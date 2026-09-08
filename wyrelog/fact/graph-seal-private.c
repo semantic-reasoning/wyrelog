@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "replay-private.h"
+
 void
 wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome *outcome)
 {
@@ -293,4 +295,221 @@ wyl_fact_graph_seal (wyl_policy_store_t *policy,
   }
   wyl_fact_graph_key_clear (&key);
   return WYRELOG_E_OK;
+}
+
+void
+wyl_fact_graph_unseal_outcome_clear (WylFactGraphUnsealOutcome *outcome)
+{
+  if (outcome == NULL)
+    return;
+  wyl_fact_graph_runtime_status_clear (&outcome->status);
+  memset (outcome, 0, sizeof *outcome);
+}
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  wyl_policy_fact_graph_info_t info;
+  gboolean found;
+} UnsealGraphProbe;
+
+static void
+clear_unseal_graph_info (wyl_policy_fact_graph_info_t *info)
+{
+  g_free ((gchar *) info->tenant_id);
+  g_free ((gchar *) info->graph_id);
+  g_free ((gchar *) info->storage_uri);
+  g_free ((gchar *) info->storage_path);
+  g_free ((gchar *) info->owner_scope);
+  memset (info, 0, sizeof *info);
+}
+
+static wyrelog_error_t
+capture_unseal_graph_info_cb (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  UnsealGraphProbe *probe = user_data;
+  if (g_strcmp0 (probe->tenant_id, info->tenant_id) != 0
+      || g_strcmp0 (probe->graph_id, info->graph_id) != 0)
+    return WYRELOG_E_OK;
+  probe->info.tenant_id = g_strdup (info->tenant_id);
+  probe->info.graph_id = g_strdup (info->graph_id);
+  probe->info.storage_uri = g_strdup (info->storage_uri);
+  probe->info.storage_path = g_strdup (info->storage_path);
+  probe->info.schema_version = info->schema_version;
+  probe->info.owner_scope = g_strdup (info->owner_scope);
+  probe->info.sealed = info->sealed;
+  probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_unsealed_graph_info (wyl_policy_store_t *policy, const gchar *tenant_id,
+    const gchar *graph_id, wyl_policy_fact_graph_info_t *out_info)
+{
+  UnsealGraphProbe probe = { .tenant_id = tenant_id, .graph_id = graph_id };
+  wyrelog_error_t rc = wyl_policy_store_foreach_fact_graph (policy, tenant_id,
+          capture_unseal_graph_info_cb, &probe);
+  if (rc != WYRELOG_E_OK) {
+    clear_unseal_graph_info (&probe.info);
+    return rc;
+  }
+  if (!probe.found)
+    return WYRELOG_E_NOT_FOUND;
+  if (probe.info.sealed) {
+    clear_unseal_graph_info (&probe.info);
+    return WYRELOG_E_POLICY;
+  }
+  *out_info = probe.info;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_unseal (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (out_outcome != NULL) {
+    memset (out_outcome, 0, sizeof *out_outcome);
+    out_outcome->policy_result =
+        WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  }
+  if (policy == NULL || graph_info == NULL || manager == NULL
+      || graph_info->tenant_id == NULL || graph_info->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Close and drain before changing durable authority.  A pre-existing
+   * runtime entry therefore cannot admit work while the engine is rebuilt;
+   * a graph not yet held by the manager is safely minted CLOSED by the
+   * refresh_closed primitive below. */
+  rc = wyl_fact_graph_runtime_manager_close_admission (manager, &key);
+  gboolean barrier = rc == WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND)
+    goto finish;
+  if (barrier) {
+    WylFactGraphRuntimeStatus drained = { 0 };
+    rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
+            drain_timeout_us, &drained);
+    wyl_fact_graph_runtime_status_clear (&drained);
+    if (rc != WYRELOG_E_OK)
+      goto finish;
+  }
+
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  rc = wyl_policy_store_unseal_fact_graph_with_result (policy,
+          graph_info->tenant_id, graph_info->graph_id, &result);
+  if (out_outcome != NULL)
+    out_outcome->policy_result = result;
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  if (result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+    rc = result == WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION
+        ? WYRELOG_E_POLICY : WYRELOG_E_BUSY;
+    goto finish;
+  }
+  if (out_outcome != NULL)
+    out_outcome->durable_unseal_applied = TRUE;
+
+  /* The input metadata was read while sealed.  Re-read it after the CAS so
+   * replay sees the current unsealed authority and storage/schema contract. */
+  wyl_policy_fact_graph_info_t current = { 0 };
+  rc = read_unsealed_graph_info (policy, graph_info->tenant_id,
+          graph_info->graph_id, &current);
+  if (rc != WYRELOG_E_OK)
+    goto compensate;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  rc = wyl_policy_store_read_graph_authority (policy, graph_info->tenant_id,
+          graph_info->graph_id, &authority);
+  gboolean authority_active = rc == WYRELOG_E_OK && authority != NULL
+      && authority->lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      && authority->has_store_identity;
+  wyl_policy_graph_authority_record_free (authority);
+  if (rc != WYRELOG_E_OK || !authority_active) {
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    clear_unseal_graph_info (&current);
+    goto compensate;
+  }
+
+  WylFactGraphRuntimeStatus status = { 0 };
+  rc = wyl_fact_replay_refresh_graph_closed (policy, fact_root, &current,
+          manager, &status);
+  clear_unseal_graph_info (&current);
+  if (out_outcome != NULL) {
+    out_outcome->status = status;
+    memset (&status, 0, sizeof status);
+    out_outcome->engine_published = rc == WYRELOG_E_OK;
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  if (rc != WYRELOG_E_OK)
+    goto compensate;
+
+  rc = wyl_fact_graph_runtime_manager_open_admission (manager, &key);
+  if (rc != WYRELOG_E_OK) {
+    /* Do not leave an active policy with a published engine that can never be
+     * admitted.  Remove the closed publication, then restore the durable
+     * seal while the runtime barrier remains closed. */
+    gboolean evicted = FALSE;
+    wyrelog_error_t evict_rc =
+        wyl_fact_graph_runtime_manager_evict_closed (manager, &key, &evicted);
+    wyrelog_error_t reseal_rc = wyl_policy_store_seal_fact_graph
+          (policy, graph_info->tenant_id, graph_info->graph_id);
+    if (out_outcome != NULL) {
+      WylFactGraphRuntimeStatus after = { 0 };
+      wyrelog_error_t status_rc =
+          wyl_fact_graph_runtime_manager_get_status (manager, &key, &after);
+      out_outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
+      out_outcome->engine_published =
+          status_rc == WYRELOG_E_OK && after.queryable;
+      out_outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
+      wyl_fact_graph_runtime_status_clear (&after);
+    }
+  }
+  if (out_outcome != NULL)
+    out_outcome->runtime_admission_open = rc == WYRELOG_E_OK;
+  goto finish;
+
+compensate:
+  /* The durable transition is already committed but no usable engine is
+   * available.  Evict any stale publication, then re-seal while admission is
+   * still closed; failure to compensate leaves the runtime closed and returns
+   * the original failure. */
+  gboolean evicted = FALSE;
+  wyrelog_error_t evict_rc =
+      wyl_fact_graph_runtime_manager_evict_closed (manager, &key, &evicted);
+  wyrelog_error_t reseal_rc;
+  if (out_outcome != NULL) {
+    reseal_rc = wyl_policy_store_seal_fact_graph
+          (policy, graph_info->tenant_id, graph_info->graph_id);
+    WylFactGraphRuntimeStatus after = { 0 };
+    wyrelog_error_t status_rc =
+        wyl_fact_graph_runtime_manager_get_status (manager, &key, &after);
+    out_outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
+    out_outcome->engine_published =
+        status_rc == WYRELOG_E_OK && after.queryable;
+    out_outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
+    wyl_fact_graph_runtime_status_clear (&after);
+  } else {
+    reseal_rc = wyl_policy_store_seal_fact_graph
+          (policy, graph_info->tenant_id, graph_info->graph_id);
+  }
+  if (out_outcome == NULL) {
+    (void) evict_rc;
+    (void) reseal_rc;
+  }
+finish:
+  if (out_outcome != NULL) {
+    (void) wyl_fact_graph_runtime_manager_get_status (manager, &key,
+        &out_outcome->status);
+  }
+  wyl_fact_graph_key_clear (&key);
+  return rc;
 }

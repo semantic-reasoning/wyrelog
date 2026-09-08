@@ -79,6 +79,31 @@ wyrelog_error_t wyl_fact_graph_seal (wyl_policy_store_t * policy,
 
 void wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome * outcome);
 
+typedef struct
+{
+  gboolean durable_unseal_applied;
+  gboolean durable_reseal_applied;
+  gboolean engine_published;
+  gboolean engine_evicted;
+  gboolean runtime_admission_open;
+  WylPolicyAuthorityMutationResult policy_result;
+  WylFactGraphRuntimeStatus status;
+} WylFactGraphUnsealOutcome;
+
+void wyl_fact_graph_unseal_outcome_clear
+  (WylFactGraphUnsealOutcome * outcome);
+
+/* Activate one authority-managed sealed graph, rebuild its engine while the
+ * runtime barrier remains closed, and reopen only after publication.  The
+ * caller must hold the daemon's policy write lease and serialize this call
+ * with other graph lifecycle writers; handle callers use the replay
+ * coordinator lock for the latter. */
+wyrelog_error_t wyl_fact_graph_unseal
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome * out_outcome);
+
 #if defined(WYL_TEST_HANDLE_SEAMS)
 /*
  * Fail one step of the seal for a test, so the ambiguous-write branch can be

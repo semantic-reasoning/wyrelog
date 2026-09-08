@@ -105,4 +105,14 @@ wyrelog_error_t wyl_fact_replay_refresh_graph (wyl_policy_store_t * policy,
     WylFactGraphRuntimeManager * runtime_manager,
     WylFactGraphRuntimeStatus * out_status);
 
+/* Rebuild and publish one graph while its runtime admission remains CLOSED.
+ * This is the publication half of a graph unseal sequencer: callers must
+ * validate and durably activate policy first, then reopen admission only after
+ * this returns successfully. */
+wyrelog_error_t wyl_fact_replay_refresh_graph_closed
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeManager * runtime_manager,
+    WylFactGraphRuntimeStatus * out_status);
+
 G_END_DECLS;

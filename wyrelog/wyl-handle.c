@@ -2464,6 +2464,29 @@ wyl_handle_refresh_fact_graph (WylHandle *self,
 }
 
 wyrelog_error_t
+wyl_handle_unseal_fact_graph (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (out_outcome != NULL)
+    memset (out_outcome, 0, sizeof *out_outcome);
+  if (self == NULL || !WYL_IS_HANDLE (self) || graph_info == NULL
+      || self->fact_graph_runtime == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *policy = NULL;
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_fact_graph_unseal (policy, self->fact_root, graph_info,
+            self->fact_graph_runtime, drain_timeout_us, out_outcome);
+    wyl_handle_policy_store_unpin (self, policy);
+  }
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
     const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch,

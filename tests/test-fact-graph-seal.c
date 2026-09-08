@@ -67,6 +67,51 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
       &schema), ==, WYRELOG_E_OK);
 }
 
+static void
+create_authority_graph_with_schema (wyl_policy_store_t *store,
+    const gchar *root, const gchar *tenant_id, const gchar *graph_id)
+{
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id, &created),
+      ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    {"order_id", "symbol"},
+    {"amount", "int64"},
+    {"expedited", "bool"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"orders-rel", graph_columns, G_N_ELEMENTS (graph_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = tenant_id,
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (store,
+      &graph_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult mutation =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+      tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+      &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
+      &schema), ==, WYRELOG_E_OK);
+}
+
 /* Proves the pinned generation is still live after the seal detached the
  * entry's reference.  What it computes is beside the point; that it runs at
  * all is the assertion. */
@@ -457,6 +502,131 @@ seal_fixture_clear (SealFixture *fixture)
   g_clear_pointer (&fixture->manager, wyl_fact_graph_runtime_manager_unref);
   g_clear_pointer (&fixture->policy, wyl_policy_store_close);
   g_clear_pointer (&fixture->root, g_free);
+}
+
+static void
+test_unseal_rebuilds_before_reopening (void)
+{
+  SealFixture fixture = { 0 };
+  g_autoptr (GError) error = NULL;
+  fixture.root = wyl_test_make_secure_fact_root
+        ("wyl-graph-unseal-success-XXXXXX", &error);
+  g_assert_nonnull (fixture.root);
+  g_autofree gchar *policy_path = g_build_filename (fixture.root, "policy.db",
+          NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
+      "orders");
+  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (fixture.policy, fixture.root,
+      fixture.manager, &summary);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  g_assert_true (sealed.engine_evicted);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  WylFactGraphUnsealOutcome unsealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+      fixture.manager, -1, &unsealed), ==, WYRELOG_E_OK);
+  g_assert_true (unsealed.durable_unseal_applied);
+  g_assert_true (unsealed.engine_published);
+  g_assert_true (unsealed.runtime_admission_open);
+  g_assert_cmpint (unsealed.policy_result,
+      ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (unsealed.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_cmpint (unsealed.status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_true (unsealed.status.queryable);
+
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_nonnull (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_unseal_outcome_clear (&unsealed);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static void
+test_unseal_build_failure_reseals_and_stays_closed (void)
+{
+  SealFixture fixture = { 0 };
+  g_autoptr (GError) error = NULL;
+  fixture.root = wyl_test_make_secure_fact_root
+        ("wyl-graph-unseal-failure-XXXXXX", &error);
+  g_assert_nonnull (fixture.root);
+  g_autofree gchar *policy_path = g_build_filename (fixture.root, "policy.db",
+          NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
+      "orders");
+  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (fixture.policy, fixture.root,
+      fixture.manager, &summary);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  GraphPathProbe path = { "tenant-a", "orders", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
+      "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
+  g_assert_nonnull (path.storage_path);
+  g_autofree gchar *fact_path = g_build_filename (path.storage_path,
+          "facts.duckdb", NULL);
+  g_assert_cmpint (g_remove (fact_path), ==, 0);
+
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal (fixture.policy, fixture.root, &info,
+      fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
+  g_assert_true (outcome.durable_unseal_applied);
+  g_assert_true (outcome.durable_reseal_applied);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.runtime_admission_open);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &authority), ==, WYRELOG_E_OK);
+  g_assert_nonnull (authority);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  g_assert_true (authority->sealed_compatibility);
+  wyl_policy_graph_authority_record_free (authority);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
 }
 
 /* S4's ambiguous durable write, sub-case one: the write fails and the
@@ -1012,5 +1182,9 @@ main (int argc, char **argv)
       test_seal_writes_durably_inside_a_sealed_tenant);
   g_test_add_func ("/fact-graph-seal/abort-keeps-a-sealed-graph-closed",
       test_aborted_seal_does_not_reopen_an_already_sealed_graph);
+  g_test_add_func ("/fact-graph-seal/unseal-rebuilds-before-reopening",
+      test_unseal_rebuilds_before_reopening);
+  g_test_add_func ("/fact-graph-seal/unseal-build-failure-reseals",
+      test_unseal_build_failure_reseals_and_stays_closed);
   return g_test_run ();
 }
