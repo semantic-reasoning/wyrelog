@@ -3430,15 +3430,27 @@ test('fact-store-forget-transaction-boundary-self', python3,
   args : [files('test-fact-store-forget-transaction-boundary.py'),
     '--self-test', meson.project_source_root()])
 
+fact_store_connection_boundary_sources = files(
+  'test-fact-store-connection-boundary.py',
+  'fact_store_connection_boundary/__init__.py',
+  'fact_store_connection_boundary/parser.py',
+  'fact_store_connection_boundary/contract.py',
+  'fact_store_connection_boundary/mutations.py',
+)
 test('fact-store-connection-boundary', python3,
   args : [files('test-fact-store-connection-boundary.py'),
-    meson.project_source_root()])
+    meson.project_source_root(), fact_store_connection_boundary_sources])
 
 test('fact-store-connection-boundary-self', python3,
   args : [files('test-fact-store-connection-boundary.py'),
-    '--self-test', meson.project_source_root()],
+    '--self-test', meson.project_source_root(),
+    fact_store_connection_boundary_sources],
   timeout : 900,
   is_parallel : false)
+
+test('fact-store-connection-boundary-parser', python3,
+  args : [files('test-fact-store-connection-boundary-parser.py'),
+    fact_store_connection_boundary_sources])
 
 test('duckdb-test-seam-wiring', python3,
   args : [files('test-duckdb-test-seam-wiring.py'),
