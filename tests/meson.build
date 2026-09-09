@@ -1859,8 +1859,9 @@ if get_option('enable_fact_store').allowed()
   # The lock matrix drives the provisioned secure publication path and its
   # test-only synchronization seams.  Keep it behind the secure bridge so a
   # prebuilt/off-bridge configuration cannot advertise evidence it cannot
-  # exercise; the test source selects the POSIX or Windows artifact case.
-  if get_option('enable_secure_duckdb_bridge').enabled()
+  # exercise; this unit is currently registered only for the POSIX artifact
+  # implementation until a native Windows child harness is added.
+  if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
     test_fact_publication_lock_matrix = executable(
       'test-fact-publication-lock-matrix',
       'test-fact-publication-lock-matrix.c',
@@ -1871,7 +1872,8 @@ if get_option('enable_fact_store').allowed()
         '-DWYL_TEST_HANDLE_SEAMS',
       ] + fact_test_support_c_args,
       include_directories : include_directories('../wyrelog'),
-      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
+      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep,
+        dependency('gio-unix-2.0')]
           + fact_test_support_deps,
     )
 
