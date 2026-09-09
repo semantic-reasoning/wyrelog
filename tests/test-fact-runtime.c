@@ -1803,12 +1803,16 @@ test_publication_refresh_refuses_its_own_build_callback (void)
   BuildSpec seed = {.marker = 311};
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
       build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
-      &key), ==, WYRELOG_E_OK);
+  WylFactGraphAdmission previous_admission = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  guint64 admission_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &key, &previous_admission, &admission_generation), ==,
+      WYRELOG_E_OK);
 
   WylFactGraphRuntimePublication publication = { 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
-      &key, &publication), ==, WYRELOG_E_OK);
+      &key, previous_admission, admission_generation, &publication), ==,
+      WYRELOG_E_OK);
   PublicationRefreshFromBuild probe = {
     .publication = &publication,
     .nested_rc = WYRELOG_E_INTERNAL,
