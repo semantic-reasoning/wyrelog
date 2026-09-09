@@ -119,6 +119,12 @@ def mutation_validation_error(
     return None
 
 
+def control_validation_error(
+    delta: tuple[tuple[str, str | None], ...],
+) -> str | None:
+    return mutation_validation_error(delta)
+
+
 def source_key(root: PurePath, path: PurePath) -> str:
     return path.relative_to(root).as_posix()
 
@@ -144,6 +150,7 @@ def load(root: Path) -> dict[str, str]:
 
 def self_test(files: dict[str, str]) -> None:
     mutations = []
+    validation_controls = []
     critical_mutations = []
 
     windows_root = PureWindowsPath("C:/wyrelog")
@@ -159,7 +166,7 @@ def self_test(files: dict[str, str]) -> None:
     ):
         control = dict(files)
         control["wyrelog/fact/store.c"] += "\n" + declaration
-        validate(control)
+        validation_controls.append(control)
 
     safe_macro_controls = (
         "#if 0\n"
@@ -205,7 +212,7 @@ def self_test(files: dict[str, str]) -> None:
     for source in safe_macro_controls:
         control = dict(files)
         control["wyrelog/fact/store.c"] += "\n" + source
-        validate(control)
+        validation_controls.append(control)
 
     control = dict(files)
     replay_source = control["wyrelog/fact/replay.c"]
@@ -230,7 +237,7 @@ def self_test(files: dict[str, str]) -> None:
         + replay_admission,
         1,
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     replay_source = control["wyrelog/fact/replay.c"]
@@ -251,7 +258,7 @@ def self_test(files: dict[str, str]) -> None:
     ).replace(
         replay_admission, local_safe_alias + replay_admission, 1
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     replay_source = control["wyrelog/fact/replay.c"]
@@ -265,7 +272,7 @@ def self_test(files: dict[str, str]) -> None:
     ).replace(
         replay_admission, safe_for_alias + replay_admission, 1
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     replay_source = control["wyrelog/fact/replay.c"]
@@ -288,7 +295,7 @@ def self_test(files: dict[str, str]) -> None:
         "  boundary_assignment_alias (store);\n",
         1,
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["tests/test-fact-store.c"] += (
@@ -300,7 +307,7 @@ def self_test(files: dict[str, str]) -> None:
         "\n#define WYL_UNRELATED_SAFE(value) (value)\n"
         "static int boundary_unrelated_value = WYL_UNRELATED_SAFE(0);\n"
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["wyrelog/fact/stringify-boundary.h"] = (
@@ -312,7 +319,7 @@ def self_test(files: dict[str, str]) -> None:
         + "\nstatic const char *boundary_header_stringified = "
         "WYL_HEADER_STRINGIFY(store->conn);\n"
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["wyrelog/fact/session-stringify-boundary.h"] = (
@@ -330,7 +337,7 @@ def self_test(files: dict[str, str]) -> None:
         "WYL_SESSION_STRINGIFY(store->conn);\n  "
         + replay_source[session_at:]
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["wyrelog/fact/recursive-stringify-inner.h"] = (
@@ -346,7 +353,7 @@ def self_test(files: dict[str, str]) -> None:
         + "\nstatic const char *boundary_recursive_stringified = "
         "WYL_RECURSIVE_STRINGIFY(store->conn);\n"
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["wyrelog/fact/pragma-once-boundary.h"] = (
@@ -364,7 +371,7 @@ def self_test(files: dict[str, str]) -> None:
         + control["wyrelog/fact/store.c"]
         + "\nstatic int boundary_pragma_once = WYL_PRAGMA_ONCE_VALUE(0);\n"
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     replay_source = control["wyrelog/fact/replay.c"]
@@ -377,7 +384,7 @@ def self_test(files: dict[str, str]) -> None:
         + 'const gchar *boundary_text = "} store->conn";\n  '
         + "(void) boundary_text;\n  " + replay_source[session_at:]
     )
-    validate(control)
+    validation_controls.append(control)
 
     control = dict(files)
     control["wyrelog/fact/replay.c"] = control[
@@ -388,7 +395,7 @@ def self_test(files: dict[str, str]) -> None:
         "  wyl_fact_store_connection_session_end (&session);\n",
         1,
     )
-    validate(control)
+    validation_controls.append(control)
 
     def require_boundary_rejection(
         label: str, expected: str, mutation: dict[str, str],
@@ -1118,7 +1125,7 @@ def self_test(files: dict[str, str]) -> None:
         pointer_retarget_body,
         1,
     )
-    validate(control)
+    validation_controls.append(control)
 
     changed = dict(files)
     replay_source = changed["wyrelog/fact/replay.c"]
@@ -3935,13 +3942,23 @@ def self_test(files: dict[str, str]) -> None:
     cases = [case for case in mutation_cases if case.critical] + [
         case for case in mutation_cases if not case.critical
     ]
-    workers = min(4, len(cases), os.cpu_count() or 1)
+    workers = min(4, len(cases) + len(validation_controls), os.cpu_count() or 1)
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=workers,
         mp_context=multiprocessing.get_context("spawn"),
         initializer=initialize_mutation_worker,
         initargs=(files,),
     ) as executor:
+        control_errors = executor.map(
+            control_validation_error,
+            (mutation_delta(files, control) for control in validation_controls),
+            chunksize=1,
+        )
+        for index, error in enumerate(control_errors, 1):
+            if error is not None:
+                raise AssertionError(
+                    f"connection-boundary safe control {index} rejected: {error}"
+                )
         errors = executor.map(
             mutation_validation_error,
             (
