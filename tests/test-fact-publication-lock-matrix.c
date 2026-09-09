@@ -27,7 +27,11 @@ wyrelog_error_t wyl_engine_open_source (const gchar *dl_src,
     guint32 num_workers, WylEngine **out);
 
 #define CHILD_MODE "--hold-artifact-mutation-lease"
+#define REVERSE_ARTIFACT_RUNTIME_MODE "--reverse-artifact-runtime"
+#define REVERSE_RUNTIME_POLICY_MODE "--reverse-runtime-policy"
 #define LEASE_READY "READY"
+#define REVERSE_READY "DEADLOCK_READY"
+#define REVERSE_COMPLETE "REVERSE_COMPLETE"
 #define LEASE_ERROR_PREFIX "ERROR:"
 #define TEST_DEADLINE_US (5 * G_TIME_SPAN_SECOND)
 #define WATCHDOG_DEADLINE_US (100 * G_TIME_SPAN_MILLISECOND)
@@ -404,6 +408,362 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
     ".decl marker(value: int64)\nmarker(1).\n", 1, out_engine);
 }
 
+#ifndef G_OS_WIN32
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+typedef enum
+{
+  REVERSE_ARTIFACT_RUNTIME,
+  REVERSE_RUNTIME_POLICY,
+} ReverseScenario;
+
+typedef struct
+{
+  ReverseScenario scenario;
+  wyl_policy_store_t *policy;
+  WylFactGraphRuntimeManager *manager;
+  WylFactGraphKey key;
+  WylFactArtifactNamespace *artifact_namespace;
+  WylFactArtifactNamespace *second_artifact_namespace;
+  GMutex mutex;
+  GCond condition;
+  gboolean artifact_acquired;
+  gboolean runtime_hook_entered;
+  gboolean policy_acquired;
+  gboolean readiness_written;
+  wyrelog_error_t artifact_reverse_rc;
+  gint ready_fd;
+} ReverseProbe;
+
+static void
+reverse_probe_signal (ReverseProbe *probe, gboolean *flag)
+{
+  g_mutex_lock (&probe->mutex);
+  *flag = TRUE;
+  g_cond_broadcast (&probe->condition);
+  g_mutex_unlock (&probe->mutex);
+}
+
+static void
+reverse_runtime_hook (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, gpointer user_data)
+{
+  ReverseProbe *probe = user_data;
+  (void) manager;
+  (void) key;
+
+  g_mutex_lock (&probe->mutex);
+  probe->runtime_hook_entered = TRUE;
+  g_cond_broadcast (&probe->condition);
+  if (probe->scenario == REVERSE_RUNTIME_POLICY) {
+    while (!probe->policy_acquired)
+      g_cond_wait (&probe->condition, &probe->mutex);
+  }
+  gboolean write_readiness = !probe->readiness_written;
+  probe->readiness_written = TRUE;
+  g_mutex_unlock (&probe->mutex);
+
+  /* Readiness is emitted after the first real lock and the opposing worker's
+   * first real lock are held.  The following call enters the other primitive;
+   * POSIX lease conflict is a bounded busy result, while policy-fence conflict
+   * is intentionally left for the parent watchdog to terminate. */
+  if (write_readiness)
+    (void) write_all (probe->ready_fd, REVERSE_READY "\n",
+        strlen (REVERSE_READY "\n"));
+  if (probe->scenario == REVERSE_ARTIFACT_RUNTIME) {
+    WylFactArtifactMutationLease *lease = NULL;
+    probe->artifact_reverse_rc =
+        wyl_fact_artifact_namespace_acquire_mutation_lease
+          (probe->second_artifact_namespace, &lease);
+    wyl_fact_artifact_mutation_lease_free (lease);
+  } else {
+    WylPolicyGraphPublicationFence fence =
+        WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
+    (void) wyl_policy_store_graph_publication_fence_begin (probe->policy,
+        "tenant-a", "orders", &fence);
+    wyl_policy_store_graph_publication_fence_clear (&fence);
+  }
+}
+
+static void
+reverse_runtime_call (ReverseProbe *probe)
+{
+  WylFactGraphRuntimePublication publication = { 0 };
+  wyrelog_error_t rc =
+      wyl_fact_graph_runtime_publication_begin_closed (probe->manager,
+          &probe->key, &publication);
+  if (rc == WYRELOG_E_OK)
+    wyl_fact_graph_runtime_publication_abort (&publication);
+}
+
+static gpointer
+reverse_runtime_worker (gpointer user_data)
+{
+  ReverseProbe *probe = user_data;
+  if (probe->scenario == REVERSE_ARTIFACT_RUNTIME) {
+    g_mutex_lock (&probe->mutex);
+    while (!probe->artifact_acquired)
+      g_cond_wait (&probe->condition, &probe->mutex);
+    g_mutex_unlock (&probe->mutex);
+  }
+  reverse_runtime_call (probe);
+  return NULL;
+}
+
+static gpointer
+reverse_artifact_worker (gpointer user_data)
+{
+  ReverseProbe *probe = user_data;
+  WylFactArtifactMutationLease *lease = NULL;
+  if (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (probe->artifact_namespace, &lease) != WYRELOG_E_OK)
+    return NULL;
+  reverse_probe_signal (probe, &probe->artifact_acquired);
+  g_mutex_lock (&probe->mutex);
+  while (!probe->runtime_hook_entered)
+    g_cond_wait (&probe->condition, &probe->mutex);
+  g_mutex_unlock (&probe->mutex);
+  reverse_runtime_call (probe);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  return NULL;
+}
+
+static gpointer
+reverse_policy_worker (gpointer user_data)
+{
+  ReverseProbe *probe = user_data;
+  g_mutex_lock (&probe->mutex);
+  while (!probe->runtime_hook_entered)
+    g_cond_wait (&probe->condition, &probe->mutex);
+  g_mutex_unlock (&probe->mutex);
+
+  WylPolicyGraphPublicationFence fence =
+      WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
+  if (wyl_policy_store_graph_publication_fence_begin (probe->policy,
+      "tenant-a", "orders", &fence) != WYRELOG_E_OK)
+    return NULL;
+  reverse_probe_signal (probe, &probe->policy_acquired);
+  reverse_runtime_call (probe);
+  wyl_policy_store_graph_publication_fence_clear (&fence);
+  return NULL;
+}
+
+static int
+run_reverse_child (const gchar *root, ReverseScenario scenario, gint ready_fd)
+{
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  ReverseProbe probe = { .scenario = scenario, .ready_fd = ready_fd };
+  g_mutex_init (&probe.mutex);
+  g_cond_init (&probe.condition);
+  if (wyl_policy_store_open (policy_path, &probe.policy) != WYRELOG_E_OK
+      || wyl_fact_graph_runtime_manager_new (&probe.manager) != WYRELOG_E_OK
+      || wyl_fact_graph_key_init (&probe.key, "tenant-a", "orders")
+      != WYRELOG_E_OK)
+    return 1;
+  WylFactGraphRuntimeStatus status = { 0 };
+  if (wyl_fact_graph_runtime_manager_refresh (probe.manager, &probe.key,
+      build_marker_engine, NULL, &status) != WYRELOG_E_OK
+      || wyl_fact_graph_runtime_manager_close_admission (probe.manager,
+      &probe.key) != WYRELOG_E_OK)
+    return 1;
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  WylFactGraphResolver artifact_resolver = { 0 };
+  WylFactGraphDirectory artifact_directory = { 0 };
+  WylFactGraphResolver second_resolver = { 0 };
+  WylFactGraphDirectory second_directory = { 0 };
+  if (scenario == REVERSE_ARTIFACT_RUNTIME) {
+    if (open_namespace (root, &artifact_resolver, &artifact_directory,
+        &probe.artifact_namespace) != WYRELOG_E_OK
+        || open_namespace (root, &second_resolver, &second_directory,
+        &probe.second_artifact_namespace) != WYRELOG_E_OK)
+      return 1;
+  }
+  wyl_fact_graph_runtime_set_publication_test_hook (reverse_runtime_hook,
+      &probe);
+  GThread *runtime_thread = g_thread_new ("reverse-runtime",
+          reverse_runtime_worker, &probe);
+  GThread *opposing_thread = scenario == REVERSE_ARTIFACT_RUNTIME
+      ? g_thread_new ("reverse-artifact", reverse_artifact_worker, &probe)
+      : g_thread_new ("reverse-policy", reverse_policy_worker, &probe);
+  (void) runtime_thread;
+  (void) opposing_thread;
+
+  g_mutex_lock (&probe.mutex);
+  gint64 deadline = g_get_monotonic_time () + TEST_DEADLINE_US;
+  while (!probe.runtime_hook_entered
+      || (scenario == REVERSE_ARTIFACT_RUNTIME
+          ? !probe.artifact_acquired : !probe.policy_acquired)) {
+    if (!g_cond_wait_until (&probe.condition, &probe.mutex, deadline))
+      break;
+  }
+  gboolean ready = probe.runtime_hook_entered
+      && (scenario == REVERSE_ARTIFACT_RUNTIME
+          ? probe.artifact_acquired : probe.policy_acquired);
+  g_mutex_unlock (&probe.mutex);
+  if (!ready)
+    return 1;
+
+  if (scenario == REVERSE_ARTIFACT_RUNTIME) {
+    /* POSIX lease acquisition is deliberately non-blocking.  Join this
+     * bounded rejection path and publish the result so the parent can prove
+     * it did not turn a busy lease into a cycle. */
+    g_thread_join (runtime_thread);
+    g_thread_join (opposing_thread);
+    wyl_fact_graph_runtime_set_publication_test_hook (NULL, NULL);
+    if (probe.artifact_reverse_rc != WYRELOG_E_BUSY)
+      return 1;
+    (void) write_all (ready_fd, REVERSE_COMPLETE "\n",
+        strlen (REVERSE_COMPLETE "\n"));
+    return 0;
+  }
+
+  /* Policy fence acquisition is blocking.  Deliberately do not join: both
+   * workers are blocked in real primitives, and the parent owns the
+   * monotonic watchdog and process termination. */
+  for (;;)
+    g_usleep (G_TIME_SPAN_SECOND);
+}
+
+static gboolean
+run_reverse_watchdog (const gchar *root, ReverseScenario scenario)
+{
+  const gchar *mode = scenario == REVERSE_ARTIFACT_RUNTIME
+      ? REVERSE_ARTIFACT_RUNTIME_MODE : REVERSE_RUNTIME_POLICY_MODE;
+  gchar *argv[] = { (gchar *) program_path, (gchar *) mode,
+                    (gchar *) root, NULL };
+  g_autoptr (GError) error = NULL;
+  GPid child_pid = 0;
+  gint child_stdin = -1;
+  gint child_stdout = -1;
+  if (!g_spawn_async_with_pipes (NULL, argv, NULL,
+      G_SPAWN_DO_NOT_REAP_CHILD | G_SPAWN_STDERR_TO_DEV_NULL,
+      NULL, NULL, &child_pid, &child_stdin, &child_stdout, NULL, &error))
+    return FALSE;
+  close (child_stdin);
+  g_autofree gchar *line = NULL;
+  gboolean ready = readiness_read_line (child_stdout,
+          g_get_monotonic_time () + TEST_DEADLINE_US, &line)
+      && g_strcmp0 (line, REVERSE_READY) == 0;
+  if (ready && scenario == REVERSE_ARTIFACT_RUNTIME) {
+    g_autofree gchar *complete = NULL;
+    ready = readiness_read_line (child_stdout,
+            g_get_monotonic_time () + TEST_DEADLINE_US, &complete)
+        && g_strcmp0 (complete, REVERSE_COMPLETE) == 0;
+    if (!ready)
+      g_test_message ("artifact reverse completion line=%s",
+          complete != NULL ? complete : "<none>");
+  }
+  if (scenario == REVERSE_ARTIFACT_RUNTIME) {
+    int status = 0;
+    pid_t result = -1;
+    gint64 exit_deadline = g_get_monotonic_time () + TEST_DEADLINE_US;
+    while (g_get_monotonic_time () < exit_deadline) {
+      result = waitpid (child_pid, &status, WNOHANG);
+      if (result == child_pid)
+        break;
+      if (result < 0 && errno != EINTR)
+        break;
+      g_usleep (10 * 1000);
+    }
+    if (result == child_pid)
+      g_spawn_close_pid (child_pid);
+    else
+      ready = FALSE;
+    close (child_stdout);
+    return ready && WIFEXITED (status) && WEXITSTATUS (status) == 0;
+  }
+  close (child_stdout);
+  if (ready) {
+    gint64 watchdog_deadline = g_get_monotonic_time ()
+        + WATCHDOG_DEADLINE_US;
+    while (g_get_monotonic_time () < watchdog_deadline)
+      g_usleep (10 * 1000);
+  }
+  gboolean reaped = reap_forced_child (child_pid,
+          g_get_monotonic_time () + TEST_DEADLINE_US);
+  return ready && reaped;
+}
+
+static void
+verify_fresh_recovery (const gchar *root)
+{
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  WylFactGraphResolver resolver;
+  WylFactGraphDirectory directory;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (open_namespace (root, &resolver, &directory, &namespace_),
+      ==, WYRELOG_E_OK);
+  WylFactArtifactMutationLease *lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  close_namespace (&resolver, &directory, namespace_);
+
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  WylPolicyGraphAuthorityRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (policy,
+      "tenant-a", "orders", &record), ==, WYRELOG_E_OK);
+  g_assert_nonnull (record);
+  wyl_policy_graph_authority_record_free (record);
+  gboolean active = FALSE;
+  g_assert_cmpint (wyl_policy_store_fact_graph_is_active (policy,
+      "tenant-a", "orders", &active), ==, WYRELOG_E_OK);
+  g_assert_true (active);
+  guint graph_count = 0;
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      count_target_graph_cb, &graph_count), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (graph_count, ==, 1);
+}
+
+static void
+test_reverse_watchdog (ReverseScenario scenario)
+{
+  g_autofree gchar *root = make_root ();
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+      WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+      &created), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_column_t columns[] = { { "value", "int64" } };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    { "orders", columns, G_N_ELEMENTS (columns) },
+  };
+  const wyl_policy_fact_graph_create_options_t graph = {
+    .tenant_id = "tenant-a", .graph_id = "orders", .fact_root = root,
+    .schema_version = 1, .owner_scope = "tenant-a", .relations = relations,
+    .n_relations = G_N_ELEMENTS (relations),
+  };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph (policy, &graph, NULL),
+      ==, WYRELOG_E_OK);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  g_assert_true (run_reverse_watchdog (root, scenario));
+  verify_fresh_recovery (root);
+  remove_tree (root);
+}
+
+static void
+test_reverse_artifact_runtime (void)
+{
+  test_reverse_watchdog (REVERSE_ARTIFACT_RUNTIME);
+}
+
+static void
+test_reverse_runtime_policy (void)
+{
+  test_reverse_watchdog (REVERSE_RUNTIME_POLICY);
+}
+#endif
+#endif
+
 static guint
 first_acquired (const LockTrace *trace, WylFactPublicationLockDomain domain,
     guint after)
@@ -532,12 +892,32 @@ main (int argc, char **argv)
     return 77;
 #endif
   }
+  if (argc == 3 && g_strcmp0 (argv[1], REVERSE_ARTIFACT_RUNTIME_MODE) == 0) {
+#if !defined(G_OS_WIN32) && defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+    return run_reverse_child (argv[2], REVERSE_ARTIFACT_RUNTIME,
+               STDOUT_FILENO);
+#else
+    return 77;
+#endif
+  }
+  if (argc == 3 && g_strcmp0 (argv[1], REVERSE_RUNTIME_POLICY_MODE) == 0) {
+#if !defined(G_OS_WIN32) && defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+    return run_reverse_child (argv[2], REVERSE_RUNTIME_POLICY,
+               STDOUT_FILENO);
+#else
+    return 77;
+#endif
+  }
   g_test_init (&argc, &argv, NULL);
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact/publication-lock-matrix/fresh-policy-after-child-exit",
       test_fresh_policy_after_child_exit);
   g_test_add_func ("/fact/publication-lock-matrix/runtime-policy-forward",
       test_runtime_policy_forward);
+  g_test_add_func ("/fact/publication-lock-matrix/reverse-artifact-runtime",
+      test_reverse_artifact_runtime);
+  g_test_add_func ("/fact/publication-lock-matrix/reverse-runtime-policy",
+      test_reverse_runtime_policy);
 #endif
   return g_test_run ();
 }
