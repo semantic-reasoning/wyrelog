@@ -1,6 +1,6 @@
 # ADR 0007: Fact Publication Lock Order
 
-Status: proposed (implementation checkpoint)
+Status: accepted
 
 Related issues: #987, #986
 
@@ -65,23 +65,27 @@ same-entry recursive refresh with `WYRELOG_E_BUSY`; the focused
 `fact-runtime/refresh-refuses-own-build-callback` test proves that this known
 self-deadlock is bounded.
 
-A future cross-domain test-only seam must additionally force the opposing
-thread at each artifact/coordinator/policy acquisition barrier, assert that
-no cycle is entered, join all threads within a bounded deadline, and verify
-that a subsequent unseal succeeds after every failure path.  Until that test
-exists, this ADR and the #987 lock-order acceptance criterion remain
-incomplete.
+The `test-fact-publication-lock-matrix` unit now adds process-isolated reverse
+attempts for artifact↔runtime and runtime↔policy.  Each child coordinates two
+threads after the first real primitive is acquired, emits readiness only after
+the opposing primitive is also held, and then enters the second real
+primitive.  POSIX artifact lease conflict is a non-blocking `E_BUSY` result;
+the child joins that path and reports completion.  Policy-fence conflict is a
+blocking cycle, so the parent waits past a monotonic watchdog,
+force-terminates the child, and reaps it without joining application threads.
+Both paths verify fresh artifact-lease acquisition plus fresh policy
+authority, active-state, and graph enumeration.  The blocking path is
+deliberate deadlock evidence: the child is not allowed to report success by
+escaping the cycle.
 
-The first #992 implementation checkpoint adds a unified, test-only event
-stream for the actual artifact lease, runtime writer/state, policy fence, and
-handle-coordinator boundaries.  Events carry an atomic sequence and thread
-identity; release events are emitted after the underlying close or unlock
-while the borrowed subject remains valid for the synchronous callback.  The
-direct graph-unseal forward trace verifies the observed artifact (when the
-secure bridge is enabled) -> runtime writer -> runtime state -> policy fence
-subsequence.  This checkpoint deliberately does not claim real-handle
-contention, reverse-order deadlock freedom, or bounded subprocess cleanup;
-those remain the acceptance scope of #992's subsequent matrix unit.
+The #992 implementation adds a unified, test-only event stream for the actual
+artifact lease, runtime writer/state, policy fence, and handle-coordinator
+boundaries.  Events carry an atomic sequence and thread identity; release
+events are emitted after the underlying close or unlock while the borrowed
+subject remains valid for the synchronous callback.  The direct graph-unseal
+forward trace verifies the observed artifact (when the secure bridge is
+enabled) -> runtime writer -> runtime state -> policy fence subsequence.  The
+matrix unit supplies the two reverse-order process watchdogs described above.
 
 ## Bounded matrix unit contract
 
@@ -124,11 +128,14 @@ production callback takes the same path.  Static ADR/call-site checks,
 synthetic barriers, and a single forward trace remain insufficient evidence
 for reverse-order deadlock freedom.
 
-The later full-matrix unit must add actual reverse-order attempts for
-artifact↔runtime and runtime↔policy, plus the coordinator↔policy-store
-lifecycle where the wrapper permits it.  That later unit must record which
-primitive was observed, which edge was only synthesized, and which platform
-path was unavailable.  This bounded registration/checkpoint intentionally
-does not prove all reverse interleavings, exhaustive callback cycles, or
-complete Windows/POSIX equivalence; those cases remain incomplete until a
-follow-up executable exercises and records them.
+The coordinator↔policy-store lifecycle is platform-gated: on POSIX the
+coordinator fence API is available and its same-thread ownership contract is
+covered by the existing policy-store tests, while the platform-specific
+coordinator publication wrapper is compiled only on Darwin.  The matrix
+records this as unavailable rather than inferring cross-platform equivalence.
+Likewise, the Windows artifact implementation retains its native lease tests,
+but the process-isolated child watchdog is registered only on POSIX because
+Windows requires a native handle-inheritance/termination harness.  Meson
+explicitly excludes the matrix executable on Windows, so unsupported evidence
+cannot be reported as a pass.  Reverse interleavings beyond the two observed
+cycles and exhaustive callback permutations remain outside this ADR.
