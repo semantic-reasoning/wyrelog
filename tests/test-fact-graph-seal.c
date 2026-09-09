@@ -14,6 +14,7 @@
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
+#include "wyrelog/fact/publication-lock-event-private.h"
 #include "wyrelog/policy/store-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "fact/secure-duckdb-bridge-private.h"
@@ -57,6 +58,22 @@ fact_graph_file_get_identity (const gchar *path, FactGraphFileIdentity *out)
   out->file = stat_buf.st_ino;
   return TRUE;
 #endif
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GArray *events;
+} PublicationLockTrace;
+
+static void
+publication_lock_trace_event (const WylFactPublicationLockEvent *event,
+    gpointer user_data)
+{
+  PublicationLockTrace *trace = user_data;
+  g_mutex_lock (&trace->mutex);
+  g_array_append_val (trace->events, *event);
+  g_mutex_unlock (&trace->mutex);
 }
 
 /* The graph fixture is duplicated from tests/test-fact-replay.c rather than
@@ -638,6 +655,11 @@ test_unseal_rebuilds_before_reopening (void)
       fixture.manager, &summary);
   g_assert_cmpuint (summary.graphs_loaded, ==, 1);
 
+  PublicationLockTrace trace = { 0 };
+  g_mutex_init (&trace.mutex);
+  trace.events = g_array_new (FALSE, FALSE,
+          sizeof (WylFactPublicationLockEvent));
+
   wyl_policy_fact_graph_info_t info = {
     .tenant_id = "tenant-a",
     .graph_id = "orders",
@@ -649,8 +671,11 @@ test_unseal_rebuilds_before_reopening (void)
   wyl_fact_graph_seal_outcome_clear (&sealed);
 
   WylFactGraphUnsealOutcome unsealed = { 0 };
+  wyl_fact_publication_lock_event_set_hook (publication_lock_trace_event,
+      &trace);
   g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &unsealed), ==, WYRELOG_E_OK);
+  wyl_fact_publication_lock_event_set_hook (NULL, NULL);
   g_assert_true (unsealed.durable_unseal_applied);
   g_assert_true (unsealed.engine_published);
   g_assert_true (unsealed.runtime_admission_open);
@@ -660,6 +685,52 @@ test_unseal_rebuilds_before_reopening (void)
       WYL_FACT_GRAPH_ADMISSION_OPEN);
   g_assert_cmpint (unsealed.status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
   g_assert_true (unsealed.status.queryable);
+
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  guint artifact_acquired = G_MAXUINT;
+#endif
+  guint runtime_writer_acquired = G_MAXUINT;
+  guint runtime_state_acquired = G_MAXUINT;
+  guint policy_acquired = G_MAXUINT;
+  for (guint i = 0; i < trace.events->len; i++) {
+    WylFactPublicationLockEvent event =
+        g_array_index (trace.events, WylFactPublicationLockEvent, i);
+    if (event.phase != WYL_FACT_PUBLICATION_LOCK_ACQUIRED)
+      continue;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+    if (event.domain == WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE
+        && artifact_acquired == G_MAXUINT)
+      artifact_acquired = i;
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_RUNTIME_WRITER
+#else
+    if (event.domain == WYL_FACT_PUBLICATION_LOCK_RUNTIME_WRITER
+#endif
+        && runtime_writer_acquired == G_MAXUINT)
+      runtime_writer_acquired = i;
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_RUNTIME_STATE
+        && runtime_writer_acquired != G_MAXUINT
+        && i > runtime_writer_acquired
+        && runtime_state_acquired == G_MAXUINT)
+      runtime_state_acquired = i;
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE
+        && runtime_state_acquired != G_MAXUINT
+        && i > runtime_state_acquired
+        && policy_acquired == G_MAXUINT)
+      policy_acquired = i;
+  }
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_assert_cmpuint (artifact_acquired, !=, G_MAXUINT);
+#endif
+  g_assert_cmpuint (runtime_writer_acquired, !=, G_MAXUINT);
+  g_assert_cmpuint (runtime_state_acquired, !=, G_MAXUINT);
+  g_assert_cmpuint (policy_acquired, !=, G_MAXUINT);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_assert_cmpuint (artifact_acquired, <, runtime_writer_acquired);
+#endif
+  g_assert_cmpuint (runtime_writer_acquired, <, runtime_state_acquired);
+  g_assert_cmpuint (runtime_state_acquired, <, policy_acquired);
+  g_array_free (trace.events, TRUE);
+  g_mutex_clear (&trace.mutex);
 
   WylFactGraphKey key = { 0 };
   g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "runtime-private.h"
+#include "fact/publication-lock-event-private.h"
 
 #include <string.h>
 
@@ -89,6 +90,17 @@ runtime_lock_event (WylFactGraphRuntimeEntry *entry,
     WylFactGraphRuntimeLockKind lock_kind,
     WylFactGraphRuntimeLockEvent event)
 {
+  WylFactPublicationLockDomain domain =
+      lock_kind == WYL_FACT_GRAPH_RUNTIME_LOCK_WRITER
+      ? WYL_FACT_PUBLICATION_LOCK_RUNTIME_WRITER
+      : WYL_FACT_PUBLICATION_LOCK_RUNTIME_STATE;
+  WylFactPublicationLockPhase phase =
+      event == WYL_FACT_GRAPH_RUNTIME_LOCK_ACQUIRED
+      ? WYL_FACT_PUBLICATION_LOCK_ACQUIRED
+      : event == WYL_FACT_GRAPH_RUNTIME_LOCK_RELEASE_BEGIN
+      ? WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN
+      : WYL_FACT_PUBLICATION_LOCK_RELEASED;
+  wyl_fact_publication_lock_event_emit (domain, phase, entry);
   if (lock_event_hook != NULL)
     lock_event_hook (&entry->key, lock_kind, event, lock_event_hook_data);
 }

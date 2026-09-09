@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-artifact-windows-namespace-private.h"
+#include "fact/publication-lock-event-private.h"
 
 #ifdef G_OS_WIN32
 #include "fact/graph-artifact-windows-handle-private.h"
@@ -838,6 +839,9 @@ namespace_acquire (WylFactArtifactWinNamespace *namespace_, gboolean exclusive,
   lease->exclusive = exclusive;
   lease->active = TRUE;
   g_atomic_int_set (&lease->references, 1);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_ACQUIRED, lease);
   *out_lease = lease;
   return WYRELOG_E_OK;
 }
@@ -869,8 +873,14 @@ wyl_fact_artifact_win_lease_free (WylFactArtifactWinLease *lease)
     return;
   if (!g_atomic_int_dec_and_test (&lease->references))
     return;
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, lease);
   lease->active = FALSE;
   wyl_fact_artifact_win_lock_lease_free (lease->lock);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASED, lease);
   namespace_unref (lease->namespace_);
   g_free (lease);
 }
