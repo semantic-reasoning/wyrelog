@@ -211,6 +211,10 @@ case "${1:-}" in
     fi
     ;;
   *)
+    if [ "${FAKE_SWAPON_DENIED:-0}" = 1 ]; then
+      echo 'swapon: Operation not permitted' >&2
+      exit 1
+    fi
     printf '%s\\n' "$1" > "$FAKE_SWAP_STATE"
     ;;
 esac
@@ -427,6 +431,14 @@ esac
         raise SystemExit("pre-swapon owned lease was not safely recovered")
     if lease_path("seam").exists():
         raise SystemExit("pre-swapon cleanup left owned evidence")
+
+    unavailable = helper_run(
+        "provision",
+        "seam",
+        {"FAKE_SWAPON_DENIED": "1"},
+    )
+    if unavailable.returncode != 0 or lease_path("seam").exists():
+        raise SystemExit("unavailable swap was not treated as optional")
 
     if helper_run("provision", "secure").returncode != 0:
         raise SystemExit("replacement-attempt fixture did not provision")

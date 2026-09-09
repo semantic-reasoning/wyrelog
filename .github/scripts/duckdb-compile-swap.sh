@@ -194,6 +194,27 @@ swap_is_active()
   printf '%s\n' "$active_swaps" | grep -Fxq "$swap_path"
 }
 
+activate_optional_swap()
+{
+  local error_output
+
+  if error_output="$(sudo swapon "$swap_path" 2>&1)"; then
+    return 0
+  fi
+  case "$error_output" in
+    *"Operation not permitted"*)
+      echo "DuckDB compile swap: swapon unavailable; continuing without optional swap" >&2
+      sudo rm -f -- "$swap_path" "$marker_path"
+      sudo rmdir -- "$lease_path"
+      return 0
+      ;;
+    *)
+      printf '%s\n' "$error_output" >&2
+      return 1
+      ;;
+  esac
+}
+
 recover_unmarked_lease()
 {
   if sudo test -e "$marker_path" || sudo test -L "$marker_path"; then
@@ -225,7 +246,10 @@ provision()
   test "$(sudo stat -c %s "$swap_path")" -eq "$swap_bytes" \
     || fail "swap file allocation size drifted"
   sudo mkswap "$swap_path"
-  sudo swapon "$swap_path"
+  activate_optional_swap
+  if ! sudo test -e "$lease_path"; then
+    return 0
+  fi
 
   active_size="$(active_swap_size)"
   case "$active_size" in
