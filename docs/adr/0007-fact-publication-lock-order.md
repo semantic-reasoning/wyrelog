@@ -82,3 +82,49 @@ secure bridge is enabled) -> runtime writer -> runtime state -> policy fence
 subsequence.  This checkpoint deliberately does not claim real-handle
 contention, reverse-order deadlock freedom, or bounded subprocess cleanup;
 those remain the acceptance scope of #992's subsequent matrix unit.
+
+## Bounded matrix unit contract
+
+The next #992 unit is the dedicated
+`test-fact-publication-lock-matrix` executable.  Meson registers it only when
+the secure DuckDB bridge is enabled, links the handle test-seam archive and
+the fact-test support fixture, and serializes it with a 180-second test
+budget.  The test source is responsible for selecting the platform-appropriate
+POSIX or Windows artifact-lease case; the build must not claim secure
+publication evidence for an off-bridge configuration.
+
+Each forward or opposing-order scenario runs behind a monotonic deadline.  A
+scenario that reaches its watchdog releases every gate it owns before the
+child is joined; the parent never performs an unbounded join after the
+deadline.  The child reports a terminal outcome and exits, and the fixture
+then reacquires the artifact lease and reruns a graph operation.  Successful
+reacquisition and graph recovery are required evidence that timeout cleanup
+did not leave an OS lease, coordinator, runtime lock, policy fence, or SQLite
+transaction held.  This cleanup contract applies to both the POSIX and
+Windows artifact implementations where the platform case is available.
+
+The event stream and direct handle trace already provide observed evidence for
+the forward edges:
+
+```
+handle coordinator -> artifact mutation lease -> runtime writer
+runtime writer -> runtime state -> policy fence
+```
+
+The artifact edge is observed through the platform's actual lease boundary
+when the secure bridge is enabled, and the runtime and policy edges are
+observed through their test-only acquisition events.  The matrix may use
+synthetic barrier participants to hold a primitive at a controlled point;
+those barrier events are scheduling instrumentation, not proof that a
+production callback takes the same path.  Static ADR/call-site checks,
+synthetic barriers, and a single forward trace remain insufficient evidence
+for reverse-order deadlock freedom.
+
+The bounded subprocess/watchdog unit is expected to add actual reverse-order
+attempts for artifact↔runtime and runtime↔policy, plus the
+coordinator↔policy-store lifecycle where the wrapper permits it.  It must
+record which primitive was observed, which edge was only synthesized, and
+which platform path was unavailable.  In particular, this registration and
+ADR checkpoint do not prove all reverse interleavings, exhaustive callback
+cycles, or complete Windows/POSIX equivalence; those cases remain incomplete
+until the executable exercises and records them.

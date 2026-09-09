@@ -1856,6 +1856,32 @@ if get_option('enable_fact_store').allowed()
   # also run under ASan/UBSan, where that multiplies past 60.
   test('fact-replay', test_fact_replay, timeout : 120)
 
+  # The lock matrix drives the provisioned secure publication path and its
+  # test-only synchronization seams.  Keep it behind the secure bridge so a
+  # prebuilt/off-bridge configuration cannot advertise evidence it cannot
+  # exercise; the test source selects the POSIX or Windows artifact case.
+  if get_option('enable_secure_duckdb_bridge').enabled()
+    test_fact_publication_lock_matrix = executable(
+      'test-fact-publication-lock-matrix',
+      'test-fact-publication-lock-matrix.c',
+      'fact-test-support.c',
+      c_args : [
+        '-DWYL_HAS_FACT_STORE',
+        '-DWYL_HAS_SECURE_DUCKDB_BRIDGE',
+        '-DWYL_TEST_HANDLE_SEAMS',
+      ] + fact_test_support_c_args,
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
+          + fact_test_support_deps,
+    )
+
+    test('fact-publication-lock-matrix',
+      test_fact_publication_lock_matrix,
+      timeout : 180,
+      is_parallel : false,
+    )
+  endif
+
   test('fact-sealed-provisioned-forget-boundary', python3,
     args : [files('test-fact-sealed-provisioned-forget-boundary.py'),
       meson.project_source_root()],
