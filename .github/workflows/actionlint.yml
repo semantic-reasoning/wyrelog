@@ -19,14 +19,6 @@ jobs:
     name: actionlint
     runs-on: ubuntu-latest
     steps:
-      - name: Verify GitHub-hosted runner contract
-        shell: bash
-        run: |
-          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
-            echo '::error::this job requires a GitHub-hosted runner'
-            exit 1
-          fi
-
       - name: Check out source
         # actions/checkout v5
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

@@ -917,7 +917,35 @@ def parse_steps(path: str, job: str, lines: list[str], steps_start: int, end: in
     return tuple(steps)
 
 
+# Jobs that carry no hosted-runner guard.  The guard is the only repository-
+# owned fail-closed contract against #899's dispatch collision, so a job keeps
+# it whenever landing on a self-hosted runner would corrupt a result rather
+# than merely fail.  That is every job running the test suite: the deadlines in
+# tests/meson.build are calibrated against GitHub-hosted hardware, and a slower
+# runner turns them into timeouts that report as test failures.  The jobs below
+# run no suite, so a misdispatch there fails on its own missing tooling instead
+# of being scored as a defect in the tree.
+UNGUARDED_JOBS = {
+    ".github/workflows/ci-pr.yml": ("format",),
+    ".github/workflows/ci-main.yml": ("format",),
+}
+
+
+def guard_is_waived(path: str, name: str) -> bool:
+    if path == ".github/workflows/actionlint.yml":
+        return True
+    return name in UNGUARDED_JOBS.get(path, ())
+
+
 def validate_guard(path: str, name: str, steps: tuple[Step, ...]) -> None:
+    if guard_is_waived(path, name):
+        checkout = [
+            index for index, step in enumerate(steps)
+            if (step.value("uses") or "").startswith("actions/checkout@")
+        ]
+        if len(checkout) != 1 or checkout[0] != 0:
+            reject("E_FIRST_GUARD", f"{path}:{name} checkout must be first")
+        return
     expected = WINDOWS_GUARD if name == "build-windows" else POSIX_GUARD
     if steps[0].text != expected:
         reject("E_FIRST_GUARD", f"{path}:{name} first step is not the exact hosted guard")
@@ -956,7 +984,13 @@ def validate_actions(path: str, name: str, steps: tuple[Step, ...]) -> None:
             f"{path}:{name} action inventory drifted",
         )
     if path == ".github/workflows/actionlint.yml" and name == "actionlint":
-        if len(steps) < 3 or steps[2].text != ACTIONLINT_INSTALL:
+        # Located by name, not index: actionlint.yml carries no hosted guard,
+        # so a positional probe here would only be re-recording that offset.
+        lint_steps = [
+            step for step in steps
+            if step.value("name") == "Lint workflow definitions"
+        ]
+        if len(lint_steps) != 1 or lint_steps[0].text != ACTIONLINT_INSTALL:
             reject(
                 "E_ACTIONLINT_INSTALL",
                 "actionlint install/checksum/execution contract drifted",
@@ -1189,7 +1223,7 @@ def run_self_test(root: Path) -> None:
         (
             "late-guard",
             mutate(
-                actionlint,
+                codeql,
                 lambda text: replace_once(
                     text,
                     POSIX_GUARD + "\n      - name: Check out source\n",
@@ -2160,8 +2194,8 @@ def run_self_test(root: Path) -> None:
         expect_failure(name, transform(baseline), code)
 
     positive = dict(baseline)
-    positive[actionlint] = replace_once(
-        positive[actionlint],
+    positive[codeql] = replace_once(
+        positive[codeql],
         POSIX_GUARD + "\n      - name: Check out source",
         POSIX_GUARD
         + "\n      # Comments are non-executable metadata; checkout may follow later.\n"
