@@ -9,6 +9,7 @@
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
+#include "wyrelog/fact/publication-lock-event-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
@@ -21,6 +22,22 @@
 #endif
 
 #define TEST(name) g_test_message ("%s", name)
+
+typedef struct
+{
+  GMutex mutex;
+  GArray *events;
+} PublicationLockTrace;
+
+static void
+publication_lock_trace_event (const WylFactPublicationLockEvent *event,
+    gpointer user_data)
+{
+  PublicationLockTrace *trace = user_data;
+  g_mutex_lock (&trace->mutex);
+  g_array_append_val (trace->events, *event);
+  g_mutex_unlock (&trace->mutex);
+}
 
 wyrelog_error_t wyl_engine_open_source (const gchar * dl_src,
     guint32 num_workers, WylEngine ** out);
@@ -3828,6 +3845,129 @@ test_handle_seal_requires_matching_write_lease (void)
   remove_tree (root);
 }
 
+static void
+test_handle_unseal_traces_coordinator_before_publication (void)
+{
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_test_skip ("handle fact unseal requires the secure fact-store bridge");
+  return;
+#else
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-lock-order-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    /* The real handle path uses the secure authority boundary.  A legacy
+     * graph created with create_fact_graph() has no store identity and is
+     * deliberately rejected by the secure opener during unseal. */
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+        &created), ==, WYRELOG_E_OK);
+    g_assert_true (created);
+    provisioned_871_create_graph (policy, root, "tenant-a", "orders");
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+        "tenant-a", "orders", TRUE, &store), ==, WYRELOG_E_OK);
+    g_autofree gchar *table = provisioned_871_append_one (store, "tenant-a",
+            "orders", "lock-order-batch", "lock-order-key", "order-a", 11,
+            TRUE);
+    g_assert_nonnull (table);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info, -1,
+      &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  PublicationLockTrace trace = { 0 };
+  g_mutex_init (&trace.mutex);
+  trace.events = g_array_new (FALSE, FALSE,
+          sizeof (WylFactPublicationLockEvent));
+  wyl_fact_publication_lock_event_set_hook (publication_lock_trace_event,
+      &trace);
+  WylFactGraphUnsealOutcome unsealed = { 0 };
+  g_assert_cmpint (wyl_handle_unseal_fact_graph (handle, lease, &info, -1,
+      &unsealed), ==, WYRELOG_E_OK);
+  wyl_fact_publication_lock_event_set_hook (NULL, NULL);
+  g_assert_true (unsealed.engine_published);
+  g_assert_true (unsealed.runtime_admission_open);
+
+  guint coordinator = G_MAXUINT;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  guint artifact = G_MAXUINT;
+#endif
+  guint writer = G_MAXUINT;
+  guint state = G_MAXUINT;
+  guint policy = G_MAXUINT;
+  for (guint i = 0; i < trace.events->len; i++) {
+    WylFactPublicationLockEvent event =
+        g_array_index (trace.events, WylFactPublicationLockEvent, i);
+    if (event.phase != WYL_FACT_PUBLICATION_LOCK_ACQUIRED)
+      continue;
+    if (event.domain == WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR
+        && coordinator == G_MAXUINT)
+      coordinator = i;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE
+        && artifact == G_MAXUINT && coordinator != G_MAXUINT)
+      artifact = i;
+#endif
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_RUNTIME_WRITER
+        && writer == G_MAXUINT && coordinator != G_MAXUINT)
+      writer = i;
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_RUNTIME_STATE
+        && state == G_MAXUINT && writer != G_MAXUINT && i > writer)
+      state = i;
+    else if (event.domain == WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE
+        && policy == G_MAXUINT && state != G_MAXUINT && i > state)
+      policy = i;
+  }
+  g_assert_cmpuint (coordinator, !=, G_MAXUINT);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_assert_cmpuint (artifact, !=, G_MAXUINT);
+  g_assert_cmpuint (coordinator, <, artifact);
+  g_assert_cmpuint (artifact, <, writer);
+#else
+  g_assert_cmpuint (coordinator, <, writer);
+#endif
+  g_assert_cmpuint (writer, !=, G_MAXUINT);
+  g_assert_cmpuint (state, !=, G_MAXUINT);
+  g_assert_cmpuint (policy, !=, G_MAXUINT);
+  g_assert_cmpuint (writer, <, state);
+  g_assert_cmpuint (state, <, policy);
+  g_assert_cmpuint (trace.events->len, >, 0);
+  g_array_free (trace.events, TRUE);
+  g_mutex_clear (&trace.mutex);
+  wyl_fact_graph_unseal_outcome_clear (&unsealed);
+  g_clear_pointer (&lease, wyl_service_auth_write_lease_free);
+  g_clear_object (&handle);
+  remove_tree (root);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3853,6 +3993,8 @@ main (int argc, char **argv)
       test_no_fact_root_is_not_a_probe_disagreement);
   g_test_add_func ("/fact-replay/seal-requires-matching-write-lease",
       test_handle_seal_requires_matching_write_lease);
+  g_test_add_func ("/fact-replay/handle-unseal-lock-order",
+      test_handle_unseal_traces_coordinator_before_publication);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
   g_test_add_func ("/fact-replay/compound-shared",
