@@ -122,6 +122,8 @@ def mutation_validation_error(
 def control_validation_error(
     delta: tuple[tuple[str, str | None], ...],
 ) -> str | None:
+    # Safe controls are full contract validations too; execute them in the
+    # same worker pool so the parent cannot serialize the CI budget.
     return mutation_validation_error(delta)
 
 
