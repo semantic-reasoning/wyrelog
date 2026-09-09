@@ -37,6 +37,7 @@ struct _WylFactGraphRuntimeEntry
   gint64 last_replay_at_us;
   WylFactGraphForgetState forget_state;
   WylFactGraphAdmission admission;
+  guint64 admission_generation;
 };
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
@@ -667,6 +668,8 @@ wyl_fact_graph_runtime_manager_publish_closed_and_open
 wyrelog_error_t
 wyl_fact_graph_runtime_publication_begin_closed
   (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphAdmission abort_admission,
+    guint64 admission_generation,
     WylFactGraphRuntimePublication *out_publication)
 {
   if (out_publication != NULL)
@@ -684,6 +687,8 @@ wyl_fact_graph_runtime_publication_begin_closed
     rc = WYRELOG_E_BUSY;
   else if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN)
     rc = WYRELOG_E_INVALID;
+  else if (entry->admission_generation != admission_generation)
+    rc = WYRELOG_E_BUSY;
   else if (entry->operation_generation == G_MAXUINT64
       || entry->engine_generation == G_MAXUINT64)
     rc = WYRELOG_E_INTERNAL;
@@ -694,6 +699,10 @@ wyl_fact_graph_runtime_publication_begin_closed
     return rc;
   }
   entry->publication_active = TRUE;
+  out_publication->previous_state = entry->state;
+  out_publication->previous_admission = abort_admission;
+  out_publication->admission_generation = admission_generation;
+  out_publication->restore_state_on_abort = TRUE;
   entry->operation_generation++;
   entry->operation_active = TRUE;
   entry->operation_owner = g_thread_self ();
@@ -763,6 +772,10 @@ wyl_fact_graph_runtime_publication_refresh
         ? WYL_FACT_GRAPH_RUNTIME_DEGRADED : WYL_FACT_GRAPH_RUNTIME_READY_STALE;
     entry->last_replay_class = classify_replay_error (rc);
   }
+  /* Once refresh has entered the build/result path, its state is authoritative
+   * even when the build fails.  Only an abort before refresh may restore the
+   * state displaced by begin_closed(). */
+  publication->restore_state_on_abort = FALSE;
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
   g_mutex_unlock (&entry->state_lock);
@@ -830,6 +843,12 @@ wyl_fact_graph_runtime_publication_abort
   entry->operation_active = FALSE;
   entry->operation_owner = NULL;
   g_cond_broadcast (&entry->drain_cond);
+  if (publication->restore_state_on_abort && publication->writer_held
+      && !entry->abandoned
+      && !g_atomic_int_get (&publication->manager->shutdown)) {
+    entry->state = publication->previous_state;
+    entry->admission = publication->previous_admission;
+  }
   entry->publication_active = FALSE;
   g_mutex_unlock (&entry->state_lock);
   if (publication->writer_held)
@@ -896,7 +915,9 @@ wyl_fact_graph_runtime_manager_set_forget_state
 
 static wyrelog_error_t
 set_admission (WylFactGraphRuntimeManager *manager,
-    const WylFactGraphKey *key, WylFactGraphAdmission admission)
+    const WylFactGraphKey *key, WylFactGraphAdmission admission,
+    WylFactGraphAdmission *out_previous_admission,
+    guint64 *out_admission_generation)
 {
   WylFactGraphRuntimeEntry *entry = NULL;
   /* mint_as = NULL for the same reason set_forget_state uses it: this acts on
@@ -926,6 +947,21 @@ set_admission (WylFactGraphRuntimeManager *manager,
   } else if (entry->publication_active) {
     rc = WYRELOG_E_BUSY;
   } else {
+    if (out_previous_admission != NULL)
+      *out_previous_admission = entry->admission;
+    if (entry->admission != admission) {
+      if (entry->admission_generation == G_MAXUINT64)
+        rc = WYRELOG_E_INTERNAL;
+      else
+        entry->admission_generation++;
+    }
+    if (rc != WYRELOG_E_OK) {
+      g_mutex_unlock (&entry->state_lock);
+      runtime_entry_unref (entry);
+      return rc;
+    }
+    if (out_admission_generation != NULL)
+      *out_admission_generation = entry->admission_generation;
     entry->admission = admission;
     /* Wake any parked drain.  Reopening makes a drain's answer meaningless --
      * the graph is admitting again -- and the drain re-tests admission on
@@ -944,14 +980,26 @@ wyrelog_error_t
 wyl_fact_graph_runtime_manager_close_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key)
 {
-  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  return wyl_fact_graph_runtime_manager_close_admission_with_previous (manager,
+             key, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_close_admission_with_previous
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphAdmission *out_previous_admission,
+    guint64 *out_admission_generation)
+{
+  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_CLOSED,
+             out_previous_admission, out_admission_generation);
 }
 
 wyrelog_error_t
 wyl_fact_graph_runtime_manager_open_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key)
 {
-  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  return set_admission (manager, key, WYL_FACT_GRAPH_ADMISSION_OPEN, NULL,
+             NULL);
 }
 
 /* Admitted work is exactly the three bounded counters.  active_snapshots is
