@@ -155,5 +155,7 @@ void wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
 #define WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE "durable_write"
 #define WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE  "reseal_probe"
 #define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL "unseal_reseal"
+#define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION \
+  "unseal_before_publication"
 
 G_END_DECLS;

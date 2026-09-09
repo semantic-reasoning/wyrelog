@@ -2342,8 +2342,9 @@ test_refresh_closed_refusals (void)
   BuildSpec spec = {.marker = 201 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
       build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
-      &a), ==, WYRELOG_E_OK);
+  guint64 admission_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &a, NULL, &admission_generation), ==, WYRELOG_E_OK);
   wyl_fact_graph_runtime_manager_shutdown (manager);
 
   /* A dying manager answers BUSY.  This does NOT demonstrate the gate order:
@@ -2357,6 +2358,91 @@ test_refresh_closed_refusals (void)
   BuildSpec late = {.marker = 202 };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager, &a,
       build_marker_engine, &late, NULL), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A publication token may be abandoned before its builder runs (for example,
+ * when the policy CAS loses a concurrent unseal).  Aborting that token must
+ * restore the state it displaced rather than leaving a shared entry BUILDING.
+ */
+static void
+test_publication_abort_restores_displaced_state (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 211 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  guint64 admission_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &a, NULL, &admission_generation), ==, WYRELOG_E_OK);
+
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+      &a, WYL_FACT_GRAPH_ADMISSION_CLOSED, admission_generation,
+      &publication), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus building = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &building), ==, WYRELOG_E_OK);
+  g_assert_cmpint (building.state, ==, WYL_FACT_GRAPH_RUNTIME_BUILDING);
+  wyl_fact_graph_runtime_status_clear (&building);
+
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  WylFactGraphRuntimeStatus restored = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &restored), ==, WYRELOG_E_OK);
+  g_assert_cmpint (restored.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (restored.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (restored.queryable);
+  g_assert_false (restored.operation_active);
+  g_assert_cmpuint (restored.active_engine_calls, ==, 0);
+  g_assert_cmpuint (restored.waiting_engine_calls, ==, 0);
+  g_assert_cmpuint (restored.waiting_drains, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&restored);
+  wyl_fact_graph_key_clear (&a);
+}
+
+/* A close checkpoint is valid only for the admission incarnation that made
+ * it.  If another caller reopens and recloses the entry before reservation,
+ * the stale publication must be refused rather than later reopening that
+ * caller's barrier on abort. */
+static void
+test_publication_begin_rejects_stale_admission_checkpoint (void)
+{
+  WylFactGraphKey a = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 221 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+
+  WylFactGraphAdmission previous = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  guint64 stale_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &a, &previous, &stale_generation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (previous, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &a), ==, WYRELOG_E_OK);
+  guint64 current_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &a, NULL, &current_generation), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (current_generation, !=, stale_generation);
+
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+      &a, previous, stale_generation, &publication), ==, WYRELOG_E_BUSY);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &a,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (status.queryable);
+  g_assert_false (status.operation_active);
+  wyl_fact_graph_runtime_status_clear (&status);
   wyl_fact_graph_key_clear (&a);
 }
 
@@ -2414,6 +2500,10 @@ main (int argc, char **argv)
       test_refresh_closed_mints_a_closed_entry);
   g_test_add_func ("/fact-runtime/refresh-closed-refusals",
       test_refresh_closed_refusals);
+  g_test_add_func ("/fact-runtime/publication-abort-restores-state",
+      test_publication_abort_restores_displaced_state);
+  g_test_add_func ("/fact-runtime/publication-begin-rejects-stale-checkpoint",
+      test_publication_begin_rejects_stale_admission_checkpoint);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();

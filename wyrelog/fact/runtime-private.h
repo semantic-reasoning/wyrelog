@@ -344,6 +344,10 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_set_forget_state
  */
 wyrelog_error_t wyl_fact_graph_runtime_manager_close_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
+wyrelog_error_t wyl_fact_graph_runtime_manager_close_admission_with_previous
+  (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
+    WylFactGraphAdmission *out_previous_admission,
+    guint64 *out_admission_generation);
 wyrelog_error_t wyl_fact_graph_runtime_manager_open_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
 
@@ -621,10 +625,16 @@ typedef struct
   GThread *owner;
   gboolean active;
   gboolean writer_held;
+  WylFactGraphRuntimeState previous_state;
+  WylFactGraphAdmission previous_admission;
+  guint64 admission_generation;
+  gboolean restore_state_on_abort;
 } WylFactGraphRuntimePublication;
 
 wyrelog_error_t wyl_fact_graph_runtime_publication_begin_closed
   (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphAdmission abort_admission,
+    guint64 admission_generation,
     WylFactGraphRuntimePublication *out_publication);
 wyrelog_error_t wyl_fact_graph_runtime_publication_refresh
   (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,

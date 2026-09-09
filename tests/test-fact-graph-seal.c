@@ -593,6 +593,196 @@ test_unseal_rebuilds_before_reopening (void)
 
 typedef struct
 {
+  GMutex mutex;
+  GCond changed;
+  guint ready;
+  gboolean release;
+} ConcurrentUnsealStart;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean held;
+  gboolean release;
+  gboolean timed_out;
+} ConcurrentUnsealHold;
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const gchar *root;
+  WylFactGraphRuntimeManager *manager;
+  ConcurrentUnsealStart *start;
+  GMutex mutex;
+  GCond changed;
+  wyrelog_error_t result;
+  WylFactGraphUnsealOutcome outcome;
+  gboolean completed;
+} ConcurrentUnsealCall;
+
+static gpointer
+concurrent_unseal_call_thread (gpointer user_data)
+{
+  ConcurrentUnsealCall *call = user_data;
+  g_mutex_lock (&call->start->mutex);
+  call->start->ready++;
+  g_cond_broadcast (&call->start->changed);
+  while (!call->start->release)
+    g_cond_wait (&call->start->changed, &call->start->mutex);
+  g_mutex_unlock (&call->start->mutex);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  call->result = wyl_fact_graph_unseal_for_test (call->policy, call->root,
+          &info, call->manager, -1, &call->outcome);
+  g_mutex_lock (&call->mutex);
+  call->completed = TRUE;
+  g_cond_broadcast (&call->changed);
+  g_mutex_unlock (&call->mutex);
+  return NULL;
+}
+
+static wyrelog_error_t
+concurrent_unseal_hold_before_publication (const gchar *phase,
+    gpointer user_data)
+{
+  ConcurrentUnsealHold *hold = user_data;
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION)
+      != 0)
+    return WYRELOG_E_OK;
+  g_mutex_lock (&hold->mutex);
+  hold->held = TRUE;
+  g_cond_broadcast (&hold->changed);
+  gint64 deadline = g_get_monotonic_time () + 15 * G_TIME_SPAN_SECOND;
+  while (!hold->release) {
+    if (!g_cond_wait_until (&hold->changed, &hold->mutex, deadline)) {
+      hold->timed_out = TRUE;
+      break;
+    }
+  }
+  gboolean released = hold->release;
+  g_mutex_unlock (&hold->mutex);
+  return released ? WYRELOG_E_OK : WYRELOG_E_BUSY;
+}
+
+static void
+test_concurrent_unseal_converges_after_loser_abort (void)
+{
+  SealFixture fixture = { 0 };
+  ConcurrentUnsealStart start = { 0 };
+  ConcurrentUnsealHold hold = { 0 };
+  g_mutex_init (&start.mutex);
+  g_cond_init (&start.changed);
+  g_mutex_init (&hold.mutex);
+  g_cond_init (&hold.changed);
+  authority_seal_fixture_init (&fixture, "wyl-unseal-concurrent-XXXXXX");
+  WylFactGraphSealOutcome sealed = { 0 };
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  ConcurrentUnsealCall first = {
+    .policy = fixture.policy, .root = fixture.root, .manager = fixture.manager,
+    .start = &start, .result = WYRELOG_E_INTERNAL,
+  };
+  ConcurrentUnsealCall second = first;
+  g_mutex_init (&first.mutex);
+  g_cond_init (&first.changed);
+  g_mutex_init (&second.mutex);
+  g_cond_init (&second.changed);
+  wyl_fact_graph_seal_set_test_hook
+    (concurrent_unseal_hold_before_publication, &hold);
+  GThread *first_thread = g_thread_new ("unseal-first",
+          concurrent_unseal_call_thread, &first);
+  GThread *second_thread = g_thread_new ("unseal-second",
+          concurrent_unseal_call_thread, &second);
+
+  g_mutex_lock (&start.mutex);
+  gint64 start_deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (start.ready < 2) {
+    if (!g_cond_wait_until (&start.changed, &start.mutex, start_deadline))
+      break;
+  }
+  g_assert_cmpuint (start.ready, ==, 2);
+  start.release = TRUE;
+  g_cond_broadcast (&start.changed);
+  g_mutex_unlock (&start.mutex);
+
+  g_mutex_lock (&hold.mutex);
+  gint64 hold_deadline = g_get_monotonic_time () + 15 * G_TIME_SPAN_SECOND;
+  while (!hold.held) {
+    if (!g_cond_wait_until (&hold.changed, &hold.mutex, hold_deadline))
+      break;
+  }
+  g_assert_true (hold.held);
+  g_assert_false (hold.timed_out);
+  hold.release = TRUE;
+  g_cond_broadcast (&hold.changed);
+  g_mutex_unlock (&hold.mutex);
+
+  gint64 completion_deadline = g_get_monotonic_time ()
+      + 15 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&first.mutex);
+  while (!first.completed)
+    if (!g_cond_wait_until (&first.changed, &first.mutex,
+        completion_deadline))
+      break;
+  gboolean first_completed = first.completed;
+  g_mutex_unlock (&first.mutex);
+  g_mutex_lock (&second.mutex);
+  while (!second.completed)
+    if (!g_cond_wait_until (&second.changed, &second.mutex,
+        completion_deadline))
+      break;
+  gboolean second_completed = second.completed;
+  g_mutex_unlock (&second.mutex);
+  g_assert_true (first_completed);
+  g_assert_true (second_completed);
+  g_thread_join (first_thread);
+  g_thread_join (second_thread);
+  guint successes = (first.result == WYRELOG_E_OK)
+      + (second.result == WYRELOG_E_OK);
+  g_assert_cmpuint (successes, ==, 1);
+  ConcurrentUnsealCall *loser = first.result == WYRELOG_E_OK
+      ? &second : &first;
+  g_test_message ("concurrent unseal results: winner=%d loser=%d",
+      (first.result == WYRELOG_E_OK ? first.result : second.result),
+      loser->result);
+  g_assert_cmpint (loser->result, !=, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus final = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_cmpint (final.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (final.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (final.queryable);
+  g_assert_false (final.operation_active);
+  g_assert_cmpuint (final.active_engine_calls, ==, 0);
+  g_assert_cmpuint (final.waiting_engine_calls, ==, 0);
+  g_assert_cmpuint (final.waiting_drains, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&final);
+  wyl_fact_graph_unseal_outcome_clear (&first.outcome);
+  wyl_fact_graph_unseal_outcome_clear (&second.outcome);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_cond_clear (&first.changed);
+  g_mutex_clear (&first.mutex);
+  g_cond_clear (&second.changed);
+  g_mutex_clear (&second.mutex);
+  g_cond_clear (&hold.changed);
+  g_mutex_clear (&hold.mutex);
+  g_cond_clear (&start.changed);
+  g_mutex_clear (&start.mutex);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+typedef struct
+{
   wyrelog_error_t open_rc;
 } PublicationOpenProbe;
 
@@ -1391,6 +1581,8 @@ main (int argc, char **argv)
       test_aborted_seal_does_not_reopen_an_already_sealed_graph);
   g_test_add_func ("/fact-graph-seal/unseal-rebuilds-before-reopening",
       test_unseal_rebuilds_before_reopening);
+  g_test_add_func ("/fact-graph-seal/concurrent-unseal-converges",
+      test_concurrent_unseal_converges_after_loser_abort);
   g_test_add_func ("/fact-graph-seal/publication-blocks-external-open",
       test_publication_blocks_external_open);
   g_test_add_func ("/fact-graph-seal/unseal-requires-handle-write-lease",

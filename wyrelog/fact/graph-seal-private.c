@@ -431,7 +431,10 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * runtime entry therefore cannot admit work while the engine is rebuilt;
    * a graph not yet held by the manager is safely minted CLOSED by the
    * refresh_closed primitive below. */
-  rc = wyl_fact_graph_runtime_manager_close_admission (manager, &key);
+  WylFactGraphAdmission previous_admission = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  guint64 admission_generation = 0;
+  rc = wyl_fact_graph_runtime_manager_close_admission_with_previous (manager,
+          &key, &previous_admission, &admission_generation);
   gboolean barrier = rc == WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND)
     goto finish;
@@ -449,6 +452,8 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * observe an engine whose authority transaction is not committed yet. */
   WylFactGraphRuntimePublication publication = { 0 };
   rc = wyl_fact_graph_runtime_publication_begin_closed (manager, &key,
+          previous_admission,
+          admission_generation,
           &publication);
   if (rc != WYRELOG_E_OK)
     goto finish;
@@ -502,6 +507,12 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * prevents a future publication path from treating a mere authority
    * readback as sufficient validation. */
   rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+  if (rc != WYRELOG_E_OK) {
+    clear_unseal_graph_info (&current);
+    goto compensate;
+  }
+
+  rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION);
   if (rc != WYRELOG_E_OK) {
     clear_unseal_graph_info (&current);
     goto compensate;
