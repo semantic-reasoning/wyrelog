@@ -71,3 +71,14 @@ no cycle is entered, join all threads within a bounded deadline, and verify
 that a subsequent unseal succeeds after every failure path.  Until that test
 exists, this ADR and the #987 lock-order acceptance criterion remain
 incomplete.
+
+The first #992 implementation checkpoint adds a unified, test-only event
+stream for the actual artifact lease, runtime writer/state, policy fence, and
+handle-coordinator boundaries.  Events carry an atomic sequence and thread
+identity; release events are emitted after the underlying close or unlock
+while the borrowed subject remains valid for the synchronous callback.  The
+direct graph-unseal forward trace verifies the observed artifact (when the
+secure bridge is enabled) -> runtime writer -> runtime state -> policy fence
+subsequence.  This checkpoint deliberately does not claim real-handle
+contention, reverse-order deadlock freedom, or bounded subprocess cleanup;
+those remain the acceptance scope of #992's subsequent matrix unit.

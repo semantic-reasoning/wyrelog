@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/publication-lock-event-private.h"
 #ifndef G_OS_WIN32
 #include "fact/graph-artifact-inventory-posix-private.h"
 #include "fact/graph-provisioned-pair-internal.h"
@@ -1562,6 +1563,9 @@ acquire_lease (WylFactArtifactNamespace *n, gboolean exclusive,
     wyl_fact_artifact_mutation_lease_free (lease);
     return r;
   }
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_ACQUIRED, lease);
   *out_lease = lease;
   return WYRELOG_E_OK;
 }
@@ -1642,9 +1646,15 @@ wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
     return;
   if (!g_atomic_int_dec_and_test (&l->references))
     return;
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, l);
   g_mutex_clear (&l->mutex);
   if (l->lock_fd >= 0)
     close (l->lock_fd);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_ARTIFACT_LEASE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASED, l);
   namespace_unref (l->namespace_);
   g_free (l);
 }

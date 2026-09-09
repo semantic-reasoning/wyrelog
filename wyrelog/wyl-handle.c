@@ -11,6 +11,7 @@
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
 #include "wyl-handle-compound-private.h"
+#include "fact/publication-lock-event-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
@@ -2512,6 +2513,9 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   wyl_policy_store_t *policy = NULL;
   wyl_policy_store_t *lease_policy = NULL;
   g_mutex_lock (&self->fact_replay_coordinator_lock);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
+      WYL_FACT_PUBLICATION_LOCK_ACQUIRED, self);
   wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
         (write_lease, self, &lease_policy);
   if (rc == WYRELOG_E_OK)
@@ -2526,7 +2530,13 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   } else if (policy != NULL) {
     wyl_handle_policy_store_unpin (self, policy);
   }
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
+      WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, self);
   g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
+      WYL_FACT_PUBLICATION_LOCK_RELEASED, self);
   return rc;
 }
 

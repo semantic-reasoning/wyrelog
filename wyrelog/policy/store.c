@@ -56,6 +56,7 @@
 #include "store-lease-private.h"
 #include "fact/graph-locator-private.h"
 #include "fact/root-writer-lease-private.h"
+#include "fact/publication-lock-event-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -8088,6 +8089,9 @@ wyl_policy_store_graph_publication_fence_begin
     return WYRELOG_E_NOMEM;
   }
   wyl_policy_graph_authority_record_free (record);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE,
+      WYL_FACT_PUBLICATION_LOCK_ACQUIRED, store);
   return WYRELOG_E_OK;
 }
 
@@ -8147,7 +8151,13 @@ wyl_policy_store_graph_publication_fence_clear
   if (fence->active)
     (void) wyl_policy_store_publication_transaction_rollback_checked
       (fence->store);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, fence->store);
   g_rec_mutex_unlock (&fence->store->graph_authority_mutex);
+  wyl_fact_publication_lock_event_emit
+    (WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE,
+      WYL_FACT_PUBLICATION_LOCK_RELEASED, fence->store);
   g_free (fence->initial_store_uuid);
   *fence = (WylPolicyGraphPublicationFence)
       WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
