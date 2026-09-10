@@ -5,10 +5,26 @@
 
 typedef struct _WylFactGraphRuntimeEntry WylFactGraphRuntimeEntry;
 
-/* A build callback is user-controlled code.  Keep its entry in thread-local
- * storage so a callback cannot recursively wait on the same entry's writer
- * lock.  Different entries remain independent and may still be refreshed. */
+/* Track every active ancestor, not just the innermost callback: A -> B -> A
+ * must not wait for A's writer lock owned by this same thread. */
+typedef struct RuntimeBuildFrame
+{
+  WylFactGraphRuntimeEntry *entry;
+  struct RuntimeBuildFrame *previous;
+} RuntimeBuildFrame;
+
 static GPrivate runtime_build_entry = G_PRIVATE_INIT (NULL);
+
+static gboolean
+runtime_build_contains (WylFactGraphRuntimeEntry *entry)
+{
+  for (RuntimeBuildFrame *frame = g_private_get (&runtime_build_entry);
+      frame != NULL; frame = frame->previous) {
+    if (frame->entry == entry)
+      return TRUE;
+  }
+  return FALSE;
+}
 
 typedef struct
 {
@@ -764,7 +780,7 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     runtime_entry_unref (entry);
     return WYRELOG_E_INVALID;
   }
-  if (g_private_get (&runtime_build_entry) == entry) {
+  if (runtime_build_contains (entry)) {
     if (out_status != NULL)
       wyl_fact_graph_runtime_status_clear (out_status);
     runtime_entry_unref (entry);
@@ -834,10 +850,10 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
 #endif
 
   WylEngine *engine = NULL;
-  gpointer previous_build_entry = g_private_get (&runtime_build_entry);
-  g_private_set (&runtime_build_entry, entry);
+  RuntimeBuildFrame frame = { entry, g_private_get (&runtime_build_entry) };
+  g_private_set (&runtime_build_entry, &frame);
   rc = build (&entry->key, &engine, user_data);
-  g_private_set (&runtime_build_entry, previous_build_entry);
+  g_private_set (&runtime_build_entry, frame.previous);
   if (rc == WYRELOG_E_OK && (engine == NULL || !WYL_IS_ENGINE (engine)))
     rc = WYRELOG_E_INTERNAL;
   WylFactGraphEngineGeneration *replacement = NULL;
@@ -994,16 +1010,16 @@ wyl_fact_graph_runtime_publication_refresh
     if (rc != WYRELOG_E_OK)
       return rc;
   }
-  if (g_private_get (&runtime_build_entry) == entry) {
+  if (runtime_build_contains (entry)) {
     if (out_status != NULL)
       wyl_fact_graph_runtime_status_clear (out_status);
     return WYRELOG_E_BUSY;
   }
   WylEngine *engine = NULL;
-  gpointer previous_build_entry = g_private_get (&runtime_build_entry);
-  g_private_set (&runtime_build_entry, entry);
+  RuntimeBuildFrame frame = { entry, g_private_get (&runtime_build_entry) };
+  g_private_set (&runtime_build_entry, &frame);
   wyrelog_error_t rc = build (&entry->key, &engine, user_data);
-  g_private_set (&runtime_build_entry, previous_build_entry);
+  g_private_set (&runtime_build_entry, frame.previous);
   if (rc == WYRELOG_E_OK && (engine == NULL || !WYL_IS_ENGINE (engine)))
     rc = WYRELOG_E_INTERNAL;
   WylFactGraphEngineGeneration *replacement = NULL;

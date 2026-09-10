@@ -1771,9 +1771,141 @@ test_drain_refuses_its_own_build_callback (void)
   wyl_fact_graph_key_clear (&a);
 }
 
-/* A publication build must refuse recursive refresh before it waits on its
- * own writer lock.  The bounded assertion is deliberately direct: a missing
- * guard would hang this test instead of producing a recoverable error. */
+/* Nested builds may visit a different graph, but returning to an active
+ * ancestor must be refused.  Subprocess deadlines bound a missing guard. */
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  WylFactGraphKey *outer;
+  WylFactGraphKey *inner;
+  WylFactGraphRuntimePublication *publication;
+  gboolean cycle;
+  gboolean fail_inner;
+  guint forbidden_calls;
+  guint inner_calls;
+} NestedBuild;
+
+static wyrelog_error_t
+build_forbidden_ancestor (const WylFactGraphKey *key, WylEngine **engine,
+    gpointer data)
+{
+  NestedBuild *probe = data;
+  probe->forbidden_calls++;
+  BuildSpec spec = {.marker = 999};
+  return build_marker_engine (key, engine, &spec);
+}
+
+static wyrelog_error_t
+refresh_ancestor (NestedBuild *probe)
+{
+  if (probe->publication != NULL)
+    return wyl_fact_graph_runtime_publication_refresh (probe->publication,
+               build_forbidden_ancestor, probe, NULL);
+  return wyl_fact_graph_runtime_manager_refresh (probe->manager,
+             probe->outer, build_forbidden_ancestor, probe, NULL);
+}
+
+static wyrelog_error_t
+build_nested_inner (const WylFactGraphKey *key, WylEngine **engine,
+    gpointer data)
+{
+  NestedBuild *probe = data;
+  probe->inner_calls++;
+  if (probe->cycle)
+    g_assert_cmpint (refresh_ancestor (probe), ==, WYRELOG_E_BUSY);
+  if (probe->fail_inner)
+    return WYRELOG_E_IO;
+  BuildSpec spec = {.marker = 402};
+  return build_marker_engine (key, engine, &spec);
+}
+
+static wyrelog_error_t
+build_nested_outer (const WylFactGraphKey *key, WylEngine **engine,
+    gpointer data)
+{
+  NestedBuild *probe = data;
+  wyrelog_error_t rc = wyl_fact_graph_runtime_manager_refresh (probe->manager,
+          probe->inner, build_nested_inner, probe, NULL);
+  g_assert_cmpint (rc, ==, probe->fail_inner ? WYRELOG_E_IO : WYRELOG_E_OK);
+  /* A failed B callback must restore A's frame before A continues. */
+  if (probe->fail_inner)
+    g_assert_cmpint (refresh_ancestor (probe), ==, WYRELOG_E_BUSY);
+  BuildSpec spec = {.marker = 401};
+  return build_marker_engine (key, engine, &spec);
+}
+
+static void
+test_nested_build (gconstpointer data)
+{
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, DEADLOCK_CEILING_US, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
+  guint mode = GPOINTER_TO_UINT (data);
+  WylFactGraphKey a = { 0 }, b = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&a, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&b, "tenant-a", "customers"), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec seed = {.marker = 400};
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &b,
+      build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimePublication publication = { 0 };
+  gboolean publish = (mode & 1) != 0;
+  if (publish) {
+    WylFactGraphAdmission previous = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+    guint64 generation = 0;
+    g_assert_cmpint
+      (wyl_fact_graph_runtime_manager_close_admission_with_previous (manager,
+        &a, &previous, &generation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+        &a, previous, generation, &publication), ==, WYRELOG_E_OK);
+  }
+  NestedBuild probe = {
+    .manager = manager, .outer = &a, .inner = &b,
+    .publication = publish ? &publication : NULL,
+    .cycle = (mode & 2) != 0, .fail_inner = (mode & 4) != 0,
+  };
+  wyrelog_error_t rc = publish
+      ? wyl_fact_graph_runtime_publication_refresh (&publication,
+          build_nested_outer, &probe, NULL)
+      : wyl_fact_graph_runtime_manager_refresh (manager, &a,
+          build_nested_outer, &probe, NULL);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.inner_calls, ==, 1);
+  g_assert_cmpuint (probe.forbidden_calls, ==, 0);
+  if (publish) {
+    WylFactGraphSnapshot *closed = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+        &a, &closed), ==, WYRELOG_E_BUSY);
+    g_assert_null (closed);
+    g_assert_cmpint (wyl_fact_graph_runtime_publication_open (&publication),
+        ==, WYRELOG_E_OK);
+  }
+  WylFactGraphKey *keys[] = { &a, &b };
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
+    g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+        keys[i], &snapshot), ==, WYRELOG_E_OK);
+    g_assert_cmpint (snapshot_marker (snapshot), ==,
+        i == 0 ? 401 : probe.fail_inner ? 400 : 402);
+    g_clear_pointer (&snapshot, wyl_fact_graph_snapshot_unref);
+    /* Both frames must be gone, including after a failed inner callback. */
+    seed.marker = 410 + i;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, keys[i],
+        build_marker_engine, &seed, NULL), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+        keys[i], &snapshot), ==, WYRELOG_E_OK);
+    g_assert_cmpint (snapshot_marker (snapshot), ==, seed.marker);
+  }
+  wyl_fact_graph_key_clear (&a);
+  wyl_fact_graph_key_clear (&b);
+}
+
 static void
 test_refresh_refuses_its_own_build_callback (void)
 {
@@ -2731,5 +2863,17 @@ main (int argc, char **argv)
       test_publication_begin_rejects_stale_admission_checkpoint);
   g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
       test_two_tenant_two_graph_generation_isolation);
+  g_test_add_data_func ("/fact-runtime/nested/manager-acyclic",
+      GUINT_TO_POINTER (0), test_nested_build);
+  g_test_add_data_func ("/fact-runtime/nested/publication-acyclic",
+      GUINT_TO_POINTER (1), test_nested_build);
+  g_test_add_data_func ("/fact-runtime/nested/manager-cycle",
+      GUINT_TO_POINTER (2), test_nested_build);
+  g_test_add_data_func ("/fact-runtime/nested/publication-cycle",
+      GUINT_TO_POINTER (3), test_nested_build);
+  g_test_add_data_func ("/fact-runtime/nested/manager-inner-failure",
+      GUINT_TO_POINTER (4), test_nested_build);
+  g_test_add_data_func ("/fact-runtime/nested/publication-inner-failure",
+      GUINT_TO_POINTER (5), test_nested_build);
   return g_test_run ();
 }
