@@ -803,18 +803,22 @@ def scan_macro_environment(
 def macro_authority_escapes(
     files: dict[str, str], role_owners: set[str],
 ) -> set[tuple[str, str]]:
-    relevant = tuple(sorted(
-        (path, text) for path, text in files.items()
-        if not path.startswith("tests/")
-        and path.endswith((".c", ".h", ".cc", ".cpp"))
-    ))
-    return set(cached_macro_authority_escapes(relevant, tuple(sorted(role_owners))))
+    escapes = set()
+    for path in role_owners:
+        closure = project_include_closure(files, {path})
+        relevant = tuple(sorted(
+            (candidate, files[candidate]) for candidate in closure
+            if candidate.endswith((".c", ".h", ".cc", ".cpp"))
+        ))
+        escapes.update(cached_macro_authority_escapes_for_owner(
+            path, relevant,
+        ))
+    return escapes
 
 
-@functools.lru_cache(maxsize=256)
-def cached_macro_authority_escapes(
-    relevant: tuple[tuple[str, str], ...],
-    role_owners: tuple[str, ...],
+@functools.lru_cache(maxsize=512)
+def cached_macro_authority_escapes_for_owner(
+    owner: str, relevant: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
     files = dict(relevant)
     escapes = set()
@@ -828,11 +832,8 @@ def cached_macro_authority_escapes(
             {"WYL_HAS_FACT_STORE", "__linux__"},
         )
     ]
-    profile_paths = project_include_closure(files, set(role_owners))
     conditional_groups: list[dict[str, set[str]]] = []
     for path, text in files.items():
-        if path not in profile_paths:
-            continue
         conditional_groups.append(external_condition_values(text))
     profile_variants = list(profiles)
     for options in conditional_groups:
@@ -843,14 +844,13 @@ def cached_macro_authority_escapes(
     profile_variants = [dict(profile) for profile in {
         tuple(sorted(profile.items())) for profile in profile_variants
     }]
-    for path in role_owners:
-        for profile in profile_variants:
-            definitions: dict[str, MacroDefinition] = {
-                name: (None, value) for name, value in profile.items()
-            }
-            escapes.update(scan_macro_environment(
-                files, path, definitions, set(), True, False, set(),
-            ))
+    for profile in profile_variants:
+        definitions: dict[str, MacroDefinition] = {
+            name: (None, value) for name, value in profile.items()
+        }
+        escapes.update(scan_macro_environment(
+            files, owner, definitions, set(), True, False, set(),
+        ))
     return tuple(sorted(escapes))
 
 
@@ -1049,6 +1049,23 @@ def source_inventory_profiles(
     files: dict[str, str], path: str, role_owners: set[str],
     raw_names: set[str],
 ) -> list[dict[str, str]]:
+    closure = project_include_closure(files, {path})
+    relevant = tuple(sorted(
+        (candidate, files[candidate]) for candidate in closure
+        if candidate.endswith((".c", ".h", ".cc", ".cpp"))
+    ))
+    return list(cached_source_inventory_profiles(
+        path, relevant, tuple(sorted(raw_names)),
+    ))
+
+
+@functools.lru_cache(maxsize=512)
+def cached_source_inventory_profiles(
+    path: str, relevant: tuple[tuple[str, str], ...],
+    raw_names: tuple[str, ...],
+) -> tuple[dict[str, str], ...]:
+    files = dict(relevant)
+    raw_name_set = set(raw_names)
     fixed = {"WYL_HAS_FACT_STORE", "WYL_TEST_HANDLE_SEAMS"}
     root_options = external_condition_values(files[path])
     for name in fixed:
@@ -1060,12 +1077,14 @@ def source_inventory_profiles(
         )) is not None
     }
     for candidate in project_include_closure(files, {path}) - {path}:
-        if not source_may_introduce_raw_authority(files[candidate], raw_names):
+        if not source_may_introduce_raw_authority(
+            files[candidate], raw_name_set
+        ):
             continue
         for name, values in external_condition_values(files[candidate]).items():
             if name not in fixed | root_definitions | {"__cplusplus"}:
                 root_options.setdefault(name, set()).update(values)
-    return profile_value_variants(root_options, fixed)
+    return tuple(profile_value_variants(root_options, fixed))
 
 
 def active_code(
