@@ -1541,6 +1541,12 @@ wyrelog_error_t wyl_policy_store_publication_transaction_rollback_checked
 /* Same-thread graph publication fence.  The graph mutex and the SQLite
  * transaction are held together so an authority snapshot remains valid while
  * a closed runtime publication is built. */
+typedef enum
+{
+  WYL_POLICY_GRAPH_PUBLICATION_FRESH,
+  WYL_POLICY_GRAPH_PUBLICATION_RECOVERY,
+} WylPolicyGraphPublicationMode;
+
 typedef struct
 {
   wyl_policy_store_t *store;
@@ -1548,6 +1554,13 @@ typedef struct
   gboolean active;
   gboolean graph_locked;
   guint64 initial_generation;
+  WylPolicyGraphLifecycleState initial_lifecycle_state;
+  WylPolicyGraphPublicationMode mode;
+  gchar *tenant_id;
+  gchar *graph_id;
+  gboolean initial_sealed;
+  gboolean initial_has_store_identity;
+  WylPolicyGraphErrorClass initial_error_class;
   guint64 initial_reconciliation_generation;
   gchar *initial_store_uuid;
   guint64 initial_format_version;
@@ -1563,6 +1576,10 @@ wyrelog_error_t wyl_policy_store_graph_publication_fence_validate
   (WylPolicyGraphPublicationFence *fence, const gchar *tenant_id,
     const gchar *graph_id, WylPolicyGraphAuthorityRecord **out_record);
 wyrelog_error_t wyl_policy_store_graph_publication_fence_commit
+  (WylPolicyGraphPublicationFence *fence);
+/* Abort an owned transaction. Failed rollback terminalizes the connection;
+ * the caller must close/reopen it, not retry on an unresolved transaction. */
+wyrelog_error_t wyl_policy_store_graph_publication_fence_abort
   (WylPolicyGraphPublicationFence *fence);
 void wyl_policy_store_graph_publication_fence_clear
   (WylPolicyGraphPublicationFence *fence);

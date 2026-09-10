@@ -91,9 +91,11 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylFactGraphSealOutcome,
 
 typedef struct
 {
+  /* Confirmed committed transitions only, never merely attempted SQL. */
   gboolean durable_unseal_applied;
   gboolean durable_reseal_applied;
-  /* TRUE when eviction or compensating reseal did not complete. */
+  /* TRUE when eviction, rollback, or compensating reseal did not complete.
+   * A terminal policy connection requires close/reopen before retry. */
   gboolean compensation_failed;
   /* The first non-benign compensation error, or WYRELOG_E_OK. */
   wyrelog_error_t compensation_error;
@@ -111,7 +113,10 @@ void wyl_fact_graph_unseal_outcome_clear
  * runtime barrier remains closed, and reopen only after publication.  The
  * caller must hold the daemon's policy write lease and serialize this call
  * with other graph lifecycle writers; handle callers use the replay
- * coordinator lock for the latter. */
+ * coordinator lock for the latter. A previously CLOSED/missing runtime can
+ * reconcile ACTIVE authority without a lifecycle mutation. A retained engine
+ * requires failed-publication evidence bound to the current runtime generation;
+ * a healthy OPEN runtime is never made eligible by closing it in this call. */
 wyrelog_error_t wyl_fact_graph_unseal
   (wyl_policy_store_t * policy, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease, const gchar * fact_root,
@@ -180,5 +185,8 @@ void wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
   "unseal_before_admission_open"
 #define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION \
   "unseal_before_publication"
+#define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_AFTER_COMMIT "unseal_after_commit"
+#define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_COMPENSATION_EVICT \
+  "unseal_compensation_evict"
 
 G_END_DECLS;

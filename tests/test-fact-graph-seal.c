@@ -3,6 +3,7 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 #ifdef G_OS_WIN32
 #include <windows.h>
 #endif
@@ -182,6 +183,25 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
    * invalid production state and is rejected by the secure store opener. */
   g_assert_cmpint (wyl_fact_graph_provisioning_recover (store, op_uuid, root,
       NULL), ==, WYRELOG_E_OK);
+  WylPolicyGraphProvisioningRecord *operation = NULL;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+      &operation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_nonnull (operation);
+  g_assert_nonnull (authority);
+  g_assert_cmpint (operation->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  g_assert_cmpstr (operation->tenant_id, ==, tenant_id);
+  g_assert_cmpstr (operation->graph_id, ==, graph_id);
+  g_assert_cmpstr (authority->tenant_id, ==, tenant_id);
+  g_assert_cmpstr (authority->graph_id, ==, graph_id);
+  g_assert_nonnull (operation->store_uuid);
+  g_assert_cmpstr (operation->store_uuid, ==, authority->store_uuid);
+  wyl_policy_graph_provisioning_record_free (operation);
+  wyl_policy_graph_authority_record_free (authority);
 #else
   WylPolicyAuthorityMutationResult mutation =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
@@ -237,9 +257,8 @@ capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
  * mode 0600, so without the chmod the build fails at its first step with
  * WYRELOG_E_POLICY and every later ingredient is irrelevant. */
 static void
-materialize_graph_engine (wyl_policy_store_t *policy,
-    const gchar *root G_GNUC_UNUSED, const gchar *tenant_id,
-    const gchar *graph_id)
+materialize_graph_engine (wyl_policy_store_t *policy, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id)
 {
   GraphPathProbe probe = { tenant_id, graph_id, NULL };
   g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, tenant_id,
@@ -253,8 +272,8 @@ materialize_graph_engine (wyl_policy_store_t *policy,
     g_autoptr (wyl_fact_store_t) store = NULL;
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
     WylPolicyGraphAuthorityRecord *authority = NULL;
-    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy,
-        tenant_id, graph_id, &authority), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+        graph_id, &authority), ==, WYRELOG_E_OK);
     g_assert_nonnull (authority);
     gboolean legacy = authority->lifecycle_state
         == WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED;
@@ -263,9 +282,11 @@ materialize_graph_engine (wyl_policy_store_t *policy,
       g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
           tenant_id, graph_id, TRUE, &store), ==, WYRELOG_E_OK);
     else
+#else
+    (void) root;
 #endif
-    g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
-        WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
+          WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
     const wyl_policy_fact_relation_schema_column_t columns[] = {
       {"order_id", "symbol", FALSE, TRUE},
@@ -1492,7 +1513,7 @@ test_publication_blocks_external_open (void)
 }
 
 static void
-test_unseal_build_failure_reseals_and_stays_closed (void)
+test_unseal_build_failure_rolls_back_and_stays_closed (void)
 {
   SealFixture fixture = { 0 };
   g_autoptr (GError) error = NULL;
@@ -1534,8 +1555,8 @@ test_unseal_build_failure_reseals_and_stays_closed (void)
   WylFactGraphUnsealOutcome outcome = { 0 };
   g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
-  g_assert_true (outcome.durable_unseal_applied);
-  g_assert_true (outcome.durable_reseal_applied);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_false (outcome.durable_reseal_applied);
   g_assert_false (outcome.engine_published);
   g_assert_false (outcome.runtime_admission_open);
   g_assert_cmpint (outcome.status.admission, ==,
@@ -1763,7 +1784,7 @@ typedef struct
 } UnsealCommitFault;
 
 static int
-deny_unseal_commit (void *data, int action, const char *arg1,
+deny_leased_commit (void *data, int action, const char *arg1,
     const char *arg2, const char *database, const char *trigger)
 {
   (void) arg2;
@@ -1778,7 +1799,7 @@ deny_unseal_commit (void *data, int action, const char *arg1,
 }
 
 static int
-veto_unseal_commit (void *data)
+veto_leased_commit (void *data)
 {
   UnsealCommitFault *fault = data;
   fault->rejected++;
@@ -1793,10 +1814,55 @@ arm_unseal_commit_fault (const gchar *phase, gpointer data)
       WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION) == 0) {
     fault->installed++;
     if (fault->veto)
-      sqlite3_commit_hook (fault->db, veto_unseal_commit, fault);
+      sqlite3_commit_hook (fault->db, veto_leased_commit, fault);
     else
-      g_assert_cmpint (sqlite3_set_authorizer (fault->db, deny_unseal_commit,
+      g_assert_cmpint (sqlite3_set_authorizer (fault->db, deny_leased_commit,
           fault), ==, SQLITE_OK);
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fail_recoverable_unseal (const gchar *phase, gpointer user_data)
+{
+  guint *builds = user_data;
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION)
+      == 0) {
+    (*builds)++;
+    return WYRELOG_E_IO;
+  }
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL) == 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  guint failures;
+  guint after_commit;
+  guint evictions;
+  guint reseals;
+} PostcommitFault;
+
+static wyrelog_error_t
+fail_postcommit_unseal (const gchar *phase, gpointer data)
+{
+  PostcommitFault *fault = data;
+  if (g_strcmp0 (phase,
+      WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_AFTER_COMMIT) == 0) {
+    fault->after_commit++;
+    return WYRELOG_E_IO;
+  }
+  if (g_strcmp0 (phase,
+      WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_COMPENSATION_EVICT) == 0) {
+    fault->evictions++;
+    if (fault->failures & 1)
+      return WYRELOG_E_IO;
+  }
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL) == 0) {
+    fault->reseals++;
+    if (fault->failures & 2)
+      return WYRELOG_E_IO;
   }
   return WYRELOG_E_OK;
 }
@@ -1868,54 +1934,536 @@ test_unseal_commit_failure_stays_closed (gconstpointer data)
 }
 
 static void
-test_unseal_reseal_failure_is_reported_and_stays_closed (void)
+test_healthy_unseal_with_idle_snapshot_stays_open (void)
 {
   SealFixture fixture = { 0 };
-  authority_seal_fixture_init (&fixture,
-      "wyl-graph-unseal-reseal-failure-XXXXXX");
-
+  authority_seal_fixture_init (&fixture, "wyl-unseal-idle-snapshot-XXXXXX");
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_OK);
   wyl_policy_fact_graph_info_t info = {
-    .tenant_id = "tenant-a",
-    .graph_id = "orders",
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root,
+      &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_snapshot_unref (snapshot);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root,
+      &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  wyl_fact_graph_key_clear (&key);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static int
+deny_recovery_begin (void *data, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+  (void) second;
+  (void) database;
+  (void) trigger;
+  if (action == SQLITE_TRANSACTION && g_strcmp0 (first, "BEGIN") == 0) {
+    (*(guint *) data)++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+static void
+test_postcommit_failure_and_retry (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  gboolean recovery = (scenario & 4) != 0;
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-postcommit-retry-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  if (!recovery)
+    g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+        -1, &sealed), ==, WYRELOG_E_OK);
+  else if (scenario & 8) {
+    wyl_fact_graph_runtime_manager_unref (fixture.manager);
+    fixture.manager = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
+        WYRELOG_E_OK);
+  } else {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture.manager, &key), ==, WYRELOG_E_OK);
+    gboolean evicted = FALSE;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed
+          (fixture.manager, &key, &evicted), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  WylPolicyGraphAuthorityRecord *before = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &before), ==, WYRELOG_E_OK);
+  PostcommitFault fault = { .failures = scenario & 3 };
+  wyl_fact_graph_seal_set_test_hook (fail_postcommit_unseal, &fault);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root,
+      &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_assert_cmpuint (fault.after_commit, ==, 1);
+  g_assert_cmpuint (fault.evictions, ==, 1);
+  g_assert_cmpuint (fault.reseals, ==, recovery ? 0 : 1);
+  gboolean resealed = !recovery && !(fault.failures & 2);
+  gboolean evicted = !(fault.failures & 1);
+  g_assert_cmpint (outcome.durable_unseal_applied, ==, !recovery);
+  g_assert_cmpint (outcome.durable_reseal_applied, ==, resealed);
+  g_assert_cmpint (outcome.engine_evicted, ==, evicted);
+  g_assert_cmpint (outcome.engine_published, ==, !evicted);
+  g_assert_cmpint (outcome.compensation_failed, ==, fault.failures != 0);
+  g_assert_false (outcome.runtime_admission_open);
+  /* queryable describes engine presence, not admission permission. */
+  g_assert_cmpint (outcome.status.queryable, ==, !evicted);
+  g_assert_cmpint (outcome.status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  WylPolicyGraphAuthorityRecord *after = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (after->lifecycle_state, ==, resealed
+      ? WYL_POLICY_GRAPH_LIFECYCLE_SEALED : WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  g_assert_cmpuint (after->lifecycle_generation, ==,
+      before->lifecycle_generation + (recovery ? 0 : (resealed ? 2 : 1)));
+  g_assert_cmpuint (after->reconciliation_generation, ==,
+      before->reconciliation_generation);
+  g_assert_cmpstr (after->store_uuid, ==, before->store_uuid);
+  wyl_policy_graph_authority_record_free (before);
+  wyl_policy_graph_authority_record_free (after);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  if (scenario & 16) {
+    guint denied = 0;
+    sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+    g_assert_cmpint (sqlite3_set_authorizer (db, deny_recovery_begin, &denied),
+        ==, SQLITE_OK);
+    g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root,
+        &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+    g_assert_cmpuint (denied, ==, 1);
+    g_assert_cmpint (sqlite3_set_authorizer (db, NULL, NULL), ==, SQLITE_OK);
+    wyl_fact_graph_unseal_outcome_clear (&outcome);
+  }
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root,
+      &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.runtime_admission_open);
+  g_assert_true (outcome.status.queryable);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static void
+test_unseal_precommit_failure_preserves_authority (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-rollback-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
   };
   WylFactGraphSealOutcome sealed = { 0 };
   g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
       -1, &sealed), ==, WYRELOG_E_OK);
   wyl_fact_graph_seal_outcome_clear (&sealed);
-
-  GraphPathProbe path = { "tenant-a", "orders", NULL };
-  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
-      "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
-  g_assert_nonnull (path.storage_path);
-  g_autofree gchar *fact_path = g_build_filename (path.storage_path,
-          "facts.duckdb", NULL);
-  g_assert_cmpint (g_remove (fact_path), ==, 0);
-
-  SealPhaseFault fault = { 0 };
-  fault.fail_unseal_reseal = TRUE;
-  wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
+  WylPolicyGraphAuthorityRecord *before = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &before), ==, WYRELOG_E_OK);
+  guint builds = 0;
+  wyl_fact_graph_seal_set_test_hook (fail_recoverable_unseal, &builds);
   WylFactGraphUnsealOutcome outcome = { 0 };
-  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
-      fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+  wyrelog_error_t rc = wyl_fact_graph_unseal_for_test (fixture.policy,
+          fixture.root, &info, fixture.manager, -1, &outcome);
   wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+  g_assert_cmpuint (builds, ==, 1);
+  g_assert_false (outcome.runtime_admission_open);
+  WylPolicyGraphAuthorityRecord *after = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (after->lifecycle_state, ==, before->lifecycle_state);
+  g_assert_cmpuint (after->lifecycle_generation, ==, before->lifecycle_generation);
+  g_assert_cmpuint (after->reconciliation_generation, ==,
+      before->reconciliation_generation);
+  g_assert_cmpstr (after->store_uuid, ==, before->store_uuid);
+  g_assert_true (after->sealed_compatibility);
+  g_assert_false (outcome.durable_unseal_applied);
+  wyl_policy_graph_authority_record_free (before);
+  wyl_policy_graph_authority_record_free (after);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  /* The artifact was never damaged: removing the one-shot fault suffices. */
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.runtime_admission_open);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
 
-  g_assert_true (outcome.durable_unseal_applied);
-  g_assert_false (outcome.durable_reseal_applied);
+static void
+test_unseal_recovers_existing_active_runtime (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-active-recovery-XXXXXX");
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  /* Seed the state left by older failed compensation, without executing a
+   * new SEALED -> ACTIVE transition or relying on a request-local token. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+        (fixture.manager, &key), ==, WYRELOG_E_OK);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed
+        (fixture.manager, &key, &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  WylPolicyGraphAuthorityRecord *before = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (before->lifecycle_state, ==, WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  WylFactGraphRuntimeStatus status = status_of (fixture.manager, "tenant-a",
+          "orders");
+  g_assert_false (status.queryable);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.runtime_admission_open);
+  g_assert_true (outcome.status.queryable);
+  WylPolicyGraphAuthorityRecord *after = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after->lifecycle_generation, ==, before->lifecycle_generation);
+  g_assert_cmpuint (after->reconciliation_generation, ==,
+      before->reconciliation_generation);
+  g_assert_cmpstr (after->store_uuid, ==, before->store_uuid);
+  wyl_policy_graph_authority_record_free (before);
+  wyl_policy_graph_authority_record_free (after);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  wyl_fact_graph_key_clear (&key);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static void
+test_unseal_recovery_preserves_active_and_shutdown (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-recovery-controls-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphRuntimeStatus before = status_of (fixture.manager, "tenant-a",
+          "orders");
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.policy_result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_cmpint (outcome.status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (outcome.status.queryable);
+  g_assert_cmpuint (outcome.status.engine_generation, ==, before.engine_generation);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_manager_shutdown (fixture.manager);
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_false (outcome.runtime_admission_open);
+  /* Shutdown rejects the lookup before an outcome status can be filled. */
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static int
+deny_publication_rollback (void *data, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+  (void) second;
+  (void) database;
+  (void) trigger;
+  if (action == SQLITE_TRANSACTION && g_strcmp0 (first, "ROLLBACK") == 0) {
+    (*(guint *) data)++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+static void
+test_publication_rollback_failure_fences_connection (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-publication-rollback-XXXXXX");
+  sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+  sqlite3_stmt *prepared = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db, "SELECT 1;", -1, &prepared, NULL),
+      ==, SQLITE_OK);
+  WylPolicyGraphPublicationFence fence = WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
+  g_assert_cmpint (wyl_policy_store_graph_publication_fence_begin
+        (fixture.policy, "tenant-a", "orders", &fence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db, "CREATE TABLE rollback_probe(x INTEGER);",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  guint denied = 0;
+  g_assert_cmpint (sqlite3_set_authorizer (db, deny_publication_rollback,
+      &denied), ==, SQLITE_OK);
+  wyl_policy_store_graph_publication_fence_clear (&fence);
+  g_assert_cmpuint (denied, >, 0);
+  g_assert_cmpint (wyl_policy_store_terminal_result (fixture.policy), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_step (prepared), !=, SQLITE_ROW);
+  (void) sqlite3_finalize (prepared);
+  g_assert_cmpint (sqlite3_exec (db, "SELECT 1;", NULL, NULL, NULL), !=,
+      SQLITE_OK);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  g_autofree gchar *path = g_build_filename (root, "policy.db", NULL);
+  seal_fixture_clear (&fixture);
+  g_autoptr (wyl_policy_store_t) reopened = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &reopened), ==, WYRELOG_E_OK);
+  db = wyl_policy_store_get_db (reopened);
+  g_assert_cmpint (sqlite3_prepare_v2 (db, "SELECT COUNT(*) FROM sqlite_master "
+      "WHERE name='rollback_probe';", -1, &prepared, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (prepared), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (prepared, 0), ==, 0);
+  g_assert_cmpint (sqlite3_finalize (prepared), ==, SQLITE_OK);
+  g_clear_pointer (&reopened, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+static int
+deny_unseal_commit (void *data, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+  (void) second;
+  (void) database;
+  (void) trigger;
+  if (action == SQLITE_TRANSACTION && g_strcmp0 (first, "COMMIT") == 0) {
+    (*(guint *) data)++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+static void
+test_publication_fence_binds_graph_key (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-publication-key-XXXXXX");
+  /* The unique UUID constraint deliberately prevents identical identity
+   * across graphs. A valid different graph must still be refused as a key
+   * error, before its identity is compared against this fence. */
+  create_authority_graph_with_schema (fixture.policy, fixture.root,
+      "tenant-a", "other");
+  gchar *tenant = g_strdup ("tenant-a");
+  gchar *graph = g_strdup ("orders");
+  WylPolicyGraphPublicationFence fence = WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
+  g_assert_cmpint (wyl_policy_store_graph_publication_fence_begin
+        (fixture.policy, tenant, graph, &fence), ==, WYRELOG_E_OK);
+  g_free (tenant);
+  g_free (graph);
+  fence.mode = WYL_POLICY_GRAPH_PUBLICATION_RECOVERY;
+  WylPolicyGraphAuthorityRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_publication_fence_validate
+        (&fence, "tenant-a", "other", &record), ==, WYRELOG_E_INVALID);
+  g_assert_null (record);
+  g_assert_cmpint (wyl_policy_store_graph_publication_fence_validate
+        (&fence, "tenant-a", "orders", &record), ==, WYRELOG_E_OK);
+  wyl_policy_graph_authority_record_free (record);
+  g_assert_cmpint (wyl_policy_store_graph_publication_fence_abort (&fence), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_graph_publication_fence_clear (&fence);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+static int
+veto_unseal_commit (void *data)
+{
+  (*(guint *) data)++;
+  return 1;
+}
+
+static int
+deny_unseal_commit_and_rollback (void *data, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+  guint *counts = data;
+  int rc = deny_unseal_commit (&counts[0], action, first, second,
+          database, trigger);
+  return rc == SQLITE_DENY ? rc : deny_publication_rollback (&counts[1],
+             action, first, second, database, trigger);
+}
+
+static int
+deny_post_veto_read (void *data, int action, const char *first,
+    const char *second, const char *database, const char *trigger)
+{
+  (void) first;
+  (void) second;
+  (void) database;
+  (void) trigger;
+  guint *counts = data;
+  if (counts[0] != 0 && action == SQLITE_READ) {
+    counts[1]++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+static void
+test_unseal_commit_cleanup_failure_is_terminal (gconstpointer data)
+{
+  gboolean fail_readback = GPOINTER_TO_INT (data);
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-commit-terminal-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+  sqlite3_stmt *prepared = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db, "SELECT 1;", -1, &prepared, NULL),
+      ==, SQLITE_OK);
+  guint counts[2] = { 0 };
+  g_assert_cmpint (sqlite3_set_authorizer (db,
+      fail_readback ? deny_post_veto_read : deny_unseal_commit_and_rollback,
+      counts), ==, SQLITE_OK);
+  if (fail_readback)
+    sqlite3_commit_hook (db, veto_unseal_commit, &counts[0]);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (counts[0], ==, 1);
+  g_assert_cmpuint (counts[1], ==, 1);
   g_assert_true (outcome.compensation_failed);
   g_assert_cmpint (outcome.compensation_error, ==, WYRELOG_E_IO);
+  g_assert_false (outcome.durable_unseal_applied);
   g_assert_false (outcome.runtime_admission_open);
-  g_assert_cmpint (outcome.status.admission, ==,
-      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (outcome.engine_published);
+  g_assert_true (outcome.engine_evicted);
+  g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+  g_assert_false (outcome.status.queryable);
+  g_assert_cmpint (wyl_policy_store_terminal_result (fixture.policy), ==,
+      WYRELOG_E_IO);
+  /* Never remove the terminal authorizer to inspect a poisoned connection. */
+  g_assert_cmpint (sqlite3_step (prepared), !=, SQLITE_ROW);
+  (void) sqlite3_finalize (prepared);
+  g_assert_cmpint (sqlite3_exec (db, "SELECT 1;", NULL, NULL, NULL), !=,
+      SQLITE_OK);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
 
-  WylPolicyGraphAuthorityRecord *authority = NULL;
+static void
+test_unseal_commit_failure_remains_retryable (gconstpointer data)
+{
+  gboolean veto = GPOINTER_TO_INT (data);
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-commit-retry-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  WylPolicyGraphAuthorityRecord *before = NULL;
   g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
-      "tenant-a", "orders", &authority), ==, WYRELOG_E_OK);
-  g_assert_nonnull (authority);
-  g_assert_cmpint (authority->lifecycle_state, ==,
-      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
-  g_assert_false (authority->sealed_compatibility);
-  wyl_policy_graph_authority_record_free (authority);
-
+      "tenant-a", "orders", &before), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+  guint reached = 0;
+  if (veto)
+    sqlite3_commit_hook (db, veto_unseal_commit, &reached);
+  else
+    g_assert_cmpint (sqlite3_set_authorizer (db, deny_unseal_commit, &reached),
+        ==, SQLITE_OK);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_unseal_for_test (fixture.policy,
+          fixture.root, &info, fixture.manager, -1, &outcome);
+  sqlite3_commit_hook (db, NULL, NULL);
+  g_assert_cmpint (sqlite3_set_authorizer (db, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpuint (reached, ==, 1);
+  g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+  g_assert_true (wyl_policy_store_is_autocommit (fixture.policy));
+  g_assert_cmpint (wyl_policy_store_terminal_result (fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_false (outcome.runtime_admission_open);
+  WylPolicyGraphAuthorityRecord *after = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "orders", &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (after->lifecycle_state, ==, WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  g_assert_cmpuint (after->lifecycle_generation, ==, before->lifecycle_generation);
+  g_assert_cmpuint (after->reconciliation_generation, ==,
+      before->reconciliation_generation);
+  g_assert_cmpstr (after->store_uuid, ==, before->store_uuid);
+  g_assert_cmpuint (after->format_version, ==, before->format_version);
+  g_assert_cmpuint (after->path_encoding_version, ==,
+      before->path_encoding_version);
+  g_assert_true (after->sealed_compatibility);
+  g_assert_false (outcome.durable_reseal_applied);
+  g_assert_true (outcome.engine_evicted);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.compensation_failed);
+  g_assert_cmpint (outcome.compensation_error, ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+  g_assert_cmpint (outcome.status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (outcome.status.queryable);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  wyl_policy_graph_authority_record_free (before);
+  wyl_policy_graph_authority_record_free (after);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.runtime_admission_open);
+  g_assert_true (outcome.status.queryable);
   wyl_fact_graph_unseal_outcome_clear (&outcome);
   g_autofree gchar *root = g_strdup (fixture.root);
   seal_fixture_clear (&fixture);
@@ -1963,12 +2511,14 @@ test_unseal_rejects_graph_schema_mismatch (void)
       "DELETE FROM fact_relation_schema_columns "
       "WHERE tenant_id='tenant-a' AND graph_id='orders';", NULL, NULL, NULL),
       ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (wyl_policy_store_get_db (fixture.policy)),
+      ==, 3);
 
   WylFactGraphUnsealOutcome outcome = { 0 };
   g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy, fixture.root, &info,
       fixture.manager, -1, &outcome), !=, WYRELOG_E_OK);
-  g_assert_true (outcome.durable_unseal_applied);
-  g_assert_true (outcome.durable_reseal_applied);
+  g_assert_false (outcome.durable_unseal_applied);
+  g_assert_false (outcome.durable_reseal_applied);
   g_assert_false (outcome.engine_published);
   g_assert_false (outcome.runtime_admission_open);
   g_assert_cmpint (outcome.status.admission, ==,
@@ -2107,8 +2657,10 @@ test_unseal_replacement_after_validation_and_retry (void)
   } else {
     g_assert_cmpint (rc, !=, WYRELOG_E_OK);
     g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
-    g_assert_true (outcome.durable_unseal_applied);
-    g_assert_true (outcome.durable_reseal_applied);
+    /* The substitution is detected before the publication fence commits, so
+     * the unseal is rolled back rather than applied and compensated. */
+    g_assert_false (outcome.durable_unseal_applied);
+    g_assert_false (outcome.durable_reseal_applied);
     g_assert_false (outcome.engine_published);
     g_assert_false (outcome.runtime_admission_open);
     g_assert_false (outcome.status.queryable);
@@ -2755,13 +3307,45 @@ main (int argc, char **argv)
       GINT_TO_POINTER (2), test_unseal_rejects_provisioning_mismatch);
 #endif
 #endif
-  g_test_add_func ("/fact-graph-seal/unseal-build-failure-reseals",
-      test_unseal_build_failure_reseals_and_stays_closed);
-  g_test_add_func ("/fact-graph-seal/unseal-reseal-failure-reported",
-      test_unseal_reseal_failure_is_reported_and_stays_closed);
+  g_test_add_func ("/fact-graph-seal/unseal-build-failure-rolls-back",
+      test_unseal_build_failure_rolls_back_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-schema-mismatch",
       test_unseal_rejects_graph_schema_mismatch);
   g_test_add_func ("/fact-graph-seal/unseal-replacement-after-validation-and-retry",
       test_unseal_replacement_after_validation_and_retry);
+  g_test_add_func ("/fact-graph-seal/unseal-precommit-preserves-authority",
+      test_unseal_precommit_failure_preserves_authority);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-cleanup-retry",
+      GUINT_TO_POINTER (0), test_postcommit_failure_and_retry);
+  g_test_add_func ("/fact-graph-seal/healthy-unseal-idle-snapshot",
+      test_healthy_unseal_with_idle_snapshot_stays_open);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-reseal-failure-retry",
+      GUINT_TO_POINTER (2), test_postcommit_failure_and_retry);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-eviction-failure-retry",
+      GUINT_TO_POINTER (1), test_postcommit_failure_and_retry);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-both-failures-retry",
+      GUINT_TO_POINTER (3), test_postcommit_failure_and_retry);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-interrupted-retry",
+      GUINT_TO_POINTER (19), test_postcommit_failure_and_retry);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-recovery-never-reseals",
+      GUINT_TO_POINTER (4), test_postcommit_failure_and_retry);
+  g_test_add_data_func ("/fact-graph-seal/postcommit-missing-runtime-recovery",
+      GUINT_TO_POINTER (12), test_postcommit_failure_and_retry);
+  g_test_add_func ("/fact-graph-seal/unseal-recovers-existing-active",
+      test_unseal_recovers_existing_active_runtime);
+  g_test_add_func ("/fact-graph-seal/unseal-recovery-controls",
+      test_unseal_recovery_preserves_active_and_shutdown);
+  g_test_add_func ("/fact-graph-seal/publication-rollback-fences-connection",
+      test_publication_rollback_failure_fences_connection);
+  g_test_add_func ("/fact-graph-seal/publication-fence-binds-key",
+      test_publication_fence_binds_graph_key);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-cleanup-terminal",
+      GINT_TO_POINTER (FALSE), test_unseal_commit_cleanup_failure_is_terminal);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-readback-terminal",
+      GINT_TO_POINTER (TRUE), test_unseal_commit_cleanup_failure_is_terminal);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-denial-retry",
+      GINT_TO_POINTER (FALSE), test_unseal_commit_failure_remains_retryable);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-veto-retry",
+      GINT_TO_POINTER (TRUE), test_unseal_commit_failure_remains_retryable);
   return g_test_run ();
 }

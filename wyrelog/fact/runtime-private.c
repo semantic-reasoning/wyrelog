@@ -61,6 +61,11 @@ struct _WylFactGraphRuntimeEntry
   WylFactGraphForgetState forget_state;
   WylFactGraphAdmission admission;
   guint64 admission_generation;
+  gboolean failed_publication;
+  guint64 failed_operation_generation;
+  guint64 failed_engine_generation;
+  guint64 failed_admission_generation;
+  gpointer preparation_owner;
 };
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
@@ -577,11 +582,13 @@ wyl_fact_graph_runtime_manager_unref (WylFactGraphRuntimeManager *manager)
  * happens: an entry already in the map keeps the admission it has, so no
  * caller can re-close a graph somebody reopened by passing CLOSED here. */
 static wyrelog_error_t
-manager_lookup_entry (WylFactGraphRuntimeManager *manager,
+manager_lookup_entry_full (WylFactGraphRuntimeManager *manager,
     const WylFactGraphKey *key, const WylFactGraphAdmission *mint_as,
-    WylFactGraphRuntimeEntry **out_entry)
+    WylFactGraphRuntimeEntry **out_entry, gboolean *out_created)
 {
   *out_entry = NULL;
+  if (out_created != NULL)
+    *out_created = FALSE;
   if (manager == NULL || key == NULL
       || !canonical_component_is_valid (key->tenant_id)
       || !canonical_graph_id_is_valid (key->graph_id))
@@ -607,6 +614,8 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
     entry = candidate;
     candidate = NULL;
     g_hash_table_insert (manager->entries, &entry->key, entry);
+    if (out_created != NULL)
+      *out_created = TRUE;
   }
   if (entry != NULL)
     runtime_entry_ref (entry);
@@ -616,6 +625,14 @@ manager_lookup_entry (WylFactGraphRuntimeManager *manager,
     return WYRELOG_E_NOT_FOUND;
   *out_entry = entry;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+manager_lookup_entry (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, const WylFactGraphAdmission *mint_as,
+    WylFactGraphRuntimeEntry **out_entry)
+{
+  return manager_lookup_entry_full (manager, key, mint_as, out_entry, NULL);
 }
 
 static gint
@@ -950,29 +967,39 @@ wyl_fact_graph_runtime_manager_publish_closed_and_open
              WYL_FACT_GRAPH_ADMISSION_CLOSED, TRUE);
 }
 
-wyrelog_error_t
-wyl_fact_graph_runtime_publication_begin_closed
-  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+static wyrelog_error_t
+publication_begin_entry
+  (WylFactGraphRuntimeManager *manager, WylFactGraphRuntimeEntry *entry,
     WylFactGraphAdmission abort_admission,
     guint64 admission_generation,
+    const WylFactGraphUnsealPreparation *preparation,
     WylFactGraphRuntimePublication *out_publication)
 {
-  if (out_publication != NULL)
-    *out_publication = (WylFactGraphRuntimePublication) { 0 };
-  if (out_publication == NULL)
-    return WYRELOG_E_INVALID;
-  WylFactGraphRuntimeEntry *entry = NULL;
-  WylFactGraphAdmission closed = WYL_FACT_GRAPH_ADMISSION_CLOSED;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, &closed, &entry);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  runtime_writer_lock (entry);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (preparation != NULL) {
+    /* A competing writer invalidates this observation; do not wait on a
+     * publication that might itself be owned by the calling thread. */
+    if (!runtime_writer_trylock (entry)) {
+      runtime_entry_unref (entry);
+      return WYRELOG_E_BUSY;
+    }
+  } else
+    runtime_writer_lock (entry);
   runtime_state_lock (entry);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown))
     rc = WYRELOG_E_BUSY;
   else if (entry->admission == WYL_FACT_GRAPH_ADMISSION_OPEN)
     rc = WYRELOG_E_INVALID;
   else if (entry->admission_generation != admission_generation)
+    rc = WYRELOG_E_BUSY;
+  else if (preparation != NULL
+      && (entry->preparation_owner != preparation
+      || entry->operation_generation != preparation->operation_generation
+      || entry->engine_generation != preparation->engine_generation
+      || entry->state != preparation->previous_state
+      || entry->publication_active || entry->operation_active
+      || entry->active_engine_calls != 0
+      || entry->waiting_engine_calls != 0))
     rc = WYRELOG_E_BUSY;
   else if (entry->operation_generation == G_MAXUINT64
       || entry->engine_generation == G_MAXUINT64)
@@ -988,7 +1015,13 @@ wyl_fact_graph_runtime_publication_begin_closed
   out_publication->previous_admission = abort_admission;
   out_publication->admission_generation = admission_generation;
   out_publication->restore_state_on_abort = TRUE;
+  out_publication->restore_failed_publication = preparation != NULL
+      && preparation->recovery_eligible && entry->current != NULL;
+  entry->preparation_owner = NULL;
   entry->operation_generation++;
+  entry->failed_publication = FALSE;
+  out_publication->operation_generation = entry->operation_generation;
+  out_publication->engine_generation = entry->engine_generation;
   entry->operation_active = TRUE;
   entry->operation_owner = g_thread_self ();
   entry->state = WYL_FACT_GRAPH_RUNTIME_BUILDING;
@@ -1003,6 +1036,126 @@ wyl_fact_graph_runtime_publication_begin_closed
     publication_test_hook (manager, &entry->key, publication_test_hook_data);
 #endif
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_publication_begin_closed
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphAdmission abort_admission, guint64 admission_generation,
+    WylFactGraphRuntimePublication *out_publication)
+{
+  if (out_publication == NULL)
+    return WYRELOG_E_INVALID;
+  *out_publication = (WylFactGraphRuntimePublication) { 0 };
+  WylFactGraphRuntimeEntry *entry = NULL;
+  WylFactGraphAdmission closed = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, &closed, &entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return publication_begin_entry (manager, entry, abort_admission,
+             admission_generation, NULL, out_publication);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_unseal_prepare (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, WylFactGraphUnsealPreparation *out_preparation)
+{
+  if (out_preparation == NULL)
+    return WYRELOG_E_INVALID;
+  *out_preparation = (WylFactGraphUnsealPreparation) { 0 };
+  WylFactGraphRuntimeEntry *entry = NULL;
+  WylFactGraphAdmission closed = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  gboolean created = FALSE;
+  wyrelog_error_t rc = manager_lookup_entry_full (manager, key, &closed,
+          &entry, &created);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&entry->state_lock);
+  if (entry->abandoned || g_atomic_int_get (&manager->shutdown)
+      || entry->publication_active || entry->operation_active
+      || entry->preparation_owner != NULL)
+    rc = WYRELOG_E_BUSY;
+  else if (entry->admission != closed
+      && entry->admission_generation == G_MAXUINT64)
+    rc = WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK) {
+    out_preparation->manager = manager;
+    entry->preparation_owner = out_preparation;
+    out_preparation->entry = entry;
+    out_preparation->owner = g_thread_self ();
+    out_preparation->created_entry = created;
+    out_preparation->previous_admission = entry->admission;
+    out_preparation->previous_state = entry->state;
+    out_preparation->operation_generation = entry->operation_generation;
+    out_preparation->engine_generation = entry->engine_generation;
+    gboolean retained_recovery = entry->current != NULL
+        && entry->failed_publication
+        && entry->failed_operation_generation == entry->operation_generation
+        && entry->failed_engine_generation == entry->engine_generation
+        && entry->failed_admission_generation == entry->admission_generation
+        && (entry->state == WYL_FACT_GRAPH_RUNTIME_READY
+        || entry->state == WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+    out_preparation->recovery_eligible = entry->admission == closed
+        && (retained_recovery || (entry->current == NULL
+        && (entry->state == WYL_FACT_GRAPH_RUNTIME_EMPTY
+        || entry->state == WYL_FACT_GRAPH_RUNTIME_DEGRADED
+        || entry->state == WYL_FACT_GRAPH_RUNTIME_EVICTED)));
+    if (entry->admission != closed)
+      entry->admission_generation++;
+    entry->admission = closed;
+    out_preparation->admission_generation = entry->admission_generation;
+    g_cond_broadcast (&entry->drain_cond);
+  }
+  g_mutex_unlock (&entry->state_lock);
+  if (rc != WYRELOG_E_OK)
+    runtime_entry_unref (entry);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_unseal_claim (WylFactGraphUnsealPreparation *preparation,
+    WylFactGraphRuntimePublication *out_publication)
+{
+  if (out_publication != NULL)
+    *out_publication = (WylFactGraphRuntimePublication) { 0 };
+  if (preparation == NULL || preparation->entry == NULL
+      || preparation->owner != g_thread_self () || out_publication == NULL)
+    return WYRELOG_E_INVALID;
+  return publication_begin_entry (preparation->manager,
+             runtime_entry_ref (preparation->entry),
+             preparation->previous_admission, preparation->admission_generation,
+             preparation, out_publication);
+}
+
+void
+wyl_fact_graph_runtime_unseal_preparation_clear
+  (WylFactGraphUnsealPreparation *preparation)
+{
+  if (preparation == NULL)
+    return;
+  WylFactGraphRuntimeEntry *entry = preparation->entry;
+  if (entry != NULL) {
+    g_assert (preparation->owner == g_thread_self ());
+    g_mutex_lock (&entry->state_lock);
+    if (entry->preparation_owner == preparation) {
+      entry->preparation_owner = NULL;
+      if (preparation->previous_admission == WYL_FACT_GRAPH_ADMISSION_OPEN
+          && !entry->abandoned
+          && !g_atomic_int_get (&preparation->manager->shutdown)
+          && !entry->operation_active && !entry->publication_active
+          && entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED
+          && entry->state == preparation->previous_state
+          && entry->admission_generation == preparation->admission_generation
+          && entry->operation_generation == preparation->operation_generation
+          && entry->engine_generation == preparation->engine_generation) {
+        entry->admission = WYL_FACT_GRAPH_ADMISSION_OPEN;
+        g_cond_broadcast (&entry->drain_cond);
+      }
+    }
+    g_mutex_unlock (&entry->state_lock);
+  }
+  runtime_entry_unref (preparation->entry);
+  *preparation = (WylFactGraphUnsealPreparation) { 0 };
 }
 
 wyrelog_error_t
@@ -1068,7 +1221,7 @@ wyl_fact_graph_runtime_publication_refresh
   /* Once refresh has entered the build/result path, its state is authoritative
    * even when the build fails.  Only an abort before refresh may restore the
    * state displaced by begin_closed(). */
-  publication->restore_state_on_abort = FALSE;
+  publication->engine_generation = entry->engine_generation;
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
   runtime_state_unlock (entry);
@@ -1077,12 +1230,12 @@ wyl_fact_graph_runtime_publication_refresh
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_graph_runtime_publication_open
-  (WylFactGraphRuntimePublication *publication)
+static wyrelog_error_t
+publication_open (WylFactGraphRuntimePublication *publication,
+    gboolean retain_on_failure)
 {
   if (publication == NULL || !publication->active
-      || publication->owner != g_thread_self ())
+      || !publication->writer_held || publication->owner != g_thread_self ())
     return WYRELOG_E_INVALID;
   WylFactGraphRuntimeEntry *entry = publication->entry;
   runtime_state_lock (entry);
@@ -1097,6 +1250,8 @@ wyl_fact_graph_runtime_publication_open
     g_cond_broadcast (&entry->drain_cond);
   }
   runtime_state_unlock (entry);
+  if (rc != WYRELOG_E_OK && retain_on_failure)
+    return rc;
   if (rc == WYRELOG_E_OK) {
     runtime_writer_unlock (entry);
     runtime_entry_unref (entry);
@@ -1112,6 +1267,20 @@ wyl_fact_graph_runtime_publication_open
   return rc;
 }
 
+wyrelog_error_t
+wyl_fact_graph_runtime_publication_open
+  (WylFactGraphRuntimePublication *publication)
+{
+  return publication_open (publication, FALSE);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_publication_open_retaining
+  (WylFactGraphRuntimePublication *publication)
+{
+  return publication_open (publication, TRUE);
+}
+
 void
 wyl_fact_graph_runtime_publication_release_writer
   (WylFactGraphRuntimePublication *publication)
@@ -1122,6 +1291,30 @@ wyl_fact_graph_runtime_publication_release_writer
   WylFactGraphRuntimeEntry *entry = publication->entry;
   runtime_writer_unlock (entry);
   publication->writer_held = FALSE;
+}
+
+void
+wyl_fact_graph_runtime_publication_record_failed_cleanup
+  (WylFactGraphRuntimePublication *publication)
+{
+  if (publication == NULL || !publication->active
+      || publication->owner != g_thread_self ())
+    return;
+  WylFactGraphRuntimeEntry *entry = publication->entry;
+  g_mutex_lock (&entry->state_lock);
+  if (!entry->abandoned && !g_atomic_int_get (&publication->manager->shutdown)
+      && entry->publication_active && !entry->operation_active
+      && entry->current != NULL
+      && entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED
+      && entry->admission_generation == publication->admission_generation
+      && entry->operation_generation == publication->operation_generation
+      && entry->engine_generation == publication->engine_generation) {
+    entry->failed_publication = TRUE;
+    entry->failed_admission_generation = entry->admission_generation;
+    entry->failed_operation_generation = entry->operation_generation;
+    entry->failed_engine_generation = entry->engine_generation;
+  }
+  g_mutex_unlock (&entry->state_lock);
 }
 
 void
@@ -1141,6 +1334,19 @@ wyl_fact_graph_runtime_publication_abort
       && !g_atomic_int_get (&publication->manager->shutdown)) {
     entry->state = publication->previous_state;
     entry->admission = publication->previous_admission;
+    if (publication->restore_failed_publication
+        && entry->current != NULL
+        && (entry->state == WYL_FACT_GRAPH_RUNTIME_READY
+        || entry->state == WYL_FACT_GRAPH_RUNTIME_READY_STALE)
+        && entry->admission == WYL_FACT_GRAPH_ADMISSION_CLOSED
+        && entry->operation_generation == publication->operation_generation
+        && entry->engine_generation == publication->engine_generation
+        && entry->admission_generation == publication->admission_generation) {
+      entry->failed_publication = TRUE;
+      entry->failed_operation_generation = entry->operation_generation;
+      entry->failed_engine_generation = entry->engine_generation;
+      entry->failed_admission_generation = entry->admission_generation;
+    }
   }
   entry->publication_active = FALSE;
   runtime_state_unlock (entry);
@@ -1255,6 +1461,9 @@ set_admission (WylFactGraphRuntimeManager *manager,
     }
     if (out_admission_generation != NULL)
       *out_admission_generation = entry->admission_generation;
+    /* Even CLOSED -> CLOSED is a rival closure and revokes preparation's
+     * right to undo its earlier close. Public generation semantics stay put. */
+    entry->preparation_owner = NULL;
     entry->admission = admission;
     /* Wake any parked drain.  Reopening makes a drain's answer meaningless --
      * the graph is admitting again -- and the drain re-tests admission on

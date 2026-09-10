@@ -383,34 +383,92 @@ read_unsealed_graph_info (wyl_policy_store_t *policy, const gchar *tenant_id,
  * to remove; every other failure is retained while the durable reseal is
  * still attempted. */
 static wyrelog_error_t
-compensate_unseal (wyl_policy_store_t *policy, const gchar *tenant_id,
-    const gchar *graph_id, WylFactGraphRuntimeManager *manager,
-    const WylFactGraphKey *key, WylFactGraphUnsealOutcome *outcome)
+reseal_committed_unseal (WylPolicyGraphPublicationFence *original,
+    gboolean *resealed)
+{
+  *resealed = FALSE;
+  if (original->mode == WYL_POLICY_GRAPH_PUBLICATION_RECOVERY)
+    return WYRELOG_E_OK;
+  if (original->initial_generation > G_MAXINT64 - 2)
+    return WYRELOG_E_POLICY;
+  WylPolicyGraphPublicationFence cleanup =
+      WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_graph_publication_fence_begin
+        (original->store, original->tenant_id, original->graph_id, &cleanup);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyGraphAuthorityRecord *record = NULL;
+  /* Compare inside the NEW transaction, never overwrite a rival generation.
+   * The original fence still describes exactly our committed unseal. */
+  rc = wyl_policy_store_graph_publication_fence_validate (original,
+          original->tenant_id, original->graph_id, &record);
+  wyl_policy_graph_authority_record_free (record);
+  if (rc == WYRELOG_E_OK)
+    rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_seal_fact_graph (original->store,
+            original->tenant_id, original->graph_id);
+  record = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_graph_authority (original->store,
+            original->tenant_id, original->graph_id, &record);
+  if (rc == WYRELOG_E_OK && (record == NULL
+      || record->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+      || !record->sealed_compatibility || !record->has_store_identity
+      || record->lifecycle_generation != original->initial_generation + 2
+      || record->reconciliation_generation
+      != original->initial_reconciliation_generation
+      || g_strcmp0 (record->store_uuid, original->initial_store_uuid) != 0
+      || record->format_version != original->initial_format_version
+      || record->path_encoding_version != original->initial_path_encoding_version))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_graph_authority_record_free (record);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_publication_fence_commit (&cleanup);
+  if (rc == WYRELOG_E_OK)
+    *resealed = TRUE;
+  else {
+    wyrelog_error_t abort_rc =
+        wyl_policy_store_graph_publication_fence_abort (&cleanup);
+    if (abort_rc != WYRELOG_E_OK)
+      rc = abort_rc;
+  }
+  wyl_policy_store_graph_publication_fence_clear (&cleanup);
+  return rc;
+}
+
+static wyrelog_error_t
+compensate_unseal (WylPolicyGraphPublicationFence *original,
+    WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphUnsealOutcome *outcome)
 {
   gboolean evicted = FALSE;
-  wyrelog_error_t evict_rc =
-      wyl_fact_graph_runtime_manager_evict_closed (manager, key, &evicted);
-  wyrelog_error_t reseal_rc = seal_step_fault
-        (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL);
-  if (reseal_rc == WYRELOG_E_OK)
-    reseal_rc = wyl_policy_store_seal_fact_graph (policy, tenant_id, graph_id);
+  wyrelog_error_t evict_rc = seal_step_fault
+        (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_COMPENSATION_EVICT);
+  if (evict_rc == WYRELOG_E_OK)
+    evict_rc = wyl_fact_graph_runtime_manager_evict_closed (manager, key,
+            &evicted);
+  gboolean resealed = FALSE;
+  wyrelog_error_t reseal_rc = reseal_committed_unseal (original, &resealed);
 
   wyrelog_error_t compensation_rc = WYRELOG_E_OK;
   if (evict_rc != WYRELOG_E_OK && evict_rc != WYRELOG_E_NOT_FOUND)
     compensation_rc = evict_rc;
   if (reseal_rc != WYRELOG_E_OK && compensation_rc == WYRELOG_E_OK)
     compensation_rc = reseal_rc;
+  wyrelog_error_t terminal_rc =
+      wyl_policy_store_terminal_result (original->store);
+  if (terminal_rc != WYRELOG_E_OK)
+    compensation_rc = terminal_rc;
 
   if (outcome != NULL) {
     outcome->engine_evicted = evict_rc == WYRELOG_E_OK && evicted;
-    outcome->durable_reseal_applied = reseal_rc == WYRELOG_E_OK;
+    outcome->durable_reseal_applied = resealed;
     outcome->compensation_failed = compensation_rc != WYRELOG_E_OK;
     outcome->compensation_error = compensation_rc;
-    WylFactGraphRuntimeStatus after = { 0 };
-    wyrelog_error_t status_rc =
-        wyl_fact_graph_runtime_manager_get_status (manager, key, &after);
-    outcome->engine_published = status_rc == WYRELOG_E_OK && after.queryable;
-    wyl_fact_graph_runtime_status_clear (&after);
+    if (evict_rc == WYRELOG_E_OK || evict_rc == WYRELOG_E_NOT_FOUND)
+      outcome->engine_published = FALSE;
+    outcome->runtime_admission_open = FALSE;
   }
   return compensation_rc;
 }
@@ -595,6 +653,10 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
 
   WylFactArtifactNamespace *artifact_namespace = NULL;
   WylFactArtifactMutationLease *artifact_lease = NULL;
+  /* Declared before the first jump to finish.  That label clears the
+   * preparation, and a goto that skipped this initializer would leave it
+   * holding an indeterminate entry pointer for the clear to follow. */
+  WylFactGraphUnsealPreparation preparation = { 0 };
   rc = acquire_graph_artifact_lease (policy, fact_root, graph_info,
           &artifact_namespace, &artifact_lease);
   if (rc != WYRELOG_E_OK)
@@ -604,14 +666,10 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * runtime entry therefore cannot admit work while the engine is rebuilt;
    * a graph not yet held by the manager is safely minted CLOSED by the
    * refresh_closed primitive below. */
-  WylFactGraphAdmission previous_admission = WYL_FACT_GRAPH_ADMISSION_CLOSED;
-  guint64 admission_generation = 0;
-  rc = wyl_fact_graph_runtime_manager_close_admission_with_previous (manager,
-          &key, &previous_admission, &admission_generation);
-  gboolean barrier = rc == WYRELOG_E_OK;
-  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND)
+  rc = wyl_fact_graph_runtime_unseal_prepare (manager, &key, &preparation);
+  if (rc != WYRELOG_E_OK)
     goto finish;
-  if (barrier) {
+  {
     WylFactGraphRuntimeStatus drained = { 0 };
     rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
             drain_timeout_us, &drained);
@@ -624,10 +682,7 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * entry CLOSED across the build and the durable commit, so no reader can
    * observe an engine whose authority transaction is not committed yet. */
   WylFactGraphRuntimePublication publication = { 0 };
-  rc = wyl_fact_graph_runtime_publication_begin_closed (manager, &key,
-          previous_admission,
-          admission_generation,
-          &publication);
+  rc = wyl_fact_graph_runtime_unseal_claim (&preparation, &publication);
   if (rc != WYRELOG_E_OK)
     goto finish;
 
@@ -640,20 +695,23 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
 
   WylPolicyAuthorityMutationResult result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
-  rc = wyl_policy_store_unseal_fact_graph_with_result (policy,
-          graph_info->tenant_id, graph_info->graph_id, &result);
+  gboolean recovery = preparation.recovery_eligible
+      && fence.initial_lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE;
+  if (recovery) {
+    fence.mode = WYL_POLICY_GRAPH_PUBLICATION_RECOVERY;
+    result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+  } else
+    rc = wyl_policy_store_unseal_fact_graph_with_result (policy,
+            graph_info->tenant_id, graph_info->graph_id, &result);
   if (out_outcome != NULL)
     out_outcome->policy_result = result;
   if (rc != WYRELOG_E_OK)
     goto fence_abort;
-  if (result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+  if (!recovery && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
     rc = result == WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION
         ? WYRELOG_E_POLICY : WYRELOG_E_BUSY;
     goto fence_abort;
   }
-  if (out_outcome != NULL)
-    out_outcome->durable_unseal_applied = TRUE;
-
   /* The input metadata was read while sealed.  Re-read it after the CAS so
    * replay sees the current unsealed authority and storage/schema contract. */
   wyl_policy_fact_graph_info_t current = { 0 };
@@ -726,31 +784,29 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
   if (rc != WYRELOG_E_OK)
     goto compensate;
   rc = wyl_policy_store_graph_publication_fence_commit (&fence);
-  if (rc != WYRELOG_E_OK) {
-    /* A failed COMMIT may leave the transaction outcome uncertain.  Make the
-     * runtime safe before releasing the fence: a closed, evicted entry is
-     * recoverable whether the durable transaction rolled back or committed. */
-    wyl_fact_graph_runtime_publication_release_writer (&publication);
-    gboolean evicted = FALSE;
-    (void) wyl_fact_graph_runtime_manager_evict_closed (manager, &key,
-        &evicted);
-    wyl_fact_graph_runtime_publication_fail_closed (&publication);
-    wyl_fact_graph_runtime_publication_abort (&publication);
-    wyl_policy_store_graph_publication_fence_clear (&fence);
-    if (out_outcome != NULL)
-      out_outcome->runtime_admission_open = FALSE;
-    goto finish;
-  }
+  /* A failed COMMIT is not a confirmed one, so compensation is still the
+   * right answer here and the compensate label's rule is not broken.  It
+   * evicts and reseals, and reports through compensation_failed when the
+   * cleanup itself cannot complete -- which a caller needs in order to retry.
+   * The paths below this point follow a COMMIT that did succeed, and they go
+   * to postcommit_compensate instead. */
+  if (rc != WYRELOG_E_OK)
+    goto compensate;
   if (root_lease != NULL) {
     rc = wyl_fact_root_writer_lease_verify (root_lease);
     if (rc != WYRELOG_E_OK)
-      goto compensate;
+      goto postcommit_compensate;
   }
   if (artifact_lease != NULL) {
     rc = wyl_fact_artifact_mutation_lease_revalidate (artifact_lease);
     if (rc != WYRELOG_E_OK)
-      goto compensate;
+      goto postcommit_compensate;
   }
+  if (out_outcome != NULL)
+    out_outcome->durable_unseal_applied = !recovery;
+  rc = seal_step_fault (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_AFTER_COMMIT);
+  if (rc != WYRELOG_E_OK)
+    goto postcommit_compensate;
   /* Keep the graph mutex until this post-commit read.  It closes the small
    * interval in which the transaction is durable but an independent policy
    * mutation could otherwise invalidate the runtime publication. */
@@ -762,29 +818,17 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
       && authority->has_store_identity;
   wyl_policy_graph_authority_record_free (authority);
   if (rc != WYRELOG_E_OK || !authority_active) {
-    gboolean evicted = FALSE;
-    wyl_fact_graph_runtime_publication_release_writer (&publication);
-    (void) wyl_fact_graph_runtime_manager_evict_closed (manager, &key,
-        &evicted);
-    wyl_fact_graph_runtime_publication_fail_closed (&publication);
-    wyl_fact_graph_runtime_publication_abort (&publication);
-    wyl_policy_store_graph_publication_fence_clear (&fence);
-    goto finish;
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    goto postcommit_compensate;
   }
 #if defined(WYL_TEST_HANDLE_SEAMS)
   /* Observation only: do not inject a new failure after the durable commit. */
   (void) seal_step_fault
     (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_ADMISSION_OPEN);
 #endif
-  rc = wyl_fact_graph_runtime_publication_open (&publication);
-  if (rc != WYRELOG_E_OK) {
-    gboolean evicted = FALSE;
-    (void) wyl_fact_graph_runtime_manager_close_admission (manager, &key);
-    (void) wyl_fact_graph_runtime_manager_evict_closed (manager, &key,
-        &evicted);
-    wyl_policy_store_graph_publication_fence_clear (&fence);
-    goto finish;
-  }
+  rc = wyl_fact_graph_runtime_publication_open_retaining (&publication);
+  if (rc != WYRELOG_E_OK)
+    goto postcommit_compensate;
   if (out_outcome != NULL) {
     out_outcome->runtime_admission_open = TRUE;
     out_outcome->engine_published = TRUE;
@@ -792,39 +836,64 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
   wyl_policy_store_graph_publication_fence_clear (&fence);
   goto finish;
 
-compensate:
-  /* The durable transition is already committed but no usable engine is
-   * available.  Evict any stale publication, then re-seal while admission is
-   * still closed.  A compensation failure is retained in the outcome and is
-   * returned so callers cannot mistake an unreconciled transition for an
-   * ordinary replay failure. */
-  /* The build token is no longer needed for compensation.  Release its
-   * entry writer before eviction, which acquires the same writer lock, while
-   * retaining publication_active so external opens still fail closed. */
+postcommit_compensate:
   wyl_fact_graph_runtime_publication_release_writer (&publication);
-  wyrelog_error_t compensation_rc = compensate_unseal (policy,
-          graph_info->tenant_id, graph_info->graph_id, manager, &key,
-          out_outcome);
-  if (compensation_rc != WYRELOG_E_OK)
-    rc = compensation_rc;
-  /* The transaction contains either the compensating reseal or the durable
-   * unseal whose compensation failed.  Commit both cases deliberately so the
-   * caller can observe the established outcome and a later recovery can act
-   * on it; blindly clearing the fence would roll the original CAS back. */
-  wyrelog_error_t commit_rc =
-      wyl_policy_store_graph_publication_fence_commit (&fence);
-  if (commit_rc != WYRELOG_E_OK && rc == WYRELOG_E_OK)
-    rc = commit_rc;
+  {
+    wyrelog_error_t compensation_rc = compensate_unseal (&fence, manager,
+            &key, out_outcome);
+    if (compensation_rc != WYRELOG_E_OK)
+      rc = compensation_rc;
+  }
+  wyl_fact_graph_runtime_publication_record_failed_cleanup (&publication);
+  wyl_policy_store_graph_publication_fence_clear (&fence);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  goto finish;
+
+compensate:
+  /* No jump here follows a confirmed COMMIT. Abort any still-owned SQL
+   * transaction; fence_commit has checked an already-ended transaction and
+   * terminalized uncertain outcomes. Abort reports that terminal error too.
+   * Operational failures stay CLOSED, not permanently ABANDONED. */
+  wyl_fact_graph_runtime_publication_release_writer (&publication);
+  gboolean rollback_evicted = FALSE;
+  wyrelog_error_t evict_rc = wyl_fact_graph_runtime_manager_evict_closed
+        (manager, &key, &rollback_evicted);
+  if (evict_rc == WYRELOG_E_NOT_FOUND)
+    evict_rc = WYRELOG_E_OK;
+  wyrelog_error_t rollback_rc =
+      wyl_policy_store_graph_publication_fence_abort (&fence);
+  wyrelog_error_t cleanup_rc = rollback_rc != WYRELOG_E_OK
+      ? rollback_rc : evict_rc;
+  if (cleanup_rc != WYRELOG_E_OK)
+    rc = cleanup_rc;
+  if (out_outcome != NULL) {
+    out_outcome->durable_unseal_applied = FALSE;
+    out_outcome->durable_reseal_applied = FALSE;
+    out_outcome->engine_evicted = rollback_evicted;
+    if (evict_rc == WYRELOG_E_OK)
+      out_outcome->engine_published = FALSE;
+    out_outcome->runtime_admission_open = FALSE;
+    out_outcome->compensation_failed = cleanup_rc != WYRELOG_E_OK;
+    out_outcome->compensation_error = cleanup_rc;
+  }
   wyl_policy_store_graph_publication_fence_clear (&fence);
   wyl_fact_graph_runtime_publication_abort (&publication);
   goto finish;
 
 fence_abort:
+  {
+    wyrelog_error_t abort_rc =
+        wyl_policy_store_graph_publication_fence_abort (&fence);
+    if (abort_rc != WYRELOG_E_OK)
+      rc = abort_rc;
+  }
   wyl_policy_store_graph_publication_fence_clear (&fence);
 publication_abort:
   wyl_fact_graph_runtime_publication_abort (&publication);
 finish:
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
   if (out_outcome != NULL) {
+    wyl_fact_graph_runtime_status_clear (&out_outcome->status);
     (void) wyl_fact_graph_runtime_manager_get_status (manager, &key,
         &out_outcome->status);
   }
