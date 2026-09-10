@@ -2797,10 +2797,280 @@ test_publication_begin_rejects_stale_admission_checkpoint (void)
   wyl_fact_graph_key_clear (&a);
 }
 
+static void
+test_unseal_claim_rejects_intervening_publication (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &before), ==, WYRELOG_E_OK);
+  g_assert_true (before.recovery_eligible);
+  WylFactGraphRuntimePublication rival = { 0 }, publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+      &key, WYL_FACT_GRAPH_ADMISSION_CLOSED, before.admission_generation,
+      &rival), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&rival);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.admission_generation, ==, after.admission_generation);
+  g_assert_cmpuint (before.operation_generation, <, after.operation_generation);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&before, &publication),
+      ==, WYRELOG_E_BUSY);
+  g_assert_false (publication.active);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&after, &publication),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&before);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&after);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_failed_publication_provenance_expires (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec spec = { .marker = 973 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation preparation = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  g_assert_false (preparation.recovery_eligible);
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+      &publication), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_refresh (&publication,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_release_writer (&publication);
+  wyl_fact_graph_runtime_publication_record_failed_cleanup (&publication);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  g_assert_true (preparation.recovery_eligible);
+  /* A real intervening publication invalidates the evidence even if it
+   * aborts without changing engine or admission generations. */
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
+      &key, WYL_FACT_GRAPH_ADMISSION_CLOSED, preparation.admission_generation,
+      &publication), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+      &publication), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  g_assert_false (preparation.recovery_eligible);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_unseal_preparation_overlap (gconstpointer data)
+{
+  guint scenario = GPOINTER_TO_UINT (data);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec spec = { .marker = 973 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  if (scenario == 1)
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+        &key), ==, WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation first = { 0 }, second = { 0 };
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &first), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &second), ==, WYRELOG_E_BUSY);
+  g_assert_null (second.entry);
+  g_assert_null (second.manager);
+  g_assert_null (second.owner);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.operation_generation, ==, first.operation_generation);
+  g_assert_cmpuint (status.engine_generation, ==, first.engine_generation);
+  g_assert_cmpint (status.state, ==, first.previous_state);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&second);
+  if (scenario == 2) {
+    /* Even a repeated CLOSED request invalidates the previous owner. */
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+        &key), ==, WYRELOG_E_OK);
+  } else {
+    g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&first,
+        &publication), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+        &second), ==, WYRELOG_E_BUSY);
+    g_assert_null (second.entry);
+    if (scenario == 4) {
+      g_assert_cmpint (wyl_fact_graph_runtime_publication_refresh (&publication,
+          build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_graph_runtime_publication_open (&publication),
+          ==, WYRELOG_E_OK);
+    } else
+      wyl_fact_graph_runtime_publication_abort (&publication);
+  }
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &second), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&first);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&second, &publication),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&second);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, (scenario == 1 || scenario == 2)
+      ? WYL_FACT_GRAPH_ADMISSION_CLOSED : WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_unclaimed_close_ownership (gconstpointer data)
+{
+  guint rival = GPOINTER_TO_UINT (data);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec spec = { .marker = 973 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation preparation = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  if (rival == 1) {
+    /* CLOSED -> CLOSED does not change the public admission generation. */
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (manager, &key), ==, WYRELOG_E_OK);
+    WylFactGraphRuntimePublication publication = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+        &publication), ==, WYRELOG_E_BUSY);
+  } else if (rival == 2)
+    wyl_fact_graph_runtime_manager_shutdown (manager);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  if (rival != 2) {
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+        &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.admission, ==, rival
+        ? WYL_FACT_GRAPH_ADMISSION_CLOSED : WYL_FACT_GRAPH_ADMISSION_OPEN);
+    wyl_fact_graph_runtime_status_clear (&status);
+  } else {
+    WylFactGraphSnapshot *snapshot = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+        &key, &snapshot), ==, WYRELOG_E_BUSY);
+    g_assert_null (snapshot);
+  }
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_publication_open_failure_retains_cleanup (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation preparation = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+      &publication), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  /* BUILDING is not READY: exercise the actual opening refusal. */
+  g_assert_cmpint (wyl_fact_graph_runtime_publication_open_retaining
+        (&publication), ==, WYRELOG_E_INVALID);
+  g_assert_true (publication.active);
+  g_assert_true (publication.writer_held);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_runtime_publication_release_writer (&publication);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &key, &evicted), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  g_assert_false (publication.active);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_unseal_prepare_preserves_healthy_and_shutdown (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  BuildSpec spec = { .marker = 973 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  WylFactGraphUnsealPreparation preparation = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  g_assert_false (preparation.recovery_eligible);
+  WylFactGraphRuntimePublication publication = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+      &publication), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_publication_abort (&publication);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_prepare (manager, &key,
+      &preparation), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_assert_cmpint (wyl_fact_graph_runtime_unseal_claim (&preparation,
+      &publication), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+  wyl_fact_graph_key_clear (&key);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-runtime/failed-publication-provenance-expires",
+      test_failed_publication_provenance_expires);
+  g_test_add_func ("/fact-runtime/open-failure-retains-cleanup",
+      test_publication_open_failure_retains_cleanup);
+  g_test_add_data_func ("/fact-runtime/unclaimed-close-restores",
+      GUINT_TO_POINTER (0), test_unclaimed_close_ownership);
+  g_test_add_data_func ("/fact-runtime/preparation-overlap-open",
+      GUINT_TO_POINTER (0), test_unseal_preparation_overlap);
+  g_test_add_data_func ("/fact-runtime/preparation-overlap-closed",
+      GUINT_TO_POINTER (1), test_unseal_preparation_overlap);
+  g_test_add_data_func ("/fact-runtime/preparation-overlap-admission",
+      GUINT_TO_POINTER (2), test_unseal_preparation_overlap);
+  g_test_add_data_func ("/fact-runtime/preparation-overlap-abort",
+      GUINT_TO_POINTER (3), test_unseal_preparation_overlap);
+  g_test_add_data_func ("/fact-runtime/preparation-overlap-publish",
+      GUINT_TO_POINTER (4), test_unseal_preparation_overlap);
+  g_test_add_data_func ("/fact-runtime/unclaimed-rival-close-stays",
+      GUINT_TO_POINTER (1), test_unclaimed_close_ownership);
+  g_test_add_data_func ("/fact-runtime/unclaimed-shutdown-stays",
+      GUINT_TO_POINTER (2), test_unclaimed_close_ownership);
+  g_test_add_func ("/fact-runtime/unseal-claim-intervening-publication",
+      test_unseal_claim_rejects_intervening_publication);
+  g_test_add_func ("/fact-runtime/unseal-prepare-controls",
+      test_unseal_prepare_preserves_healthy_and_shutdown);
   g_test_add_func ("/fact-runtime/refresh-snapshot-status-evict",
       test_refresh_snapshot_status_and_evict);
   g_test_add_func ("/fact-runtime/slow-build-graph-local",

@@ -8105,6 +8105,19 @@ wyl_policy_store_publication_transaction_rollback_checked
   return release_rc == WYRELOG_E_OK ? WYRELOG_E_OK : release_rc;
 }
 
+/* Called only after this fence owns the transaction and authority mutex. */
+static wyrelog_error_t
+publication_transaction_abort_owned (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc =
+      wyl_policy_store_publication_transaction_rollback_checked (store);
+  if (rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit (store))
+    rc = WYRELOG_E_INTERNAL;
+  if (rc != WYRELOG_E_OK)
+    policy_store_make_terminal (store, rc);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_graph_publication_fence_begin
   (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
@@ -8126,27 +8139,37 @@ wyl_policy_store_graph_publication_fence_begin
   rc = wyl_policy_store_read_graph_authority (store, tenant_id, graph_id,
           &record);
   if (rc != WYRELOG_E_OK) {
-    (void) wyl_policy_store_publication_transaction_rollback_checked (store);
+    wyrelog_error_t cleanup_rc = publication_transaction_abort_owned (store);
     g_rec_mutex_unlock (&store->graph_authority_mutex);
-    return rc;
+    return cleanup_rc == WYRELOG_E_OK ? rc : cleanup_rc;
   }
   out_fence->store = store;
   out_fence->owner = g_thread_self ();
   out_fence->active = TRUE;
   out_fence->graph_locked = TRUE;
   out_fence->initial_generation = record->lifecycle_generation;
+  out_fence->initial_lifecycle_state = record->lifecycle_state;
+  out_fence->tenant_id = g_strdup (tenant_id);
+  out_fence->graph_id = g_strdup (graph_id);
+  out_fence->initial_sealed = record->sealed_compatibility;
+  out_fence->initial_has_store_identity = record->has_store_identity;
+  out_fence->initial_error_class = record->last_error_class;
   out_fence->initial_reconciliation_generation =
       record->reconciliation_generation;
   out_fence->initial_store_uuid = g_strdup (record->store_uuid);
   out_fence->initial_format_version = record->format_version;
   out_fence->initial_path_encoding_version = record->path_encoding_version;
-  if (record->store_uuid != NULL && out_fence->initial_store_uuid == NULL) {
+  if (out_fence->tenant_id == NULL || out_fence->graph_id == NULL
+      || (record->store_uuid != NULL && out_fence->initial_store_uuid == NULL)) {
     wyl_policy_graph_authority_record_free (record);
-    (void) wyl_policy_store_publication_transaction_rollback_checked (store);
+    wyrelog_error_t cleanup_rc = publication_transaction_abort_owned (store);
     g_rec_mutex_unlock (&store->graph_authority_mutex);
+    g_free (out_fence->tenant_id);
+    g_free (out_fence->graph_id);
+    g_free (out_fence->initial_store_uuid);
     *out_fence = (WylPolicyGraphPublicationFence)
         WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
-    return WYRELOG_E_NOMEM;
+    return cleanup_rc == WYRELOG_E_OK ? WYRELOG_E_NOMEM : cleanup_rc;
   }
   wyl_policy_graph_authority_record_free (record);
   wyl_fact_publication_lock_event_emit
@@ -8164,20 +8187,31 @@ wyl_policy_store_graph_publication_fence_validate
     *out_record = NULL;
   if (fence == NULL || !fence->graph_locked
       || fence->owner != g_thread_self () || tenant_id == NULL
-      || graph_id == NULL || out_record == NULL)
+      || graph_id == NULL || out_record == NULL
+      || g_strcmp0 (tenant_id, fence->tenant_id) != 0
+      || g_strcmp0 (graph_id, fence->graph_id) != 0)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = wyl_policy_store_read_graph_authority (fence->store,
           tenant_id, graph_id, out_record);
   if (rc != WYRELOG_E_OK)
     return rc;
   WylPolicyGraphAuthorityRecord *record = *out_record;
+  gboolean recovery = fence->mode == WYL_POLICY_GRAPH_PUBLICATION_RECOVERY;
+  gboolean valid_mode = recovery
+      ? fence->initial_lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      : fence->mode == WYL_POLICY_GRAPH_PUBLICATION_FRESH
+      && fence->initial_lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+      && fence->initial_generation < G_MAXINT64;
+  guint64 expected_generation = fence->initial_generation;
+  if (valid_mode && !recovery)
+    expected_generation++;
   gboolean same_identity = record->has_store_identity
       && g_strcmp0 (record->store_uuid, fence->initial_store_uuid) == 0
       && record->format_version == fence->initial_format_version
       && record->path_encoding_version == fence->initial_path_encoding_version;
-  if (record->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+  if (!valid_mode || record->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
       || record->sealed_compatibility
-      || record->lifecycle_generation != fence->initial_generation + 1
+      || record->lifecycle_generation != expected_generation
       || record->reconciliation_generation
       != fence->initial_reconciliation_generation || !same_identity) {
     wyl_policy_graph_authority_record_free (*out_record);
@@ -8198,6 +8232,45 @@ wyl_policy_store_graph_publication_fence_commit
       wyl_policy_store_publication_transaction_commit (fence->store);
   if (rc == WYRELOG_E_OK)
     fence->active = FALSE;
+  else if (wyl_policy_store_is_autocommit (fence->store)) {
+    /* Automatic rollback (for example a commit-hook veto) ended the SQL
+     * transaction. Only an authoritative read outside it can establish that
+     * the initial state survived. An ambiguous outcome requires reopening. */
+    WylPolicyGraphAuthorityRecord *record = NULL;
+    wyrelog_error_t read_rc = wyl_policy_store_read_graph_authority
+          (fence->store, fence->tenant_id, fence->graph_id, &record);
+    gboolean initial_state_preserved = read_rc == WYRELOG_E_OK && record != NULL
+        && record->lifecycle_state == fence->initial_lifecycle_state
+        && record->sealed_compatibility == fence->initial_sealed
+        && record->has_store_identity == fence->initial_has_store_identity
+        && record->last_error_class == fence->initial_error_class
+        && record->lifecycle_generation == fence->initial_generation
+        && record->reconciliation_generation
+        == fence->initial_reconciliation_generation
+        && g_strcmp0 (record->store_uuid, fence->initial_store_uuid) == 0
+        && record->format_version == fence->initial_format_version
+        && record->path_encoding_version == fence->initial_path_encoding_version;
+    wyl_policy_graph_authority_record_free (record);
+    if (!initial_state_preserved)
+      policy_store_make_terminal (fence->store, rc);
+    fence->active = FALSE;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_publication_fence_abort
+  (WylPolicyGraphPublicationFence *fence)
+{
+  if (fence == NULL || fence->store == NULL || !fence->graph_locked
+      || fence->owner != g_thread_self ())
+    return WYRELOG_E_INVALID;
+  if (!fence->active)
+    return policy_store_terminal_gate (fence->store);
+  wyrelog_error_t rc = publication_transaction_abort_owned (fence->store);
+  /* Failed cleanup made the connection terminal before releasing ownership.
+   * The destructor must not retry SQL on that terminal connection. */
+  fence->active = FALSE;
   return rc;
 }
 
@@ -8209,8 +8282,7 @@ wyl_policy_store_graph_publication_fence_clear
     return;
   g_assert (fence->owner == g_thread_self ());
   if (fence->active)
-    (void) wyl_policy_store_publication_transaction_rollback_checked
-      (fence->store);
+    (void) wyl_policy_store_graph_publication_fence_abort (fence);
   wyl_fact_publication_lock_event_emit
     (WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE,
       WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, fence->store);
@@ -8219,6 +8291,8 @@ wyl_policy_store_graph_publication_fence_clear
     (WYL_FACT_PUBLICATION_LOCK_POLICY_FENCE,
       WYL_FACT_PUBLICATION_LOCK_RELEASED, fence->store);
   g_free (fence->initial_store_uuid);
+  g_free (fence->tenant_id);
+  g_free (fence->graph_id);
   *fence = (WylPolicyGraphPublicationFence)
       WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
 }

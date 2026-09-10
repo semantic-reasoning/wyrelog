@@ -43,11 +43,17 @@ assert handle_unseal.index(
 
 # The sequencer must retain the artifact lease through runtime publication,
 # and must take the policy fence after the runtime writer has closed admission.
+#
+# The unseal path reaches the runtime writer through unseal_claim rather than
+# publication_begin_closed: claim is the call that enters publication_begin_entry
+# and takes writer_lock, while the prepare that precedes it only observes state
+# and takes no lock.  The order being asserted is unchanged; only the name of
+# the step that establishes the publication moved.
 assert unseal.index("acquire_graph_artifact_lease") < unseal.index(
-    "wyl_fact_graph_runtime_publication_begin_closed"
+    "wyl_fact_graph_runtime_unseal_claim"
 )
 assert unseal.index(
-    "wyl_fact_graph_runtime_publication_begin_closed"
+    "wyl_fact_graph_runtime_unseal_claim"
 ) < unseal.index("wyl_policy_store_graph_publication_fence_begin")
 assert unseal.index(
     "wyl_fact_replay_refresh_graph_publication"

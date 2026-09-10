@@ -649,7 +649,39 @@ typedef struct
   WylFactGraphAdmission previous_admission;
   guint64 admission_generation;
   gboolean restore_state_on_abort;
+  gboolean restore_failed_publication;
+  guint64 operation_generation;
+  guint64 engine_generation;
 } WylFactGraphRuntimePublication;
+
+/* Same-thread observation taken before this request closes admission.
+ * Claiming rechecks every generation under the writer lock. The caller
+ * retains manager lifetime and must clear the preparation on every exit.
+ * Its address is the closure token: do not copy or move a live preparation.
+ * Clear it before reuse, including after a successful claim. An outstanding
+ * owner makes another preparation BUSY until cleared or invalidated. */
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  gpointer entry;
+  GThread *owner;
+  WylFactGraphAdmission previous_admission;
+  WylFactGraphRuntimeState previous_state;
+  guint64 admission_generation;
+  guint64 operation_generation;
+  guint64 engine_generation;
+  gboolean recovery_eligible;
+  gboolean created_entry;
+} WylFactGraphUnsealPreparation;
+
+wyrelog_error_t wyl_fact_graph_runtime_unseal_prepare
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphUnsealPreparation *out_preparation);
+wyrelog_error_t wyl_fact_graph_runtime_unseal_claim
+  (WylFactGraphUnsealPreparation *preparation,
+    WylFactGraphRuntimePublication *out_publication);
+void wyl_fact_graph_runtime_unseal_preparation_clear
+  (WylFactGraphUnsealPreparation *preparation);
 
 wyrelog_error_t wyl_fact_graph_runtime_publication_begin_closed
   (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
@@ -661,7 +693,13 @@ wyrelog_error_t wyl_fact_graph_runtime_publication_refresh
     gpointer user_data, WylFactGraphRuntimeStatus *out_status);
 wyrelog_error_t wyl_fact_graph_runtime_publication_open
   (WylFactGraphRuntimePublication *publication);
+/* Failure leaves the token/barrier/writer intact for checked cleanup. */
+wyrelog_error_t wyl_fact_graph_runtime_publication_open_retaining
+  (WylFactGraphRuntimePublication *publication);
 void wyl_fact_graph_runtime_publication_release_writer
+  (WylFactGraphRuntimePublication *publication);
+/* Retained engine recovery is authorized only by the failed owning token. */
+void wyl_fact_graph_runtime_publication_record_failed_cleanup
   (WylFactGraphRuntimePublication *publication);
 void wyl_fact_graph_runtime_publication_fail_closed
   (WylFactGraphRuntimePublication *publication);
