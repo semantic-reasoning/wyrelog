@@ -216,6 +216,197 @@ static const MetadataCase metadata_cases[] = {
 };
 
 static void
+query_ok (duckdb_connection conn, const gchar *sql)
+{
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+}
+
+static gchar *
+metadata_snapshot (duckdb_connection conn)
+{
+  GString *snapshot = g_string_new (NULL);
+  const gchar *queries[] = {
+    "SELECT table_name,sql FROM duckdb_tables() WHERE schema_name='main' "
+    "ORDER BY table_name;",
+    "SELECT table_name,column_name,data_type,is_nullable,column_default "
+    "FROM information_schema.columns WHERE table_schema='main' "
+    "ORDER BY table_name,ordinal_position;",
+    "SELECT table_name,constraint_type,constraint_text "
+    "FROM duckdb_constraints() WHERE schema_name='main' "
+    "ORDER BY table_name,constraint_type,constraint_text;",
+    "SELECT key,value FROM saved_metadata ORDER BY key;",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (queries); i++) {
+    duckdb_result result;
+    g_assert_cmpint (duckdb_query (conn, queries[i], &result), ==,
+        DuckDBSuccess);
+    for (idx_t row = 0; row < duckdb_row_count (&result); row++)
+      for (idx_t column = 0; column < duckdb_column_count (&result); column++) {
+        gchar *value = duckdb_value_varchar (&result, column, row);
+        g_string_append_printf (snapshot, "%zu:%s;",
+            value == NULL ? 0 : strlen (value), value == NULL ? "" : value);
+        duckdb_free (value);
+      }
+    duckdb_destroy_result (&result);
+  }
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn,
+      "SELECT COUNT(*) FROM duckdb_tables() "
+      "WHERE table_name='fact_store_metadata';", &result), ==, DuckDBSuccess);
+  gboolean exists = duckdb_value_int64 (&result, 0, 0) != 0;
+  duckdb_destroy_result (&result);
+  if (exists) {
+    g_assert_cmpint (duckdb_query (conn,
+        "SELECT key,value FROM fact_store_metadata ORDER BY key;", &result),
+        ==, DuckDBSuccess);
+    for (idx_t row = 0; row < duckdb_row_count (&result); row++)
+      for (idx_t column = 0; column < 2; column++) {
+        gchar *value = duckdb_value_varchar (&result, column, row);
+        g_string_append_printf (snapshot, "%s;", value);
+        duckdb_free (value);
+      }
+    duckdb_destroy_result (&result);
+  }
+  return g_string_free (snapshot, FALSE);
+}
+
+static void
+close_test_bridge (WylSecureDuckdbBridge *bridge, duckdb_database *db,
+    duckdb_connection *conn)
+{
+  duckdb_disconnect (conn);
+  duckdb_close (db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+}
+
+static void
+test_ordinary_open_rejects_metadata (gconstpointer data)
+{
+  static const gchar *keys[] = {
+    "store_uuid", "format_version", "path_encoding_version", "missing", "schema"
+  };
+  guint selector = GPOINTER_TO_UINT (data);
+  const gchar *key = keys[selector / 2];
+  gboolean writable = (selector % 2) != 0;
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-ordinary-metadata-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  seed_graph (policy);
+  const WylPolicyGraphProvisioningInput input = {
+    .tenant_id = tenant_id, .graph_id = graph_id, .store_uuid = store_uuid,
+    .format_version = 1, .path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (policy, &input, root,
+      &record), ==, WYRELOG_E_OK);
+  wyl_fact_store_t *store = NULL;
+  g_assert_cmpint (open_live (policy, root, TRUE, &store), ==, WYRELOG_E_OK);
+  g_assert_true (exec_ok (store, "CREATE TABLE probe(x INTEGER);"));
+  g_assert_true (exec_ok (store, "INSERT INTO probe VALUES(42);"));
+  wyl_fact_store_close (store);
+  store = NULL;
+  g_assert_cmpint (open_live (policy, root, writable, &store), ==, WYRELOG_E_OK);
+  gint64 value = 0;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
+      "SELECT x FROM probe;", &value), ==, WYRELOG_E_OK);
+  g_assert_cmpint (value, ==, 42);
+  wyl_fact_store_close (store);
+  store = NULL;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (policy, root,
+      tenant_id, graph_id, FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      record->op_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &namespace_), ==, WYRELOG_E_OK);
+  g_autofree gchar *tenant_component = NULL;
+  g_autofree gchar *graph_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode (tenant_id,
+      &tenant_component), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+      &graph_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *path = g_build_filename (root, tenant_component,
+          graph_component, "facts.duckdb", NULL);
+  struct stat before, after;
+  g_assert_cmpint (stat (path, &before), ==, 0);
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  query_ok (conn, "ALTER TABLE fact_store_metadata RENAME TO saved_metadata;");
+  if (g_strcmp0 (key, "missing") != 0) {
+    if (g_strcmp0 (key, "schema") == 0)
+      query_ok (conn, "CREATE TABLE fact_store_metadata AS "
+          "SELECT * FROM saved_metadata;");
+    else {
+      query_ok (conn, "CREATE TABLE fact_store_metadata(key VARCHAR PRIMARY KEY,"
+          "value VARCHAR NOT NULL);"
+          "INSERT INTO fact_store_metadata SELECT * FROM saved_metadata;");
+      g_autofree gchar *sql = g_strdup_printf
+            ("UPDATE fact_store_metadata SET value='%s' WHERE key='%s';",
+              g_strcmp0 (key, "store_uuid") == 0
+            ? "01890f47-3c4b-7cc2-b8c4-dc0c0c079999" : "2", key);
+      query_ok (conn, sql);
+    }
+  }
+  g_autofree gchar *metadata_before = metadata_snapshot (conn);
+  close_test_bridge (bridge, &db, &conn);
+  gint changes = sqlite3_total_changes (wyl_policy_store_get_db (policy));
+  g_assert_cmpint (open_live (policy, root, writable, &store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (store);
+  g_assert_cmpint (sqlite3_total_changes (wyl_policy_store_get_db (policy)),
+      ==, changes);
+  g_assert_cmpint (stat (path, &after), ==, 0);
+  g_assert_cmpuint (before.st_dev, ==, after.st_dev);
+  g_assert_cmpuint (before.st_ino, ==, after.st_ino);
+  WylFactArtifactMutationLease *lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  g_autofree gchar *metadata_after = metadata_snapshot (conn);
+  g_assert_cmpstr (metadata_after, ==, metadata_before);
+  query_ok (conn, "DROP TABLE IF EXISTS fact_store_metadata;"
+      "ALTER TABLE saved_metadata RENAME TO fact_store_metadata;");
+  close_test_bridge (bridge, &db, &conn);
+  g_assert_cmpint (open_live (policy, root, writable, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
+      "SELECT x FROM probe;", &value), ==, WYRELOG_E_OK);
+  g_assert_cmpint (value, ==, 42);
+  wyl_fact_store_close (store);
+  wyl_fact_artifact_namespace_free (namespace_);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_policy_graph_provisioning_record_free (record);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_root (root);
+}
+
+static void
 test_leased_open_rejects_corruption (gconstpointer data)
 {
   const MetadataCase *test = data;
@@ -409,6 +600,13 @@ main (int argc, char *argv[])
   g_test_add_func (
     "/fact/store-provisioned/open-provisioned-pair-persists-across-reopen",
     test_open_provisioned_pair_persists_across_reopen);
+  for (guint i = 0; i < 10; i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/metadata/%u/%s", i / 2,
+            i % 2 != 0 ? "writable" : "readonly");
+    g_test_add_data_func (name, GUINT_TO_POINTER (i),
+        test_ordinary_open_rejects_metadata);
+  }
   for (gsize i = 0; i < G_N_ELEMENTS (metadata_cases); i++) {
     g_autofree gchar *name = g_strdup_printf
           ("/fact/store-provisioned/leased-open-rejects-%s",

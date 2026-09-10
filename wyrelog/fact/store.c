@@ -828,6 +828,17 @@ wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
     return rc;
   }
 
+  WylFactStoreIdentityExecutor executor = {
+    self, fact_identity_execute, fact_identity_validation_barrier
+  };
+  WylFactStoreIdentityResult identity_result;
+  rc = wyl_fact_store_identity_execute (&executor, identity,
+          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &identity_result);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_close (self);
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
   self->identity_tenant_id = g_strdup (identity->tenant_id);
   self->identity_graph_id = g_strdup (identity->graph_id);
   self->identity_store_uuid = g_strdup (identity->store_uuid);

@@ -723,12 +723,14 @@ def validate(files: dict[str, str]) -> None:
         "meson compile -C build-secure-duckdb -j 1 \\\n"
         "            test-fact-store-provisioned \\\n"
         "            test-fact-graph-seal \\\n"
+        "            test-daemon-http-facts \\\n"
         "            test-fact-store-forget-transaction \\\n"
         "            test-fact-store-forget-transaction-provision-helper \\\n"
         "            test-fact-store-forget-transaction-provisioned\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-provisioned \\\n"
         "            fact-graph-seal \\\n"
+        "            daemon-http-facts \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1495,6 +1497,7 @@ def self_test(baseline: dict[str, str]) -> None:
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-provisioned \\\n"
         "            fact-graph-seal \\\n"
+        "            daemon-http-facts \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1510,6 +1513,18 @@ def self_test(baseline: dict[str, str]) -> None:
             "      - name: Removed fact forget transaction cleanup with secure DuckDB",
             f"missing POSIX cleanup step in {workflow_path}",
         )
+        for target in ("fact-graph-seal", "daemon-http-facts"):
+            for prefix in ("test-", ""):
+                line = "            " + prefix + target + " \\\n"
+                original = line if prefix else workflow_runtime_block
+                removed = "" if prefix else workflow_runtime_block.replace(line, "")
+                expect_rejected(
+                    baseline,
+                    workflow_path,
+                    original,
+                    removed,
+                    f"missing secure {prefix}{target} in {workflow_path}",
+                )
         expect_rejected(
             baseline,
             workflow_path,
@@ -1554,6 +1569,7 @@ def self_test(baseline: dict[str, str]) -> None:
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
             "            fact-store-provisioned \\\n"
             "            fact-graph-seal \\\n"
+            "            daemon-http-facts \\\n"
             "            fact-store-forget-transaction \\\n"
             "            fact-store-forget-transaction-provisioned \\\n"
             "            --print-errorlogs",

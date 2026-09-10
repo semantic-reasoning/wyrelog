@@ -19,6 +19,12 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-request-id-private.h"
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+#include "wyrelog/fact/secure-duckdb-bridge-private.h"
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+#endif
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -468,6 +474,182 @@ check_legacy_metadata_key_count (const gchar *fact_root,
   duckdb_disconnect (&connection);
   duckdb_close (&database);
   return count == expected ? 0 : 4115;
+}
+#endif
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+static void
+identity_http_post (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *path, const gchar *query,
+    const gchar *payload, guint expected_status, const gchar *expected_body)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (send_raw (session, "POST", base_url, path, query, token,
+      payload, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, expected_status);
+  g_assert_nonnull (strstr (body, expected_body));
+}
+
+static gchar *
+identity_http_snapshot (duckdb_connection conn, const gchar *table)
+{
+  g_autofree gchar *projection = g_strdup_printf
+        ("SELECT * FROM %s ORDER BY 1;", table);
+  const gchar *queries[] = {
+    "SELECT key,value FROM fact_store_metadata ORDER BY key;",
+    "SELECT * FROM fact_batches ORDER BY batch_id;", projection
+  };
+  GString *snapshot = g_string_new (NULL);
+  for (gsize i = 0; i < G_N_ELEMENTS (queries); i++) {
+    duckdb_result result;
+    duckdb_state state = duckdb_query (conn, queries[i], &result);
+    if (state != DuckDBSuccess)
+      g_printerr ("identity snapshot query %s: %s\n", queries[i],
+          duckdb_result_error (&result));
+    g_assert_cmpint (state, ==, DuckDBSuccess);
+    g_string_append_printf (snapshot, "%zu/%llu/%llu:", i,
+        (unsigned long long) duckdb_row_count (&result),
+        (unsigned long long) duckdb_column_count (&result));
+    for (idx_t row = 0; row < duckdb_row_count (&result); row++)
+      for (idx_t col = 0; col < duckdb_column_count (&result); col++) {
+        gchar *value = duckdb_value_varchar (&result, col, row);
+        g_string_append_printf (snapshot, "%d/%zu:%s;", value != NULL,
+            value == NULL ? 0 : strlen (value), value == NULL ? "" : value);
+        duckdb_free (value);
+      }
+    duckdb_destroy_result (&result);
+  }
+  return g_string_free (snapshot, FALSE);
+}
+
+static void
+check_provisioned_http_identity (WylHandle *handle, SoupSession *session,
+    const gchar *root, const gchar *base_url, const gchar *token,
+    const gchar *schema_body)
+{
+  const gchar *graph = "identity-1000";
+  const gchar *path = "/facts/__wr_default/identity-1000/orders:append";
+  const gchar *create_query = "tenant=__wr_default&graph=identity-1000&" FACT_GUARD;
+  const gchar *schema_query = "tenant=__wr_default&graph=identity-1000&"
+      "namespace=shop&relation=orders&schema_version=1&" FACT_GUARD;
+  const gchar *control_query = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=identity-control&idempotency_key=identity-control&" FACT_GUARD;
+  const gchar *retry_query = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=identity-retry&idempotency_key=identity-retry&" FACT_GUARD;
+  const gchar *payload = "order_id\tamount\nidentity-retry\t23\n";
+  identity_http_post (session, base_url, token, "/graphs/create", create_query,
+      NULL, 200, "\"created\":true");
+  identity_http_post (session, base_url, token, "/facts/schema/register",
+      schema_query, schema_body, 200, "\"ok\":true");
+  identity_http_post (session, base_url, token, path, control_query,
+      "order_id\tamount\nidentity-control\t17\n", 200, "\"inserted\":true");
+
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (policy,
+      WYL_TENANT_DEFAULT, &records), ==, WYRELOG_E_OK);
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  for (guint i = 0; i < records->len; i++) {
+    WylPolicyGraphProvisioningRecord *item = g_ptr_array_index (records, i);
+    if (g_strcmp0 (item->graph_id, graph) == 0) {
+      g_assert_null (record);
+      record = item;
+    }
+  }
+  g_assert_nonnull (record);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (policy, root,
+      WYL_TENANT_DEFAULT, graph, FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      record->op_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &namespace_), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = graph,
+    .namespace_id = "shop", .relation_name = "orders", .schema_version = 1,
+    .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+  };
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_assert_nonnull (table);
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      WYL_TENANT_DEFAULT, graph, &before), ==, WYRELOG_E_OK);
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn, "UPDATE fact_store_metadata SET "
+      "value='01890f47-3c4b-7cc2-b8c4-dc0c0c079999' "
+      "WHERE key='store_uuid';", &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+  g_autofree gchar *snapshot = identity_http_snapshot (conn, table);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+
+  identity_http_post (session, base_url, token, path, retry_query, payload,
+      409, "\"fact_batch_conflict\"");
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      WYL_TENANT_DEFAULT, graph, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+  g_assert_cmpuint (before.operation_generation, ==, after.operation_generation);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  g_autofree gchar *unchanged = identity_http_snapshot (conn, table);
+  g_assert_cmpstr (snapshot, ==, unchanged);
+  g_autofree gchar *restore = g_strdup_printf
+        ("UPDATE fact_store_metadata SET value='%s' WHERE key='store_uuid';",
+          record->store_uuid);
+  g_assert_cmpint (duckdb_query (conn, restore, &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  identity_http_post (session, base_url, token, path, retry_query, payload,
+      200, "\"inserted\":true");
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  g_autofree gchar *count_sql = g_strdup_printf
+        ("SELECT (SELECT COUNT(*) FROM fact_batches),"
+          "(SELECT COUNT(*) FROM %s);", table);
+  g_assert_cmpint (duckdb_query (conn, count_sql, &result), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 2);
+  g_assert_cmpint (duckdb_value_int64 (&result, 1, 0), ==, 2);
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_free (namespace_);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  g_ptr_array_unref (records);
 }
 #endif
 
@@ -1173,6 +1355,10 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 409 || strstr (body, "\"fact_batch_conflict\"") == NULL)
     return 4125;
+#endif
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+  check_provisioned_http_identity (handle, session, fact_root, base_url,
+      admin_token, schema_body);
 #endif
   /* Issue #546: a post-commit audit failure must not be reported as a failed
    * append.  The audit result used to overwrite the commit result and then
