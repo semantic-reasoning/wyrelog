@@ -1339,13 +1339,23 @@ test_policy_graph_authority = executable('test-policy-graph-authority',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
 )
 
-# Serialized on Windows only.  Both aggregates are long enough that a
-# neighbour holding the machine pushes them past their deadline: the one
-# recoverable full-suite sample from a failing Windows run had a concurrent
-# test occupying 1404 seconds while this one took 50.  is_parallel drains the
-# in-flight set and runs the test alone, so the deadline measures the test
-# rather than the queue.  POSIX parallelism is untouched.
+# The two 19-stage migration matrices took 43.22s and 35.19s on Windows,
+# exhausting the aggregate's 90s budget before the remaining cases finished.
+# Run each matrix with its own bounded deadline and exclude it from the base.
+# Keep Windows serialization so other suites cannot consume their budget.
 test('policy-graph-authority', test_policy_graph_authority,
+  args : ['-s', '/policy/graph-authority/pre-windows-provisioning-migration',
+          '-s', '/policy/graph-authority/windows-provisioning-migration'],
+  timeout : 90,
+  is_parallel : host_machine.system() != 'windows',
+)
+test('policy-graph-authority-pre-windows-provisioning-migration', test_policy_graph_authority,
+  args : ['-p', '/policy/graph-authority/pre-windows-provisioning-migration'],
+  timeout : 90,
+  is_parallel : host_machine.system() != 'windows',
+)
+test('policy-graph-authority-windows-provisioning-migration', test_policy_graph_authority,
+  args : ['-p', '/policy/graph-authority/windows-provisioning-migration'],
   timeout : 90,
   is_parallel : host_machine.system() != 'windows',
 )

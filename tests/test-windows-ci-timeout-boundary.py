@@ -39,14 +39,28 @@ MATRIX_ENTRIES = (
 )
 
 
-# The two aggregates the Windows rows time out on.  Each must stay serialized
+# The aggregates the Windows rows time out on.  Each must stay serialized
 # on Windows and keep an explicit deadline at or below its recorded ceiling.
 # Raising a ceiling means editing this table, which is the point: a deadline
 # may only move when someone states the measurement that moved it.
 SERIALIZED_AGGREGATES = (
     ("policy-graph-authority", 90),
+    ("policy-graph-authority-pre-windows-provisioning-migration", 90),
+    ("policy-graph-authority-windows-provisioning-migration", 90),
     ("fact-store", 60),
 )
+POLICY_SELECTIONS = {
+    "policy-graph-authority": [
+        "-s", "/policy/graph-authority/pre-windows-provisioning-migration",
+        "-s", "/policy/graph-authority/windows-provisioning-migration",
+    ],
+    "policy-graph-authority-pre-windows-provisioning-migration": [
+        "-p", "/policy/graph-authority/pre-windows-provisioning-migration",
+    ],
+    "policy-graph-authority-windows-provisioning-migration": [
+        "-p", "/policy/graph-authority/windows-provisioning-migration",
+    ],
+}
 WINDOWS_SERIAL = "is_parallel : host_machine.system() != 'windows'"
 # A checker nothing runs guards nothing.  Unregistering these two lines would
 # retire every assertion below without failing anything, so the registrations
@@ -184,6 +198,15 @@ def validate_repository(root: Path,
       errors.append(f"tests/meson.build lost the {test_name} registration")
       continue
     entry = match.group(0)
+    if test_name in POLICY_SELECTIONS:
+      executable = re.search(r"test\('[^']+',\s*(\w+)\s*,", entry)
+      selectors = re.search(r"args\s*:\s*\[([^]]*)\]", entry, re.S)
+      if (executable is None
+          or executable.group(1) != "test_policy_graph_authority"
+          or selectors is None
+          or re.findall(r"'([^']*)'", selectors.group(1))
+          != POLICY_SELECTIONS[test_name]):
+        errors.append(f"{test_name} must preserve its exact policy case selection")
     if WINDOWS_SERIAL not in entry:
       errors.append(
           f"{test_name} must stay serialized on Windows: {WINDOWS_SERIAL}")
@@ -250,6 +273,18 @@ def self_test(root: Path) -> list[str]:
       continue
     entry = match.group(0)
     indent = match.group(1)
+    if test_name in POLICY_SELECTIONS:
+      meson_mutations += [
+          (f"{test_name} wrong executable", entry,
+           entry.replace("test_policy_graph_authority", "test_policy_store")),
+          (f"{test_name} selectors removed", entry,
+           re.sub(r"args\s*:\s*\[[^]]*\]", "args : []", entry)),
+          (f"{test_name} wrong selector", entry,
+           entry.replace("/policy/graph-authority/", "/policy/wrong/")),
+          (f"{test_name} selection mode changed", entry,
+           entry.replace("'-s'", "'-p'") if test_name == "policy-graph-authority"
+           else entry.replace("'-p'", "'-s'")),
+      ]
     meson_mutations += [
         (f"{test_name} unserialized",
          entry, entry.replace(WINDOWS_SERIAL, "is_parallel : true")),
