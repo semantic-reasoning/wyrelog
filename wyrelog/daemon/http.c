@@ -11112,7 +11112,7 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL, &write);
 #ifdef WYL_HAS_FACT_STORE
-  WylFactGraphSealOutcome outcome = { 0 };
+  g_auto (WylFactGraphSealOutcome) outcome = { 0 };
 #endif
   if (rc == WYRELOG_E_OK) {
 #ifdef WYL_HAS_FACT_STORE
@@ -11138,16 +11138,10 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (rc == WYRELOG_E_BUSY) {
-#ifdef WYL_HAS_FACT_STORE
-    wyl_fact_graph_seal_outcome_clear (&outcome);
-#endif
     set_json_error (msg, 503, "graph_mutation_unavailable");
     return;
   }
   if (rc != WYRELOG_E_OK) {
-#ifdef WYL_HAS_FACT_STORE
-    wyl_fact_graph_seal_outcome_clear (&outcome);
-#endif
     set_json_error (msg, 500, "graph_mutation_failed");
     return;
   }
@@ -11163,9 +11157,6 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
    * 500. */
   (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "", tenant,
       graph, "graph_seal", "", "sealed", ensure_request_id_header (msg));
-#ifdef WYL_HAS_FACT_STORE
-  wyl_fact_graph_seal_outcome_clear (&outcome);
-#endif
   set_graph_mutation_json (msg, tenant, graph, "sealed", TRUE);
 }
 

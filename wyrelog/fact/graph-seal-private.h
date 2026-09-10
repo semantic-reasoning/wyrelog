@@ -80,6 +80,14 @@ wyrelog_error_t wyl_fact_graph_seal (wyl_policy_store_t * policy,
 
 void wyl_fact_graph_seal_outcome_clear (WylFactGraphSealOutcome * outcome);
 
+/* An outcome owns strings whenever the seal filled status, which the abort
+ * path does before returning the failing rc.  Callers that answer several
+ * error codes therefore have to clear it on every one of them; declaring the
+ * cleanup makes g_auto the way to hold one, so a return added later cannot
+ * miss it. */
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylFactGraphSealOutcome,
+    wyl_fact_graph_seal_outcome_clear)
+
 typedef struct
 {
   gboolean durable_unseal_applied;
