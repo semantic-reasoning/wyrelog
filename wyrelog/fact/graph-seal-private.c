@@ -698,16 +698,6 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
   if (rc != WYRELOG_E_OK)
     goto compensate;
   rc = wyl_policy_store_graph_publication_fence_commit (&fence);
-  if (root_lease != NULL) {
-    rc = wyl_fact_root_writer_lease_verify (root_lease);
-    if (rc != WYRELOG_E_OK)
-      goto compensate;
-  }
-  if (artifact_lease != NULL) {
-    rc = wyl_fact_artifact_mutation_lease_revalidate (artifact_lease);
-    if (rc != WYRELOG_E_OK)
-      goto compensate;
-  }
   if (rc != WYRELOG_E_OK) {
     /* A failed COMMIT may leave the transaction outcome uncertain.  Make the
      * runtime safe before releasing the fence: a closed, evicted entry is
@@ -722,6 +712,16 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     if (out_outcome != NULL)
       out_outcome->runtime_admission_open = FALSE;
     goto finish;
+  }
+  if (root_lease != NULL) {
+    rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (rc != WYRELOG_E_OK)
+      goto compensate;
+  }
+  if (artifact_lease != NULL) {
+    rc = wyl_fact_artifact_mutation_lease_revalidate (artifact_lease);
+    if (rc != WYRELOG_E_OK)
+      goto compensate;
   }
   /* Keep the graph mutex until this post-commit read.  It closes the small
    * interval in which the transaction is durable but an independent policy

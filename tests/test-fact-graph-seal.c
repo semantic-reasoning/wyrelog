@@ -939,6 +939,119 @@ test_unseal_requires_handle_write_lease (void)
   seal_fixture_clear (&fixture);
 }
 
+typedef struct
+{
+  sqlite3 *db;
+  gboolean veto;
+  guint installed;
+  guint rejected;
+} UnsealCommitFault;
+
+static int
+deny_unseal_commit (void *data, int action, const char *arg1,
+    const char *arg2, const char *database, const char *trigger)
+{
+  (void) arg2;
+  (void) database;
+  (void) trigger;
+  UnsealCommitFault *fault = data;
+  if (action == SQLITE_TRANSACTION && g_strcmp0 (arg1, "COMMIT") == 0) {
+    fault->rejected++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+static int
+veto_unseal_commit (void *data)
+{
+  UnsealCommitFault *fault = data;
+  fault->rejected++;
+  return 1;
+}
+
+static wyrelog_error_t
+arm_unseal_commit_fault (const gchar *phase, gpointer data)
+{
+  UnsealCommitFault *fault = data;
+  if (g_strcmp0 (phase,
+      WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION) == 0) {
+    fault->installed++;
+    if (fault->veto)
+      sqlite3_commit_hook (fault->db, veto_unseal_commit, fault);
+    else
+      g_assert_cmpint (sqlite3_set_authorizer (fault->db, deny_unseal_commit,
+          fault), ==, SQLITE_OK);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_unseal_commit_failure_stays_closed (gconstpointer data)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-commit-failure-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &authority), ==, WYRELOG_E_OK);
+  guint64 generation = authority->lifecycle_generation;
+  wyl_policy_graph_authority_record_free (authority);
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease),
+      ==, WYRELOG_E_OK);
+  UnsealCommitFault fault = {
+    .db = wyl_policy_store_get_db (fixture.policy),
+    .veto = GPOINTER_TO_INT (data),
+  };
+  wyl_fact_graph_seal_set_test_hook (arm_unseal_commit_fault, &fault);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_unseal_with_root_lease (fixture.policy,
+          fixture.root, lease, &info, fixture.manager, -1, &outcome);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  sqlite3_set_authorizer (fault.db, NULL, NULL);
+  sqlite3_commit_hook (fault.db, NULL, NULL);
+  g_test_message ("commit rejection rc=%d admission_open=%d queryable=%d",
+      rc, outcome.runtime_admission_open, outcome.status.queryable);
+  g_assert_cmpuint (fault.installed, ==, 1);
+  g_assert_cmpuint (fault.rejected, ==, 1);
+  g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+  g_assert_false (outcome.runtime_admission_open);
+  g_assert_false (outcome.status.queryable);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_true (sqlite3_get_autocommit (fault.db));
+  WylFactGraphSnapshot *snapshot = NULL;
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, info.tenant_id,
+      info.graph_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), !=, WYRELOG_E_OK);
+  g_assert_null (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  g_autofree gchar *path = g_build_filename (fixture.root, "policy.db", NULL);
+  g_autoptr (wyl_policy_store_t) observer = NULL;
+  g_assert_cmpint (wyl_policy_store_open (path, &observer), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (observer,
+      info.tenant_id, info.graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  g_assert_cmpuint (authority->lifecycle_generation, ==, generation);
+  wyl_policy_graph_authority_record_free (authority);
+  g_clear_pointer (&observer, wyl_policy_store_close);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 static void
 test_unseal_reseal_failure_is_reported_and_stays_closed (void)
 {
@@ -1788,6 +1901,10 @@ main (int argc, char **argv)
       test_publication_blocks_external_open);
   g_test_add_func ("/fact-graph-seal/unseal-requires-handle-write-lease",
       test_unseal_requires_handle_write_lease);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-denied",
+      GINT_TO_POINTER (FALSE), test_unseal_commit_failure_stays_closed);
+  g_test_add_data_func ("/fact-graph-seal/unseal-commit-vetoed",
+      GINT_TO_POINTER (TRUE), test_unseal_commit_failure_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-build-failure-reseals",
       test_unseal_build_failure_reseals_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-reseal-failure-reported",
