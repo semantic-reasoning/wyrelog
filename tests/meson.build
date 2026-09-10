@@ -1857,7 +1857,7 @@ if get_option('enable_fact_store').allowed()
   test_fact_tenant_admission = executable('test-fact-tenant-admission',
     'test-fact-tenant-admission.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep],
+    dependencies : [wyrelog_dep, wirelog_dep],
   )
   test('fact-tenant-admission', test_fact_tenant_admission, timeout : 60)
 endif
