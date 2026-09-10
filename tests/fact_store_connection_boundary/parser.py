@@ -571,11 +571,18 @@ def external_condition_values(source: str) -> dict[str, set[str]]:
             r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
             " ", expanded_expression,
         )
+        # The lookbehind excludes digits as well as identifier characters.
+        # Without the digit, a macro whose name ends in more than one digit
+        # donates a phantom literal: in G_OS_WIN32 the 3 is rejected for the
+        # N before it, and the 2 is then matched because a 3 precedes it.
+        # Every macro named in that expression would inherit the phantom
+        # value's neighbourhood, and the profile cross-product built from
+        # those candidates grows by an order of magnitude.
         literals = {
             int(token, 16) if token.lower().startswith("0x")
             else int(token, 8) if len(token) > 1 and token.startswith("0")
             else int(token, 10) for token in re.findall(
-                r"(?<![A-Za-z_])(?:0[xX][0-9a-fA-F]+|\d+)", expression
+                r"(?<![A-Za-z_0-9])(?:0[xX][0-9a-fA-F]+|\d+)", expression
             )
         } | character_values
         complex_numeric = expanded_expression != raw_expression or re.search(
