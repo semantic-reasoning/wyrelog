@@ -826,6 +826,17 @@ open_graph_engine_with_artifact_lease (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  /* Taken here rather than in wyl_fact_replay_open_graph_engine, which is no
+   * longer the only way in: build_graph_engine needs the artifact namespace
+   * and lease, so it calls this function directly.  Checking in the public
+   * entry point alone would leave the runtime's engine builder -- the path a
+   * mutation actually takes -- unable to be faulted, and a graph whose engine
+   * failed to open would be reported committed_ready. */
+  if (take_fact_replay_test_fault (
+        WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE))
+    return WYRELOG_E_IO;
+#endif
   g_autoptr (wyl_fact_store_t) store = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
           artifact_namespace, artifact_lease, &store);
@@ -900,11 +911,6 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
-#if defined(WYL_TEST_HANDLE_SEAMS)
-  if (take_fact_replay_test_fault (
-        WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE))
-    return WYRELOG_E_IO;
-#endif
   return open_graph_engine_with_artifact_lease (policy, fact_root, graph_info,
              NULL, NULL, out_engine);
 }
@@ -1245,7 +1251,8 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
      * passes the entire suite unchanged.  The reason is now stronger than it
      * was when this was written.  Since #869 U1 the forget probe and the
      * engine builder BOTH open read-only (probe_graph_forgets and
-     * wyl_fact_replay_open_graph_engine), so they are the same call in every
+     * open_graph_engine_with_artifact_lease, which the builder reaches
+     * directly), so they are the same call in every
      * configuration, not only off-bridge: a graph that could not be probed
      * also failed to build and is never mapped through the forget axis.  The
      * write-lease refusal that used to be the one observable state no longer
