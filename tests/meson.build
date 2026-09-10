@@ -1806,11 +1806,16 @@ if get_option('enable_fact_store').allowed()
   # Links the seams archive rather than the shipped library: the ambiguous
   # durable-write branch is unreachable without a fault on the policy write,
   # and that seam exists only under WYL_TEST_HANDLE_SEAMS.
+  graph_seal_c_args = ['-DWYL_HAS_FACT_STORE', '-DWYL_TEST_HANDLE_SEAMS']
+  # The POSIX provisioned-owner jobs must exercise real provisioning rather
+  # than the legacy fixture when secure storage is enabled.
+  if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
+    graph_seal_c_args += ['-DWYL_HAS_SECURE_DUCKDB_BRIDGE']
+  endif
   test_fact_graph_seal = executable('test-fact-graph-seal',
     'test-fact-graph-seal.c',
     'fact-test-support.c',
-    c_args : ['-DWYL_HAS_FACT_STORE', '-DWYL_TEST_HANDLE_SEAMS']
-        + fact_test_support_c_args,
+    c_args : graph_seal_c_args + fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
         + fact_test_support_deps,

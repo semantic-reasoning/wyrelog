@@ -722,11 +722,13 @@ def validate(files: dict[str, str]) -> None:
     posix_commands = (
         "meson compile -C build-secure-duckdb -j 1 \\\n"
         "            test-fact-store-provisioned \\\n"
+        "            test-fact-graph-seal \\\n"
         "            test-fact-store-forget-transaction \\\n"
         "            test-fact-store-forget-transaction-provision-helper \\\n"
         "            test-fact-store-forget-transaction-provisioned\n"
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-provisioned \\\n"
+        "            fact-graph-seal \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1492,6 +1494,7 @@ def self_test(baseline: dict[str, str]) -> None:
     workflow_runtime_block = (
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-provisioned \\\n"
+        "            fact-graph-seal \\\n"
         "            fact-store-forget-transaction \\\n"
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
@@ -1523,6 +1526,14 @@ def self_test(baseline: dict[str, str]) -> None:
             "",
             f"missing macOS provisioning control compile in {workflow_path}",
         )
+        for target in ("test-fact-graph-seal", "fact-graph-seal"):
+            expect_rejected(
+                baseline,
+                workflow_path,
+                f"            {target} \\\n",
+                "",
+                f"missing secure graph seal coverage ({target}) in {workflow_path}",
+            )
         expect_rejected(
             baseline,
             workflow_path,
@@ -1542,10 +1553,12 @@ def self_test(baseline: dict[str, str]) -> None:
             workflow_path,
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
             "            fact-store-provisioned \\\n"
+            "            fact-graph-seal \\\n"
             "            fact-store-forget-transaction \\\n"
             "            fact-store-forget-transaction-provisioned \\\n"
             "            --print-errorlogs",
             "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-graph-seal \\\n"
             "            fact-store-forget-transaction \\\n"
             "            fact-store-forget-transaction-provisioned \\\n"
             "            --print-errorlogs",

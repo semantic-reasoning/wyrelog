@@ -11,6 +11,11 @@
 #include "fact/store-open-private.h"
 #include "fact/store-private.h"
 #include "fact/store-test-seams-private.h"
+#include "fact/graph-artifact-namespace-private.h"
+
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
 
 static const gchar store_uuid[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
 static const gchar tenant_id[] = "tenant-provision";
@@ -162,6 +167,74 @@ test_open_provisioned_pair_persists_across_reopen (void)
   remove_root (root);
 }
 
+static void
+test_leased_open_rejects_audit_database (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-leased-audit-rejection-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  seed_graph (policy);
+  const WylPolicyGraphProvisioningInput input = {
+    .tenant_id = tenant_id, .graph_id = graph_id, .store_uuid = store_uuid,
+    .format_version = 1, .path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioning_run (policy, &input, root,
+      &record), ==, WYRELOG_E_OK);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (policy, root,
+      tenant_id, graph_id, FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      record->op_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &namespace_), ==, WYRELOG_E_OK);
+  WylFactArtifactMutationLease *lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
+  const WylFactStoreIdentity identity = {
+    .tenant_id = (gchar *) tenant_id, .graph_id = (gchar *) graph_id,
+    .store_uuid = (gchar *) store_uuid, .format_version = 1,
+    .path_encoding_version = 1,
+  };
+  wyl_fact_store_t *store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_namespace_with_lease
+        (namespace_, lease, &identity, TRUE, &store), ==, WYRELOG_E_OK);
+  g_assert_true (exec_ok (store, "CREATE TABLE audit_events(id INTEGER);"));
+  wyl_fact_store_close (store);
+  store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_namespace_with_lease
+        (namespace_, lease, &identity, TRUE, &store), ==, WYRELOG_E_POLICY);
+  g_assert_null (store);
+  /* Rejection must not consume the caller-owned lease. */
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (lease), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  wyl_fact_artifact_namespace_free (namespace_);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_policy_graph_provisioning_record_free (record);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_root (root);
+}
+
 #ifdef __APPLE__
 /* Policy only constrains the Darwin envelope's size.  Store-open must decode
  * its contents before touching the caller's fact root. */
@@ -228,6 +301,8 @@ main (int argc, char *argv[])
   g_test_add_func (
     "/fact/store-provisioned/open-provisioned-pair-persists-across-reopen",
     test_open_provisioned_pair_persists_across_reopen);
+  g_test_add_func ("/fact/store-provisioned/leased-open-rejects-audit",
+      test_leased_open_rejects_audit_database);
 #ifdef __APPLE__
   g_test_add_func (
     "/fact/store-provisioned/malformed-darwin-evidence-fails-before-filesystem",
