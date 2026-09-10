@@ -432,6 +432,7 @@ typedef struct
   gboolean readiness_written;
   wyrelog_error_t artifact_reverse_rc;
   gint ready_fd;
+  guint64 admission_generation;
 } ReverseProbe;
 
 static void
@@ -490,7 +491,8 @@ reverse_runtime_call (ReverseProbe *probe)
   WylFactGraphRuntimePublication publication = { 0 };
   wyrelog_error_t rc =
       wyl_fact_graph_runtime_publication_begin_closed (probe->manager,
-          &probe->key, &publication);
+          &probe->key, WYL_FACT_GRAPH_ADMISSION_CLOSED,
+          probe->admission_generation, &publication);
   if (rc == WYRELOG_E_OK)
     wyl_fact_graph_runtime_publication_abort (&publication);
 }
@@ -563,8 +565,9 @@ run_reverse_child (const gchar *root, ReverseScenario scenario, gint ready_fd)
   WylFactGraphRuntimeStatus status = { 0 };
   if (wyl_fact_graph_runtime_manager_refresh (probe.manager, &probe.key,
       build_marker_engine, NULL, &status) != WYRELOG_E_OK
-      || wyl_fact_graph_runtime_manager_close_admission (probe.manager,
-      &probe.key) != WYRELOG_E_OK)
+      || wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (probe.manager, &probe.key, NULL, &probe.admission_generation)
+      != WYRELOG_E_OK)
     return 1;
   wyl_fact_graph_runtime_status_clear (&status);
 
@@ -838,15 +841,17 @@ test_runtime_policy_forward (void)
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
       build_marker_engine, NULL, &status), ==, WYRELOG_E_OK);
   wyl_fact_graph_runtime_status_clear (&status);
-  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
-      &key), ==, WYRELOG_E_OK);
+  guint64 admission_generation = 0;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission_with_previous
+        (manager, &key, NULL, &admission_generation), ==, WYRELOG_E_OK);
 
   LockTrace trace = { 0 };
   lock_trace_init (&trace);
   wyl_fact_publication_lock_event_set_hook (lock_trace_event, &trace);
   WylFactGraphRuntimePublication publication = { 0 };
   g_assert_cmpint (wyl_fact_graph_runtime_publication_begin_closed (manager,
-      &key, &publication), ==, WYRELOG_E_OK);
+      &key, WYL_FACT_GRAPH_ADMISSION_CLOSED, admission_generation,
+      &publication), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_runtime_publication_refresh (&publication,
       build_marker_engine, NULL, NULL), ==, WYRELOG_E_OK);
   WylPolicyGraphPublicationFence fence =
