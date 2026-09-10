@@ -776,6 +776,11 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (take_fact_replay_test_fault (
+        WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE))
+    return WYRELOG_E_IO;
+#endif
 
   /* Reject an already poisoned supplied store before policy enumeration.  If
    * another thread poisons after this admission, each later store session
