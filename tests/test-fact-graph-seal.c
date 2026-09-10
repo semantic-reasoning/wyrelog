@@ -15,6 +15,12 @@
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "fact/secure-duckdb-bridge-private.h"
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+#endif
 
 typedef struct
 {
@@ -980,6 +986,145 @@ test_unseal_requires_handle_write_lease (void)
 }
 
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+/* Test-only access deliberately bypasses identity validation for corruption
+ * and restoration, while retaining the bounded filesystem and artifact lease. */
+static void
+open_metadata_test_bridge (SealFixture *fixture, WylSecureDuckdbBridge **bridge,
+    duckdb_database *db, duckdb_connection *conn)
+{
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (fixture->policy,
+      "tenant-a", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  WylPolicyGraphProvisioningRecord *record = g_ptr_array_index (records, 0);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (fixture->policy,
+      fixture->root, "tenant-a", "orders", FALSE, &directory), ==,
+      WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      record->op_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      bridge, db, conn), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_free (namespace_);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  g_ptr_array_unref (records);
+}
+
+static void
+metadata_query_ok (duckdb_connection conn, const gchar *sql)
+{
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+}
+
+static void
+test_unseal_rejects_persisted_metadata (gconstpointer data)
+{
+  const gchar *key_name = data;
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-metadata-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  GraphPathProbe path = { "tenant-a", "orders", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
+      "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
+  g_autofree gchar *fact_path = g_build_filename (path.storage_path,
+          "facts.duckdb", NULL);
+  g_free (path.storage_path);
+  FactGraphFileIdentity before = { 0 }, after = { 0 };
+  g_assert_true (fact_graph_file_get_identity (fact_path, &before));
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  open_metadata_test_bridge (&fixture, &bridge, &db, &conn);
+  metadata_query_ok (conn,
+      "ALTER TABLE fact_store_metadata RENAME TO saved_metadata;");
+  if (g_strcmp0 (key_name, "missing") != 0) {
+    metadata_query_ok (conn,
+        "CREATE TABLE fact_store_metadata(key VARCHAR PRIMARY KEY,"
+        "value VARCHAR NOT NULL);"
+        "INSERT INTO fact_store_metadata SELECT * FROM saved_metadata;");
+    if (g_strcmp0 (key_name, "schema") == 0)
+      metadata_query_ok (conn, "DROP TABLE fact_store_metadata;"
+          "CREATE TABLE fact_store_metadata AS SELECT * FROM saved_metadata;");
+    else {
+      g_autofree gchar *sql = g_strdup_printf
+            ("UPDATE fact_store_metadata SET value='%s' WHERE key='%s';",
+              g_strcmp0 (key_name, "store_uuid") == 0
+            ? "01890f47-3c4b-7cc2-b8c4-dc0c0c079999" : "2", key_name);
+      metadata_query_ok (conn, sql);
+    }
+  }
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.runtime_admission_open);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "orders"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.manager,
+      &key, &status), ==, WYRELOG_E_OK);
+  g_assert_false (status.queryable);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), !=, WYRELOG_E_OK);
+  g_assert_null (snapshot);
+  g_assert_true (fact_graph_file_get_identity (fact_path, &after));
+  g_assert_cmpuint (before.device, ==, after.device);
+  g_assert_cmpuint (before.file, ==, after.file);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  open_metadata_test_bridge (&fixture, &bridge, &db, &conn);
+  metadata_query_ok (conn, "DROP TABLE IF EXISTS fact_store_metadata;"
+      "ALTER TABLE saved_metadata RENAME TO fact_store_metadata;");
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (outcome.status.queryable);
+  g_assert_true (outcome.runtime_admission_open);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (fixture.manager, &key, &snapshot), ==, WYRELOG_E_OK);
+  wyl_fact_graph_snapshot_unref (snapshot);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 static void
 test_unseal_rejects_provisioning_mismatch (gconstpointer data)
 {
@@ -1992,6 +2137,15 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fact-graph-seal/unseal-commit-vetoed",
       GINT_TO_POINTER (TRUE), test_unseal_commit_failure_stays_closed);
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  static const gchar *metadata_keys[] = {
+    "store_uuid", "format_version", "path_encoding_version", "missing", "schema"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (metadata_keys); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact-graph-seal/unseal-persisted-metadata-%s", metadata_keys[i]);
+    g_test_add_data_func (name, metadata_keys[i],
+        test_unseal_rejects_persisted_metadata);
+  }
   g_test_add_data_func ("/fact-graph-seal/unseal-provisioning-uuid-mismatch",
       GINT_TO_POINTER (0), test_unseal_rejects_provisioning_mismatch);
 #ifdef __APPLE__

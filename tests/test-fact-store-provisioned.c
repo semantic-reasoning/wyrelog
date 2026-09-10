@@ -12,6 +12,7 @@
 #include "fact/store-private.h"
 #include "fact/store-test-seams-private.h"
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/secure-duckdb-bridge-private.h"
 
 G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
@@ -76,7 +77,13 @@ open_live (wyl_policy_store_t *policy_store, const gchar *root,
 static gboolean
 exec_ok (wyl_fact_store_t *store, const gchar *sql)
 {
-  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK;
+  g_auto (GStrv) statements = g_strsplit (sql, ";", -1);
+  for (gsize i = 0; statements[i] != NULL; i++)
+    if (*statements[i] != '\0'
+        && wyl_fact_store_test_exec_sql (store, statements[i])
+        != WYRELOG_E_OK)
+      return FALSE;
+  return TRUE;
 }
 
 static gint64
@@ -167,9 +174,51 @@ test_open_provisioned_pair_persists_across_reopen (void)
   remove_root (root);
 }
 
-static void
-test_leased_open_rejects_audit_database (void)
+typedef struct
 {
+  const gchar *name;
+  const gchar *mutation;
+  const gchar *probe;
+  const gchar *restore;
+} MetadataCase;
+
+static const MetadataCase metadata_cases[] = {
+  { "audit", "CREATE TABLE audit_events(id INTEGER);",
+    "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name='audit_events';",
+    "DROP TABLE audit_events;" },
+  { "uuid", "UPDATE fact_store_metadata SET value="
+    "'01890f47-3c4b-7cc2-b8c4-dc0c0c079999' WHERE key='store_uuid';",
+    "SELECT COUNT(*) FROM fact_store_metadata WHERE key='store_uuid' AND "
+    "value='01890f47-3c4b-7cc2-b8c4-dc0c0c079999';",
+    "UPDATE fact_store_metadata SET value="
+    "'01890f47-3c4b-7cc2-b8c4-dc0c0c070545' WHERE key='store_uuid';" },
+  { "format", "UPDATE fact_store_metadata SET value='2' "
+    "WHERE key='format_version';",
+    "SELECT COUNT(*) FROM fact_store_metadata WHERE key='format_version' "
+    "AND value='2';",
+    "UPDATE fact_store_metadata SET value='1' WHERE key='format_version';" },
+  { "encoding", "UPDATE fact_store_metadata SET value='2' "
+    "WHERE key='path_encoding_version';",
+    "SELECT COUNT(*) FROM fact_store_metadata "
+    "WHERE key='path_encoding_version' AND value='2';",
+    "UPDATE fact_store_metadata SET value='1' "
+    "WHERE key='path_encoding_version';" },
+  { "missing", "ALTER TABLE fact_store_metadata RENAME TO saved_metadata;",
+    "SELECT 1-COUNT(*) FROM duckdb_tables() "
+    "WHERE table_name='fact_store_metadata';",
+    "ALTER TABLE saved_metadata RENAME TO fact_store_metadata;" },
+  { "schema", "ALTER TABLE fact_store_metadata RENAME TO saved_metadata;"
+    "CREATE TABLE fact_store_metadata AS SELECT * FROM saved_metadata;",
+    "SELECT 1-COUNT(*) FROM duckdb_constraints() "
+    "WHERE table_name='fact_store_metadata';",
+    "DROP TABLE fact_store_metadata;"
+    "ALTER TABLE saved_metadata RENAME TO fact_store_metadata;" },
+};
+
+static void
+test_leased_open_rejects_corruption (gconstpointer data)
+{
+  const MetadataCase *test = data;
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
         ("wyl-leased-audit-rejection-XXXXXX", &error);
@@ -217,15 +266,74 @@ test_leased_open_rejects_audit_database (void)
   wyl_fact_store_t *store = NULL;
   g_assert_cmpint (wyl_fact_store_open_provisioned_namespace_with_lease
         (namespace_, lease, &identity, TRUE, &store), ==, WYRELOG_E_OK);
-  g_assert_true (exec_ok (store, "CREATE TABLE audit_events(id INTEGER);"));
+  g_assert_true (exec_ok (store, "CREATE TABLE probe(x INTEGER);"
+      "INSERT INTO probe VALUES(42);"));
+  g_assert_true (exec_ok (store, test->mutation));
+  gint64 observed = 0;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, test->probe,
+      &observed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==, 1);
   wyl_fact_store_close (store);
   store = NULL;
+  g_autofree gchar *tenant_component = NULL;
+  g_autofree gchar *graph_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode (tenant_id,
+      &tenant_component), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+      &graph_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *path = g_build_filename (root, tenant_component,
+          graph_component, "facts.duckdb", NULL);
+  struct stat before, after;
+  g_assert_cmpint (stat (path, &before), ==, 0);
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  guint64 generation = authority->lifecycle_generation;
+  wyl_policy_graph_authority_record_free (authority);
   g_assert_cmpint (wyl_fact_store_open_provisioned_namespace_with_lease
         (namespace_, lease, &identity, TRUE, &store), ==, WYRELOG_E_POLICY);
   g_assert_null (store);
   /* Rejection must not consume the caller-owned lease. */
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (lease), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (stat (path, &after), ==, 0);
+  g_assert_cmpuint (after.st_dev, ==, before.st_dev);
+  g_assert_cmpuint (after.st_ino, ==, before.st_ino);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (authority->lifecycle_generation, ==, generation);
+  g_assert_cmpstr (authority->store_uuid, ==, store_uuid);
+  wyl_policy_graph_authority_record_free (authority);
+
+  /* Inspection/restoration deliberately bypasses the store identity gate,
+   * but uses the same bounded namespace and caller-owned lease. */
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_with_lease (namespace_,
+      lease, TRUE, &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn, test->probe, &result), ==,
+      DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 1);
+  duckdb_destroy_result (&result);
+  g_assert_cmpint (duckdb_query (conn, "SELECT x FROM probe;", &result),
+      ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 42);
+  duckdb_destroy_result (&result);
+  g_assert_cmpint (duckdb_query (conn, test->restore, &result), ==,
+      DuckDBSuccess);
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  wyl_secure_duckdb_bridge_free (bridge);
+  g_assert_cmpint (wyl_fact_store_open_provisioned_namespace_with_lease
+        (namespace_, lease, &identity, TRUE, &store), ==, WYRELOG_E_OK);
+  wyl_fact_store_close (store);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+        (namespace_, &lease), ==, WYRELOG_E_OK);
   wyl_fact_artifact_mutation_lease_free (lease);
   wyl_fact_artifact_namespace_free (namespace_);
   wyl_fact_graph_provisioned_pair_free (pair);
@@ -301,8 +409,13 @@ main (int argc, char *argv[])
   g_test_add_func (
     "/fact/store-provisioned/open-provisioned-pair-persists-across-reopen",
     test_open_provisioned_pair_persists_across_reopen);
-  g_test_add_func ("/fact/store-provisioned/leased-open-rejects-audit",
-      test_leased_open_rejects_audit_database);
+  for (gsize i = 0; i < G_N_ELEMENTS (metadata_cases); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact/store-provisioned/leased-open-rejects-%s",
+            metadata_cases[i].name);
+    g_test_add_data_func (name, &metadata_cases[i],
+        test_leased_open_rejects_corruption);
+  }
 #ifdef __APPLE__
   g_test_add_func (
     "/fact/store-provisioned/malformed-darwin-evidence-fails-before-filesystem",
