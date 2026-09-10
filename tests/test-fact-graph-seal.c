@@ -3,6 +3,9 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-seal-private.h"
@@ -12,6 +15,43 @@
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
+
+typedef struct
+{
+  guint64 device;
+  guint64 file;
+} FactGraphFileIdentity;
+
+static gboolean
+fact_graph_file_get_identity (const gchar *path, FactGraphFileIdentity *out)
+{
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *path_utf16 = g_utf8_to_utf16 (path, -1,
+          NULL, NULL, NULL);
+  if (path_utf16 == NULL)
+    return FALSE;
+  HANDLE handle = CreateFileW ((LPCWSTR) path_utf16, 0,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (handle == INVALID_HANDLE_VALUE)
+    return FALSE;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  gboolean ok = GetFileInformationByHandle (handle, &info);
+  CloseHandle (handle);
+  if (!ok)
+    return FALSE;
+  out->device = info.dwVolumeSerialNumber;
+  out->file = ((guint64) info.nFileIndexHigh << 32) | info.nFileIndexLow;
+  return TRUE;
+#else
+  GStatBuf stat_buf = { 0 };
+  if (g_stat (path, &stat_buf) != 0)
+    return FALSE;
+  out->device = stat_buf.st_dev;
+  out->file = stat_buf.st_ino;
+  return TRUE;
+#endif
+}
 
 /* The graph fixture is duplicated from tests/test-fact-replay.c rather than
  * shared.  Extracting it would mean deleting it there, and two open pull
@@ -1196,8 +1236,8 @@ test_unseal_replacement_after_validation_and_retry (void)
           "facts.duckdb.validated", NULL);
   g_autofree gchar *foreign_path = g_build_filename (path.storage_path,
           "facts.duckdb.foreign", NULL);
-  GStatBuf original_stat = { 0 };
-  g_assert_cmpint (g_stat (fact_path, &original_stat), ==, 0);
+  FactGraphFileIdentity original_identity = { 0 };
+  g_assert_true (fact_graph_file_get_identity (fact_path, &original_identity));
   WylPolicyGraphAuthorityRecord *original_authority = NULL;
   g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
       "tenant-a", "orders", &original_authority), ==, WYRELOG_E_OK);
@@ -1212,10 +1252,10 @@ test_unseal_replacement_after_validation_and_retry (void)
       &foreign_length, &error));
   g_assert_true (g_file_set_contents (foreign_path, foreign_bytes,
       (gssize) foreign_length, &error));
-  GStatBuf foreign_stat = { 0 };
-  g_assert_cmpint (g_stat (foreign_path, &foreign_stat), ==, 0);
-  g_assert_cmpuint (foreign_stat.st_dev, ==, original_stat.st_dev);
-  g_assert_cmpuint (foreign_stat.st_ino, !=, original_stat.st_ino);
+  FactGraphFileIdentity foreign_identity = { 0 };
+  g_assert_true (fact_graph_file_get_identity (foreign_path, &foreign_identity));
+  g_assert_cmpuint (foreign_identity.device, ==, original_identity.device);
+  g_assert_cmpuint (foreign_identity.file, !=, original_identity.file);
   duckdb_database foreign_db = NULL;
   duckdb_connection foreign_connection = NULL;
   duckdb_result foreign_result = { 0 };
@@ -1274,12 +1314,12 @@ test_unseal_replacement_after_validation_and_retry (void)
     /* A blocked replacement is only valid evidence when the original target
      * is still present, the substitute was not created, and its physical
      * identity is unchanged. */
-    GStatBuf blocked_stat = { 0 };
+    FactGraphFileIdentity blocked_identity = { 0 };
     g_assert_true (g_file_test (fact_path, G_FILE_TEST_IS_REGULAR));
     g_assert_false (g_file_test (replacement_path, G_FILE_TEST_EXISTS));
-    g_assert_cmpint (g_stat (fact_path, &blocked_stat), ==, 0);
-    g_assert_cmpuint (blocked_stat.st_dev, ==, original_stat.st_dev);
-    g_assert_cmpuint (blocked_stat.st_ino, ==, original_stat.st_ino);
+    g_assert_true (fact_graph_file_get_identity (fact_path, &blocked_identity));
+    g_assert_cmpuint (blocked_identity.device, ==, original_identity.device);
+    g_assert_cmpuint (blocked_identity.file, ==, original_identity.file);
     g_assert_true (fault.replacement_errno == EACCES
         || fault.replacement_errno == EBUSY
         || fault.replacement_errno == EPERM);
