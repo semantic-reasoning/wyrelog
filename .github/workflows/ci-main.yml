@@ -232,11 +232,13 @@ jobs:
         run: |
           meson compile -C build-secure-duckdb -j 1 \
             test-fact-store-provisioned \
+            test-fact-graph-seal \
             test-fact-store-forget-transaction \
             test-fact-store-forget-transaction-provision-helper \
             test-fact-store-forget-transaction-provisioned
           meson test -C build-secure-duckdb --no-rebuild \
             fact-store-provisioned \
+            fact-graph-seal \
             fact-store-forget-transaction \
             fact-store-forget-transaction-provisioned \
             --print-errorlogs

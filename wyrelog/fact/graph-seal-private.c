@@ -430,6 +430,9 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   *out_lease = NULL;
   WylPolicyGraphAuthorityRecord *authority = NULL;
   g_autofree gchar *operation_uuid = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+#endif
   wyrelog_error_t rc = wyl_policy_store_read_graph_authority (policy,
           graph_info->tenant_id, graph_info->graph_id, &authority);
   if (rc != WYRELOG_E_OK)
@@ -452,14 +455,33 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
           g_ptr_array_index (records, i);
       if (g_strcmp0 (record->graph_id, graph_info->graph_id) == 0
           && record->phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE) {
+        if (g_strcmp0 (record->tenant_id, authority->tenant_id) != 0
+            || g_strcmp0 (record->store_uuid, authority->store_uuid) != 0) {
+          rc = WYRELOG_E_POLICY;
+          break;
+        }
         provisioned = TRUE;
         operation_uuid = g_strdup (record->op_uuid);
+#ifdef __APPLE__
+        gsize length = 0;
+        const guint8 *bytes = record->darwin_operation_evidence == NULL
+            ? NULL : g_bytes_get_data (record->darwin_operation_evidence,
+                &length);
+        if (bytes == NULL
+            || length != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+          rc = WYRELOG_E_POLICY;
+        else
+          rc = wyl_fact_graph_darwin_evidence_decode (bytes, length,
+                  record->op_uuid, &evidence);
+#endif
         break;
       }
     }
     g_ptr_array_unref (records);
   }
   wyl_policy_graph_authority_record_free (authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (!provisioned)
     return WYRELOG_E_OK;
 
@@ -504,8 +526,14 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK && operation_uuid == NULL)
     rc = WYRELOG_E_NOMEM;
   if (rc == WYRELOG_E_OK)
+#ifdef __APPLE__
+    rc =
+        wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+          (&directory, operation_uuid, &evidence, &pair);
+#else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             operation_uuid, &pair);
+#endif
   if (rc == WYRELOG_E_OK) {
     artifact_opened = TRUE;
     rc = wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,

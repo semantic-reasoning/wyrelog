@@ -866,6 +866,12 @@ wyl_fact_store_open_provisioned_namespace_with_lease
   self->conn = conn;
   self->provisioned_bridge = bridge;
   g_mutex_init (&self->lock);
+  rc = reject_audit_database_unlocked (self);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_close (self);
+    wyl_fact_store_identity_process_guard_unlock ();
+    return rc;
+  }
   self->identity_tenant_id = g_strdup (identity->tenant_id);
   self->identity_graph_id = g_strdup (identity->graph_id);
   self->identity_store_uuid = g_strdup (identity->store_uuid);

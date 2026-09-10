@@ -979,6 +979,52 @@ test_unseal_requires_handle_write_lease (void)
   seal_fixture_clear (&fixture);
 }
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+static void
+test_unseal_rejects_provisioning_mismatch (gconstpointer data)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-unseal-record-mismatch-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+  sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+  /* Model an inconsistent persisted record, bypassing only the fixture's
+   * immutable-record guard so the read-side validation is exercised. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_immutable;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  const gchar *sql = GPOINTER_TO_INT (data) == 0
+      ? "UPDATE fact_graph_provisioning SET "
+      "store_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c079999';"
+      : GPOINTER_TO_INT (data) == 1
+      ? "UPDATE fact_graph_provisioning SET darwin_operation_evidence=NULL;"
+      : "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=zeroblob(length(darwin_operation_evidence));";
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
+      fixture.root, &info, fixture.manager, -1, &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_false (outcome.runtime_admission_open);
+  g_assert_false (outcome.status.queryable);
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+  wyl_policy_graph_authority_record_free (authority);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+#endif
+
 typedef struct
 {
   sqlite3 *db;
@@ -1945,6 +1991,16 @@ main (int argc, char **argv)
       GINT_TO_POINTER (FALSE), test_unseal_commit_failure_stays_closed);
   g_test_add_data_func ("/fact-graph-seal/unseal-commit-vetoed",
       GINT_TO_POINTER (TRUE), test_unseal_commit_failure_stays_closed);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_test_add_data_func ("/fact-graph-seal/unseal-provisioning-uuid-mismatch",
+      GINT_TO_POINTER (0), test_unseal_rejects_provisioning_mismatch);
+#ifdef __APPLE__
+  g_test_add_data_func ("/fact-graph-seal/unseal-missing-darwin-evidence",
+      GINT_TO_POINTER (1), test_unseal_rejects_provisioning_mismatch);
+  g_test_add_data_func ("/fact-graph-seal/unseal-invalid-darwin-evidence",
+      GINT_TO_POINTER (2), test_unseal_rejects_provisioning_mismatch);
+#endif
+#endif
   g_test_add_func ("/fact-graph-seal/unseal-build-failure-reseals",
       test_unseal_build_failure_reseals_and_stays_closed);
   g_test_add_func ("/fact-graph-seal/unseal-reseal-failure-reported",
