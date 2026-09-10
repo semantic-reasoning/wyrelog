@@ -14,6 +14,7 @@
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/graph-seal-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -145,6 +146,20 @@ dup_safe_api_error_code (const gchar *body)
   }
   return g_strndup (start, length);
 }
+
+#if defined(WYL_HAS_FACT_STORE) && defined(WYL_TEST_HANDLE_SEAMS)
+/* Fails the S4 durable write with the rc the handler maps to 404.  The abort
+ * path fills outcome.status before returning, so this is what puts owned
+ * strings in the outcome on a route that answers an error. */
+static wyrelog_error_t
+seal_durable_write_not_found (const gchar *phase, gpointer user_data)
+{
+  (void) user_data;
+  if (g_strcmp0 (phase, WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE) == 0)
+    return WYRELOG_E_NOT_FOUND;
+  return WYRELOG_E_OK;
+}
+#endif
 
 static wyrelog_error_t
 grant_fact_http_authority (WylHandle *handle, const gchar *subject)
@@ -1379,6 +1394,35 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       return 103;
     }
   }
+#endif
+
+#if defined(WYL_HAS_FACT_STORE) && defined(WYL_TEST_HANDLE_SEAMS)
+  /* A seal that answers 404 must still release the outcome it was handed.
+   * The abort path fills outcome.status, whose key owns two strings, so a
+   * return that skips the clear leaks them -- caught by the sanitizer job
+   * rather than by an assertion here.  The durable write never commits, so
+   * the graph is left admitting and the successful seal below is unaffected.
+   */
+  g_clear_pointer (&body, g_free);
+  wyl_fact_graph_seal_set_test_hook (seal_durable_write_not_found, NULL);
+  rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
+          admin_token, NULL, &status, &body);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  if (rc != 0)
+    return rc;
+  if (status != 404) {
+    g_printerr ("faulted seal returned HTTP %u: %s\n", status, body);
+    return 121;
+  }
+  WylFactGraphRuntimeStatus aborted_status = { 0 };
+  if (wyl_handle_get_fact_graph_runtime_status (handle, WYL_TENANT_DEFAULT,
+      "orders", &aborted_status) != WYRELOG_E_OK
+      || aborted_status.admission != WYL_FACT_GRAPH_ADMISSION_OPEN) {
+    wyl_fact_graph_runtime_status_clear (&aborted_status);
+    g_printerr ("faulted seal left the graph closed\n");
+    return 122;
+  }
+  wyl_fact_graph_runtime_status_clear (&aborted_status);
 #endif
 
   g_clear_pointer (&body, g_free);
