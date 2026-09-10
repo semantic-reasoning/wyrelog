@@ -18,7 +18,11 @@
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "wyrelog/fact/provisioning-run-private.h"
 #include "wyrelog/fact/store-open-private.h"
+#include "wyrelog/fact/secure-duckdb-bridge-private.h"
 #include "wyrelog/wyl-id-private.h"
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_fact_artifact_namespace_open_provisioned_pair_internal
+  (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
 #endif
 
 #define TEST(name) g_test_message ("%s", name)
@@ -1011,6 +1015,120 @@ provisioned_871_append_one (wyl_fact_store_t *store, const gchar *tenant_id,
       &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
   return g_steal_pointer (&table);
+}
+
+static void
+test_unleased_replay_rejects_metadata (void)
+{
+  const gchar *tenant = "tenant-1000";
+  const gchar *graph = "orders";
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-replay-metadata-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant, &created),
+      ==, WYRELOG_E_OK);
+  provisioned_871_create_graph (policy, root, tenant, graph);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+      tenant, graph, TRUE, &store), ==, WYRELOG_E_OK);
+  g_autofree gchar *table = provisioned_871_append_one (store, tenant, graph,
+          "batch-1000", "key-1000", "order-b", 22, FALSE);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = tenant, .graph_id = graph, .schema_version = 1,
+  };
+  g_autoptr (WylEngine) engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+      &engine), ==, WYRELOG_E_OK);
+  assert_replayed_order_b_only (engine);
+  g_clear_pointer (&engine, wyl_engine_close);
+
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (policy, tenant,
+      &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  WylPolicyGraphProvisioningRecord *record = g_ptr_array_index (records, 0);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (policy, root,
+      tenant, graph, FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (record->darwin_operation_evidence,
+          &length);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (bytes, length,
+      record->op_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
+#endif
+  WylFactArtifactNamespace *namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_provisioned_pair_internal
+        (pair, &namespace_), ==, WYRELOG_E_OK);
+  WylSecureDuckdbBridge *bridge = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  duckdb_result result;
+  g_assert_cmpint (duckdb_query (conn, "UPDATE fact_store_metadata SET "
+      "value='01890f47-3c4b-7cc2-b8c4-dc0c0c079999' "
+      "WHERE key='store_uuid';", &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+      &engine), ==, WYRELOG_E_POLICY);
+  g_assert_null (engine);
+  g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_summary_t summary = { 0 };
+  (void) wyl_fact_replay_policy_graphs (policy, root, manager, &summary);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 0);
+  g_assert_cmpuint (summary.graphs_degraded, ==, 1);
+  WylFactGraphKey runtime_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&runtime_key, tenant, graph), ==,
+      WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &runtime_key, &snapshot), !=, WYRELOG_E_OK);
+  g_assert_null (snapshot);
+
+  g_assert_cmpint (wyl_secure_duckdb_bridge_open_live_pair (namespace_, TRUE,
+      &bridge, &db, &conn), ==, WYRELOG_E_OK);
+  g_autofree gchar *restore = g_strdup_printf
+        ("UPDATE fact_store_metadata SET value='%s' WHERE key='store_uuid';",
+          record->store_uuid);
+  g_assert_cmpint (duckdb_query (conn, restore, &result), ==, DuckDBSuccess);
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  g_assert_cmpint (wyl_secure_duckdb_bridge_release_live (bridge), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+      &engine), ==, WYRELOG_E_OK);
+  assert_replayed_order_b_only (engine);
+  g_clear_pointer (&engine, wyl_engine_close);
+  wyl_fact_graph_key_clear (&runtime_key);
+  g_clear_pointer (&manager, wyl_fact_graph_runtime_manager_unref);
+  wyl_fact_artifact_namespace_free (namespace_);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+  g_ptr_array_unref (records);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
 }
 
 static gint64
@@ -4031,5 +4149,9 @@ main (int argc, char **argv)
       test_mutation_refused_by_a_barrier_is_not_degraded);
   g_test_add_func ("/fact-replay/evicted-closed-outranks-sealed",
       test_evicted_and_closed_reports_evicted_not_sealed);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  g_test_add_func ("/fact-replay/unleased-metadata-refused",
+      test_unleased_replay_rejects_metadata);
+#endif
   return g_test_run ();
 }

@@ -18,6 +18,7 @@
 #include "wyrelog/policy/store-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "fact/secure-duckdb-bridge-private.h"
+#include "wyrelog/fact/store-open-private.h"
 G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
   (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
@@ -222,7 +223,8 @@ capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
  * mode 0600, so without the chmod the build fails at its first step with
  * WYRELOG_E_POLICY and every later ingredient is irrelevant. */
 static void
-materialize_graph_engine (wyl_policy_store_t *policy, const gchar *tenant_id,
+materialize_graph_engine (wyl_policy_store_t *policy,
+    const gchar *root G_GNUC_UNUSED, const gchar *tenant_id,
     const gchar *graph_id)
 {
   GraphPathProbe probe = { tenant_id, graph_id, NULL };
@@ -235,6 +237,19 @@ materialize_graph_engine (wyl_policy_store_t *policy, const gchar *tenant_id,
 
   {
     g_autoptr (wyl_fact_store_t) store = NULL;
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy,
+        tenant_id, graph_id, &authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (authority);
+    gboolean legacy = authority->lifecycle_state
+        == WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED;
+    wyl_policy_graph_authority_record_free (authority);
+    if (!legacy)
+      g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+          tenant_id, graph_id, TRUE, &store), ==, WYRELOG_E_OK);
+    else
+#endif
     g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
@@ -590,7 +605,7 @@ seal_fixture_init (SealFixture *fixture, const gchar *template_name)
       WYRELOG_E_OK);
   create_graph_with_schema (fixture->policy, fixture->root, "tenant-a",
       "orders");
-  materialize_graph_engine (fixture->policy, "tenant-a", "orders");
+  materialize_graph_engine (fixture->policy, fixture->root, "tenant-a", "orders");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->manager), ==,
       WYRELOG_E_OK);
   wyl_fact_replay_summary_t summary = { 0 };
@@ -622,7 +637,7 @@ authority_seal_fixture_init (SealFixture *fixture, const gchar *template_name)
       WYRELOG_E_OK);
   create_authority_graph_with_schema (fixture->policy, fixture->root,
       "tenant-a", "orders");
-  materialize_graph_engine (fixture->policy, "tenant-a", "orders");
+  materialize_graph_engine (fixture->policy, fixture->root, "tenant-a", "orders");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->manager), ==,
       WYRELOG_E_OK);
   wyl_fact_replay_summary_t summary = { 0 };
@@ -647,7 +662,7 @@ test_unseal_rebuilds_before_reopening (void)
       WYRELOG_E_OK);
   create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
       "orders");
-  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  materialize_graph_engine (fixture.policy, fixture.root, "tenant-a", "orders");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
       WYRELOG_E_OK);
   wyl_fact_replay_summary_t summary = { 0 };
@@ -994,7 +1009,7 @@ test_unseal_build_failure_reseals_and_stays_closed (void)
       WYRELOG_E_OK);
   create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
       "orders");
-  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  materialize_graph_engine (fixture.policy, fixture.root, "tenant-a", "orders");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
       WYRELOG_E_OK);
   wyl_fact_replay_summary_t summary = { 0 };
@@ -1425,7 +1440,7 @@ test_unseal_rejects_graph_schema_mismatch (void)
       WYRELOG_E_OK);
   create_authority_graph_with_schema (fixture.policy, fixture.root, "tenant-a",
       "orders");
-  materialize_graph_engine (fixture.policy, "tenant-a", "orders");
+  materialize_graph_engine (fixture.policy, fixture.root, "tenant-a", "orders");
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
       WYRELOG_E_OK);
   wyl_fact_replay_summary_t summary = { 0 };
@@ -1760,7 +1775,7 @@ test_seal_establishes_the_barrier_and_the_durable_bit (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   create_graph_with_schema (policy, root, "tenant-a", "orders");
-  materialize_graph_engine (policy, "tenant-a", "orders");
+  materialize_graph_engine (policy, root, "tenant-a", "orders");
 
   g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
