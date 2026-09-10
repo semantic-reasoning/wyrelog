@@ -367,7 +367,7 @@ def validate(files: dict[str, str]) -> None:
 
     self_test_at = meson.index("test('fact-store-connection-boundary-self'")
     self_test_block = meson[self_test_at:meson.index("\n\n", self_test_at)]
-    if "timeout : 1800" not in self_test_block \
+    if "timeout : 900" not in self_test_block \
             or "is_parallel : false" not in self_test_block:
         raise AssertionError(
             "connection boundary self-test lost its serialized CI budget"
