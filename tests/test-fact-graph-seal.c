@@ -2018,6 +2018,9 @@ test_unseal_replacement_after_validation_and_retry (void)
       "tenant-a", "orders", &original_authority), ==, WYRELOG_E_OK);
   g_assert_nonnull (original_authority);
   g_assert_nonnull (original_authority->store_uuid);
+  WylPolicyGraphLifecycleState original_lifecycle =
+      original_authority->lifecycle_state;
+  guint64 original_generation = original_authority->lifecycle_generation;
   g_autofree gchar *original_uuid = g_strdup (original_authority->store_uuid);
   wyl_policy_graph_authority_record_free (original_authority);
   g_autofree gchar *foreign_bytes = NULL;
@@ -2124,6 +2127,8 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_cmpint (authority->lifecycle_state, ==,
         WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
     g_assert_cmpstr (authority->store_uuid, ==, original_uuid);
+    g_assert_cmpuint (authority->lifecycle_generation, ==,
+        original_generation + 2);
     wyl_policy_graph_authority_record_free (authority);
     g_assert_cmpint (g_remove (fact_path), ==, 0);
     g_assert_cmpint (g_rename (replacement_path, fact_path), ==, 0);
@@ -2131,6 +2136,39 @@ test_unseal_replacement_after_validation_and_retry (void)
   wyl_fact_graph_unseal_outcome_clear (&outcome);
 
   if (!fault.replacement_blocked && !fault.replacement_setup_failed) {
+    /* Do not let the retry inherit either the policy connection or the
+     * runtime manager that observed the failed publication.  Reopen both
+     * over the same root, as a restarted process would, before checking the
+     * durable compensation snapshot and retrying. */
+    g_clear_pointer (&fixture.manager, wyl_fact_graph_runtime_manager_unref);
+    g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *policy_path = g_build_filename (fixture.root,
+            "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.manager), ==,
+        WYRELOG_E_OK);
+    wyl_fact_replay_summary_t summary = { 0 };
+    g_assert_cmpint (wyl_fact_replay_policy_graphs (fixture.policy, fixture.root,
+        fixture.manager, &summary), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (summary.graphs_sealed, ==, 1);
+
+    WylPolicyGraphAuthorityRecord *fresh_authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        info.tenant_id, info.graph_id, &fresh_authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (fresh_authority);
+    g_assert_cmpint (fresh_authority->lifecycle_state, ==, original_lifecycle);
+    g_assert_cmpint (fresh_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    g_assert_cmpuint (fresh_authority->lifecycle_generation, ==,
+        original_generation + 2);
+    g_assert_cmpstr (fresh_authority->store_uuid, ==, original_uuid);
+    wyl_policy_graph_authority_record_free (fresh_authority);
+    FactGraphFileIdentity fresh_identity = { 0 };
+    g_assert_true (fact_graph_file_get_identity (fact_path, &fresh_identity));
+    g_assert_cmpuint (fresh_identity.device, ==, original_identity.device);
+    g_assert_cmpuint (fresh_identity.file, ==, original_identity.file);
+
     WylFactGraphUnsealOutcome retry = { 0 };
     g_assert_cmpint (wyl_fact_graph_unseal_for_test (fixture.policy,
         fixture.root, &info, fixture.manager, -1, &retry), ==, WYRELOG_E_OK);
@@ -2141,6 +2179,20 @@ test_unseal_replacement_after_validation_and_retry (void)
         ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
     g_assert_cmpint (retry.status.admission, ==,
         WYL_FACT_GRAPH_ADMISSION_OPEN);
+    WylPolicyGraphAuthorityRecord *recovered_authority = NULL;
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+        info.tenant_id, info.graph_id, &recovered_authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (recovered_authority);
+    g_assert_cmpint (recovered_authority->lifecycle_state, ==,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+    g_assert_cmpuint (recovered_authority->lifecycle_generation, ==,
+        original_generation + 3);
+    g_assert_cmpstr (recovered_authority->store_uuid, ==, original_uuid);
+    wyl_policy_graph_authority_record_free (recovered_authority);
+    FactGraphFileIdentity recovered_identity = { 0 };
+    g_assert_true (fact_graph_file_get_identity (fact_path, &recovered_identity));
+    g_assert_cmpuint (recovered_identity.device, ==, original_identity.device);
+    g_assert_cmpuint (recovered_identity.file, ==, original_identity.file);
     wyl_fact_graph_unseal_outcome_clear (&retry);
   }
 
