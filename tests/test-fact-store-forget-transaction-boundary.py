@@ -113,6 +113,44 @@ def validate(files: dict[str, str]) -> None:
     ]
     meson = files["tests/meson.build"]
 
+    coordination_executable = (
+        "test_fact_seal_unseal_coordination = executable("
+    )
+    coordination_registration = (
+        "test('fact-seal-unseal-coordination',"
+    )
+    require_once(
+        meson,
+        coordination_executable,
+        "opposing lifecycle coordination executable is missing",
+    )
+    require_once(
+        meson,
+        coordination_registration,
+        "opposing lifecycle coordination test registration is missing",
+    )
+    coordination_start = meson.index(coordination_executable)
+    coordination_guard = meson.rfind(
+        "  if get_option('enable_secure_duckdb_bridge').enabled()"
+        " and host_machine.system() != 'windows'",
+        0,
+        coordination_start,
+    )
+    coordination_end = meson.find("\n  endif", coordination_start)
+    if coordination_guard == -1 or coordination_end < coordination_start:
+        raise AssertionError(
+            "opposing lifecycle coordination must stay in its secure POSIX guard"
+        )
+    coordination_body = meson[coordination_guard:coordination_end]
+    if "enable_secure_duckdb_bridge" not in coordination_body:
+        raise AssertionError(
+            "opposing lifecycle coordination escaped the secure DuckDB guard"
+        )
+    if "host_machine.system() != 'windows'" not in coordination_body:
+        raise AssertionError(
+            "opposing lifecycle coordination escaped the POSIX guard"
+        )
+
     transaction = function_body(store, "wyl_fact_store_transaction_finish")
     completion = function_body(store, "complete_forget_intent_unlocked")
     for token, message in (
@@ -746,6 +784,16 @@ def validate(files: dict[str, str]) -> None:
         "            fact-store-forget-transaction-provisioned \\\n"
         "            --print-errorlogs"
     )
+    coordination_step_name = (
+        "      - name: Test opposing fact lifecycle wrappers with secure DuckDB"
+    )
+    coordination_commands = (
+        "meson compile -C build-secure-duckdb -j 1 \\\n"
+        "            test-fact-seal-unseal-coordination\n"
+        "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+        "            fact-seal-unseal-coordination \\\n"
+        "            --print-errorlogs"
+    )
     windows_step_name = (
         "      - name: Test fact forget transaction cleanup seam (clang-cl)"
     )
@@ -800,6 +848,38 @@ def validate(files: dict[str, str]) -> None:
             raise AssertionError(
                 f"{workflow_path} POSIX cleanup test escaped the secure lease"
             )
+        require_once(
+            workflow,
+            coordination_step_name,
+            f"{workflow_path} must run opposing lifecycle coordination coverage",
+        )
+        require_once(
+            workflow,
+            coordination_commands,
+            f"{workflow_path} opposing lifecycle coordination commands drifted",
+        )
+        coordination_step_start = workflow.index(coordination_step_name)
+        coordination_step_end = workflow.index(
+            "\n      - name:", coordination_step_start + len(coordination_step_name)
+        )
+        coordination_step = workflow[coordination_step_start:coordination_step_end]
+        if "runner.os == 'Linux'" in coordination_step or "if:" in coordination_step:
+            raise AssertionError(
+                f"{workflow_path} conditionally disabled opposing lifecycle coverage"
+            )
+        if not (
+            workflow.index(posix_step_name)
+            < coordination_step_start
+            < workflow.index("      - name: Remove secure DuckDB compile swap")
+        ):
+            raise AssertionError(
+                f"{workflow_path} opposing lifecycle coverage escaped the secure lease"
+            )
+        for forbidden in ("continue-on-error", "|| true", "retry", "NDEBUG"):
+            if forbidden in coordination_step:
+                raise AssertionError(
+                    f"{workflow_path} tolerated opposing lifecycle failure: {forbidden}"
+                )
         require_once(
             workflow,
             windows_step_name,
@@ -1531,6 +1611,23 @@ def self_test(baseline: dict[str, str]) -> None:
         "# direct-final Darwin.",
         "missing Meson Darwin evidence boundary",
     )
+    meson_coordination_start = baseline["tests/meson.build"].index(
+        "  if get_option('enable_secure_duckdb_bridge').enabled()"
+        " and host_machine.system() != 'windows'",
+    )
+    meson_coordination_end = baseline["tests/meson.build"].index(
+        "\n  test_fact_compound = executable(", meson_coordination_start
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        baseline["tests/meson.build"][
+            meson_coordination_start:meson_coordination_end
+        ],
+        "",
+        "missing opposing lifecycle coordination target",
+        expect="opposing lifecycle coordination executable is missing",
+    )
     workflow_runtime_block = (
         "          meson test -C build-secure-duckdb --no-rebuild \\\n"
         "            fact-store-provisioned \\\n"
@@ -1544,6 +1641,27 @@ def self_test(baseline: dict[str, str]) -> None:
         ".github/workflows/ci-pr.yml",
         ".github/workflows/ci-main.yml",
     ):
+        coordination_step = (
+            "      - name: Test opposing fact lifecycle wrappers with secure DuckDB\n"
+            "        run: |\n"
+            "          meson compile -C build-secure-duckdb -j 1 \\\n"
+            "            test-fact-seal-unseal-coordination\n"
+            "          meson test -C build-secure-duckdb --no-rebuild \\\n"
+            "            fact-seal-unseal-coordination \\\n"
+            "            --print-errorlogs"
+        )
+        expect_rejected(
+            baseline,
+            workflow_path,
+            coordination_step,
+            coordination_step.replace(
+                "      - name: Test opposing fact lifecycle wrappers with secure DuckDB\n",
+                "      - name: Test opposing fact lifecycle wrappers with secure DuckDB\n"
+                "        if: false\n",
+            ),
+            f"disabled opposing lifecycle coordination coverage in {workflow_path}",
+            expect="conditionally disabled opposing lifecycle coverage",
+        )
         expect_rejected(
             baseline,
             workflow_path,

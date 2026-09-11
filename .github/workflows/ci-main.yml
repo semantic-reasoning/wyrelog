@@ -254,6 +254,14 @@ jobs:
             fact-store-duckdb-hardening-boundary-self-test \
             --print-errorlogs
 
+      - name: Test opposing fact lifecycle wrappers with secure DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 1 \
+            test-fact-seal-unseal-coordination
+          meson test -C build-secure-duckdb --no-rebuild \
+            fact-seal-unseal-coordination \
+            --print-errorlogs
+
       - name: Test audit DuckDB hardening with source DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 1 \

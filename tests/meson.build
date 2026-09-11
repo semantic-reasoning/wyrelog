@@ -1851,6 +1851,21 @@ if get_option('enable_fact_store').allowed()
     is_parallel : host_machine.system() != 'windows',
   )
 
+  if get_option('enable_secure_duckdb_bridge').enabled() and host_machine.system() != 'windows'
+    test_fact_seal_unseal_coordination = executable('test-fact-seal-unseal-coordination',
+      'test-fact-seal-unseal-coordination.c',
+      'fact-test-support.c',
+      c_args : ['-DWYL_HAS_FACT_STORE', '-DWYL_HAS_SECURE_DUCKDB_BRIDGE',
+        '-DWYL_TEST_HANDLE_SEAMS'] + fact_test_support_c_args,
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_handle_test_seams_dep, duckdb_dep, sqlite_dep]
+          + fact_test_support_deps,
+    )
+    test('fact-seal-unseal-coordination', test_fact_seal_unseal_coordination,
+      timeout : 90,
+    )
+  endif
+
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
     c_args : [
