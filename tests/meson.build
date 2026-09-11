@@ -2040,14 +2040,11 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # Linux asserts the retained hard-link pair; Darwin asserts a direct final
-  # bound to durable operation evidence. Windows has no durable provisioning
-  # evidence home yet (#816).
-  if host_machine.system() != 'windows'
-    test('fact-provisioning-run', test_fact_provisioning_run,
-      timeout : host_machine.system() == 'darwin' ? 300 : 60,
-    )
-  endif
+  # Linux asserts the retained hard-link pair; Darwin and Windows assert a
+  # direct final bound to durable operation evidence.
+  test('fact-provisioning-run', test_fact_provisioning_run,
+    timeout : host_machine.system() == 'darwin' ? 300 : 60,
+  )
   test_fact_store_provisioned = executable(
     'test-fact-store-provisioned',
     'test-fact-store-provisioned.c',
@@ -2057,14 +2054,11 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
       + fact_test_support_deps,
   )
-  # Linux retains the stage/final hard-link pair; Darwin opens its direct final
-  # through durable policy-owned operation evidence. Windows remains compile
-  # only until its provisioning evidence has a durable authority home (#816).
-  if host_machine.system() != 'windows'
-    test('fact-store-provisioned', test_fact_store_provisioned,
-      timeout : host_machine.system() == 'darwin' ? 300 : 60,
-    )
-  endif
+  # Linux retains the stage/final hard-link pair; Darwin and Windows open their
+  # direct final through durable policy-owned operation evidence.
+  test('fact-store-provisioned', test_fact_store_provisioned,
+    timeout : host_machine.system() == 'darwin' ? 300 : 60,
+  )
 
   if host_machine.system() != 'windows'
     test_fact_store_forget_transaction_provision_helper = executable(
