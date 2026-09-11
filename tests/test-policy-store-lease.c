@@ -63,7 +63,8 @@ counting_seal (gpointer data, const guint8 *plaintext, gsize plaintext_len,
   (void) plaintext_len;
   if (out_blob != NULL)
     *out_blob = (wyl_sealed_blob_t) {
-    0};
+      0
+    };
   return WYRELOG_E_INTERNAL;
 }
 
@@ -95,7 +96,8 @@ counting_clear_sealed_blob (gpointer data, wyl_sealed_blob_t *blob)
     return;
   g_free (blob->bytes);
   *blob = (wyl_sealed_blob_t) {
-  0};
+    0
+  };
 }
 
 static void
@@ -221,7 +223,7 @@ owned_wipe (gpointer data)
         run_helper_exit (provider->probe_path_on_wipe);
   if (provider->truncate_path_on_wipe != NULL)
     g_assert_true (g_file_set_contents (provider->truncate_path_on_wipe, "", 0,
-            NULL));
+        NULL));
 }
 
 static void
@@ -240,7 +242,8 @@ owned_clear_sealed_blob (gpointer data, wyl_sealed_blob_t *blob)
     return;
   g_free (blob->bytes);
   *blob = (wyl_sealed_blob_t) {
-  0};
+    0
+  };
 }
 
 static const wyl_keyprovider_vtable_t owned_vtable = {
@@ -315,12 +318,11 @@ static gint
 run_helper_exit (const gchar *path)
 {
   const gchar *argv[] = { test_lease_self_path, LEASE_HELPER_ARG, path,
-    "--oneshot", NULL
-  };
+                          "--oneshot", NULL};
   GError *error = NULL;
   GSubprocess *process = g_subprocess_newv (argv,
-      G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-      &error);
+          G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+          &error);
   g_assert_no_error (error);
   g_assert_true (g_subprocess_wait (process, NULL, &error));
   g_assert_no_error (error);
@@ -353,7 +355,7 @@ test_provider_lifetime_success (void)
   };
   wyl_policy_store_t *encrypted = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&encrypted_options,
-          &encrypted), ==, WYRELOG_E_OK);
+      &encrypted), ==, WYRELOG_E_OK);
   g_assert_cmpuint (encrypted_counters.probes, ==, 1);
   g_assert_cmpuint (encrypted_counters.derives, ==, 1);
   g_assert_cmpuint (encrypted_counters.wipes, ==, 0);
@@ -374,7 +376,7 @@ test_provider_lifetime_success (void)
   };
   wyl_policy_store_t *plaintext = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&plaintext_options,
-          &plaintext), ==, WYRELOG_E_POLICY);
+      &plaintext), ==, WYRELOG_E_POLICY);
   g_assert_null (plaintext);
   g_assert_cmpuint (plaintext_counters.probes, ==, 1);
   g_assert_cmpuint (plaintext_counters.derives, ==, 0);
@@ -387,7 +389,7 @@ test_provider_lifetime_success (void)
       plaintext_provider_opts (":memory:", &memory_provider);
   wyl_policy_store_t *memory = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&memory_options,
-          &memory), ==, WYRELOG_E_OK);
+      &memory), ==, WYRELOG_E_OK);
   g_assert_cmpuint (memory_provider.probes, ==, 1);
   wyl_policy_store_close (memory);
   g_assert_cmpuint (memory_provider.wipes, ==, 1);
@@ -395,10 +397,10 @@ test_provider_lifetime_success (void)
 
   CountingProvider stack_provider = { 0 };
   wyl_policy_store_open_options_t stack_options = encrypted_opts (stack_path,
-      &stack_provider);
+          &stack_provider);
   wyl_policy_store_t *stack_store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&stack_options,
-          &stack_store), ==, WYRELOG_E_OK);
+      &stack_store), ==, WYRELOG_E_OK);
   g_assert_false (stack_provider.wiped);
   g_assert_cmpuint (stack_provider.wipes, ==, 0);
   wyl_policy_store_close (stack_store);
@@ -432,7 +434,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
   };
   wyl_policy_store_t *store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&incomplete_options,
-          &store), ==, WYRELOG_E_INVALID);
+      &store), ==, WYRELOG_E_INVALID);
   g_assert_null (store);
   g_assert_cmpuint (incomplete_counters.probes, ==, 0);
   g_assert_cmpuint (incomplete_counters.wipes, ==, 1);
@@ -451,7 +453,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&null_vtable_options,
-          &store), ==, WYRELOG_E_INVALID);
+      &store), ==, WYRELOG_E_INVALID);
   g_assert_null (store);
   g_assert_cmpuint (null_vtable_counters.wipes, ==, 0);
   g_assert_cmpuint (null_vtable_counters.frees, ==, 1);
@@ -471,7 +473,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&missing_wipe_options,
-          &store), ==, WYRELOG_E_INVALID);
+      &store), ==, WYRELOG_E_INVALID);
   g_assert_null (store);
   g_assert_cmpuint (missing_wipe_counters.wipes, ==, 0);
   g_assert_cmpuint (missing_wipe_counters.frees, ==, 1);
@@ -508,7 +510,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&derive_options,
-          &store), ==, WYRELOG_E_INTERNAL);
+      &store), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpuint (derive_counters.probes, ==, 1);
   g_assert_cmpuint (derive_counters.derives, ==, 1);
   g_assert_cmpuint (derive_counters.wipes, ==, 1);
@@ -528,7 +530,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&decrypt_options,
-          &store), !=, WYRELOG_E_OK);
+      &store), !=, WYRELOG_E_OK);
   g_assert_cmpuint (decrypt_counters.wipes, ==, 1);
   g_assert_cmpuint (decrypt_counters.frees, ==, 1);
 
@@ -565,7 +567,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&snapshot_options,
-          &store), ==, WYRELOG_E_OK);
+      &store), ==, WYRELOG_E_OK);
   memset (mutable_vtable, 0, sizeof *mutable_vtable);
   g_free (mutable_vtable);
   wyl_policy_store_close (store);
@@ -580,7 +582,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
   remove_store_files (decrypt_path);
   remove_store_files (snapshot_path);
   g_autofree gchar *sqlite_lock = g_strdup_printf ("%s%s", sqlite_path,
-      LOCK_SUFFIX);
+          LOCK_SUFFIX);
   (void) g_remove (sqlite_lock);
   g_assert_cmpint (g_rmdir (sqlite_path), ==, 0);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -593,9 +595,10 @@ owned_options (OwnedProviderCounters *counters, OwnedProvider **out_provider)
   provider->counters = counters;
   *out_provider = provider;
   return (wyl_policy_store_open_options_t) {
-  .keyprovider_vtable = &owned_vtable,.keyprovider_state =
-        provider,.keyprovider_state_free = owned_free,.require_encrypted =
-        TRUE,};
+           .keyprovider_vtable = &owned_vtable,.keyprovider_state =
+               provider,.keyprovider_state_free = owned_free,.require_encrypted =
+               TRUE,
+  };
 }
 
 static void
@@ -605,18 +608,18 @@ test_rotation_provider_ownership (void)
   g_autofree gchar *path = g_build_filename (dir, "rotate.store", NULL);
   CountingProvider seed_provider = { 0 };
   wyl_policy_store_open_options_t seed_options = encrypted_opts (path,
-      &seed_provider);
+          &seed_provider);
   wyl_policy_store_t *seed = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&seed_options, &seed),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
   char *sqlite_error = NULL;
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (seed),
-          "INSERT INTO service_credential_cvk"
-          " (slot,generation,envelope_format_version,provider_binding,"
-          "sealed_cvk,created_at_us,updated_at_us)"
-          " VALUES(1,1,1,zeroblob(32),x'010203',1,1);", NULL, NULL,
-          &sqlite_error), ==, SQLITE_OK);
+      "INSERT INTO service_credential_cvk"
+      " (slot,generation,envelope_format_version,provider_binding,"
+      "sealed_cvk,created_at_us,updated_at_us)"
+      " VALUES(1,1,1,zeroblob(32),x'010203',1,1);", NULL, NULL,
+      &sqlite_error), ==, SQLITE_OK);
   g_assert_null (sqlite_error);
   wyl_policy_store_close (seed);
 
@@ -633,13 +636,13 @@ test_rotation_provider_ownership (void)
   g_autofree gchar *canonical_before = NULL;
   gsize canonical_before_len = 0;
   g_assert_true (g_file_get_contents (path, &canonical_before,
-          &canonical_before_len, NULL));
+      &canonical_before_len, NULL));
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_success_options, &new_success_options), ==, WYRELOG_E_CRYPTO);
+      &old_success_options, &new_success_options), ==, WYRELOG_E_CRYPTO);
   g_autofree gchar *canonical_after = NULL;
   gsize canonical_after_len = 0;
   g_assert_true (g_file_get_contents (path, &canonical_after,
-          &canonical_after_len, NULL));
+      &canonical_after_len, NULL));
   g_assert_cmpmem (canonical_after, canonical_after_len, canonical_before,
       canonical_before_len);
   g_assert_cmpuint (old_success.probes, ==, 1);
@@ -657,10 +660,10 @@ test_rotation_provider_ownership (void)
 
   CountingProvider verify_provider = { 0 };
   wyl_policy_store_open_options_t verify_options = encrypted_opts (path,
-      &verify_provider);
+          &verify_provider);
   wyl_policy_store_t *verify = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&verify_options,
-          &verify), ==, WYRELOG_E_OK);
+      &verify), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_validate_snapshot (verify), ==,
       WYRELOG_E_OK);
   wyl_policy_service_cvk_info_t cvk = { 0 };
@@ -670,14 +673,16 @@ test_rotation_provider_ownership (void)
   g_assert_cmpmem (cvk.sealed_cvk, cvk.sealed_cvk_len, "\x01\x02\x03", 3);
   wyl_policy_service_cvk_info_clear (&cvk);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (verify),
-          "DELETE FROM service_credential_cvk;", NULL, NULL, NULL), ==,
+      "DELETE FROM service_credential_cvk;", NULL, NULL, NULL), ==,
       SQLITE_OK);
   wyl_policy_store_close (verify);
 
   old_success = (OwnedProviderCounters) {
-  0};
+    0
+  };
   new_success = (OwnedProviderCounters) {
-  0};
+    0
+  };
   old_success_provider = NULL;
   new_success_provider = NULL;
   old_success_options = owned_options (&old_success, &old_success_provider);
@@ -686,7 +691,7 @@ test_rotation_provider_ownership (void)
   old_success_provider->truncate_path_on_wipe = clear_path;
   new_success_provider->key_byte = 0x6a;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
+      &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
   g_assert_cmpuint (old_success.probes, ==, 1);
   g_assert_cmpuint (old_success.derives, ==, 1);
   g_assert_cmpuint (old_success.wipes, ==, 1);
@@ -711,7 +716,7 @@ test_rotation_provider_ownership (void)
   new_failure_provider->probe_path_on_wipe = path;
   new_failure_provider->truncate_path_on_wipe = clear_path;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_failure_options, &new_failure_options), ==, WYRELOG_E_CRYPTO);
+      &old_failure_options, &new_failure_options), ==, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (old_failure.wipes, ==, 1);
   g_assert_cmpuint (old_failure.frees, ==, 1);
   g_assert_cmpuint (new_failure.probes, ==, 1);
@@ -732,7 +737,7 @@ test_rotation_provider_ownership (void)
   old_open_failure_provider->key_byte = 0x6a;
   old_open_failure_provider->probe_rc = WYRELOG_E_INTERNAL;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_open_failure_options, &new_after_old_failure_options), ==,
+      &old_open_failure_options, &new_after_old_failure_options), ==,
       WYRELOG_E_CRYPTO);
   g_assert_cmpuint (old_open_failure.wipes, ==, 1);
   g_assert_cmpuint (old_open_failure.frees, ==, 1);
@@ -743,22 +748,22 @@ test_rotation_provider_ownership (void)
 
   CountingProvider holder_provider = { 0 };
   wyl_policy_store_open_options_t holder_options = encrypted_opts (path,
-      &holder_provider);
+          &holder_provider);
   holder_provider.key_byte = 0x6a;
   wyl_policy_store_t *holder = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&holder_options,
-          &holder), ==, WYRELOG_E_OK);
+      &holder), ==, WYRELOG_E_OK);
   OwnedProviderCounters old_busy = { 0 };
   OwnedProviderCounters new_busy = { 0 };
   OwnedProvider *old_busy_provider = NULL;
   OwnedProvider *new_busy_provider = NULL;
   wyl_policy_store_open_options_t old_busy_options = owned_options (&old_busy,
-      &old_busy_provider);
+          &old_busy_provider);
   wyl_policy_store_open_options_t new_busy_options = owned_options (&new_busy,
-      &new_busy_provider);
+          &new_busy_provider);
   old_busy_provider->key_byte = 0x6a;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_busy_options, &new_busy_options), ==, WYRELOG_E_BUSY);
+      &old_busy_options, &new_busy_options), ==, WYRELOG_E_BUSY);
   g_assert_cmpuint (old_busy.probes, ==, 0);
   g_assert_cmpuint (old_busy.wipes, ==, 1);
   g_assert_cmpuint (old_busy.frees, ==, 1);
@@ -770,9 +775,9 @@ test_rotation_provider_ownership (void)
   OwnedProviderCounters alias_counters = { 0 };
   OwnedProvider *alias_provider = NULL;
   wyl_policy_store_open_options_t alias_options = owned_options
-      (&alias_counters, &alias_provider);
+        (&alias_counters, &alias_provider);
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path, &alias_options,
-          &alias_options), ==, WYRELOG_E_INVALID);
+      &alias_options), ==, WYRELOG_E_INVALID);
   g_assert_cmpuint (alias_counters.wipes, ==, 0);
   g_assert_cmpuint (alias_counters.frees, ==, 0);
   owned_wipe (alias_provider);
@@ -794,7 +799,7 @@ test_same_process_and_different_paths (void)
   provider_busy->counters = &busy_counters;
   CountingProvider provider_b = { 0 };
   wyl_policy_store_open_options_t opts_a = encrypted_opts (path_a,
-      &provider_a);
+          &provider_a);
   wyl_policy_store_open_options_t opts_busy = {
     .path = path_a,
     .keyprovider_vtable = &owned_vtable,
@@ -803,7 +808,7 @@ test_same_process_and_different_paths (void)
     .require_encrypted = TRUE,
   };
   wyl_policy_store_open_options_t opts_b = encrypted_opts (path_b,
-      &provider_b);
+          &provider_b);
   wyl_policy_store_t *store_a = NULL;
   wyl_policy_store_t *store_b = NULL;
   wyl_policy_store_t *busy = NULL;
@@ -831,7 +836,7 @@ test_same_process_and_different_paths (void)
     .require_encrypted = TRUE,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&partial_busy_options,
-          &busy), ==, WYRELOG_E_BUSY);
+      &busy), ==, WYRELOG_E_BUSY);
   g_assert_null (busy);
   g_assert_cmpuint (partial_busy_counters.probes, ==, 0);
   g_assert_cmpuint (partial_busy_counters.wipes, ==, 0);
@@ -842,12 +847,11 @@ test_same_process_and_different_paths (void)
   /* The rejected same-process open must not accidentally release the
    * process-associated fcntl lock held by store_a. */
   const gchar *holder_argv[] = { test_lease_self_path, LEASE_HELPER_ARG,
-    path_a, NULL
-  };
+                                 path_a, NULL};
   GError *spawn_error = NULL;
   GSubprocess *contender = g_subprocess_newv (holder_argv,
-      G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-      &spawn_error);
+          G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+          &spawn_error);
   g_assert_no_error (spawn_error);
   g_assert_true (g_subprocess_wait (contender, NULL, &spawn_error));
   g_assert_no_error (spawn_error);
@@ -862,7 +866,7 @@ test_same_process_and_different_paths (void)
   wyl_policy_store_close (store_a);
   CountingProvider reopen_provider = { 0 };
   wyl_policy_store_open_options_t reopen_opts = encrypted_opts (path_a,
-      &reopen_provider);
+          &reopen_provider);
   wyl_policy_store_t *reopened = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&reopen_opts, &reopened),
       ==, WYRELOG_E_OK);
@@ -904,7 +908,7 @@ create_directory_alias (const gchar *target, const gchar *alias)
 {
 #ifdef G_OS_WIN32
   wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL,
-      NULL);
+          NULL);
   wchar_t *walias = (wchar_t *) g_utf8_to_utf16 (alias, -1, NULL, NULL, NULL);
   if (wtarget == NULL || walias == NULL) {
     g_free (wtarget);
@@ -986,7 +990,7 @@ test_parent_alias_swap_stays_pinned (void)
   g_assert_cmpint (g_mkdir (dir_b, 0700), ==, 0);
   g_assert_true (create_directory_alias (dir_a, alias));
   g_autofree gchar *alias_path = g_build_filename (alias, "policy.store",
-      NULL);
+          NULL);
   g_autofree gchar *path_a = g_build_filename (dir_a, "policy.store", NULL);
   g_autofree gchar *path_b = g_build_filename (dir_b, "policy.store", NULL);
   SwapProvider provider = {
@@ -1036,15 +1040,15 @@ test_parent_alias_identity (void)
     return;
   }
   g_autofree gchar *real_path = g_build_filename (real_dir, "policy.store",
-      NULL);
+          NULL);
   g_autofree gchar *alias_path = g_build_filename (alias_dir, "policy.store",
-      NULL);
+          NULL);
   CountingProvider first = { 0 };
   CountingProvider second = { 0 };
   wyl_policy_store_open_options_t first_opts = encrypted_opts (real_path,
-      &first);
+          &first);
   wyl_policy_store_open_options_t second_opts = encrypted_opts (alias_path,
-      &second);
+          &second);
   wyl_policy_store_t *store = NULL;
   wyl_policy_store_t *other = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&first_opts, &store), ==,
@@ -1079,7 +1083,7 @@ test_providerless_plaintext_dual_open (void)
   wyl_policy_store_close (memory_b);
   wyl_policy_store_close (memory_a);
   g_autofree gchar *lock_path = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
-  g_assert_false (g_file_test (lock_path, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (lock_path, G_FILE_TEST_EXISTS));
   remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
@@ -1090,13 +1094,13 @@ test_plaintext_provider_is_rejected (void)
   g_assert_false (wyl_policy_store_pinned_backend_available ());
   g_autofree gchar *dir = make_tmpdir ();
   g_autofree gchar *path = g_build_filename (dir, "plain-provider.sqlite",
-      NULL);
+          NULL);
   CountingProvider first_provider = { 0 };
   CountingProvider second_provider = { 0 };
   wyl_policy_store_open_options_t first_opts = plaintext_provider_opts (path,
-      &first_provider);
+          &first_provider);
   wyl_policy_store_open_options_t second_opts = plaintext_provider_opts (path,
-      &second_provider);
+          &second_provider);
   wyl_policy_store_t *first = NULL;
   wyl_policy_store_t *second = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&first_opts, &first), ==,
@@ -1131,7 +1135,7 @@ test_early_error_releases_lease (void)
       ==, WYRELOG_E_POLICY);
   CountingProvider provider = { 0 };
   wyl_policy_store_open_options_t valid_opts = encrypted_opts (path,
-      &provider);
+          &provider);
   g_assert_cmpint (wyl_policy_store_open_with_options (&valid_opts, &store), ==,
       WYRELOG_E_OK);
   wyl_policy_store_close (store);
@@ -1144,7 +1148,7 @@ create_file_alias (const gchar *target, const gchar *alias)
 {
 #ifdef G_OS_WIN32
   wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL,
-      NULL);
+          NULL);
   wchar_t *walias = (wchar_t *) g_utf8_to_utf16 (alias, -1, NULL, NULL, NULL);
   if (wtarget == NULL || walias == NULL) {
     g_free (wtarget);
@@ -1195,10 +1199,10 @@ test_hardlink_contender_preserves_external_lock (void)
   g_autofree gchar *alias_path = g_build_filename (dir, "alias.store", NULL);
   g_autofree gchar *lock_path = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
   g_autofree gchar *alias_lock = g_strdup_printf ("%s%s", alias_path,
-      LOCK_SUFFIX);
+          LOCK_SUFFIX);
   CountingProvider owner_provider = { 0 };
   wyl_policy_store_open_options_t owner_opts = encrypted_opts (path,
-      &owner_provider);
+          &owner_provider);
   wyl_policy_store_t *owner = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&owner_opts, &owner), ==,
       WYRELOG_E_OK);
@@ -1207,10 +1211,10 @@ test_hardlink_contender_preserves_external_lock (void)
 
   CountingProvider contender_provider = { 0 };
   wyl_policy_store_open_options_t contender_opts = encrypted_opts (alias_path,
-      &contender_provider);
+          &contender_provider);
   wyl_policy_store_t *contender = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&contender_opts,
-          &contender), ==, WYRELOG_E_BUSY);
+      &contender), ==, WYRELOG_E_BUSY);
   g_assert_cmpuint (contender_provider.probes, ==, 0);
   g_assert_cmpint (g_remove (alias_lock), ==, 0);
   g_assert_cmpint (run_helper_exit (path), ==, 73);
@@ -1231,7 +1235,7 @@ test_precreated_malicious_hardlink_unchanged (void)
   g_autofree gchar *target = g_build_filename (dir, "operator-data", NULL);
   const gchar contents[] = "do-not-modify";
   g_assert_true (g_file_set_contents (target, contents, sizeof contents - 1,
-          NULL));
+      NULL));
   g_assert_cmpint (g_chmod (target, 0644), ==, 0);
   g_assert_cmpint (link (target, lock_path), ==, 0);
 
@@ -1278,8 +1282,7 @@ fork_exec_helper (const gchar *path)
   g_assert_cmpint (child, >=, 0);
   if (child == 0) {
     char *const argv[] = { test_lease_self_path, (char *) LEASE_HELPER_ARG,
-      (char *) path, (char *) "--oneshot", NULL
-    };
+                           (char *) path, (char *) "--oneshot", NULL};
     execve (test_lease_self_path, argv, environ);
     _exit (74);
   }
@@ -1313,12 +1316,11 @@ static GSubprocess *
 spawn_holder (const gchar *path, GDataInputStream **out_stdout)
 {
   const gchar *argv[] = { test_lease_self_path, LEASE_HELPER_ARG, path,
-    NULL
-  };
+                          NULL};
   GError *error = NULL;
   GSubprocess *process = g_subprocess_newv (argv,
-      G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE
-      | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+          G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE
+          | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
   g_assert_no_error (error);
   g_assert_nonnull (process);
   *out_stdout =
@@ -1338,7 +1340,7 @@ test_subprocess_busy_crash_and_reacquire (void)
   g_autofree gchar *path = g_build_filename (dir, "process.store", NULL);
   CountingProvider seed_provider = { 0 };
   wyl_policy_store_open_options_t seed_opts = encrypted_opts (path,
-      &seed_provider);
+          &seed_provider);
   wyl_policy_store_t *seed_store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed_store),
       ==, WYRELOG_E_OK);
@@ -1353,7 +1355,7 @@ test_subprocess_busy_crash_and_reacquire (void)
   GSubprocess *holder = spawn_holder (path, &holder_stdout);
   CountingProvider busy_provider = { 0 };
   wyl_policy_store_open_options_t busy_opts = encrypted_opts (path,
-      &busy_provider);
+          &busy_provider);
   wyl_policy_store_t *busy_store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&busy_opts, &busy_store),
       ==, WYRELOG_E_BUSY);
@@ -1374,7 +1376,7 @@ test_subprocess_busy_crash_and_reacquire (void)
 
   CountingProvider reopen_provider = { 0 };
   wyl_policy_store_open_options_t reopen_opts = encrypted_opts (path,
-      &reopen_provider);
+          &reopen_provider);
   wyl_policy_store_t *reopened = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&reopen_opts, &reopened),
       ==, WYRELOG_E_OK);

@@ -771,6 +771,11 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     wyl_policy_store_graph_publication_fence_clear (&fence);
     goto finish;
   }
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  /* Observation only: do not inject a new failure after the durable commit. */
+  (void) seal_step_fault
+    (WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_ADMISSION_OPEN);
+#endif
   rc = wyl_fact_graph_runtime_publication_open (&publication);
   if (rc != WYRELOG_E_OK) {
     gboolean evicted = FALSE;

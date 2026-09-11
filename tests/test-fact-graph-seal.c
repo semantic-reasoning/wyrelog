@@ -6,6 +6,8 @@
 #ifdef G_OS_WIN32
 #include <windows.h>
 #endif
+#include <sqlite3.h>
+#include <string.h>
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-seal-private.h"
@@ -16,6 +18,8 @@
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/fact/publication-lock-event-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "fact/secure-duckdb-bridge-private.h"
 #include "wyrelog/fact/store-open-private.h"
@@ -76,6 +80,16 @@ publication_lock_trace_event (const WylFactPublicationLockEvent *event,
   g_array_append_val (trace->events, *event);
   g_mutex_unlock (&trace->mutex);
 }
+
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#include "wyrelog/fact/provisioning-run-private.h"
+#include "wyrelog/fact/store-open-private.h"
+#endif
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+static const gchar policy_seal_helper_arg[] = "--policy-seal-helper";
+#endif
+static gchar *test_self_path;
 
 /* The graph fixture is duplicated from tests/test-fact-replay.c rather than
  * shared.  Extracting it would mean deleting it there, and two open pull
@@ -306,6 +320,490 @@ remove_tree (const gchar *path)
     }
   }
   (void) g_rmdir (path);
+}
+
+static void
+count_live_order (WylEngine *engine, const gchar *relation, const gint64 *row,
+    guint ncols, gpointer data)
+{
+  (void) engine;
+  (void) relation;
+  g_assert_cmpuint (ncols, ==, 3);
+  g_assert_cmpint (row[1], ==, 11);
+  g_assert_cmpint (row[2], ==, 1);
+  (*(guint *) data)++;
+}
+
+typedef enum
+{
+  LEGACY_DIRECT_POLICY,
+  LEGACY_HANDLE_NO_ROOT,
+  LEGACY_HANDLE_OTHER_ROOT,
+} LegacyCompetitor;
+
+static void
+test_legacy_live_owner_case (LegacyCompetitor competitor)
+{
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, 30 * G_TIME_SPAN_SECOND, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-policy-ownership-legacy-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *other_root = NULL;
+  if (competitor == LEGACY_HANDLE_OTHER_ROOT) {
+    other_root = wyl_test_make_secure_fact_root
+          ("wyl-policy-ownership-other-XXXXXX", &error);
+    g_assert_no_error (error);
+  }
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite", NULL);
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "graph-a");
+    materialize_graph_engine (policy, root, "tenant-a", "graph-a");
+  }
+
+  WylHandleOpenOptions a_options = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_autoptr (WylHandle) handle_a = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&a_options, &handle_a), ==,
+      WYRELOG_E_OK);
+  guint initial_rows = 0;
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle_a,
+      "tenant-a", "graph-a", observed, count_live_order, &initial_rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (initial_rows, ==, 1);
+
+  wyrelog_error_t seal_rc = WYRELOG_E_INTERNAL;
+  if (competitor == LEGACY_DIRECT_POLICY) {
+    g_autoptr (wyl_policy_store_t) policy_b = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy_b), ==,
+        WYRELOG_E_OK);
+    seal_rc = wyl_policy_store_seal_fact_graph (policy_b, "tenant-a",
+            "graph-a");
+  } else {
+    WylHandleOpenOptions b_options = {
+      .policy_store_path = policy_path,
+      .fact_root = competitor == LEGACY_HANDLE_OTHER_ROOT ? other_root : NULL,
+    };
+    g_autoptr (WylHandle) handle_b = NULL;
+    g_assert_cmpint (wyl_handle_open_with_options (&b_options, &handle_b), ==,
+        WYRELOG_E_OK);
+    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+          (wyl_handle_get_service_auth_authority (handle_b), handle_b, NULL,
+        &lease), ==, WYRELOG_E_OK);
+    wyl_policy_fact_graph_info_t info = {
+      .tenant_id = "tenant-a",
+      .graph_id = "graph-a",
+    };
+    WylFactGraphSealOutcome outcome = { 0 };
+    seal_rc = wyl_handle_seal_fact_graph (handle_b, lease, &info,
+            G_TIME_SPAN_SECOND,
+            &outcome);
+    wyl_fact_graph_seal_outcome_clear (&outcome);
+    g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease),
+        ==, WYRELOG_E_OK);
+  }
+
+  gboolean durable_sealed = FALSE;
+  {
+    g_autoptr (wyl_policy_store_t) policy_c = NULL;
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy_c), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (policy_c,
+        "tenant-a", "graph-a", &authority), ==, WYRELOG_E_OK);
+    g_assert_nonnull (authority);
+    durable_sealed = authority->sealed_compatibility;
+    wyl_policy_graph_authority_record_free (authority);
+  }
+  guint fresh_rows = 0;
+  wyrelog_error_t fresh_snapshot_rc =
+      wyl_handle_snapshot_fact_graph_relation (handle_a, "tenant-a", "graph-a",
+          observed, count_live_order, &fresh_rows);
+
+  /* The diagnostic values are captured before teardown.  Teardown must not be
+   * skipped when the ownership assertion below catches the known regression. */
+  gboolean unsafe = seal_rc == WYRELOG_E_OK && durable_sealed
+      && fresh_snapshot_rc == WYRELOG_E_OK && fresh_rows == 1;
+  g_printerr ("contender=%d seal=%d durable-sealed=%d fresh-snapshot=%d rows=%u\n",
+      competitor, seal_rc, durable_sealed, fresh_snapshot_rc, fresh_rows);
+  g_clear_object (&handle_a);
+  remove_tree (root);
+  if (other_root != NULL)
+    remove_tree (other_root);
+  g_assert_cmpint (seal_rc, ==, WYRELOG_E_BUSY);
+  g_assert_true (fresh_snapshot_rc == WYRELOG_E_OK
+      || fresh_snapshot_rc == WYRELOG_E_BUSY);
+  if (seal_rc == WYRELOG_E_OK)
+    g_assert_true (durable_sealed);
+  if (fresh_snapshot_rc == WYRELOG_E_OK)
+    g_assert_cmpuint (fresh_rows, ==, 1);
+  g_assert_false (unsafe);
+}
+
+static void
+test_legacy_direct_policy_live_owner (void)
+{
+  test_legacy_live_owner_case (LEGACY_DIRECT_POLICY);
+}
+
+static void
+test_legacy_handle_live_owner_without_root (void)
+{
+  test_legacy_live_owner_case (LEGACY_HANDLE_NO_ROOT);
+}
+
+static void
+test_legacy_handle_live_owner_with_other_root (void)
+{
+  test_legacy_live_owner_case (LEGACY_HANDLE_OTHER_ROOT);
+}
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+
+static void
+create_provisioned_graph_fixture (wyl_policy_store_t *policy,
+    const gchar *root, const gchar *tenant_id, const gchar *graph_id)
+{
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id, &created),
+      ==, WYRELOG_E_OK);
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    {"order_id", "symbol"}, {"amount", "int64"}, {"expedited", "bool"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"orders-rel", graph_columns, G_N_ELEMENTS (graph_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = tenant_id, .graph_id = graph_id, .fact_root = root,
+    .schema_version = 1, .owner_scope = tenant_id,
+    .relations = graph_relations, .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_provisioning (policy,
+      &graph_opts, NULL, op_uuid), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (op_uuid, !=, "");
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (policy, op_uuid, root,
+      NULL), ==, WYRELOG_E_OK);
+  WylPolicyGraphProvisioningRecord *operation = NULL;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (policy, op_uuid,
+      &operation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (policy, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_nonnull (operation);
+  g_assert_nonnull (authority);
+  g_assert_cmpint (operation->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  g_assert_cmpstr (operation->tenant_id, ==, tenant_id);
+  g_assert_cmpstr (operation->graph_id, ==, graph_id);
+  g_assert_cmpstr (authority->tenant_id, ==, tenant_id);
+  g_assert_cmpstr (authority->graph_id, ==, graph_id);
+  g_assert_nonnull (operation->store_uuid);
+  g_assert_true (authority->has_store_identity);
+  g_assert_nonnull (authority->store_uuid);
+  g_assert_cmpstr (operation->store_uuid, ==, authority->store_uuid);
+  wyl_policy_graph_provisioning_record_free (operation);
+  wyl_policy_graph_authority_record_free (authority);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE}, {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &schema), ==, WYRELOG_E_OK);
+}
+
+static void
+append_provisioned_batch (wyl_policy_store_t *policy, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  wyl_fact_store_t *store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (policy, root,
+      tenant_id, graph_id, TRUE, &store), ==, WYRELOG_E_OK);
+  g_assert_nonnull (store);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE}, {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 11},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  wyl_fact_row_t rows[] = { {values, G_N_ELEMENTS (values)} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "provisioned-live-owner", .tenant_id = tenant_id,
+    .graph_id = graph_id, .namespace_id = "shop.ns",
+    .relation_name = "orders-rel", .schema_version = 1, .source = "test",
+    .idempotency_key = "provisioned-live-owner:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+      &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  wyl_fact_store_close (store);
+}
+
+typedef struct
+{
+  GMainLoop *loop;
+  GSubprocess *process;
+  gchar *stdout_text;
+  gchar *stderr_text;
+  GError *error;
+  gboolean communicate_ok;
+  gboolean timed_out;
+  gboolean successful;
+  GSource *timeout_source;
+} PolicySealChild;
+
+static void
+policy_seal_child_communicated (GObject *source_object, GAsyncResult *result,
+    gpointer user_data)
+{
+  PolicySealChild *child = user_data;
+  child->communicate_ok = g_subprocess_communicate_utf8_finish
+        (G_SUBPROCESS (source_object), result, &child->stdout_text,
+          &child->stderr_text, &child->error);
+  g_source_destroy (child->timeout_source);
+  g_main_loop_quit (child->loop);
+}
+
+static gboolean
+policy_seal_child_timeout (gpointer user_data)
+{
+  PolicySealChild *child = user_data;
+  child->timed_out = TRUE;
+  g_subprocess_force_exit (child->process);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean
+parse_policy_seal_result (const gchar *text, gint *out_startup, gint *out_seal)
+{
+  if (text == NULL
+      || !g_regex_match_simple ("^STARTUP=-?[0-9]+ SEAL=-?[0-9]+\\n$",
+      text, 0, 0))
+    return FALSE;
+  gchar *end = NULL;
+  gint64 startup = g_ascii_strtoll (text + strlen ("STARTUP="), &end, 10);
+  const gchar *seal_text = strstr (text, " SEAL=");
+  if (seal_text == NULL)
+    return FALSE;
+  seal_text += strlen (" SEAL=");
+  gint64 seal = g_ascii_strtoll (seal_text, &end, 10);
+  if (end == NULL || g_strcmp0 (end, "\n") != 0
+      || startup < G_MININT || startup > G_MAXINT
+      || seal < G_MININT || seal > G_MAXINT)
+    return FALSE;
+  *out_startup = (gint) startup;
+  *out_seal = (gint) seal;
+  return TRUE;
+}
+
+static void
+run_policy_seal_child (const gchar *policy_path, PolicySealChild *child)
+{
+  const gchar *argv[] = {test_self_path, policy_seal_helper_arg, policy_path,
+                         "tenant-a", "orders", NULL};
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  g_main_context_push_thread_default (context);
+  child->process = g_subprocess_newv (argv,
+          G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
+          &child->error);
+  if (child->process != NULL) {
+    child->loop = g_main_loop_new (context, FALSE);
+    child->timeout_source = g_timeout_source_new (5000);
+    g_source_set_callback (child->timeout_source, policy_seal_child_timeout,
+        child, NULL);
+    g_source_attach (child->timeout_source, context);
+    g_subprocess_communicate_utf8_async (child->process, NULL, NULL,
+        policy_seal_child_communicated, child);
+    g_main_loop_run (child->loop);
+    child->successful = child->communicate_ok
+        && g_subprocess_get_successful (child->process);
+    g_source_destroy (child->timeout_source);
+    g_clear_pointer (&child->timeout_source, g_source_unref);
+    g_clear_pointer (&child->loop, g_main_loop_unref);
+    g_clear_object (&child->process);
+  }
+  g_main_context_pop_thread_default (context);
+}
+
+typedef struct
+{
+  const gchar *policy_path;
+  PolicySealChild *child;
+  guint calls;
+} BeforeAdmissionProbe;
+
+static wyrelog_error_t
+seal_before_admission_hook (const gchar *phase, gpointer user_data)
+{
+  BeforeAdmissionProbe *probe = user_data;
+  if (g_strcmp0 (phase,
+      WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_ADMISSION_OPEN) == 0) {
+    probe->calls++;
+    if (probe->calls == 1)
+      run_policy_seal_child (probe->policy_path, probe->child);
+  }
+  return WYRELOG_E_OK;
+}
+
+static gint
+policy_seal_helper_main (int argc, char **argv)
+{
+  if (argc != 5)
+    return 2;
+  wyl_policy_store_t *policy = NULL;
+  wyrelog_error_t startup = wyl_policy_store_open (argv[2], &policy);
+  wyrelog_error_t seal = WYRELOG_E_INVALID;
+  if (startup == WYRELOG_E_OK) {
+    seal = wyl_policy_store_seal_fact_graph (policy, argv[3], argv[4]);
+    wyl_policy_store_close (policy);
+  }
+  g_print ("STARTUP=%d SEAL=%d\n", startup, seal);
+  return 0;
+}
+#endif
+
+static void
+test_independent_policy_seal_with_live_handle (gconstpointer data)
+{
+#if !defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) || defined(G_OS_WIN32)
+  (void) data;
+  g_test_skip ("the provisioned live-handle case requires POSIX secure fact storage");
+  return;
+#else
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, 30 * G_TIME_SPAN_SECOND, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-policy-live-owner-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite", NULL);
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_provisioned_graph_fixture (policy, root, "tenant-a", "orders");
+    append_provisioned_batch (policy, root, "tenant-a", "orders");
+  }
+  g_autoptr (WylHandle) handle = NULL;
+  WylHandleOpenOptions options = {.policy_store_path = policy_path,
+                                  .fact_root = root};
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  guint rows = 0;
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, "tenant-a",
+      "orders", observed, count_live_order, &rows), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (rows, ==, 1);
+  gboolean before_open = GPOINTER_TO_INT (data) != 0;
+  PolicySealChild child = { 0 };
+  BeforeAdmissionProbe probe = {policy_path, &child, 0};
+  wyrelog_error_t unseal_rc = WYRELOG_E_OK;
+  wyrelog_error_t release_rc = WYRELOG_E_OK;
+  if (before_open) {
+    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+        &lease), ==, WYRELOG_E_OK);
+    wyl_policy_fact_graph_info_t info = {
+      .tenant_id = "tenant-a", .graph_id = "orders",
+    };
+    WylFactGraphSealOutcome sealed_outcome = { 0 };
+    wyrelog_error_t initial_seal = wyl_handle_seal_fact_graph (handle, lease,
+            &info, G_TIME_SPAN_SECOND, &sealed_outcome);
+    wyl_fact_graph_seal_outcome_clear (&sealed_outcome);
+    if (initial_seal != WYRELOG_E_OK) {
+      (void) wyl_service_auth_write_lease_release_terminal (&lease);
+      g_assert_cmpint (initial_seal, ==, WYRELOG_E_OK);
+    }
+    WylFactGraphUnsealOutcome outcome = { 0 };
+    wyl_fact_graph_seal_set_test_hook (seal_before_admission_hook, &probe);
+    unseal_rc = wyl_handle_unseal_fact_graph (handle, lease, &info,
+            G_TIME_SPAN_SECOND, &outcome);
+    wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+    wyl_fact_graph_unseal_outcome_clear (&outcome);
+    release_rc = wyl_service_auth_write_lease_release_terminal (&lease);
+  } else {
+    run_policy_seal_child (policy_path, &child);
+  }
+  gint startup = WYRELOG_E_INTERNAL;
+  gint seal = WYRELOG_E_INTERNAL;
+  gboolean protocol_ok = !child.timed_out && child.communicate_ok
+      && child.successful && child.error == NULL
+      && (child.stderr_text == NULL || child.stderr_text[0] == '\0')
+      && parse_policy_seal_result (child.stdout_text, &startup, &seal);
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  {
+    g_autoptr (wyl_policy_store_t) observer = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &observer), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_read_graph_authority (observer,
+        "tenant-a", "orders", &authority), ==, WYRELOG_E_OK);
+  }
+  guint fresh_rows = 0;
+  wyrelog_error_t snapshot_rc = wyl_handle_snapshot_fact_graph_relation
+        (handle, "tenant-a", "orders", observed, count_live_order, &fresh_rows);
+  gboolean sealed = authority->sealed_compatibility;
+  g_printerr ("before-open=%d checkpoints=%u protocol=%d timeout=%d "
+      "startup=%d seal=%d unseal=%d authority-sealed=%d lifecycle=%d "
+      "generation=%" G_GUINT64_FORMAT " fresh-snapshot=%d rows=%u\n",
+      before_open, probe.calls, protocol_ok, child.timed_out, startup, seal,
+      unseal_rc, sealed, authority->lifecycle_state,
+      authority->lifecycle_generation, snapshot_rc, fresh_rows);
+  gboolean unsafe = seal == WYRELOG_E_OK && sealed
+      && snapshot_rc == WYRELOG_E_OK && fresh_rows == 1;
+  wyl_policy_graph_authority_record_free (authority);
+  g_clear_pointer (&child.stdout_text, g_free);
+  g_clear_pointer (&child.stderr_text, g_free);
+  g_clear_error (&child.error);
+  g_clear_object (&handle);
+  remove_tree (root);
+  g_assert_true (protocol_ok);
+  g_assert_cmpint (release_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (startup, ==, WYRELOG_E_OK);
+  g_assert_cmpint (seal, ==, WYRELOG_E_BUSY);
+  if (before_open) {
+    g_assert_cmpuint (probe.calls, ==, 1);
+    g_assert_cmpint (unseal_rc, ==, WYRELOG_E_OK);
+  }
+  g_assert_true (snapshot_rc == WYRELOG_E_OK || snapshot_rc == WYRELOG_E_BUSY);
+  g_assert_false (sealed);
+  if (snapshot_rc == WYRELOG_E_OK)
+    g_assert_cmpuint (fresh_rows, ==, 1);
+  g_assert_false (unsafe);
+#endif
 }
 
 static WylFactGraphRuntimeStatus
@@ -2191,7 +2689,23 @@ test_seal_writes_durably_inside_a_sealed_tenant (void)
 int
 main (int argc, char **argv)
 {
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
+  if (argc >= 2 && g_strcmp0 (argv[1], policy_seal_helper_arg) == 0)
+    return policy_seal_helper_main (argc, argv);
+#endif
+  test_self_path = g_canonicalize_filename (argv[0], NULL);
+  g_assert_nonnull (test_self_path);
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-graph-seal/independent-policy-live-handle",
+      test_legacy_direct_policy_live_owner);
+  g_test_add_func ("/fact-graph-seal/independent-handle-no-root",
+      test_legacy_handle_live_owner_without_root);
+  g_test_add_func ("/fact-graph-seal/independent-handle-other-root",
+      test_legacy_handle_live_owner_with_other_root);
+  g_test_add_data_func ("/fact-graph-seal/provisioned-independent-policy-exec",
+      GINT_TO_POINTER (0), test_independent_policy_seal_with_live_handle);
+  g_test_add_data_func ("/fact-graph-seal/provisioned-before-admission-policy-exec",
+      GINT_TO_POINTER (1), test_independent_policy_seal_with_live_handle);
   g_test_add_func ("/fact-graph-seal/boot-reestablishes-admission",
       test_boot_reestablishes_admission_from_the_durable_seal);
   g_test_add_func ("/fact-graph-seal/boot-preserves-forget-verdict",

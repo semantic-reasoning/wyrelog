@@ -21,6 +21,14 @@ typedef struct
 
 wyrelog_error_t wyl_policy_store_lease_acquire (const gchar * path,
     wyl_policy_store_lease_t ** out_lease);
+/* Shared runtime ownership for providerless policy stores. Multiple live
+ * readers may hold it; a writer must upgrade it before changing policy. */
+wyrelog_error_t wyl_policy_store_runtime_lease_acquire (const gchar * path,
+    wyl_policy_store_lease_t ** out_lease);
+wyrelog_error_t wyl_policy_store_runtime_lease_upgrade
+  (wyl_policy_store_lease_t * lease);
+wyrelog_error_t wyl_policy_store_runtime_lease_downgrade
+  (wyl_policy_store_lease_t * lease);
 wyrelog_error_t wyl_policy_store_lease_acquire_maintenance (const gchar * path,
     wyl_policy_store_lease_t ** out_lease);
 wyrelog_error_t wyl_policy_store_lease_verify_store_identity (const

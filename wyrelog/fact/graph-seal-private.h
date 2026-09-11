@@ -152,6 +152,9 @@ wyrelog_error_t wyl_fact_graph_unseal_with_root_lease
  * Phases:
  *   WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE  the S4 policy-store write
  *   WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE   the compensating re-read
+ *   WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_ADMISSION_OPEN is observation
+ *   only: its return value is ignored. It runs after successful final authority
+ *   validation and before admission opens, with the existing locks retained.
  *
  * Process-global because the seal is a free function over a policy store and
  * a runtime manager, with no object to hang the hook on.  A shipped library
@@ -173,6 +176,8 @@ void wyl_fact_graph_seal_set_test_hook (WylFactGraphSealTestHook hook,
 #define WYL_FACT_GRAPH_SEAL_PHASE_DURABLE_WRITE "durable_write"
 #define WYL_FACT_GRAPH_SEAL_PHASE_RESEAL_PROBE  "reseal_probe"
 #define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_RESEAL "unseal_reseal"
+#define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_ADMISSION_OPEN \
+  "unseal_before_admission_open"
 #define WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION \
   "unseal_before_publication"
 
