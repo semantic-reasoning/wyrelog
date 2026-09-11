@@ -1821,7 +1821,35 @@ if get_option('enable_fact_store').allowed()
         + fact_test_support_deps,
   )
 
-  test('fact-graph-seal', test_fact_graph_seal, timeout : 60)
+  # Serialized on Windows for the reason given above the fact-store
+  # aggregate.  Running parallel on the runner this test has reported as
+  # much as 51 seconds against its 60-second deadline, and then expired at
+  # 60 with no assertion failure.  Serialized on the same runner class it
+  # costs 9.11 seconds, so most of what that deadline read was the queue
+  # rather than the test.
+  #
+  # Do not read a future expiry here as this test's own cost without
+  # checking three things first.  One is the same run's other serialized
+  # tests.  fact-store is already serialized and shares the machine with
+  # nothing, yet across the runs around this one it ranged 15.82 to 20.59
+  # seconds, reached 43.72 in the run that expired, and had already
+  # reached 45.19 two days earlier: a slow runner can expire a deadline
+  # that no amount of isolation protects.  Two is this test's own case
+  # count, which was 19 when the 9.11 seconds was measured -- a mean of
+  # 0.48 seconds a case, and about 0.6 for the nine slowest.  Past roughly
+  # 40 cases the 2.76x margin above is gone; reach that with the cohort
+  # steady and the cost is the test's own -- shard it, or move the ceiling
+  # and state the measurement that moved it, which is what the ceiling
+  # table in the boundary checker is for.
+  # Three is those nine slow cases themselves, which ran 0.50 to 0.72
+  # seconds.  At an unchanged case count, one outside that band -- or more
+  # than nine of them, since GLib only reports cases over 0.5 and a
+  # regression can enter the band from below -- is a per-case regression,
+  # and neither of the first two checks will show it.
+  test('fact-graph-seal', test_fact_graph_seal,
+    timeout : 60,
+    is_parallel : host_machine.system() != 'windows',
+  )
 
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
