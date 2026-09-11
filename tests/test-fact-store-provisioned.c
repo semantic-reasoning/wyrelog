@@ -333,6 +333,12 @@ test_ordinary_open_rejects_metadata (gconstpointer data)
   g_assert_cmpint
     (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
         (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#elif defined(G_OS_WIN32)
+  g_assert_true (record->has_windows_evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &record->windows_evidence, &pair), ==,
+      WYRELOG_E_OK);
 #else
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
         (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
@@ -439,6 +445,12 @@ test_leased_open_rejects_corruption (gconstpointer data)
   g_assert_cmpint
     (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
         (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#elif defined(G_OS_WIN32)
+  g_assert_true (record->has_windows_evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &record->windows_evidence, &pair), ==,
+      WYRELOG_E_OK);
 #else
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
         (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
