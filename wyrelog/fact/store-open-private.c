@@ -43,6 +43,10 @@ open_provisioned_active (const gchar *fact_root,
       || g_strcmp0 (record->store_uuid, authority->store_uuid) != 0)
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef G_OS_WIN32
+  if (!record->has_windows_evidence)
+    return WYRELOG_E_POLICY;
+#endif
 #ifdef __APPLE__
   WylFactGraphDarwinOperationEvidence evidence = { 0 };
   gsize evidence_length = 0;
@@ -81,6 +85,10 @@ open_provisioned_active (const gchar *fact_root,
     rc =
         wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
           (&directory, record->op_uuid, &evidence, &pair);
+#elif defined(G_OS_WIN32)
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&directory, record->op_uuid, &record->windows_evidence, &pair);
 #else
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
