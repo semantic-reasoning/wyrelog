@@ -48,6 +48,7 @@ SERIALIZED_AGGREGATES = (
     ("policy-graph-authority-pre-windows-provisioning-migration", 90),
     ("policy-graph-authority-windows-provisioning-migration", 90),
     ("fact-store", 60),
+    ("fact-graph-seal", 60),
 )
 POLICY_SELECTIONS = {
     "policy-graph-authority": [
@@ -70,6 +71,7 @@ REQUIRED_MESON_TESTS = (
     "windows-ci-timeout-boundary-self-test",
     "policy-graph-authority",
     "fact-store",
+    "fact-graph-seal",
 )
 # meson test spells this two ways; banning only the long one bans nothing.
 # meson's parser sets allow_abbrev, so --timeout-mul and --timeout-m reach
