@@ -158,7 +158,7 @@ test_open_provisioned_pair_persists_across_reopen (void)
           graph_component, record->stage_basename, NULL);
   struct stat status;
   g_assert_cmpint (stat (final_path, &status), ==, 0);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(G_OS_WIN32)
   g_assert_cmpuint (status.st_nlink, ==, 1);
   g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
 #else

@@ -586,6 +586,9 @@ append_provisioned_batch (wyl_policy_store_t *policy, const gchar *root,
   wyl_fact_store_close (store);
 }
 
+#endif
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 typedef struct
 {
   GMainLoop *loop;
@@ -1698,6 +1701,12 @@ open_metadata_test_bridge (SealFixture *fixture, WylSecureDuckdbBridge **bridge,
   g_assert_cmpint
     (wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
         (&directory, record->op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+#elif defined(G_OS_WIN32)
+  g_assert_true (record->has_windows_evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &record->windows_evidence, &pair), ==,
+      WYRELOG_E_OK);
 #else
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
         (&directory, record->op_uuid, &pair), ==, WYRELOG_E_OK);
@@ -2834,7 +2843,7 @@ test_unseal_replacement_after_validation_and_retry (void)
   remove_tree (root);
 }
 
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
 typedef struct
 {
   const gchar *name;
@@ -3509,6 +3518,7 @@ main (int argc, char **argv)
   }
   g_test_add_data_func ("/fact-graph-seal/unseal-provisioning-uuid-mismatch",
       GINT_TO_POINTER (0), test_unseal_rejects_provisioning_mismatch);
+#ifndef G_OS_WIN32
   static const PostValidationMetadataMutation post_validation_metadata[] = {
     {"format-version", "UPDATE fact_store_metadata SET value='2' "
      "WHERE key='format_version';",
@@ -3529,6 +3539,7 @@ main (int argc, char **argv)
     g_test_add_data_func (name, &post_validation_metadata[i],
         test_unseal_rejects_post_validation_canonical_metadata);
   }
+#endif
 #ifdef __APPLE__
   g_test_add_data_func ("/fact-graph-seal/unseal-missing-darwin-evidence",
       GINT_TO_POINTER (1), test_unseal_rejects_provisioning_mismatch);

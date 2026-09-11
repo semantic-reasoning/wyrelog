@@ -674,15 +674,26 @@ def validate(files: dict[str, str]) -> None:
     ):
         raise AssertionError("generic executable must precede its registration")
 
-    control_registration = meson.index("test('fact-store-provisioned',")
-    control_guard = meson.rfind(
-        "if host_machine.system() != 'windows'", 0, control_registration
+    control_executable = meson.index(
+        "test_fact_store_provisioned = executable("
     )
-    control_guard_end = meson.find("\n  endif", control_guard)
-    if control_guard == -1 or control_guard_end < control_registration:
-        raise AssertionError("provisioning control escaped its POSIX guard")
-    if meson.index("test_fact_store_provisioned = executable(") > control_guard:
-        raise AssertionError("provisioning control executable became Linux-only")
+    control_registration = meson.index("test('fact-store-provisioned',")
+    if control_executable > control_registration:
+        raise AssertionError(
+            "provisioning control executable must precede its registration"
+        )
+    for condition in enclosing_conditions(meson, control_executable):
+        if "host_machine.system()" in condition:
+            raise AssertionError(
+                "provisioning control executable must be built on every "
+                "platform, but it is under: " + condition
+            )
+    for condition in enclosing_conditions(meson, control_registration):
+        if "host_machine.system()" in condition:
+            raise AssertionError(
+                "provisioning control must be registered on every platform, "
+                f"but it is under: {condition}"
+            )
 
     provisioned_executable = meson.index(
         "test_fact_store_forget_transaction_provisioned = executable("
@@ -1462,11 +1473,38 @@ def self_test(baseline: dict[str, str]) -> None:
     expect_rejected(
         baseline,
         "tests/meson.build",
-        "if host_machine.system() != 'windows'\n"
+        "  test('fact-store-provisioned',",
+        "  if host_machine.system() != 'windows'\n"
         "    test('fact-store-provisioned',",
-        "if host_machine.system() == 'linux'\n"
-        "    test('fact-store-provisioned',",
-        "Linux-only provisioning control registration",
+        "POSIX-only provisioning control registration",
+        expect="provisioning control must be registered on every platform",
+    )
+    control_executable = (
+        "  test_fact_store_provisioned = executable(\n"
+        "    'test-fact-store-provisioned',\n"
+        "    'test-fact-store-provisioned.c',\n"
+        "    'fact-test-support.c',\n"
+        "    c_args : fact_test_support_c_args + "
+        "['-DWYL_HAS_SECURE_DUCKDB_BRIDGE'],\n"
+        "    include_directories : include_directories('../wyrelog'),\n"
+        "    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, "
+        "duckdb_dep]\n"
+        "      + fact_test_support_deps,\n"
+        "  )"
+    )
+    guarded_control_executable = (
+        "  if host_machine.system() != 'windows'\n"
+        "  " + control_executable.replace("\n", "\n  ") +
+        "\n  endif"
+    )
+    expect_rejected(
+        baseline,
+        "tests/meson.build",
+        control_executable,
+        guarded_control_executable,
+        "POSIX-only provisioning control executable",
+        expect="provisioning control executable must be built on every "
+        "platform",
     )
     expect_rejected(
         baseline,
