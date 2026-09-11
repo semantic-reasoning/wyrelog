@@ -43,6 +43,7 @@ tests/test-fact-provisioning.c
 tests/test-fact-publication-lock-matrix.c
 tests/test-fact-replay.c
 tests/test-fact-runtime.c
+tests/test-fact-seal-unseal-coordination.c
 tests/test-fact-store-duckdb-hardening.c
 tests/test-fact-store-forget-transaction-provision-helper.c
 tests/test-fact-store-forget-transaction-provisioned.c
