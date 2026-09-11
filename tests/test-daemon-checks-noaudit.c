@@ -273,6 +273,8 @@ test_durable_root_reopen_appends_fresh_event (void)
   g_clear_object (&handle);
 
   g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  g_assert_cmpint (g_remove (lock_path), ==, 0);
   g_assert_cmpint (g_rmdir (directory), ==, 0);
 }
 

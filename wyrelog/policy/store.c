@@ -145,6 +145,10 @@ struct wyl_policy_store_t
   guint8 *deserialized_image;
   gsize deserialized_image_capacity;
   wyl_policy_store_lease_t *lease;
+  /* Providerless stores retain shared runtime ownership so policy readers may
+   * coexist while mutations can fail closed when another runtime is live. */
+  wyl_policy_store_lease_t *runtime_lease;
+  guint runtime_writer_depth;
   gchar *canonical_path;
   gchar *work_path;
   /* Directory fd anchoring Wyrelog-owned openat()/renameat() calls against
@@ -287,6 +291,39 @@ policy_store_terminal_gate (wyl_policy_store_t *store)
   if (store == NULL)
     return WYRELOG_E_INVALID;
   return (wyrelog_error_t) g_atomic_int_get (&store->terminal_result);
+}
+
+static wyrelog_error_t
+policy_store_runtime_writer_begin (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->runtime_lease == NULL) {
+    return WYRELOG_E_OK;
+  }
+  if (store->runtime_writer_depth == 0) {
+    wyrelog_error_t rc = wyl_policy_store_runtime_lease_upgrade
+          (store->runtime_lease);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  store->runtime_writer_depth++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+policy_store_runtime_writer_end (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->runtime_writer_depth == 0)
+    return WYRELOG_E_OK;
+  store->runtime_writer_depth--;
+  if (store->runtime_writer_depth == 0 && store->runtime_lease != NULL) {
+    wyrelog_error_t rc = wyl_policy_store_runtime_lease_downgrade
+          (store->runtime_lease);
+    if (rc != WYRELOG_E_OK) {
+      store->runtime_writer_depth = 1;
+      return rc;
+    }
+  }
+  return WYRELOG_E_OK;
 }
 
 gboolean
@@ -7989,7 +8026,13 @@ wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  return exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
+  wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
+  if (rc != WYRELOG_E_OK)
+    (void) policy_store_runtime_writer_end (store);
+  return rc;
 }
 
 wyrelog_error_t
@@ -7997,7 +8040,12 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  return exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+  wyrelog_error_t rc = exec_sql (store->db,
+          "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (rc == WYRELOG_E_OK)
+    rc = lease_rc;
+  return rc;
 }
 
 void
@@ -8007,6 +8055,7 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
     return;
   (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;");
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+  (void) policy_store_runtime_writer_end (store);
 }
 
 gboolean
@@ -8021,7 +8070,13 @@ wyl_policy_store_publication_transaction_begin (wyl_policy_store_t *store)
 {
   if (!wyl_policy_store_is_autocommit (store))
     return WYRELOG_E_BUSY;
-  return exec_sql (store->db, "BEGIN IMMEDIATE;");
+  wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+  if (rc != WYRELOG_E_OK)
+    (void) policy_store_runtime_writer_end (store);
+  return rc;
 }
 
 wyrelog_error_t
@@ -8029,7 +8084,11 @@ wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL || sqlite3_get_autocommit (store->db))
     return WYRELOG_E_INVALID;
-  return exec_sql (store->db, "COMMIT;");
+  wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
+  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (rc == WYRELOG_E_OK)
+    rc = lease_rc;
+  return rc;
 }
 
 wyrelog_error_t
@@ -8042,7 +8101,8 @@ wyl_policy_store_publication_transaction_rollback_checked
   wyrelog_error_t rc = exec_sql (store->db, "ROLLBACK;");
   if (rc != WYRELOG_E_OK || !sqlite3_get_autocommit (store->db))
     return rc == WYRELOG_E_OK ? WYRELOG_E_INTERNAL : rc;
-  return WYRELOG_E_OK;
+  wyrelog_error_t release_rc = policy_store_runtime_writer_end (store);
+  return release_rc == WYRELOG_E_OK ? WYRELOG_E_OK : release_rc;
 }
 
 wyrelog_error_t
@@ -8987,6 +9047,14 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     self->canonical_basename =
         g_strdup (wyl_policy_store_lease_basename (self->lease));
 #endif
+  } else if (!path_is_memory_db (effective_path)) {
+    rc = wyl_policy_store_runtime_lease_acquire (effective_path,
+            &self->runtime_lease);
+    if (rc != WYRELOG_E_OK)
+      goto fail;
+    g_free (self->canonical_path);
+    self->canonical_path = g_strdup (
+      wyl_policy_store_lease_resolved_path (self->runtime_lease));
   }
 
   rc = owned_keyprovider_validate (&self->keyprovider);
@@ -9248,6 +9316,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   owned_keyprovider_release (&store->keyprovider);
   wyl_policy_store_lease_release (store->lease);
   store->lease = NULL;
+  wyl_policy_store_lease_release (store->runtime_lease);
+  store->runtime_lease = NULL;
   g_clear_pointer (&store->canonical_basename, g_free);
   g_clear_pointer (&store->work_basename, g_free);
   g_clear_pointer (&store->canonical_path, g_free);
@@ -13526,18 +13596,28 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
   } else {
     return WYRELOG_E_POLICY;
   }
-  rc = prepare_stmt (store->db, sql, &stmt);
+  rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
   if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
       || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
 
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
-  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (step_rc != SQLITE_DONE) {
+    wyl_policy_store_rollback_mutation (store);
+    return WYRELOG_E_IO;
+  }
+  return wyl_policy_store_commit_mutation (store);
 }
 
 /* The inverse of wyl_policy_store_seal_fact_graph for the one population that
@@ -13701,25 +13781,37 @@ wyl_policy_store_unseal_fact_graph_with_result (wyl_policy_store_t *store,
     *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
     return WYRELOG_E_OK;
   }
-  rc = prepare_stmt (store->db, sql, &stmt);
+  rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
   if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
       || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
   if (sqlite3_bind_int64 (stmt, 3, (sqlite3_int64) seen_generation)
       != SQLITE_OK) {
     sqlite3_finalize (stmt);
+    wyl_policy_store_rollback_mutation (store);
     return WYRELOG_E_IO;
   }
 
   int step_rc = sqlite3_step (stmt);
   int changed = step_rc == SQLITE_DONE ? sqlite3_changes (store->db) : 0;
   sqlite3_finalize (stmt);
-  if (step_rc != SQLITE_DONE)
+  if (step_rc != SQLITE_DONE) {
+    wyl_policy_store_rollback_mutation (store);
     return WYRELOG_E_IO;
+  }
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (changed == 1) {
     *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
     return WYRELOG_E_OK;

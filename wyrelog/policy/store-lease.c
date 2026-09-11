@@ -42,6 +42,9 @@ struct wyl_policy_store_lease_t
 #ifdef G_OS_WIN32
   HANDLE parent_handle;
   HANDLE lock_handle;
+  OVERLAPPED lock_overlapped;
+  gboolean lock_held;
+  gboolean shared;
   guint64 parent_volume;
   guint64 parent_file_index;
   gboolean maintenance;
@@ -52,6 +55,7 @@ struct wyl_policy_store_lease_t
 #else
   int parent_dirfd;
   int lock_fd;
+  gboolean shared;
   guint64 parent_dev;
   guint64 parent_ino;
   gboolean maintenance;
@@ -207,6 +211,7 @@ pin_store_file (wyl_policy_store_lease_t *lease,
 
 static wyrelog_error_t
 lease_acquire_internal (const gchar *path, gboolean maintenance,
+    gboolean shared,
     wyl_policy_store_lease_t **out_lease)
 {
   if (path == NULL || path[0] == '\0' || out_lease == NULL)
@@ -243,8 +248,8 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
           ":%" G_GUINT64_FORMAT ":%s", volume, parent_index, basename);
 
   g_mutex_lock (&lease_registry_mutex);
-  if (registry_lookup (path_key) != NULL
-      || registry_lookup (location_key) != NULL) {
+  if (!shared && (registry_lookup (path_key) != NULL
+      || registry_lookup (location_key) != NULL)) {
     g_mutex_unlock (&lease_registry_mutex);
     CloseHandle (parent_handle);
     return WYRELOG_E_BUSY;
@@ -257,7 +262,8 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     CloseHandle (parent_handle);
     return WYRELOG_E_INVALID;
   }
-  HANDLE lock_handle = CreateFileW (wlock, GENERIC_READ | GENERIC_WRITE, 0,
+  HANDLE lock_handle = CreateFileW (wlock, GENERIC_READ | GENERIC_WRITE,
+          shared ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : 0,
           NULL, OPEN_ALWAYS,
           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   DWORD last_error = lock_handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
@@ -279,16 +285,33 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     return WYRELOG_E_POLICY;
   }
 
+  OVERLAPPED lock_overlapped = { 0 };
+  if (shared && !LockFileEx (lock_handle, LOCKFILE_FAIL_IMMEDIATELY, 0,
+      MAXDWORD, MAXDWORD, &lock_overlapped)) {
+    DWORD lock_error = GetLastError ();
+    CloseHandle (lock_handle);
+    CloseHandle (parent_handle);
+    g_mutex_unlock (&lease_registry_mutex);
+    return (lock_error == ERROR_LOCK_VIOLATION
+           || lock_error == ERROR_SHARING_VIOLATION) ? WYRELOG_E_BUSY :
+           WYRELOG_E_IO;
+  }
+
   wyl_policy_store_lease_t *lease = g_new0 (wyl_policy_store_lease_t, 1);
   lease->resolved_path = g_steal_pointer (&resolved);
   lease->basename = g_strdup (basename);
   lease->registry_keys = g_ptr_array_new_with_free_func (g_free);
   lease->parent_handle = parent_handle;
   lease->lock_handle = lock_handle;
+  lease->lock_overlapped = lock_overlapped;
+  lease->lock_held = shared;
+  lease->shared = shared;
   lease->parent_volume = volume;
   lease->parent_file_index = parent_index;
-  registry_bind (lease, path_key);
-  registry_bind (lease, location_key);
+  if (!shared) {
+    registry_bind (lease, path_key);
+    registry_bind (lease, location_key);
+  }
   g_mutex_unlock (&lease_registry_mutex);
   if (maintenance) {
     wyrelog_error_t prc = pin_store_file (lease, NULL);
@@ -305,14 +328,21 @@ wyrelog_error_t
 wyl_policy_store_lease_acquire (const gchar *path,
     wyl_policy_store_lease_t **out_lease)
 {
-  return lease_acquire_internal (path, FALSE, out_lease);
+  return lease_acquire_internal (path, FALSE, FALSE, out_lease);
+}
+
+wyrelog_error_t
+wyl_policy_store_runtime_lease_acquire (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, FALSE, TRUE, out_lease);
 }
 
 wyrelog_error_t
 wyl_policy_store_lease_acquire_maintenance (const gchar *path,
     wyl_policy_store_lease_t **out_lease)
 {
-  return lease_acquire_internal (path, TRUE, out_lease);
+  return lease_acquire_internal (path, TRUE, FALSE, out_lease);
 }
 
 wyrelog_error_t
@@ -386,6 +416,52 @@ wyl_policy_store_lease_refresh_store_pin (wyl_policy_store_lease_t *lease,
   return pin_store_file (lease, expected_identity);
 }
 
+wyrelog_error_t
+wyl_policy_store_runtime_lease_upgrade (wyl_policy_store_lease_t *lease)
+{
+  if (lease == NULL || !lease->shared || !lease->lock_held)
+    return WYRELOG_E_INVALID;
+  if (!UnlockFileEx (lease->lock_handle, 0, MAXDWORD, MAXDWORD,
+      &lease->lock_overlapped))
+    return WYRELOG_E_IO;
+  lease->lock_held = FALSE;
+  OVERLAPPED exclusive = { 0 };
+  if (!LockFileEx (lease->lock_handle, LOCKFILE_EXCLUSIVE_LOCK
+      | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &exclusive)) {
+    DWORD lock_error = GetLastError ();
+    (void) LockFileEx (lease->lock_handle, LOCKFILE_FAIL_IMMEDIATELY, 0,
+        MAXDWORD, MAXDWORD, &lease->lock_overlapped);
+    lease->lock_held = TRUE;
+    return (lock_error == ERROR_LOCK_VIOLATION
+           || lock_error == ERROR_SHARING_VIOLATION) ? WYRELOG_E_BUSY :
+           WYRELOG_E_IO;
+  }
+  lease->lock_overlapped = exclusive;
+  lease->lock_held = TRUE;
+  lease->shared = FALSE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_runtime_lease_downgrade (wyl_policy_store_lease_t *lease)
+{
+  if (lease == NULL || lease->shared || !lease->lock_held)
+    return WYRELOG_E_INVALID;
+  if (!UnlockFileEx (lease->lock_handle, 0, MAXDWORD, MAXDWORD,
+      &lease->lock_overlapped))
+    return WYRELOG_E_IO;
+  OVERLAPPED shared = { 0 };
+  if (!LockFileEx (lease->lock_handle, LOCKFILE_FAIL_IMMEDIATELY, 0,
+      MAXDWORD, MAXDWORD, &shared)) {
+    lease->lock_held = FALSE;
+    return WYRELOG_E_IO;
+  }
+  lease->lock_overlapped = shared;
+  lease->lock_held = TRUE;
+  lease->shared = TRUE;
+  return WYRELOG_E_OK;
+}
+
 void
 wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 {
@@ -395,6 +471,9 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
   registry_unbind_all (lease);
   if (lease->maintenance && lease->store_handle != INVALID_HANDLE_VALUE)
     CloseHandle (lease->store_handle);
+  if (lease->lock_held)
+    (void) UnlockFileEx (lease->lock_handle, 0, MAXDWORD, MAXDWORD,
+        &lease->lock_overlapped);
   CloseHandle (lease->lock_handle);
   CloseHandle (lease->parent_handle);
   g_mutex_unlock (&lease_registry_mutex);
@@ -405,11 +484,11 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 }
 #else
 static wyrelog_error_t
-lock_nonblocking (int fd)
+lock_nonblocking (int fd, gboolean shared)
 {
 #if defined(__linux__) && defined(F_OFD_SETLK)
   struct flock ofd = { 0 };
-  ofd.l_type = F_WRLCK;
+  ofd.l_type = shared ? F_RDLCK : F_WRLCK;
   ofd.l_whence = SEEK_SET;
   if (fcntl (fd, F_OFD_SETLK, &ofd) == 0)
     return WYRELOG_E_OK;
@@ -418,7 +497,7 @@ lock_nonblocking (int fd)
   if (errno != EINVAL && errno != ENOSYS && errno != EOPNOTSUPP)
     return WYRELOG_E_IO;
 #endif
-  if (flock (fd, LOCK_EX | LOCK_NB) == 0)
+  if (flock (fd, (shared ? LOCK_SH : LOCK_EX) | LOCK_NB) == 0)
     return WYRELOG_E_OK;
   return (errno == EWOULDBLOCK || errno == EAGAIN) ? WYRELOG_E_BUSY :
          WYRELOG_E_IO;
@@ -479,6 +558,7 @@ pin_store_file (wyl_policy_store_lease_t *lease,
 
 static wyrelog_error_t
 lease_acquire_internal (const gchar *path, gboolean maintenance,
+    gboolean shared,
     wyl_policy_store_lease_t **out_lease)
 {
   if (path == NULL || path[0] == '\0' || out_lease == NULL)
@@ -521,8 +601,8 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
           (guint64) parent_stat.st_dev, (guint64) parent_stat.st_ino, basename);
 
   g_mutex_lock (&lease_registry_mutex);
-  if (registry_lookup (path_key) != NULL
-      || registry_lookup (location_key) != NULL) {
+  if (!shared && (registry_lookup (path_key) != NULL
+      || registry_lookup (location_key) != NULL)) {
     g_mutex_unlock (&lease_registry_mutex);
     close (dirfd);
     return WYRELOG_E_BUSY;
@@ -545,7 +625,8 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   g_autofree gchar *inode_key = g_strdup_printf ("inode:%" G_GUINT64_FORMAT
           ":%" G_GUINT64_FORMAT, (guint64) lock_stat.st_dev,
           (guint64) lock_stat.st_ino);
-  wyl_policy_store_lease_t *same_inode = registry_lookup (inode_key);
+  wyl_policy_store_lease_t *same_inode = shared ? NULL :
+      registry_lookup (inode_key);
   if (same_inode != NULL) {
     registry_bind (same_inode, path_key);
     registry_bind (same_inode, location_key);
@@ -571,7 +652,7 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
     return WYRELOG_E_IO;
   }
 
-  wyrelog_error_t rc = lock_nonblocking (lock_fd);
+  wyrelog_error_t rc = lock_nonblocking (lock_fd, shared);
   if (rc != WYRELOG_E_OK) {
     close (lock_fd);
     close (dirfd);
@@ -585,11 +666,14 @@ lease_acquire_internal (const gchar *path, gboolean maintenance,
   lease->registry_keys = g_ptr_array_new_with_free_func (g_free);
   lease->parent_dirfd = dirfd;
   lease->lock_fd = lock_fd;
+  lease->shared = shared;
   lease->parent_dev = parent_stat.st_dev;
   lease->parent_ino = parent_stat.st_ino;
-  registry_bind (lease, path_key);
-  registry_bind (lease, location_key);
-  registry_bind (lease, inode_key);
+  if (!shared) {
+    registry_bind (lease, path_key);
+    registry_bind (lease, location_key);
+    registry_bind (lease, inode_key);
+  }
   g_mutex_unlock (&lease_registry_mutex);
   if (maintenance) {
     wyrelog_error_t prc = pin_store_file (lease, NULL);
@@ -606,14 +690,43 @@ wyrelog_error_t
 wyl_policy_store_lease_acquire (const gchar *path,
     wyl_policy_store_lease_t **out_lease)
 {
-  return lease_acquire_internal (path, FALSE, out_lease);
+  return lease_acquire_internal (path, FALSE, FALSE, out_lease);
+}
+
+wyrelog_error_t
+wyl_policy_store_runtime_lease_acquire (const gchar *path,
+    wyl_policy_store_lease_t **out_lease)
+{
+  return lease_acquire_internal (path, FALSE, TRUE, out_lease);
 }
 
 wyrelog_error_t
 wyl_policy_store_lease_acquire_maintenance (const gchar *path,
     wyl_policy_store_lease_t **out_lease)
 {
-  return lease_acquire_internal (path, TRUE, out_lease);
+  return lease_acquire_internal (path, TRUE, FALSE, out_lease);
+}
+
+wyrelog_error_t
+wyl_policy_store_runtime_lease_upgrade (wyl_policy_store_lease_t *lease)
+{
+  if (lease == NULL || !lease->shared)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = lock_nonblocking (lease->lock_fd, FALSE);
+  if (rc == WYRELOG_E_OK)
+    lease->shared = FALSE;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_runtime_lease_downgrade (wyl_policy_store_lease_t *lease)
+{
+  if (lease == NULL || lease->shared)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = lock_nonblocking (lease->lock_fd, TRUE);
+  if (rc == WYRELOG_E_OK)
+    lease->shared = TRUE;
+  return rc;
 }
 
 /* Re-resolve the store's final component through the pinned parent dirfd and

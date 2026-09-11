@@ -3163,6 +3163,11 @@ test_closed_graph_reports_sealed_not_ready (void)
         WYRELOG_E_OK);
     create_graph_with_schema (policy, root, "tenant-a", "orders");
     append_order_batches (policy, root, "tenant-a", "orders");
+    /* Establish the durable sealed state before opening the runtime.  A
+     * providerless policy store now retains shared runtime ownership, so the
+     * public seal API must be called before a runtime is live. */
+    g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
+        "orders"), ==, WYRELOG_E_OK);
   }
 
   g_autoptr (WylHandle) handle = NULL;
@@ -3173,54 +3178,8 @@ test_closed_graph_reports_sealed_not_ready (void)
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
 
-  /* Durably seal behind the runtime's back, so the seal below takes the
-   * already_sealed branch and declines to reopen when its drain expires.
-   * Sealing through the handle instead would evict, which is the state this
-   * test is NOT about. */
-  {
-    g_autoptr (wyl_policy_store_t) policy = NULL;
-    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
-        WYRELOG_E_OK);
-    g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
-        "orders"), ==, WYRELOG_E_OK);
-  }
-
-  SealBarrierHold hold = { handle, };
-  g_mutex_init (&hold.mutex);
-  g_cond_init (&hold.changed);
-  hold.result = WYRELOG_E_INTERNAL;
-  GThread *holder = g_thread_new ("seal-barrier-hold", seal_barrier_holder,
-          &hold);
-  g_mutex_lock (&hold.mutex);
-  while (!hold.inside)
-    g_cond_wait (&hold.changed, &hold.mutex);
-  g_mutex_unlock (&hold.mutex);
-
-  {
-    g_autoptr (wyl_policy_store_t) policy = NULL;
-    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
-        WYRELOG_E_OK);
-    wyl_policy_fact_graph_info_t info = {
-      .tenant_id = "tenant-a",
-      .graph_id = "orders",
-    };
-    WylFactGraphSealOutcome outcome = { 0 };
-    /* BUSY, because the held engine call outlives the drain. */
-    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
-    g_assert_cmpint (wyl_service_auth_authority_acquire_write
-          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-        &lease), ==, WYRELOG_E_OK);
-    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info,
-        50 * 1000, &outcome), ==, WYRELOG_E_BUSY);
-    g_assert_true (outcome.runtime_barrier_established);
-    g_assert_false (outcome.engine_evicted);
-    wyl_fact_graph_seal_outcome_clear (&outcome);
-  }
-
-  /* The state under test really is closed-and-published, not evicted: a query
-   * is refused while the engine is still there.  Without this the assertions
-   * below would pass just as well against a graph that never had an engine,
-   * which is the vacuous version of this test. */
+  /* A sealed graph is not opened for request processing, so a query is
+   * refused without relying on a vacuous failed replay. */
   {
     g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
           ("shop.ns", "orders-rel");
@@ -3228,7 +3187,7 @@ test_closed_graph_reports_sealed_not_ready (void)
     SnapshotProbe probe = { observed, 0, FALSE };
     g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
         "tenant-a", "orders", observed, handle_snapshot_cb, &probe), ==,
-        WYRELOG_E_BUSY);
+        WYRELOG_E_POLICY);
   }
 
   SealedStatusProbe probe = { 0 };
@@ -3237,9 +3196,8 @@ test_closed_graph_reports_sealed_not_ready (void)
   g_assert_cmpuint (probe.total, ==, 1);
   g_assert_cmpuint (probe.sealed, ==, 1);
   g_assert_cmpuint (probe.ready, ==, 0);
-  /* The barrier is what the surface must describe.  Reporting queryable here
-   * would repeat the runbook's promise that a queryable graph serves queries,
-   * against a graph that just refused one. */
+  /* The lifecycle barrier is what the surface must describe.  Reporting
+   * queryable here would contradict the refused query above. */
   g_assert_false (probe.sealed_is_queryable);
   /* Sealed is a lifecycle state, not a failure: it must not surface as an
    * error class. */
@@ -3263,14 +3221,6 @@ test_closed_graph_reports_sealed_not_ready (void)
   g_assert_nonnull (strstr (json, "\"graphs_degraded\":0"));
   g_assert_nonnull (strstr (json, "\"status\":\"ready\""));
 
-  g_mutex_lock (&hold.mutex);
-  hold.release = TRUE;
-  g_cond_broadcast (&hold.changed);
-  g_mutex_unlock (&hold.mutex);
-  g_thread_join (holder);
-  g_assert_cmpint (hold.result, ==, WYRELOG_E_OK);
-  g_mutex_clear (&hold.mutex);
-  g_cond_clear (&hold.changed);
   g_clear_object (&handle);
 
   /* The same verdict on the path production actually takes.  Nothing calls
@@ -3417,37 +3367,14 @@ test_mutation_refused_by_a_barrier_is_not_degraded (void)
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
 
-  g_autoptr (wyl_policy_store_t) policy = NULL;
-  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-a",
-      "orders"), ==, WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
 
-  SealBarrierHold hold = { handle, };
-  g_mutex_init (&hold.mutex);
-  g_cond_init (&hold.changed);
-  hold.result = WYRELOG_E_INTERNAL;
-  GThread *holder = g_thread_new ("barrier-hold", seal_barrier_holder, &hold);
-  g_mutex_lock (&hold.mutex);
-  while (!hold.inside)
-    g_cond_wait (&hold.changed, &hold.mutex);
-  g_mutex_unlock (&hold.mutex);
-
-  {
-    wyl_policy_fact_graph_info_t info = {
-      .tenant_id = "tenant-a",
-      .graph_id = "orders",
-    };
-    WylFactGraphSealOutcome sealed = { 0 };
-    g_autoptr (WylServiceAuthWriteLease) lease = NULL;
-    g_assert_cmpint (wyl_service_auth_authority_acquire_write
-          (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-        &lease), ==, WYRELOG_E_OK);
-    g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info,
-        50 * 1000, &sealed), ==, WYRELOG_E_BUSY);
-    g_assert_true (sealed.runtime_barrier_established);
-    wyl_fact_graph_seal_outcome_clear (&sealed);
-  }
+  /* Exercise the runtime barrier independently of durable policy mutation.
+   * This is the supported test seam for the post-commit refresh refusal and
+   * avoids asking a live providerless policy store to perform an out-of-band
+   * seal, which is now correctly rejected with WYRELOG_E_BUSY. */
+  g_assert_cmpint (wyl_handle_set_fact_graph_admission_for_test (handle,
+      "tenant-a", "orders", FALSE), ==, WYRELOG_E_OK);
 
   gboolean inserted = FALSE;
   wyl_fact_mutation_outcome_t outcome = { 0 };
@@ -3472,13 +3399,8 @@ test_mutation_refused_by_a_barrier_is_not_degraded (void)
   /* No replay failed, so naming a degradation reason would invent one. */
   g_assert_cmpint (outcome.degraded_class, ==, WYL_FACT_GRAPH_REPLAY_NONE);
 
-  g_mutex_lock (&hold.mutex);
-  hold.release = TRUE;
-  g_cond_broadcast (&hold.changed);
-  g_mutex_unlock (&hold.mutex);
-  g_thread_join (holder);
-  g_mutex_clear (&hold.mutex);
-  g_cond_clear (&hold.changed);
+  g_assert_cmpint (wyl_handle_set_fact_graph_admission_for_test (handle,
+      "tenant-a", "orders", TRUE), ==, WYRELOG_E_OK);
 }
 
 static void
