@@ -1032,11 +1032,84 @@ typedef struct
   const gchar *replace_path;
   const gchar *replacement_path;
   const gchar *foreign_path;
+  const gchar *metadata_path;
+  const gchar *metadata_mutation;
   gboolean replacement_attempted;
   gboolean replacement_blocked;
   gboolean replacement_setup_failed;
   gint replacement_errno;
+  gboolean metadata_mutation_attempted;
+  gboolean metadata_mutated;
+  gchar *metadata_error;
 } SealPhaseFault;
+
+static gboolean
+run_duckdb_statement (const gchar *path, const gchar *sql,
+    gchar **error_message)
+{
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  duckdb_result result = { 0 };
+  duckdb_state state = duckdb_open (path, &db);
+  if (state != DuckDBSuccess) {
+    if (error_message != NULL)
+      *error_message = g_strdup_printf ("duckdb_open(%s) returned %d", path,
+              state);
+    return FALSE;
+  }
+  state = duckdb_connect (db, &conn);
+  if (state != DuckDBSuccess) {
+    if (error_message != NULL)
+      *error_message = g_strdup_printf ("duckdb_connect(%s) returned %d", path,
+              state);
+    duckdb_close (&db);
+    return FALSE;
+  }
+  state = duckdb_query (conn, sql, &result);
+  if (state != DuckDBSuccess) {
+    if (error_message != NULL) {
+      const gchar *detail = duckdb_result_error (&result);
+      *error_message = g_strdup_printf ("duckdb_query(%s): %s", path,
+              detail == NULL ? "unknown error" : detail);
+    }
+    duckdb_destroy_result (&result);
+    duckdb_disconnect (&conn);
+    duckdb_close (&db);
+    return FALSE;
+  }
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  return TRUE;
+}
+
+static gboolean
+duckdb_metadata_value_is (const gchar *path, const gchar *key,
+    const gchar *expected)
+{
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  duckdb_result result = { 0 };
+  if (duckdb_open (path, &db) != DuckDBSuccess)
+    return FALSE;
+  if (duckdb_connect (db, &conn) != DuckDBSuccess) {
+    duckdb_close (&db);
+    return FALSE;
+  }
+  g_autofree gchar *sql = g_strdup_printf
+        ("SELECT value FROM fact_store_metadata WHERE key='%s';", key);
+  gboolean matches = duckdb_query (conn, sql, &result) == DuckDBSuccess
+      && duckdb_row_count (&result) == 1;
+  if (matches) {
+    gchar *value = duckdb_value_varchar (&result, 0, 0);
+    matches = g_strcmp0 (value, expected) == 0;
+    duckdb_free (value);
+  }
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  return matches;
+}
 
 static wyrelog_error_t
 seal_phase_fault (const gchar *phase, gpointer user_data)
@@ -1060,6 +1133,14 @@ seal_phase_fault (const gchar *phase, gpointer user_data)
     return fault->fail_unseal_reseal ? WYRELOG_E_IO : WYRELOG_E_OK;
   if (g_strcmp0 (phase,
       WYL_FACT_GRAPH_SEAL_PHASE_UNSEAL_BEFORE_PUBLICATION) == 0) {
+    if (fault->metadata_path != NULL) {
+      fault->metadata_mutation_attempted = TRUE;
+      fault->metadata_mutated = run_duckdb_statement (fault->metadata_path,
+              fault->metadata_mutation, &fault->metadata_error);
+      if (!fault->metadata_mutated)
+        return WYRELOG_E_IO;
+      return WYRELOG_E_OK;
+    }
     fault->replacement_attempted = TRUE;
     if (g_rename (fault->replace_path, fault->replacement_path) != 0) {
       fault->replacement_errno = errno;
@@ -2753,6 +2834,82 @@ test_unseal_replacement_after_validation_and_retry (void)
   remove_tree (root);
 }
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+typedef struct
+{
+  const gchar *name;
+  const gchar *mutation;
+  const gchar *restore;
+  const gchar *key;
+  const gchar *expected;
+} PostValidationMetadataMutation;
+
+static void
+test_unseal_rejects_post_validation_canonical_metadata (gconstpointer data)
+{
+  const PostValidationMetadataMutation *metadata = data;
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture,
+      "wyl-unseal-post-validation-metadata-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a", .graph_id = "orders",
+  };
+  WylFactGraphSealOutcome sealed = { 0 };
+  g_assert_cmpint (wyl_fact_graph_seal (fixture.policy, &info, fixture.manager,
+      -1, &sealed), ==, WYRELOG_E_OK);
+  wyl_fact_graph_seal_outcome_clear (&sealed);
+
+  GraphPathProbe path = { "tenant-a", "orders", NULL };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
+      "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
+  g_assert_nonnull (path.storage_path);
+  g_autofree gchar *fact_path = g_build_filename (path.storage_path,
+          "facts.duckdb", NULL);
+  FactGraphFileIdentity original_identity = { 0 };
+  g_assert_true (fact_graph_file_get_identity (fact_path, &original_identity));
+  SealPhaseFault fault = {
+    .metadata_path = fact_path,
+    .metadata_mutation = metadata->mutation,
+  };
+  wyl_fact_graph_seal_set_test_hook (seal_phase_fault, &fault);
+  WylFactGraphUnsealOutcome outcome = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_unseal_for_test (fixture.policy,
+          fixture.root, &info, fixture.manager, -1, &outcome);
+  wyl_fact_graph_seal_set_test_hook (NULL, NULL);
+  g_assert_true (fault.metadata_mutation_attempted);
+  if (!fault.metadata_mutated) {
+    g_test_message ("canonical metadata mutation failed for %s: %s",
+        metadata->name, fault.metadata_error == NULL
+            ? "unknown error" : fault.metadata_error);
+  }
+  g_assert_true (fault.metadata_mutated);
+  if (metadata->key != NULL)
+    g_assert_true (duckdb_metadata_value_is (fact_path, metadata->key,
+        metadata->expected));
+  g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+  g_assert_false (outcome.engine_published);
+  g_assert_false (outcome.runtime_admission_open);
+  g_assert_false (outcome.status.queryable);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_cmpuint (outcome.status.active_engine_calls, ==, 0);
+  g_assert_cmpuint (outcome.status.waiting_engine_calls, ==, 0);
+  FactGraphFileIdentity after_identity = { 0 };
+  g_assert_true (fact_graph_file_get_identity (fact_path, &after_identity));
+  g_assert_cmpuint (after_identity.device, ==, original_identity.device);
+  g_assert_cmpuint (after_identity.file, ==, original_identity.file);
+  wyl_fact_graph_unseal_outcome_clear (&outcome);
+  /* Restore the canonical artifact before the fixture owns it again. */
+  g_assert_true (run_duckdb_statement (fact_path, metadata->restore, NULL));
+  g_free (fault.metadata_error);
+  g_free (path.storage_path);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
+#endif
+
 /* S4's ambiguous durable write, sub-case one: the write fails and the
  * compensating re-read succeeds, reporting the graph unsealed.
  *
@@ -3352,6 +3509,26 @@ main (int argc, char **argv)
   }
   g_test_add_data_func ("/fact-graph-seal/unseal-provisioning-uuid-mismatch",
       GINT_TO_POINTER (0), test_unseal_rejects_provisioning_mismatch);
+  static const PostValidationMetadataMutation post_validation_metadata[] = {
+    {"format-version", "UPDATE fact_store_metadata SET value='2' "
+     "WHERE key='format_version';",
+     "UPDATE fact_store_metadata SET value='1' "
+     "WHERE key='format_version';", "format_version", "2"},
+    {"path-encoding-version", "UPDATE fact_store_metadata SET value='2' "
+     "WHERE key='path_encoding_version';",
+     "UPDATE fact_store_metadata SET value='1' "
+     "WHERE key='path_encoding_version';", "path_encoding_version", "2"},
+    {"schema", "ALTER TABLE fact_store_metadata ADD COLUMN foreign_metadata "
+     "VARCHAR;", "ALTER TABLE fact_store_metadata DROP COLUMN "
+     "foreign_metadata;", NULL, NULL},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (post_validation_metadata); i++) {
+    g_autofree gchar *name = g_strdup_printf
+          ("/fact-graph-seal/unseal-post-validation-canonical-metadata-%s",
+            post_validation_metadata[i].name);
+    g_test_add_data_func (name, &post_validation_metadata[i],
+        test_unseal_rejects_post_validation_canonical_metadata);
+  }
 #ifdef __APPLE__
   g_test_add_data_func ("/fact-graph-seal/unseal-missing-darwin-evidence",
       GINT_TO_POINTER (1), test_unseal_rejects_provisioning_mismatch);
