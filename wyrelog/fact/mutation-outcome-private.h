@@ -31,9 +31,14 @@ G_BEGIN_DECLS;
  *
  * The deltas are LOGICAL, not physical DuckDB storage: they measure the row
  * count and a stable per-value logical byte size so quota accounting does not
- * depend on the backend's physical layout.  Both deltas are signed so a
- * future retract-as-credit policy (issue #547) can be expressed without an
- * ABI reshape; append/retract currently report non-negative values.
+ * depend on the backend's physical layout.  The deltas are signed to leave
+ * room for a future forget-side settlement: forget is the only operation
+ * that physically removes committed fact rows and could release capacity.
+ * Forget currently reports only the number of rows purged; it does not emit
+ * this outcome or a negative delta, and deleting data does not promise that
+ * quota is released.  Retract is not a credit: retract_batch_delta delegates
+ * to append_batch_delta, so the tombstone batch charges positive row and
+ * logical-byte deltas.  No producer currently emits a negative delta.
  *
  * On an idempotent no-op (a byte-identical batch replayed under the same
  * idempotency key) inserted is FALSE and both deltas are zero.
