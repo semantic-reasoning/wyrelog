@@ -1976,6 +1976,148 @@ test_direct_replay_retracts_and_mangles (void)
 }
 
 static void
+test_replay_keeps_legacy_nullable_null_fail_closed (void)
+{
+  TEST ("legacy nullable NULL rows remain stored and fail replay closed");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-legacy-null-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+        &created), ==, WYRELOG_E_OK);
+
+    const wyl_policy_fact_graph_column_t graph_columns[] = {
+      {"key", "symbol"},
+      {"value", "int64"},
+    };
+    const wyl_policy_fact_graph_relation_t graph_relations[] = {
+      {"nullable-rel", graph_columns, G_N_ELEMENTS (graph_columns)},
+    };
+    const wyl_policy_fact_graph_create_options_t graph_opts = {
+      .tenant_id = "tenant-a",
+      .graph_id = "legacy-null",
+      .fact_root = root,
+      .schema_version = 1,
+      .owner_scope = "tenant-a",
+      .relations = graph_relations,
+      .n_relations = G_N_ELEMENTS (graph_relations),
+    };
+    g_assert_cmpint (wyl_policy_store_create_fact_graph (policy, &graph_opts,
+        NULL), ==, WYRELOG_E_OK);
+
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"key", "symbol", FALSE, TRUE},
+      {"value", "int64", TRUE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema
+          ("tenant-a", "legacy-null", columns, G_N_ELEMENTS (columns));
+    schema.relation_name = "nullable-rel";
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+        &schema), ==, WYRELOG_E_OK);
+
+    g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+            "tenant-a", "legacy-null");
+    g_assert_nonnull (storage_path);
+    g_autofree gchar *fact_path = g_build_filename (storage_path,
+            "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+
+    wyl_fact_value_t value[] = {
+      {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "legacy-key"},
+      {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 23},
+    };
+    const wyl_fact_row_t row[] = {
+      {value, G_N_ELEMENTS (value)},
+    };
+    const wyl_fact_store_batch_t batch = {
+      .batch_id = "legacy-null-batch",
+      .tenant_id = "tenant-a",
+      .graph_id = "legacy-null",
+      .namespace_id = "shop.ns",
+      .relation_name = "nullable-rel",
+      .schema_version = 1,
+      .idempotency_key = "legacy-null-key",
+      .op = WYL_FACT_STORE_OP_ASSERT,
+      .rows = row,
+      .n_rows = G_N_ELEMENTS (row),
+    };
+    gboolean inserted = FALSE;
+    g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+        &inserted), ==, WYRELOG_E_OK);
+    g_assert_true (inserted);
+    g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+    g_autofree gchar *sql = g_strdup_printf
+          ("UPDATE %s SET value = NULL WHERE __wyl_batch_id = "
+            "'legacy-null-batch';", table);
+    g_assert_cmpint (wyl_fact_store_test_exec_sql (store, sql), ==,
+        WYRELOG_E_OK);
+    gint64 legacy_batch_count = 0;
+    g_assert_cmpint (wyl_fact_store_test_query_int64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = "
+        "'legacy-null-batch';", &legacy_batch_count), ==, WYRELOG_E_OK);
+    g_assert_cmpint (legacy_batch_count, ==, 1);
+  }
+
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  FactStatusProbe status = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.total, ==, 1);
+  g_assert_cmpuint (status.ready, ==, 0);
+  g_assert_cmpint (status.last_state, ==,
+      WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH);
+  g_autofree gchar *status_json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (status_json);
+  g_assert_nonnull (strstr (status_json, "\"state\":\"schema_mismatch\""));
+  g_assert_nonnull (strstr (status_json, "\"queryable\":false"));
+
+  g_autofree gchar *storage_path = lookup_graph_storage_path
+        (wyl_handle_get_policy_store (handle), "tenant-a", "legacy-null");
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"key", "symbol", FALSE, TRUE},
+    {"value", "int64", TRUE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema
+        ("tenant-a", "legacy-null", columns, G_N_ELEMENTS (columns));
+  schema.relation_name = "nullable-rel";
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *count_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s WHERE value IS NULL AND "
+          "__wyl_batch_id = 'legacy-null-batch';", table);
+  gint64 count = 0;
+  g_assert_cmpint (wyl_fact_store_test_query_int64 (store, count_sql, &count),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (count, ==, 1);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+static void
 test_direct_replay_shares_compounds_across_relations (void)
 {
   TEST ("direct replay keeps compound handles graph scoped across relations");
@@ -4293,6 +4435,8 @@ main (int argc, char **argv)
       test_handle_unseal_traces_coordinator_before_publication);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
+  g_test_add_func ("/fact-replay/legacy-null-fails-closed",
+      test_replay_keeps_legacy_nullable_null_fail_closed);
   g_test_add_func ("/fact-replay/compound-shared",
       test_direct_replay_shares_compounds_across_relations);
   g_test_add_func ("/fact-replay/compound-cache-nested",

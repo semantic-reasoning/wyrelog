@@ -44,6 +44,7 @@ tests/test-fact-provisioning.c
 tests/test-fact-publication-lock-matrix.c
 tests/test-fact-replay.c
 tests/test-fact-runtime.c
+tests/test-fact-schema.c
 tests/test-fact-seal-unseal-coordination.c
 tests/test-fact-store-duckdb-hardening.c
 tests/test-fact-store-forget-transaction-provision-helper.c
@@ -177,6 +178,7 @@ wyrelog/fact/replay.c
 wyrelog/fact/runtime-private.c
 wyrelog/fact/runtime-private.h
 wyrelog/fact/schema-private.h
+wyrelog/fact/schema.c
 wyrelog/fact/secure-duckdb-artifact-contract-private.h
 wyrelog/fact/secure-duckdb-bridge-private.h
 wyrelog/fact/secure-duckdb-filesystem-contract-private.h

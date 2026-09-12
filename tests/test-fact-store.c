@@ -1362,6 +1362,282 @@ check_fact_store_projection_validation (void)
   if (wyl_fact_store_validate_projection (store, &malformed, &exists)
       != WYRELOG_E_POLICY || !exists)
     return 77;
+
+  const wyl_policy_fact_relation_schema_column_t nullable_columns[] = {
+    {"value", "int64", TRUE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t nullable_schema = make_schema
+        (nullable_columns, G_N_ELEMENTS (nullable_columns));
+  nullable_schema.relation_name = "nullable_values";
+  if (wyl_fact_store_ensure_projection (store, &nullable_schema, NULL)
+      != WYRELOG_E_OK)
+    return 78;
+  wyl_fact_value_t nonnull_value[] = {
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 7},
+  };
+  const wyl_fact_row_t nonnull_row[] = {
+    {nonnull_value, G_N_ELEMENTS (nonnull_value)},
+  };
+  wyl_fact_store_batch_t nullable_batch = {
+    .batch_id = "nullable-nonnull",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "nullable_values",
+    .schema_version = 1,
+    .idempotency_key = "nullable-nonnull-key",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = nonnull_row,
+    .n_rows = G_N_ELEMENTS (nonnull_row),
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &nullable_schema, &nullable_batch,
+      &inserted) != WYRELOG_E_OK || !inserted)
+    return 79;
+  wyl_fact_value_t null_value[] = {
+    {.type = WYL_FACT_VALUE_NULL},
+  };
+  const wyl_fact_row_t null_row[] = {
+    {null_value, G_N_ELEMENTS (null_value)},
+  };
+  nullable_batch.batch_id = "nullable-null";
+  nullable_batch.idempotency_key = "nullable-null-key";
+  nullable_batch.rows = null_row;
+  if (wyl_fact_store_append_batch (store, &nullable_schema, &nullable_batch,
+      NULL) != WYRELOG_E_POLICY)
+    return 80;
+  g_autofree gchar *nullable_table =
+      wyl_fact_store_projection_table_name (&nullable_schema);
+  g_autofree gchar *nullable_count_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s;", nullable_table);
+  gint64 nullable_count = -1;
+  if (!count_i64 (store, nullable_count_sql, &nullable_count)
+      || nullable_count != 1
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_batches;",
+      &nullable_count) || nullable_count != 1)
+    return 81;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'nullable-null';", &nullable_count)
+      || nullable_count != 0)
+    return 82;
+  return 0;
+}
+
+static gint
+check_fact_store_rejects_nullable_null_after_reopen (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-nullability-XXXXXX",
+          &error);
+  if (dir == NULL)
+    return 3200;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3201;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"value", "int64", TRUE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  schema.relation_name = "nullable_values";
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
+    return 3202;
+
+  wyl_fact_value_t nonnull_value[] = {
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 7},
+  };
+  const wyl_fact_row_t nonnull_row[] = {
+    {nonnull_value, G_N_ELEMENTS (nonnull_value)},
+  };
+  wyl_fact_store_batch_t batch = {
+    .batch_id = "nullable-nonnull",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "nullable_values",
+    .schema_version = 1,
+    .idempotency_key = "nullable-nonnull-key",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = nonnull_row,
+    .n_rows = G_N_ELEMENTS (nonnull_row),
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3203;
+
+  g_clear_pointer (&store, wyl_fact_store_close);
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+    return 3204;
+  wyl_fact_value_t null_value[] = {
+    {.type = WYL_FACT_VALUE_NULL},
+  };
+  const wyl_fact_row_t null_row[] = {
+    {null_value, G_N_ELEMENTS (null_value)},
+  };
+  batch.batch_id = "nullable-null";
+  batch.idempotency_key = "nullable-null-key";
+  batch.rows = null_row;
+  if (wyl_fact_store_append_batch (store, &schema, &batch, NULL)
+      != WYRELOG_E_POLICY)
+    return 3205;
+  gint64 count = -1;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'nullable-null';", &count) || count != 0)
+    return 3208;
+
+  g_clear_pointer (&store, wyl_fact_store_close);
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+    return 3206;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *count_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s;", table);
+  count = -1;
+  if (!count_i64 (store, count_sql, &count) || count != 1
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 1
+      || !count_i64 (store,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'nullable-null';",
+      &count) || count != 0)
+    return 3207;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'nullable-null';", &count) || count != 0)
+    return 3209;
+
+  g_clear_pointer (&store, wyl_fact_store_close);
+  (void) g_remove (path);
+  (void) g_rmdir (dir);
+  return 0;
+}
+
+static gint
+check_retract_by_batch_id_preserves_legacy_nullable_null (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"value", "int64", TRUE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, G_N_ELEMENTS (columns)) != 0)
+    return 3300;
+  fix.schema.relation_name = "nullable_values";
+  g_clear_pointer (&fix.table, g_free);
+  if (wyl_fact_store_ensure_projection (fix.store, &fix.schema, &fix.table)
+      != WYRELOG_E_OK)
+    return 3301;
+
+  /* Seed the shape of a legacy assertion written before NULL was rejected. */
+  if (!exec_ok (fix.store,
+      "INSERT INTO fact_batches "
+      "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+      " schema_version, source, request_id, idempotency_key, op, row_count, "
+      " content_hash, created_at_us) "
+      "VALUES ('legacy-null', 'tenant-a', 'orders', 'shop', "
+      "'nullable_values', 1, 'unit-test', 'request-legacy', "
+      "'legacy-null-key', 'assert', 1, 'legacy-hash', 1);")
+      || !exec_ok (fix.store,
+      "INSERT INTO fact_event_log "
+      "(seq, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+      " schema_version, op, created_at_us, valid) "
+      "VALUES (1, 'legacy-null', 'tenant-a', 'orders', 'shop', "
+      "'nullable_values', 1, 'assert', 1, TRUE);")) {
+    retract_by_id_fixture_clear (&fix);
+    return 3302;
+  }
+  g_autofree gchar *insert_legacy_row = g_strdup_printf
+        ("INSERT INTO %s (value, __wyl_tenant_id, __wyl_graph_id, __wyl_seq, "
+          "__wyl_batch_id, __wyl_row_index, __wyl_valid) VALUES "
+          "(NULL, 'tenant-a', 'orders', 1, 'legacy-null', 0, TRUE);",
+          fix.table);
+  if (!exec_ok (fix.store, insert_legacy_row)) {
+    retract_by_id_fixture_clear (&fix);
+    return 3303;
+  }
+
+  gboolean inserted = TRUE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema,
+      "legacy-null", "legacy-null-retract", "unit-test", "request-retract",
+      "legacy-null-retract-key", &inserted, &row_count)
+      != WYRELOG_E_POLICY || inserted || row_count != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 3304;
+  }
+
+  gint64 count = -1;
+  g_autofree gchar *legacy_row_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s WHERE __wyl_batch_id = 'legacy-null' "
+          "AND value IS NULL AND __wyl_valid = TRUE;", fix.table);
+  g_autofree gchar *tombstone_sql = g_strdup_printf
+        ("SELECT COUNT(*) FROM %s "
+          "WHERE __wyl_batch_id = 'legacy-null-retract';", fix.table);
+  if (!count_i64 (fix.store,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'legacy-null';",
+      &count) || count != 1
+      || !count_i64 (fix.store,
+      "SELECT COUNT(*) FROM fact_batches "
+      "WHERE batch_id = 'legacy-null-retract';", &count) || count != 0
+      || !count_i64 (fix.store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'legacy-null-retract';", &count) || count != 0
+      || !count_i64 (fix.store, legacy_row_sql, &count) || count != 1
+      || !count_i64 (fix.store, tombstone_sql, &count) || count != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 3305;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_batch_id_keeps_empty_selection_behavior (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"value", "int64", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, G_N_ELEMENTS (columns)) != 0)
+    return 3400;
+  wyl_fact_value_t value[] = {
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 7},
+  };
+  const wyl_fact_row_t row[] = {
+    {value, G_N_ELEMENTS (value)},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "empty-trigger",
+      "empty-trigger-key", row, G_N_ELEMENTS (row)) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 3401;
+  }
+  g_autofree gchar *delete_rows = g_strdup_printf
+        ("DELETE FROM %s WHERE __wyl_batch_id = 'empty-trigger';", fix.table);
+  if (!exec_ok (fix.store, delete_rows)) {
+    retract_by_id_fixture_clear (&fix);
+    return 3402;
+  }
+
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema,
+      "empty-trigger", "empty-retract", "unit-test", "request-empty",
+      "empty-retract-key", &inserted, &row_count)
+      != WYRELOG_E_OK || !inserted || row_count != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 3403;
+  }
+  gint64 stored_rows = -1;
+  if (!count_i64 (fix.store,
+      "SELECT row_count FROM fact_batches WHERE batch_id = 'empty-retract';",
+      &stored_rows) || stored_rows != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 3404;
+  }
+  retract_by_id_fixture_clear (&fix);
   return 0;
 }
 
@@ -4089,6 +4365,15 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_projection_validation ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_rejects_nullable_null_after_reopen ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_batch_id_preserves_legacy_nullable_null ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_batch_id_keeps_empty_selection_behavior ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_audit_shape ();

@@ -14,8 +14,11 @@ static gboolean
 value_matches_column (const wyl_fact_value_t *value,
     const wyl_policy_fact_relation_schema_column_info_t *column)
 {
+  /* Wirelog's persisted tuple format has no NULL representation.  Nullable
+   * schema metadata is retained for projection compatibility, but accepting a
+   * NULL here would commit a row that replay cannot represent. */
   if (value->type == WYL_FACT_VALUE_NULL)
-    return column->nullable;
+    return FALSE;
   if (g_strcmp0 (column->column_type, "symbol") == 0)
     return value->type == WYL_FACT_VALUE_SYMBOL && value->as.text != NULL;
   if (g_strcmp0 (column->column_type, "string") == 0)
@@ -49,7 +52,7 @@ wyl_fact_schema_validate_batch (wyl_policy_store_t *store,
 
   gboolean graph_active = FALSE;
   wyrelog_error_t rc = wyl_policy_store_fact_graph_is_active (store,
-      batch->tenant_id, batch->graph_id, &graph_active);
+          batch->tenant_id, batch->graph_id, &graph_active);
   if (rc != WYRELOG_E_OK) {
     set_reason (out_reason, "invalid graph scope");
     return rc;
@@ -60,9 +63,9 @@ wyl_fact_schema_validate_batch (wyl_policy_store_t *store,
   }
 
   rc = wyl_policy_store_load_fact_relation_schema_columns
-      (store, batch->tenant_id, batch->graph_id, batch->namespace_id,
-      batch->relation_name, batch->schema_version, &relation_visible,
-      &columns, &n_columns);
+        (store, batch->tenant_id, batch->graph_id, batch->namespace_id,
+          batch->relation_name, batch->schema_version, &relation_visible,
+          &columns, &n_columns);
   if (rc != WYRELOG_E_OK) {
     set_reason (out_reason, "relation schema not found");
     return rc;
@@ -157,8 +160,8 @@ wyl_fact_schema_build_duckdb_projection_ddl (const
 
   g_autoptr (GString) out = g_string_new ("CREATE TABLE IF NOT EXISTS ");
   g_autofree gchar *table = g_strdup_printf ("%s__%s__%s__%s_v%u",
-      opts->tenant_id, opts->graph_id, opts->namespace_id,
-      opts->relation_name, opts->schema_version);
+          opts->tenant_id, opts->graph_id, opts->namespace_id,
+          opts->relation_name, opts->schema_version);
   append_duckdb_identifier (out, table);
   g_string_append (out, " (");
   for (gsize i = 0; i < opts->n_columns; i++) {
@@ -191,7 +194,7 @@ wyl_fact_schema_build_wirelog_declaration (const
   g_string_append_c (out, '(');
   for (gsize i = 0; i < opts->n_columns; i++) {
     const gchar *wirelog_type = wirelog_type_for_column
-        (opts->columns[i].column_type);
+          (opts->columns[i].column_type);
     if (wirelog_type == NULL)
       return NULL;
     if (i > 0)
