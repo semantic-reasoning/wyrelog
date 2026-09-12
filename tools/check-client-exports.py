@@ -35,6 +35,10 @@ REQUIRED = {
     "wyl_client_service_principal_disable",
     "wyl_client_service_principal_disable_with_request_id",
     "wyl_client_service_principal_list",
+    "wyl_client_fact_graph_status_clear",
+    "wyl_client_fact_status_clear",
+    "wyl_client_fact_status_free",
+    "wyl_client_fact_status",
 }
 
 

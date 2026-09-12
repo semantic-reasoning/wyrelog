@@ -32,6 +32,66 @@ G_DECLARE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, WYL, AUDIT_ITER, GObject);
 typedef struct _WylClientDecision WylClientDecision;
 typedef struct _WylClientFactAppendResult WylClientFactAppendResult;
 
+typedef enum
+{
+  WYL_CLIENT_FACT_STATUS_UNKNOWN = 0,
+  WYL_CLIENT_FACT_STATUS_READY,
+  WYL_CLIENT_FACT_STATUS_DEGRADED,
+  WYL_CLIENT_FACT_STATUS_DISABLED,
+} WylClientFactStatusKind;
+
+typedef enum
+{
+  WYL_CLIENT_FACT_GRAPH_STATE_UNKNOWN = 0,
+  WYL_CLIENT_FACT_GRAPH_STATE_READY,
+  WYL_CLIENT_FACT_GRAPH_STATE_DEGRADED,
+  WYL_CLIENT_FACT_GRAPH_STATE_SCHEMA_MISMATCH,
+  WYL_CLIENT_FACT_GRAPH_STATE_REPLAY_FAILED,
+  WYL_CLIENT_FACT_GRAPH_STATE_STORE_UNAVAILABLE,
+  WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE,
+  WYL_CLIENT_FACT_GRAPH_STATE_SEALED,
+} WylClientFactGraphState;
+
+typedef enum
+{
+  WYL_CLIENT_FACT_REASON_NONE = 0,
+  WYL_CLIENT_FACT_REASON_UNKNOWN,
+  WYL_CLIENT_FACT_REASON_DEGRADED,
+  WYL_CLIENT_FACT_REASON_SCHEMA_MISMATCH,
+  WYL_CLIENT_FACT_REASON_REPLAY_FAILED,
+  WYL_CLIENT_FACT_REASON_STORE_UNAVAILABLE,
+  WYL_CLIENT_FACT_REASON_FORGET_INCOMPLETE,
+} WylClientFactReasonClass;
+
+typedef struct
+{
+  /* Owned strings. Unknown future states retain their bounded wire name and
+   * map to WYL_CLIENT_FACT_GRAPH_STATE_UNKNOWN. */
+  gchar *tenant_id;
+  gchar *graph_id;
+  WylClientFactGraphState state;
+  gchar *state_name;
+  gboolean queryable;
+  WylClientFactReasonClass reason_class;
+  gchar *last_error_class;
+} WylClientFactGraphStatus;
+
+typedef struct
+{
+  /* Owned result. Unknown future aggregate states map to UNKNOWN while the
+   * bounded wire name is retained. Graphs are NULL when omitted by a future
+   * server; the current daemon includes all graphs. */
+  WylClientFactStatusKind status;
+  gchar *status_name;
+  guint64 graphs_total;
+  guint64 graphs_ready;
+  guint64 graphs_degraded;
+  guint64 graphs_sealed;
+  WylClientFactGraphStatus *graphs;
+  gsize n_graphs;
+  gboolean has_graphs;
+} WylClientFactStatus;
+
 typedef struct
 {
   gchar *subject_id;
@@ -110,7 +170,7 @@ typedef struct
 
 void wyl_client_service_principal_clear (WylClientServicePrincipal * value);
 void wyl_client_service_principal_list_clear
-    (WylClientServicePrincipalList * value);
+  (WylClientServicePrincipalList * value);
 wyrelog_error_t wyl_client_service_principal_create (WylClient * client,
     const gchar * subject_id, const gchar * display_name,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
@@ -122,18 +182,18 @@ wyrelog_error_t wyl_client_service_principal_disable (WylClient * client,
     const gchar * subject_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk);
 wyrelog_error_t wyl_client_service_principal_disable_with_request_id
-    (WylClient * client, const gchar * subject_id, const gchar * request_id,
+  (WylClient * client, const gchar * subject_id, const gchar * request_id,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServicePrincipal * out_principal);
 void wyl_client_service_credential_clear (WylClientServiceCredential * value);
 void wyl_client_service_credential_list_clear
-    (WylClientServiceCredentialList * value);
+  (WylClientServiceCredentialList * value);
 wyrelog_error_t wyl_client_service_credential_get (WylClient * client,
     const gchar * credential_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
 wyrelog_error_t wyl_client_service_credential_get_for_tenant
-    (WylClient * client, const gchar * credential_id,
+  (WylClient * client, const gchar * credential_id,
     const gchar * target_tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
@@ -142,7 +202,7 @@ wyrelog_error_t wyl_client_service_credential_list (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialList * out_credentials);
 wyrelog_error_t wyl_client_service_credential_list_for_tenant
-    (WylClient * client, const gchar * subject_id,
+  (WylClient * client, const gchar * subject_id,
     const gchar * target_tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialList * out_credentials);
@@ -151,13 +211,13 @@ wyrelog_error_t wyl_client_service_credential_revoke (WylClient * client,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
 wyrelog_error_t wyl_client_service_credential_revoke_for_tenant
-    (WylClient * client, const gchar * credential_id,
+  (WylClient * client, const gchar * credential_id,
     const gchar * request_id, const gchar * target_tenant,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
 void wyl_client_service_credential_handoff_receipt_clear
-    (WylClientServiceCredentialHandoffReceipt * value);
+  (WylClientServiceCredentialHandoffReceipt * value);
 wyrelog_error_t wyl_client_service_credential_issue (WylClient * client,
     const WylClientServiceCredentialIssueRequest * request,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
@@ -168,7 +228,7 @@ wyrelog_error_t wyl_client_service_credential_rotate (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialHandoffReceipt * out_receipt);
 wyrelog_error_t wyl_client_service_credential_rotate_for_tenant
-    (WylClient * client, const gchar * credential_id,
+  (WylClient * client, const gchar * credential_id,
     const gchar * request_id, const gchar * destination,
     gint64 expires_at_us, const gchar * target_tenant,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
@@ -358,6 +418,17 @@ wyrelog_error_t wyl_client_graph_create (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+void wyl_client_fact_graph_status_clear (WylClientFactGraphStatus * status);
+void wyl_client_fact_status_clear (WylClientFactStatus * status);
+void wyl_client_fact_status_free (WylClientFactStatus * status);
+/* Fetches the local daemon's sanitized GET /facts/status response. This
+ * endpoint is intentionally unauthenticated and only suitable for the
+ * daemon's local listener. The result is fully owned and must be cleared with
+ * wyl_client_fact_status_clear(). On error, out_status is left empty. Heap
+ * allocated results may be released with wyl_client_fact_status_free() or
+ * g_autoptr(WylClientFactStatus). */
+wyrelog_error_t wyl_client_fact_status (WylClient * client,
+    WylClientFactStatus * out_status);
 wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
@@ -368,7 +439,7 @@ wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     gsize n_columns,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
 wyrelog_error_t wyl_client_fact_schema_register_with_max_rows
-    (WylClient * client,
+  (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
     const gchar * namespace_id,
@@ -400,15 +471,15 @@ wyrelog_error_t wyl_client_datalog_query_json (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk, gchar ** out_json);
 void wyl_client_fact_append_result_free (WylClientFactAppendResult * result);
 gboolean wyl_client_fact_append_result_get_inserted
-    (const WylClientFactAppendResult * result);
+  (const WylClientFactAppendResult * result);
 const gchar *wyl_client_fact_append_result_get_batch_id
-    (const WylClientFactAppendResult * result);
+  (const WylClientFactAppendResult * result);
 gchar *wyl_client_fact_append_result_dup_batch_id
-    (const WylClientFactAppendResult * result);
+  (const WylClientFactAppendResult * result);
 void wyl_client_service_credential_operation_reconcile_request_clear
-    (WylClientServiceCredentialOperationReconcileRequest * request);
+  (WylClientServiceCredentialOperationReconcileRequest * request);
 void wyl_client_service_credential_operation_reconcile_result_clear
-    (WylClientServiceCredentialOperationReconcileResult * result);
+  (WylClientServiceCredentialOperationReconcileResult * result);
 /*
  * Reconciles one exact service credential issue/rotate request against the
  * server's terminal operation-fence contract. The request must carry the
@@ -416,19 +487,19 @@ void wyl_client_service_credential_operation_reconcile_result_clear
  * the caller and must be cleared with the matching helper.
  */
 wyrelog_error_t wyl_client_service_credential_operation_reconcile
-    (WylClient * client,
+  (WylClient * client,
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result);
 wyrelog_error_t wyl_client_service_credential_operation_reconcile_for_tenant
-    (WylClient * client, const gchar * target_tenant,
+  (WylClient * client, const gchar * target_tenant,
     const WylClientServiceCredentialOperationReconcileRequest * request,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationReconcileResult * out_result);
 
 void wyl_client_service_credential_operation_status_entry_clear
-    (WylClientServiceCredentialOperationStatusEntry * entry);
+  (WylClientServiceCredentialOperationStatusEntry * entry);
 void wyl_client_service_credential_operation_status_list_clear
-    (WylClientServiceCredentialOperationStatusList * list);
+  (WylClientServiceCredentialOperationStatusList * list);
 /*
  * Lists the caller tenant's durable service-credential operations. The result
  * is fully owned by the caller and must be cleared with the matching helper;
@@ -437,12 +508,12 @@ void wyl_client_service_credential_operation_status_list_clear
  * required and is validated locally before any request is sent.
  */
 wyrelog_error_t wyl_client_service_credential_operation_status_list
-    (WylClient * client, gint64 guard_timestamp, const gchar * guard_loc_class,
+  (WylClient * client, gint64 guard_timestamp, const gchar * guard_loc_class,
     gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList * out_list);
 wyrelog_error_t
-    wyl_client_service_credential_operation_status_list_for_tenant
-    (WylClient * client, const gchar * target_tenant,
+wyl_client_service_credential_operation_status_list_for_tenant
+  (WylClient * client, const gchar * target_tenant,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList * out_list);
 /*
@@ -454,11 +525,11 @@ wyrelog_error_t
  * required and is validated locally before any request is sent.
  */
 wyrelog_error_t wyl_client_service_credential_operation_recover
-    (WylClient * client, const gchar * request_id, gint64 guard_timestamp,
+  (WylClient * client, const gchar * request_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry * out_entry);
 wyrelog_error_t wyl_client_service_credential_operation_recover_for_tenant
-    (WylClient * client, const gchar * target_tenant,
+  (WylClient * client, const gchar * target_tenant,
     const gchar * request_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry * out_entry);
@@ -487,36 +558,42 @@ const gchar *wyrelog_client_version_string (void);
 G_END_DECLS;
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
-    G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientFactAppendResult,
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientFactAppendResult,
     wyl_client_fact_append_result_free)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialOperationReconcileRequest,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialOperationReconcileRequest,
     wyl_client_service_credential_operation_reconcile_request_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialOperationReconcileResult,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialOperationReconcileResult,
     wyl_client_service_credential_operation_reconcile_result_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredential, wyl_client_service_credential_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialList, wyl_client_service_credential_list_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialHandoffReceipt,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredential, wyl_client_service_credential_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialList, wyl_client_service_credential_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialHandoffReceipt,
     wyl_client_service_credential_handoff_receipt_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceTokenResult, wyl_client_service_token_result_clear)
-    G_DEFINE_AUTOPTR_CLEANUP_FUNC
-    (WylClientServiceCredentialOperationReconcileRequest,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceTokenResult, wyl_client_service_token_result_clear)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC
+  (WylClientServiceCredentialOperationReconcileRequest,
     wyl_client_service_credential_operation_reconcile_request_clear)
-    G_DEFINE_AUTOPTR_CLEANUP_FUNC
-    (WylClientServiceCredentialOperationReconcileResult,
+G_DEFINE_AUTOPTR_CLEANUP_FUNC
+  (WylClientServiceCredentialOperationReconcileResult,
     wyl_client_service_credential_operation_reconcile_result_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialOperationStatusEntry,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialOperationStatusEntry,
     wyl_client_service_credential_operation_status_entry_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialOperationStatusList,
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServiceCredentialOperationStatusList,
     wyl_client_service_credential_operation_status_list_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServicePrincipal, wyl_client_service_principal_clear)
-    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServicePrincipalList, wyl_client_service_principal_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactGraphStatus, wyl_client_fact_graph_status_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactStatus, wyl_client_fact_status_clear)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC
+  (WylClientFactStatus, wyl_client_fact_status_free)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServicePrincipal, wyl_client_service_principal_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientServicePrincipalList, wyl_client_service_principal_list_clear)

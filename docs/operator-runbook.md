@@ -1335,6 +1335,20 @@ decision and its reasons.
 `/facts/status` is the surface that reports fact health, and it is the endpoint
 to watch for an outstanding erasure.
 
+The typed C client exposes the current aggregate and per-graph fields through
+`wyl_client_fact_status()`. This endpoint is unauthenticated and reports tenant
+and graph identifiers, so use it only through the daemon's local listener; do
+not expose it through a remote proxy. The C client rejects non-loopback daemon
+URLs for this API and deliberately sends no bearer
+credentials for this read. Future status names are retained as wire strings
+and map to the client's `UNKNOWN` enum value until that client is updated.
+The decoder rejects snapshots larger than 4 MiB, more than 16,384 graphs, or
+status/reason names longer than 64 bytes; it never returns a truncated list.
+
+This adds the typed read-only status API only. It does not yet provide typed
+verification, reconciliation, or `wyctl fact status` commands; those remain in
+the open #550 scope.
+
 | you want to know | endpoint | what it tells you |
 | --- | --- | --- |
 | is the process serving | `GET /readyz` | `200` and `ready\n`, or `503` with a reason |
