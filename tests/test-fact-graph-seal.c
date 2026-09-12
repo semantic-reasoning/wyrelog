@@ -2769,8 +2769,12 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_cmpint (authority->lifecycle_state, ==,
         WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
     g_assert_cmpstr (authority->store_uuid, ==, original_uuid);
+    /* Unchanged, for the reason stated above: a rollback applies no durable
+     * unseal and performs no compensating reseal, and the generation counts
+     * durable lifecycle transitions.  Two of them would mean the unseal
+     * committed and was resealed, which is the path this case excludes. */
     g_assert_cmpuint (authority->lifecycle_generation, ==,
-        original_generation + 2);
+        original_generation);
     wyl_policy_graph_authority_record_free (authority);
     g_assert_cmpint (g_remove (fact_path), ==, 0);
     g_assert_cmpint (g_rename (replacement_path, fact_path), ==, 0);
@@ -2802,8 +2806,10 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_cmpint (fresh_authority->lifecycle_state, ==, original_lifecycle);
     g_assert_cmpint (fresh_authority->lifecycle_state, ==,
         WYL_POLICY_GRAPH_LIFECYCLE_SEALED);
+    /* The restart replays a graph the rollback left exactly as it found it,
+     * so the generation is still the original one. */
     g_assert_cmpuint (fresh_authority->lifecycle_generation, ==,
-        original_generation + 2);
+        original_generation);
     g_assert_cmpstr (fresh_authority->store_uuid, ==, original_uuid);
     wyl_policy_graph_authority_record_free (fresh_authority);
     FactGraphFileIdentity fresh_identity = { 0 };
@@ -2827,8 +2833,10 @@ test_unseal_replacement_after_validation_and_retry (void)
     g_assert_nonnull (recovered_authority);
     g_assert_cmpint (recovered_authority->lifecycle_state, ==,
         WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+    /* One durable transition -- the retry's unseal -- above an unchanged
+     * original. */
     g_assert_cmpuint (recovered_authority->lifecycle_generation, ==,
-        original_generation + 3);
+        original_generation + 1);
     g_assert_cmpstr (recovered_authority->store_uuid, ==, original_uuid);
     wyl_policy_graph_authority_record_free (recovered_authority);
     FactGraphFileIdentity recovered_identity = { 0 };
