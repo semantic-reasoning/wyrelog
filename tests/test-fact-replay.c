@@ -711,6 +711,30 @@ test_boot_forget_is_per_graph_and_never_aborts (void)
   remove_tree (root);
 }
 
+static void
+assert_boot_forget_attribution (wyl_policy_store_t *policy,
+    const gchar *state, gboolean completed)
+{
+  g_autofree gchar *intent_sql = g_strdup_printf (
+    "SELECT COUNT(*) FROM fact_forget_intent WHERE batch_id = 'batch-1' "
+    "AND state = '%s' AND actor_subject_id = 'authenticated-admin' "
+    "AND request_id = 'original-forget-request' "
+    "AND operator = 'claimed-operator' "
+    "AND operator_annotation = 'erasure-ticket';", state);
+  g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+      intent_sql), ==, 1);
+  g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+      "SELECT COUNT(*) FROM fact_forget_audit WHERE batch_id = 'batch-1';"),
+      ==, completed ? 1 : 0);
+  if (completed)
+    g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
+        "SELECT COUNT(*) FROM fact_forget_audit WHERE batch_id = 'batch-1' "
+        "AND actor_subject_id = 'authenticated-admin' "
+        "AND request_id = 'original-forget-request' "
+        "AND operator = 'claimed-operator' "
+        "AND operator_annotation = 'erasure-ticket';"), ==, 1);
+}
+
 /* Issue #547: a forget interrupted by a crash leaves a durable PENDING intent
  * that nothing in the request path resumes.  Starting the daemon must converge
  * it.  The proof is a fresh handle open and the durable state afterwards --
@@ -753,7 +777,10 @@ test_boot_converges_interrupted_forget (void)
             "orders", columns, G_N_ELEMENTS (columns));
     wyl_fact_store_forget_options_t opts = {
       .batch_id = "batch-1",
-      .operator_id = "admin",
+      .operator_id = "claimed-operator",
+      .authenticated_actor_subject_id = "authenticated-admin",
+      .request_id = "original-forget-request",
+      .operator_annotation = "erasure-ticket",
       .reason = "gdpr-erasure",
       .checkpoint = forget_crash_at,
       .checkpoint_data = (gpointer) "before_completion",
@@ -767,6 +794,7 @@ test_boot_converges_interrupted_forget (void)
     g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
         WYRELOG_E_OK);
     /* Durable evidence that the crash left work behind. */
+    assert_boot_forget_attribution (policy, "PENDING", FALSE);
     g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
         "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
         ==, 1);
@@ -802,6 +830,7 @@ test_boot_converges_interrupted_forget (void)
     g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
         WYRELOG_E_OK);
     /* Converged: no pending intent, and the batch really is gone. */
+    assert_boot_forget_attribution (policy, "COMPLETED", TRUE);
     g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
         "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
         ==, 0);
@@ -862,7 +891,10 @@ test_boot_converges_forget_on_sealed_graph (void)
             "orders", columns, G_N_ELEMENTS (columns));
     wyl_fact_store_forget_options_t opts = {
       .batch_id = "batch-1",
-      .operator_id = "admin",
+      .operator_id = "claimed-operator",
+      .authenticated_actor_subject_id = "authenticated-admin",
+      .request_id = "original-forget-request",
+      .operator_annotation = "erasure-ticket",
       .reason = "gdpr-erasure",
       .checkpoint = forget_crash_at,
       .checkpoint_data = (gpointer) "before_completion",
@@ -887,6 +919,7 @@ test_boot_converges_forget_on_sealed_graph (void)
     g_assert_cmpint (wyl_policy_store_fact_graph_is_active (policy, "tenant-a",
         "orders", &active), ==, WYRELOG_E_OK);
     g_assert_false (active);
+    assert_boot_forget_attribution (policy, "PENDING", FALSE);
     g_assert_cmpint (count_in_graph_store (policy, "tenant-a", "orders",
         "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';"),
         ==, 1);
@@ -925,6 +958,7 @@ test_boot_converges_forget_on_sealed_graph (void)
         "SELECT COUNT(*) FROM fact_forget_audit WHERE batch_id = 'batch-1';"),
         ==, 1);
     /* The graph is still sealed: erasure converged without unsealing it. */
+    assert_boot_forget_attribution (policy, "COMPLETED", TRUE);
     gboolean active = TRUE;
     g_assert_cmpint (wyl_policy_store_fact_graph_is_active (policy, "tenant-a",
         "orders", &active), ==, WYRELOG_E_OK);
