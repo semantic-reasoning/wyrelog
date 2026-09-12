@@ -154,6 +154,44 @@ compute_current_code (gchar out_proof[8])
 }
 
 static gint
+compute_wrong_code (gchar out_proof[8])
+{
+  gint64 now = (gint64) time (NULL);
+  guint64 current_step = (guint64) (now / WYL_TOTP_STEP_SECONDS);
+  guint valid_codes[7] = { 0 };
+  for (gint offset = -3; offset <= 3; offset++) {
+    if (wyl_totp_code_at_step (MFA_TEST_SEED, sizeof MFA_TEST_SEED,
+        current_step + offset, &valid_codes[offset + 3], NULL) != WYRELOG_E_OK)
+      return -1;
+  }
+
+  for (guint candidate = 0; candidate < 1000000; candidate++) {
+    gboolean matches = FALSE;
+    for (gsize i = 0; i < G_N_ELEMENTS (valid_codes); i++) {
+      if (candidate == valid_codes[i]) {
+        matches = TRUE;
+        break;
+      }
+    }
+    if (!matches) {
+      g_snprintf (out_proof, 8, "%06u", candidate);
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static gint
+send_mfa_verify (SoupSession *session, const gchar *base_url,
+    const gchar *session_token, const gchar *code, guint *out_status,
+    gchar **out_body)
+{
+  g_autofree gchar *path = g_strdup_printf
+        ("/auth/mfa/verify?session_token=%s&code=%s", session_token, code);
+  return send_raw (session, "POST", base_url, path, out_status, out_body);
+}
+
+static gint
 check_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
@@ -705,6 +743,123 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
   return 0;
 }
 
+static gint
+check_logout_does_not_reset_mfa_lockout (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_autofree gchar *victim_token = NULL;
+  gchar wrong_code[8];
+  if (store == NULL || do_login (session, base_url, "mfa.logout-victim",
+      &victim_token) != 0 || seed_enrollment (handle, "mfa.logout-victim") != 0
+      || compute_wrong_code (wrong_code) != 0)
+    return 1210;
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  for (guint i = 0; i < 4; i++) {
+    if (send_mfa_verify (session, base_url, victim_token, wrong_code, &status,
+        &body) != 0)
+      return 1211;
+    if (status != 401 || strstr (body, "\"mfa_invalid\"") == NULL)
+      return 1212;
+    g_clear_pointer (&body, g_free);
+  }
+
+  g_autofree gchar *logout_path =
+      g_strdup_printf ("/auth/logout?session_token=%s", victim_token);
+  if (send_raw (session, "POST", base_url, logout_path, &status, &body) != 0
+      || status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 1213;
+  g_clear_pointer (&body, g_free);
+
+  /* The logout ended the old MFA ceremony. A new login must carry the
+   * subject-global failure count into the fresh ceremony. */
+  g_clear_pointer (&victim_token, g_free);
+  if (do_login (session, base_url, "mfa.logout-victim", &victim_token) != 0)
+    return 1214;
+  if (send_mfa_verify (session, base_url, victim_token, wrong_code, &status,
+      &body) != 0)
+    return 1215;
+  if (status != 429 || strstr (body, "\"mfa_locked\"") == NULL)
+    return 1216;
+  g_clear_pointer (&body, g_free);
+
+  /* A later request is also rejected by the existing locked-state gate. */
+  if (send_mfa_verify (session, base_url, victim_token, wrong_code, &status,
+      &body) != 0 || status != 429
+      || strstr (body, "\"mfa_locked\"") == NULL)
+    return 1217;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *victim_state = NULL;
+  gint64 victim_count = -1;
+  gint64 victim_locked_at = 0;
+  gboolean victim_found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout-victim",
+      &victim_state, &victim_count, &victim_locked_at, &victim_found)
+      != WYRELOG_E_OK || !victim_found
+      || g_strcmp0 (victim_state, "locked") != 0 || victim_count != 5
+      || victim_locked_at == G_MININT64)
+    return 1218;
+
+  /* Four mistakes followed by proof of seed possession still succeeds and
+   * clears the count. */
+  g_autofree gchar *success_token = NULL;
+  if (do_login (session, base_url, "mfa.logout-success", &success_token) != 0
+      || seed_enrollment (handle, "mfa.logout-success") != 0)
+    return 1219;
+  for (guint i = 0; i < 4; i++) {
+    if (send_mfa_verify (session, base_url, success_token, wrong_code, &status,
+        &body) != 0 || status != 401
+        || strstr (body, "\"mfa_invalid\"") == NULL)
+      return 1220;
+    g_clear_pointer (&body, g_free);
+  }
+  gchar valid_code[8];
+  if (compute_current_code (valid_code) != 0
+      || send_mfa_verify (session, base_url, success_token, valid_code,
+      &status, &body) != 0 || status != 200
+      || strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 1221;
+
+  g_autofree gchar *success_state = NULL;
+  gint64 success_count = -1;
+  gint64 success_locked_at = 0;
+  gboolean success_found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout-success",
+      &success_state, &success_count, &success_locked_at, &success_found)
+      != WYRELOG_E_OK || !success_found
+      || g_strcmp0 (success_state, "authenticated") != 0 || success_count != 0
+      || success_locked_at != G_MININT64)
+    return 1222;
+  g_clear_pointer (&body, g_free);
+
+  /* A locked subject does not prevent an unrelated principal completing MFA. */
+  g_autofree gchar *bystander_token = NULL;
+  if (do_login (session, base_url, "mfa.logout-bystander", &bystander_token)
+      != 0 || seed_enrollment (handle, "mfa.logout-bystander") != 0
+      || compute_current_code (valid_code) != 0
+      || send_mfa_verify (session, base_url, bystander_token, valid_code,
+      &status, &body) != 0 || status != 200
+      || strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 1223;
+
+  g_autofree gchar *bystander_state = NULL;
+  gint64 bystander_count = -1;
+  gint64 bystander_locked_at = 0;
+  gboolean bystander_found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout-bystander",
+      &bystander_state, &bystander_count, &bystander_locked_at,
+      &bystander_found) != WYRELOG_E_OK || !bystander_found
+      || g_strcmp0 (bystander_state, "authenticated") != 0
+      || bystander_count != 0 || bystander_locked_at != G_MININT64)
+    return 1224;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -774,6 +929,9 @@ main (void)
       base_url)) != 0)
     goto out;
   if ((rc = check_locked_principal_returns_locked (http.server, handle,
+      base_url)) != 0)
+    goto out;
+  if ((rc = check_logout_does_not_reset_mfa_lockout (http.server, handle,
       base_url)) != 0)
     goto out;
 

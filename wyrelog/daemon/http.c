@@ -14888,6 +14888,23 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
       set_json_error (msg, 500, "mfa_verify_failed");
       return;
     }
+    if (found) {
+      /* A wrong code can itself cross the durable lockout threshold.
+       * Report that newly locked state on this request, not only on the
+       * next request's pre-validation state check.  A failed/missing
+       * state lookup remains a generic failure and never guesses that the
+       * principal is locked. */
+      g_autofree gchar *failed_state =
+          mfa_lookup_principal_state (ctx->handle, username);
+      if (failed_state == NULL) {
+        set_json_error (msg, 500, "mfa_verify_failed");
+        return;
+      }
+      if (g_strcmp0 (failed_state, "locked") == 0) {
+        set_json_error (msg, 429, "mfa_locked");
+        return;
+      }
+    }
     set_json_error (msg, 401, found ? "mfa_invalid" : "enrollment_required");
     return;
   }

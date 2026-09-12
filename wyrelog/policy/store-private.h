@@ -2616,6 +2616,10 @@ wyrelog_error_t wyl_policy_store_apply_principal_unlock
  * a resulting LOCKED row always keeps failed_attempt_count>=1 and a
  * non-NULL locked_at (issue #753 invariant).  |lock_threshold| is reserved
  * for signature symmetry with apply_principal_failure and is unused here.
+ * LOGIN_OK and LOGOUT preserve the observed failed_attempt_count because
+ * neither proves possession of the TOTP seed; MFA_OK, UNLOCK, and
+ * LOGIN_SKIP_MFA reset it.  LOCK preserves (or floors) the count, and REVOKE
+ * preserves the observed count.
  * *out_from / *out_to (guarded for NULL) report the observed and resulting
  * FSM states. */
 wyrelog_error_t wyl_policy_store_apply_principal_transition
