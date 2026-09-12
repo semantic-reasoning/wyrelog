@@ -97,9 +97,10 @@ build_uri (const gchar *base_url, const gchar *path, const gchar *query)
 }
 
 static gint
-send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
+send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *path, const gchar *query, const gchar *access_token,
-    const gchar *request_body, guint *out_status, gchar **out_body)
+    const gchar *request_body, guint *out_status, gchar **out_body,
+    gchar **out_request_id)
 {
   g_autofree gchar *uri = build_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -126,11 +127,23 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
   gint rc = check_response_request_id_header (msg, 102);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL)
+    *out_request_id = g_strdup (soup_message_headers_get_one (
+              soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id"));
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
+    const gchar *path, const gchar *query, const gchar *access_token,
+    const gchar *request_body, guint *out_status, gchar **out_body)
+{
+  return send_raw_with_request_id (session, method, base_url, path, query,
+             access_token, request_body, out_status, out_body, NULL);
 }
 
 static gchar *
@@ -243,6 +256,8 @@ typedef struct
   const gchar *action;
   const gchar *resource_id;
   const gchar *deny_reason;
+  const gchar *request_id;
+  gboolean require_allow;
   guint matches;
 } LifecycleAuditProbe;
 
@@ -255,46 +270,77 @@ lifecycle_audit_probe_cb (const gchar *id, gint64 created_at_us,
   (void) id;
   (void) created_at_us;
   (void) deny_origin;
-  (void) request_id;
-  (void) decision;
   LifecycleAuditProbe *probe = user_data;
   if (g_strcmp0 (subject_id, probe->subject_id) == 0
       && g_strcmp0 (action, probe->action) == 0
       && g_strcmp0 (resource_id, probe->resource_id) == 0
-      && g_strcmp0 (deny_reason, probe->deny_reason) == 0)
+      && (probe->deny_reason == NULL
+      || g_strcmp0 (deny_reason, probe->deny_reason) == 0)
+      && (probe->request_id == NULL
+      || g_strcmp0 (request_id, probe->request_id) == 0)
+      && (!probe->require_allow || decision == WYL_DECISION_ALLOW))
     probe->matches++;
   return WYRELOG_E_OK;
 }
 
-/* Read the batch id the durable forget row recorded, so the control-plane
- * probe can be built from it rather than from a literal. */
-static gint
-read_forget_audit_batch_id (const gchar *fact_root, const gchar *graph_id,
-    gchar **out_batch)
+#endif
+
+/* The response ID must identify the authorization and both deletion records.
+ * Only actor_subject_id is authenticated; the distinct body label is not. */
+static void
+check_forget_attribution (const gchar *fact_root, wyl_policy_store_t *policy,
+    const gchar *batch, const gchar *request_id, gboolean lifecycle_written)
 {
-  *out_batch = NULL;
+  g_assert_true (is_request_id_shape (request_id));
   WylFactGraphLocator locator = { 0 };
-  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
-      != WYRELOG_E_OK)
-    return 104;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT,
+      "orders"), ==, WYRELOG_E_OK);
   g_autofree gchar *path =
       wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
   wyl_fact_graph_locator_clear (&locator);
-  if (path == NULL)
-    return 104;
+  g_assert_nonnull (path);
   g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
-  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
-    return 105;
-  g_autofree gchar *value = NULL;
-  if (wyl_fact_store_test_query_text (store,
-      "SELECT batch_id FROM fact_forget_audit ORDER BY id DESC LIMIT 1;",
-      &value) != WYRELOG_E_OK)
-    return 106;
-  *out_batch = g_steal_pointer (&value);
-  return 0;
-}
+  g_assert_cmpint (wyl_fact_store_open (db_path, &store), ==, WYRELOG_E_OK);
+  const gchar *tables[] = { "fact_forget_intent", "fact_forget_audit" };
+  for (guint i = 0; i < G_N_ELEMENTS (tables); i++) {
+    g_autofree gchar *sql = g_strdup_printf (
+      "SELECT COUNT(*) FROM %s WHERE batch_id = '%s' "
+      "AND actor_subject_id = 'facts-admin' AND request_id = '%s' "
+      "AND operator = 'spoofed-operator' "
+      "AND operator_annotation = 'spoofed-operator'%s;",
+      tables[i], batch, request_id, i == 0 ? " AND state = 'COMPLETED'" : "");
+    gint64 count = -1;
+    g_assert_true (count_i64 (store, sql, &count));
+    g_assert_cmpint (count, ==, 1);
+  }
+#ifdef WYL_HAS_AUDIT
+  LifecycleAuditProbe authorization = {
+    .subject_id = "facts-admin",
+    .action = "wr.fact.write",
+    .resource_id = WYL_TENANT_DEFAULT,
+    .request_id = request_id,
+    .require_allow = TRUE,
+  };
+  LifecycleAuditProbe lifecycle = {
+    .subject_id = "facts-admin",
+    .action = "fact_forget",
+    .resource_id = "__wr_default/orders",
+    .deny_reason = batch,
+    .request_id = request_id,
+    .require_allow = TRUE,
+  };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (policy,
+      lifecycle_audit_probe_cb, &authorization), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (authorization.matches, ==, 1);
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (policy,
+      lifecycle_audit_probe_cb, &lifecycle), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (lifecycle.matches, ==, lifecycle_written ? 1 : 0);
+#else
+  (void) policy;
+  (void) lifecycle_written;
 #endif
+}
 
 static gint
 read_fact_projection_row_count (const gchar *fact_root,
@@ -1530,10 +1576,11 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *forget_query = g_strdup_printf
         ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
           FACT_GUARD);
-  rc = send_raw (session, "DELETE", base_url,
+  g_autofree gchar *forget_request_id = NULL;
+  rc = send_raw_with_request_id (session, "DELETE", base_url,
           "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
-          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
-          "\"reason\":\"gdpr-erasure\"}", &status, &body);
+          "{\"batch_id\":\"batch-1\",\"operator\":\"spoofed-operator\","
+          "\"reason\":\"gdpr-erasure\"}", &status, &body, &forget_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
@@ -1548,39 +1595,36 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (rc != 0)
     return rc;
 
-#ifdef WYL_HAS_AUDIT
-  /* A hard delete is the largest-blast-radius operation in this API and was
-   * the only one leaving no control-plane record: append and retract emit,
-   * forget did not.  The durable fact_forget_audit row is a different stream
-   * and does not reach an auditor reading this one.
-   *
-   * The probe's batch id comes from the durable row rather than from the
-   * literal above, so the assertion is that the two records agree about which
-   * batch was erased.  They cannot be reconciled on more than that here: the
-   * durable row has no request-id column and its operator is the client's own
-   * body field rather than the verified principal, which is #547's schema
-   * change and not this one's. */
-  {
-    g_autofree gchar *durable_batch = NULL;
-    rc = read_forget_audit_batch_id (fact_root, "orders", &durable_batch);
-    if (rc != 0)
-      return rc;
-    LifecycleAuditProbe forget_audit = {
-      .subject_id = "facts-admin",
-      .action = "fact_forget",
-      .resource_id = "__wr_default/orders",
-      .deny_reason = durable_batch,
-    };
-    if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
-          (handle), lifecycle_audit_probe_cb, &forget_audit) != WYRELOG_E_OK)
-      return 102;
-    if (forget_audit.matches != 1) {
-      g_printerr ("forget emitted no control-plane record for batch %s "
-          "(matches=%u)\n", durable_batch, forget_audit.matches);
-      return 103;
-    }
-  }
-#endif
+  check_forget_attribution (fact_root, wyl_handle_get_policy_store (handle),
+      "batch-1", forget_request_id, TRUE);
+
+  /* The lifecycle event is a separate commit.  Losing it cannot erase or
+   * misattribute the durable completion record, nor claim a rolled-back delete. */
+  g_autofree gchar *lost_audit_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&schema_version=1&batch_id=forget-audit-failed&"
+    "idempotency_key=forget-audit-failed&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_clear_pointer (&body, g_free);
+  g_assert_cmpint (send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:append", lost_audit_query,
+      admin_token, "order_id\tamount\naudit-delete\t17\n", &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (body, "\"inserted\":true"));
+  g_assert_cmpint (check_fact_projection_row_count (fact_root, "orders", 4), ==, 0);
+  wyl_daemon_http_fail_next_fact_op_audit_for_test (server);
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *failed_forget_request_id = NULL;
+  g_assert_cmpint (send_raw_with_request_id (session, "DELETE", base_url,
+      "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
+      "{\"batch_id\":\"forget-audit-failed\",\"operator\":\"spoofed-operator\","
+      "\"reason\":\"audit-failure-test\"}", &status, &body,
+      &failed_forget_request_id), ==, 0);
+  g_assert_cmpuint (status, ==, 500);
+  g_assert_nonnull (strstr (body, "\"fact_forget_audit_failed\""));
+  g_assert_nonnull (strstr (body, "\"purged\":true"));
+  g_assert_nonnull (strstr (body, "\"rows_purged\":1"));
+  g_assert_cmpint (check_fact_projection_row_count (fact_root, "orders", 3), ==, 0);
+  check_forget_attribution (fact_root, wyl_handle_get_policy_store (handle),
+      "forget-audit-failed", failed_forget_request_id, FALSE);
 
 #if defined(WYL_HAS_FACT_STORE) && defined(WYL_TEST_HANDLE_SEAMS)
   /* A seal that answers 404 must still release the outcome it was handed.
