@@ -31,7 +31,7 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
 {
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
-      ("wyl-fact-schema-XXXXXX", &error);
+        ("wyl-fact-schema-XXXXXX", &error);
   if (root == NULL)
     return WYRELOG_E_IO;
 
@@ -111,17 +111,27 @@ check_relation_schema_registration_and_validation (void)
     {"orders_by_status", "wr.fact.read", 1000},
   };
   wyl_policy_fact_relation_schema_options_t opts = make_order_schema (columns,
-      G_N_ELEMENTS (columns), queries, G_N_ELEMENTS (queries));
+          G_N_ELEMENTS (columns), queries, G_N_ELEMENTS (queries));
   if (wyl_policy_store_register_fact_relation_schema (store, &opts)
       != WYRELOG_E_OK)
     return 11;
+
+  const wyl_policy_fact_relation_schema_column_t nullable_columns[] = {
+    {"value", "int64", TRUE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t nullable_opts = make_order_schema
+        (nullable_columns, G_N_ELEMENTS (nullable_columns), NULL, 0);
+  nullable_opts.relation_name = "nullable_values";
+  if (wyl_policy_store_register_fact_relation_schema (store, &nullable_opts)
+      != WYRELOG_E_OK)
+    return 111;
 
   gboolean relation_visible = FALSE;
   wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
   gsize n_loaded = 0;
   if (wyl_policy_store_load_fact_relation_schema_columns (store, "tenant-a",
-          "graph-main", "shop", "orders", 1, &relation_visible, &loaded,
-          &n_loaded) != WYRELOG_E_OK)
+      "graph-main", "shop", "orders", 1, &relation_visible, &loaded,
+      &n_loaded) != WYRELOG_E_OK)
     return 12;
   if (!relation_visible || n_loaded != G_N_ELEMENTS (columns)
       || g_strcmp0 (loaded[2].column_name, "amount") != 0
@@ -206,6 +216,35 @@ check_relation_schema_registration_and_validation (void)
       != WYRELOG_E_OK)
     return 171;
 
+  const wyl_fact_value_t nullable_nonnull_value[] = {
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 7},
+  };
+  const wyl_fact_row_t nullable_nonnull_row[] = {
+    {nullable_nonnull_value, G_N_ELEMENTS (nullable_nonnull_value)},
+  };
+  wyl_fact_batch_t nullable_batch = {
+    .tenant_id = "tenant-a",
+    .graph_id = "graph-main",
+    .namespace_id = "shop",
+    .relation_name = "nullable_values",
+    .schema_version = 1,
+    .rows = nullable_nonnull_row,
+    .n_rows = G_N_ELEMENTS (nullable_nonnull_row),
+  };
+  if (wyl_fact_schema_validate_batch (store, &nullable_batch, NULL)
+      != WYRELOG_E_OK)
+    return 172;
+  const wyl_fact_value_t nullable_null_value[] = {
+    {.type = WYL_FACT_VALUE_NULL},
+  };
+  const wyl_fact_row_t nullable_null_row[] = {
+    {nullable_null_value, G_N_ELEMENTS (nullable_null_value)},
+  };
+  nullable_batch.rows = nullable_null_row;
+  if (wyl_fact_schema_validate_batch (store, &nullable_batch, NULL)
+      != WYRELOG_E_POLICY)
+    return 173;
+
   bad_batch = good_batch;
   bad_batch.relation_name = "missing";
   if (wyl_fact_schema_validate_batch (store, &bad_batch, NULL)
@@ -214,14 +253,14 @@ check_relation_schema_registration_and_validation (void)
 
   g_autofree gchar *ddl = wyl_fact_schema_build_duckdb_projection_ddl (&opts);
   if (ddl == NULL || !g_str_has_prefix (ddl,
-          "CREATE TABLE IF NOT EXISTS \"tenant-a__graph-main__shop__orders_v1\"")
+      "CREATE TABLE IF NOT EXISTS \"tenant-a__graph-main__shop__orders_v1\"")
       || strstr (ddl, "\"amount\" BIGINT NOT NULL") == NULL)
     return 19;
 
   g_autofree gchar *decl = wyl_fact_schema_build_wirelog_declaration (&opts);
   if (decl == NULL
       || g_strcmp0 (decl,
-          ".decl w_73_68_6f_70_w_6f_72_64_65_72_73(w_6f_72_64_65_72_5f_69_64: symbol, w_63_75_73_74_6f_6d_65_72_5f_69_64: symbol, w_61_6d_6f_75_6e_74: int64, w_73_74_61_74_75_73: symbol)")
+      ".decl w_73_68_6f_70_w_6f_72_64_65_72_73(w_6f_72_64_65_72_5f_69_64: symbol, w_63_75_73_74_6f_6d_65_72_5f_69_64: symbol, w_61_6d_6f_75_6e_74: int64, w_73_74_61_74_75_73: symbol)")
       != 0)
     return 20;
 
@@ -237,7 +276,7 @@ check_relation_schema_registration_and_validation (void)
       wyl_fact_schema_build_wirelog_declaration (&wirelog_opts);
   if (mangled_decl == NULL
       || g_strcmp0 (mangled_decl,
-          ".decl w_73_68_6f_70_2d_75_73_w_6f_72_64_65_72_2d_6c_69_6e_65(w_6f_72_64_65_72_2d_69_64: symbol)")
+      ".decl w_73_68_6f_70_2d_75_73_w_6f_72_64_65_72_2d_6c_69_6e_65(w_6f_72_64_65_72_2d_69_64: symbol)")
       != 0)
     return 201;
   wirelog_opts.namespace_id = "shop_x2d_us";

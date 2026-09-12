@@ -388,6 +388,19 @@ static gint
 check_fact_projection_row_count (const gchar *fact_root,
     const gchar *graph_id, gint64 expected_rows)
 {
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 300;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 301;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  /* A rejected first append must not create the graph's fact store at all. */
+  if (!g_file_test (db_path, G_FILE_TEST_EXISTS))
+    return expected_rows == 0 ? 0 : 305;
   gint64 count = 0;
   gint rc = read_fact_projection_row_count (fact_root, graph_id, &count);
   if (rc != 0)
@@ -807,7 +820,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
 
   const gchar *schema_body =
       "column_name\tcolumn_type\tnullable\tvisible\n"
-      "order_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n";
+      "order_id\tsymbol\ttrue\ttrue\n" "amount\tint64\ttrue\ttrue\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *schema_query = g_strdup_printf
         ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
@@ -903,6 +916,46 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = check_fact_projection_batch_rows (fact_root, "orders", "batch-1", 1);
   if (rc != 0)
     return rc;
+
+  /* Nullable schema metadata is accepted, but NULL values cannot be encoded
+   * in the logical tuple store. Refuse before creating a durable batch. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *null_append_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=null-one&"
+          "idempotency_key=null-one-key&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", null_append_query,
+          admin_token, "order_id\tamount\nnull-one\tNULL\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
+    return 271;
+  if (check_fact_projection_batch_rows (fact_root, "orders", "null-one", 0)
+      != 0)
+    return 272;
+
+  if (wyl_handle_replay_fact_graphs (handle, NULL) != WYRELOG_E_OK)
+    return 273;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/facts/status", NULL, NULL,
+          NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
+    return 274;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *null_verify_query = g_strdup_printf
+        ("tenant=%s&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/datalog/__wr_default/orders/query", null_verify_query, admin_token,
+          "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":1") == NULL
+      || strstr (body, "{\"O\":\"o-1\",\"A\":42}") == NULL)
+    return 275;
+
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
           "/facts/__wr_default/orders/orders:append", append_query, admin_token,
@@ -1084,6 +1137,42 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (status != 200 || strstr (body, "\"row_count\":1100") == NULL ||
       strstr (body, "\"truncated\":true") == NULL)
     return 354;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *create_null_bulk_query = g_strdup_printf
+        ("tenant=%s&graph=null-bulk&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          create_null_bulk_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 355;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *null_bulk_schema_query = g_strdup_printf
+        ("tenant=%s&graph=null-bulk&namespace=shop&relation=orders&"
+          "schema_version=1&max_rows=2500&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          null_bulk_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 356;
+  g_autoptr (GString) null_bulk_rows = g_string_new ("order_id\tamount\n");
+  for (guint i = 0; i < 2000; i++)
+    g_string_append (null_bulk_rows, "\t\n");
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *null_bulk_append_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=null-bulk-1&"
+          "idempotency_key=null-bulk-key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/null-bulk/orders:append", null_bulk_append_query,
+          admin_token, null_bulk_rows->str, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
+    return 357;
+  if (check_fact_projection_row_count (fact_root, "null-bulk", 0) != 0)
+    return 358;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *create_unary_query = g_strdup_printf

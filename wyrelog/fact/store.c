@@ -313,8 +313,9 @@ static gboolean
 value_matches_column (const wyl_fact_value_t *value,
     const wyl_policy_fact_relation_schema_column_t *column)
 {
+  /* The logical tuple store is fixed-width and cannot encode NULLs. */
   if (value->type == WYL_FACT_VALUE_NULL)
-    return column->nullable;
+    return FALSE;
   if (g_strcmp0 (column->column_type, "symbol") == 0)
     return value->type == WYL_FACT_VALUE_SYMBOL && value->as.text != NULL;
   if (g_strcmp0 (column->column_type, "string") == 0)
@@ -2337,6 +2338,18 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
 
   batch_meta.rows = select_rows;
   batch_meta.n_rows = n_select_rows;
+
+  /* Legacy stores may contain nullable NULL rows written before the tuple
+   * format's limitation was enforced.  Do not create a tombstone batch that
+   * replay cannot represent; leave the original assertion untouched. */
+  for (gsize i = 0; i < n_select_rows; i++) {
+    for (gsize j = 0; j < schema->n_columns; j++) {
+      if (!value_matches_column (&select_rows[i].values[j], &schema->columns[j])) {
+        rc = WYRELOG_E_POLICY;
+        goto unlock_return;
+      }
+    }
+  }
 
   content_hash = batch_content_hash (schema, &batch_meta);
   if (content_hash == NULL) {
