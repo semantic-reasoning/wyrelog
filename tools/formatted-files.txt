@@ -7,6 +7,7 @@ tests/test-audit-conn.c
 tests/test-audit-emit.c
 tests/test-break-glass-vocab.c
 tests/test-client-audit-daemon.c
+tests/test-client-smoke.c
 tests/test-daemon-checks-noaudit.c
 tests/test-daemon-checks.c
 tests/test-daemon-http-decide.c
@@ -106,6 +107,7 @@ wyrelog/auth/service-exchange-projector-private.c
 wyrelog/auth/service-session-private.c
 wyrelog/auth/totp.h
 wyrelog/break-glass.h
+wyrelog/client.h
 wyrelog/daemon/delta.c
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
@@ -203,7 +205,10 @@ wyrelog/wyctl/wyctl-publication-posix-private.c
 wyrelog/wyctl/wyctl-token-file.h
 wyrelog/wyl-boot-private.h
 wyrelog/wyl-boot.c
+wyrelog/wyl-client-codec-private.c
+wyrelog/wyl-client-codec-private.h
 wyrelog/wyl-client-private.h
+wyrelog/wyl-client.c
 wyrelog/wyl-common-private.h
 wyrelog/wyl-decide-private.h
 wyrelog/wyl-decide.c

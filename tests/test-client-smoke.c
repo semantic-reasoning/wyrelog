@@ -18,6 +18,7 @@ typedef struct
   guint status;
   guint request_count;
   gboolean truncate_response_body;
+  gboolean oversized_chunked_response;
   gchar *last_method;
   gchar *last_path;
   gchar *last_body;
@@ -128,7 +129,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "refresh_token")) : NULL;
   http->last_authorization = g_strdup (soup_message_headers_get_one
-      (soup_server_message_get_request_headers (msg), "Authorization"));
+            (soup_server_message_get_request_headers (msg), "Authorization"));
   http->last_password =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "password")) : NULL;
   http->last_skip_mfa =
@@ -160,6 +161,36 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  if (http->oversized_chunked_response) {
+    const gsize oversized_len = WYL_CLIENT_FACT_STATUS_MAX_DOCUMENT + 1u;
+    g_autofree gchar *chunk_header = g_strdup_printf ("%zx\r\n",
+            oversized_len);
+    g_autofree guint8 *chunk = g_malloc (oversized_len);
+    memset (chunk, 'x', oversized_len);
+    static const gchar response_header[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n\r\n";
+    static const gchar response_end[] = "\r\n0\r\n\r\n";
+    g_autoptr (GIOStream) connection =
+        soup_server_message_steal_connection (msg);
+    if (connection != NULL) {
+      GOutputStream *output = g_io_stream_get_output_stream (connection);
+      g_output_stream_write_all (output, response_header,
+          sizeof response_header - 1, NULL, NULL, NULL);
+      g_output_stream_write_all (output, chunk_header, strlen (chunk_header),
+          NULL, NULL, NULL);
+      g_output_stream_write_all (output, chunk, oversized_len, NULL, NULL,
+          NULL);
+      g_output_stream_write_all (output, response_end,
+          sizeof response_end - 1, NULL, NULL, NULL);
+      g_output_stream_flush (output, NULL, NULL);
+      g_io_stream_close (connection, NULL, NULL);
+    }
+    return;
+  }
+
   const gchar *body = http->body != NULL ? http->body : "[]";
   soup_server_message_set_status (msg, http->status != 0 ? http->status : 200,
       NULL);
@@ -173,7 +204,7 @@ client_last_response_is (WylClient *client, guint expected_status,
 {
   g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
   return wyl_client_get_last_http_status (client) == expected_status
-      && g_strcmp0 (error_code, expected_error_code) == 0;
+         && g_strcmp0 (error_code, expected_error_code) == 0;
 }
 
 typedef wyrelog_error_t (*LocalInvalidServiceManagementCall) (WylClient *);
@@ -182,7 +213,7 @@ static wyrelog_error_t
 local_invalid_principal_create (WylClient *client)
 {
   return wyl_client_service_principal_create (client, "svc:test:worker",
-      "Worker", 123, "public", 10, NULL);
+             "Worker", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
@@ -195,74 +226,74 @@ static wyrelog_error_t
 local_invalid_principal_disable (WylClient *client)
 {
   return wyl_client_service_principal_disable (client, "invalid", 123,
-      "public", 10);
+             "public", 10);
 }
 
 static wyrelog_error_t
 local_invalid_credential_get (WylClient *client)
 {
   return wyl_client_service_credential_get (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_get_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_get_for_tenant (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_list (WylClient *client)
 {
   return wyl_client_service_credential_list (client, "svc:test:worker", 123,
-      "public", 10, NULL);
+             "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_list_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_list_for_tenant (client,
-      "svc:test:worker", "tenant-a", 123, "public", 10, NULL);
+             "svc:test:worker", "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_revoke (WylClient *client)
 {
   return wyl_client_service_credential_revoke (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
-      123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+             123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_revoke_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_revoke_for_tenant (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
-      "tenant-a", 123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+             "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_issue (WylClient *client)
 {
   return wyl_client_service_credential_issue (client, NULL, 123, "public",
-      10, NULL);
+             10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_rotate (WylClient *client)
 {
   return wyl_client_service_credential_rotate (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
-      "issue.json", 4102444800000000, 123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+             "issue.json", 4102444800000000, 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_credential_rotate_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_rotate_for_tenant (client,
-      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
-      "issue.json", 4102444800000000, "tenant-a", 123, "public", 10, NULL);
+             "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "222222222222222222222222222",
+             "issue.json", 4102444800000000, "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
@@ -275,35 +306,35 @@ static wyrelog_error_t
 local_invalid_operation_reconcile_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_operation_reconcile_for_tenant
-      (client, "tenant-a", NULL, 123, "public", 10, NULL);
+           (client, "tenant-a", NULL, 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_operation_status (WylClient *client)
 {
   return wyl_client_service_credential_operation_status_list (client, 123,
-      "public", 10, NULL);
+             "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_operation_status_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_operation_status_list_for_tenant
-      (client, "tenant-a", 123, "public", 10, NULL);
+           (client, "tenant-a", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_operation_recover (WylClient *client)
 {
   return wyl_client_service_credential_operation_recover (client,
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
 }
 
 static wyrelog_error_t
 local_invalid_operation_recover_for_tenant (WylClient *client)
 {
   return wyl_client_service_credential_operation_recover_for_tenant (client,
-      "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
+             "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 10, NULL);
 }
 
 static gboolean
@@ -325,7 +356,7 @@ check_service_credential_codecs (void)
       "\"publication_receipt_id\":null,\"delivered\":false}";
 
   if (wyl_client_service_token_result_decode (token_json, strlen (token_json),
-          &token) != WYRELOG_E_OK
+      &token) != WYRELOG_E_OK
       || g_strcmp0 (token.access_token.text, "access-1") != 0)
     return FALSE;
   wyl_client_service_token_result_clear (&token);
@@ -338,21 +369,21 @@ check_service_credential_codecs (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_token_json); i++) {
     if (wyl_client_service_token_result_decode (invalid_token_json[i],
-            strlen (invalid_token_json[i]), &token) == WYRELOG_E_OK
+        strlen (invalid_token_json[i]), &token) == WYRELOG_E_OK
         || token.access_token.text != NULL || token.access_token.len != 0)
       return FALSE;
   }
 
   if (wyl_client_service_credential_handoff_receipt_decode (receipt_json,
-          strlen (receipt_json), &receipt) != WYRELOG_E_OK
+      strlen (receipt_json), &receipt) != WYRELOG_E_OK
       || g_strcmp0 (receipt.state, "terminal") != 0
       || g_strcmp0 (receipt.request_id, "111111111111111111111111111") != 0
       || g_strcmp0 (receipt.credential_id,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
       || receipt.generation != 7
       || g_strcmp0 (receipt.destination, "issue.json") != 0
       || g_strcmp0 (receipt.publication_receipt_id,
-          "wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0 || !receipt.delivered)
+      "wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0 || !receipt.delivered)
     return FALSE;
   wyl_client_service_credential_handoff_receipt_clear (&receipt);
   if (receipt.state != NULL || receipt.request_id != NULL
@@ -361,8 +392,8 @@ check_service_credential_codecs (void)
       || receipt.generation != 0 || receipt.delivered)
     return FALSE;
   if (wyl_client_service_credential_handoff_receipt_decode
-      (receipt_pending_json, strlen (receipt_pending_json),
-          &receipt) != WYRELOG_E_OK
+        (receipt_pending_json, strlen (receipt_pending_json),
+      &receipt) != WYRELOG_E_OK
       || g_strcmp0 (receipt.state, "server_committed") != 0
       || receipt.credential_id != NULL || receipt.generation != 0
       || receipt.publication_receipt_id != NULL || receipt.delivered)
@@ -384,25 +415,25 @@ check_service_credential_codecs (void)
       "\"created_at_us\":1,\"updated_at_us\":1,"
       "\"disabled_by\":null,\"disabled_at_us\":0}]}";
   if (wyl_client_service_principal_decode (principal_json,
-          strlen (principal_json), &principal) != WYRELOG_E_OK
+      strlen (principal_json), &principal) != WYRELOG_E_OK
       || g_strcmp0 (principal.subject_id, "svc:tenant:worker") != 0
       || wyl_client_service_principal_list_decode (principal_list_json,
-          strlen (principal_list_json), &principal_list) != WYRELOG_E_OK
+      strlen (principal_list_json), &principal_list) != WYRELOG_E_OK
       || principal_list.len != 1)
     return FALSE;
   wyl_client_service_principal_clear (&principal);
   wyl_client_service_principal_list_clear (&principal_list);
   const gchar *principal_invalid[] = {
     "{\"service_principal\":{\"subject_id\":\"svc:x:y\","
-        "\"display_name\":\"x\",\"state\":\"active\"," "\"extra\":1}}",
+    "\"display_name\":\"x\",\"state\":\"active\"," "\"extra\":1}}",
     "{\"service_principals\":[{\"subject_id\":\"svc:x:y\","
-        "\"display_name\":\"x\",\"state\":\"active\"}]} trailing",
+    "\"display_name\":\"x\",\"state\":\"active\"}]} trailing",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (principal_invalid); i++) {
     if (wyl_client_service_principal_decode (principal_invalid[i],
-            strlen (principal_invalid[i]), &principal) == WYRELOG_E_OK
+        strlen (principal_invalid[i]), &principal) == WYRELOG_E_OK
         || wyl_client_service_principal_list_decode (principal_invalid[i],
-            strlen (principal_invalid[i]), &principal_list) == WYRELOG_E_OK
+        strlen (principal_invalid[i]), &principal_list) == WYRELOG_E_OK
         || principal.subject_id != NULL || principal_list.items != NULL)
       return FALSE;
   }
@@ -416,14 +447,14 @@ check_service_credential_codecs (void)
       "\"expires_at_us\":3,\"last_used_at_us\":-9223372036854775808,\"revoked_by\":null,"
       "\"revoked_at_us\":0,\"rotated_from_id\":null}}";
   if (wyl_client_service_credential_decode (credential_json,
-          strlen (credential_json), &credential) != WYRELOG_E_OK
+      strlen (credential_json), &credential) != WYRELOG_E_OK
       || credential.generation != 1 || credential.last_used_at_us != G_MININT64
       || credential.revoked_by != NULL)
     return FALSE;
   wyl_client_service_credential_clear (&credential);
   const gchar *credential_list_json = "{\"service_credentials\":[]}";
   if (wyl_client_service_credential_list_decode (credential_list_json,
-          strlen (credential_list_json), &credential_list) != WYRELOG_E_OK
+      strlen (credential_list_json), &credential_list) != WYRELOG_E_OK
       || credential_list.len != 0)
     return FALSE;
   wyl_client_service_credential_list_clear (&credential_list);
@@ -432,10 +463,10 @@ check_service_credential_codecs (void)
   principal_list.len = 1;
   principal_list.items[0].subject_id = g_strdup ("svc:stale:value");
   if (wyl_client_service_principal_decode (principal_json, 20000,
-          &principal) != WYRELOG_E_INVALID
+      &principal) != WYRELOG_E_INVALID
       || principal.subject_id != NULL
       || wyl_client_service_principal_list_decode (principal_list_json, 20000,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || principal_list.items != NULL || principal_list.len != 0)
     return FALSE;
 
@@ -447,40 +478,40 @@ check_service_credential_codecs (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_token); i++) {
     if (wyl_client_service_token_result_decode (invalid_token[i],
-            strlen (invalid_token[i]), &token) == WYRELOG_E_OK
+        strlen (invalid_token[i]), &token) == WYRELOG_E_OK
         || token.access_token.text != NULL)
       return FALSE;
   }
   const gchar *invalid_receipt[] = {
     /* Missing the delivered field. */
     "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
-        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null}",
+    "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null}",
     /* Duplicate state key. */
     "{\"state\":\"terminal\",\"state\":\"terminal\","
-        "\"request_id\":\"111111111111111111111111111\",\"credential_id\":null,"
-        "\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null,\"delivered\":true}",
+    "\"request_id\":\"111111111111111111111111111\",\"credential_id\":null,"
+    "\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null,\"delivered\":true}",
     /* Trailing junk after the object. */
     "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
-        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null,\"delivered\":true} trailing",
+    "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null,\"delivered\":true} trailing",
     /* Non-boolean delivered value. */
     "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
-        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null,\"delivered\":\"true\"}",
+    "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null,\"delivered\":\"true\"}",
     /* Unknown state literal. */
     "{\"state\":\"bogus\",\"request_id\":\"111111111111111111111111111\","
-        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null,\"delivered\":false}",
+    "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null,\"delivered\":false}",
     /* Non-canonical credential_id. */
     "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
-        "\"credential_id\":\"bad\",\"generation\":0,\"destination\":\"issue.json\","
-        "\"publication_receipt_id\":null,\"delivered\":true}",
+    "\"credential_id\":\"bad\",\"generation\":0,\"destination\":\"issue.json\","
+    "\"publication_receipt_id\":null,\"delivered\":true}",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_receipt); i++) {
     if (wyl_client_service_credential_handoff_receipt_decode (invalid_receipt
-            [i], strlen (invalid_receipt[i]), &receipt) == WYRELOG_E_OK
+        [i], strlen (invalid_receipt[i]), &receipt) == WYRELOG_E_OK
         || receipt.state != NULL || receipt.delivered)
       return FALSE;
   }
@@ -515,13 +546,268 @@ check_secret_url_preflight (void)
     if (wyl_client_secret_url_is_canonical_literal_loopback (rejected[i]))
       return FALSE;
   if (!wyl_client_secret_redirect_is_same_authority
-      ("http://127.0.0.1:8080/api", "http://127.0.0.1:8080/other")
+        ("http://127.0.0.1:8080/api", "http://127.0.0.1:8080/other")
       || wyl_client_secret_redirect_is_same_authority
-      ("http://127.0.0.1:8080/api", "http://127.0.0.1:8081/other")
+        ("http://127.0.0.1:8080/api", "http://127.0.0.1:8081/other")
       || wyl_client_secret_redirect_is_same_authority
-      ("http://127.0.0.1:8080/api", "https://127.0.0.1:8080/other")
+        ("http://127.0.0.1:8080/api", "https://127.0.0.1:8080/other")
       || wyl_client_secret_redirect_is_same_authority
-      ("http://127.0.0.1:8080/api", "/relative"))
+        ("http://127.0.0.1:8080/api", "/relative"))
+    return FALSE;
+  return TRUE;
+}
+
+static gboolean
+check_fact_status_codec (void)
+{
+  WylClientFactStatus status = { 0 };
+  const gchar *valid =
+      "{\"status\":\"ready\",\"graphs_total\":2,"
+      "\"graphs_ready\":1,\"graphs_degraded\":0,\"graphs_sealed\":1,"
+      "\"\\u20ac\":null,\"graphs\":[{"
+      "\"tenant_id\":\"tenant-a\",\"graph_id\":\"orders\","
+      "\"state\":\"ready\",\"queryable\":true,"
+      "\"last_error_class\":null,\"future\":{\"array\":[true,2,null],"
+      "\"\\u20ac\":\"\\u0000\\uD83D\\uDE00\"},"
+      "\"\\u20ac\":null},"
+      "{\"tenant_id\":\"tenant-a\",\"graph_id\":\"sealed\","
+      "\"state\":\"sealed\",\"queryable\":false,"
+      "\"last_error_class\":null}],\"future_root\":[1,{\"x\":false}]}";
+  if (wyl_client_fact_status_decode (valid, strlen (valid), &status)
+      != WYRELOG_E_OK || status.status != WYL_CLIENT_FACT_STATUS_READY
+      || g_strcmp0 (status.status_name, "ready") != 0
+      || status.graphs_total != 2 || status.graphs_ready != 1
+      || status.graphs_degraded != 0 || status.graphs_sealed != 1
+      || !status.has_graphs || status.n_graphs != 2
+      || status.graphs[0].state != WYL_CLIENT_FACT_GRAPH_STATE_READY
+      || status.graphs[0].last_error_class != NULL
+      || status.graphs[1].state != WYL_CLIENT_FACT_GRAPH_STATE_SEALED)
+    return FALSE;
+  wyl_client_fact_status_clear (&status);
+  if (status.status_name != NULL || status.graphs != NULL
+      || status.n_graphs != 0 || status.graphs_total != 0)
+    return FALSE;
+
+  const struct
+  {
+    const gchar *name;
+    WylClientFactGraphState state;
+  } current_states[] = {
+    {"ready", WYL_CLIENT_FACT_GRAPH_STATE_READY},
+    {"degraded", WYL_CLIENT_FACT_GRAPH_STATE_DEGRADED},
+    {"schema_mismatch", WYL_CLIENT_FACT_GRAPH_STATE_SCHEMA_MISMATCH},
+    {"replay_failed", WYL_CLIENT_FACT_GRAPH_STATE_REPLAY_FAILED},
+    {"store_unavailable", WYL_CLIENT_FACT_GRAPH_STATE_STORE_UNAVAILABLE},
+    {"forget_incomplete", WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE},
+    {"sealed", WYL_CLIENT_FACT_GRAPH_STATE_SEALED},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (current_states); i++) {
+    gboolean ready = current_states[i].state ==
+        WYL_CLIENT_FACT_GRAPH_STATE_READY;
+    gboolean sealed = current_states[i].state ==
+        WYL_CLIENT_FACT_GRAPH_STATE_SEALED;
+    g_autofree gchar *document = g_strdup_printf
+          ("{\"status\":\"%s\",\"graphs_total\":1,"
+            "\"graphs_ready\":%u,\"graphs_degraded\":%u,"
+            "\"graphs_sealed\":%u,\"graphs\":[{"
+            "\"tenant_id\":\"tenant-a\",\"graph_id\":\"g\","
+            "\"state\":\"%s\",\"queryable\":false,"
+            "\"last_error_class\":null}]}",
+            ready || sealed ? "ready" : "degraded", ready ? 1u : 0u,
+            !ready && !sealed ? 1u : 0u, sealed ? 1u : 0u,
+            current_states[i].name);
+    if (wyl_client_fact_status_decode (document, strlen (document), &status)
+        != WYRELOG_E_OK
+        || status.graphs[0].state != current_states[i].state)
+      return FALSE;
+    wyl_client_fact_status_clear (&status);
+  }
+  const gchar *disabled =
+      "{\"status\":\"disabled\",\"graphs_total\":0,"
+      "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}";
+  if (wyl_client_fact_status_decode (disabled, strlen (disabled), &status)
+      != WYRELOG_E_OK
+      || status.status != WYL_CLIENT_FACT_STATUS_DISABLED || status.has_graphs
+      || status.n_graphs != 0)
+    return FALSE;
+  wyl_client_fact_status_clear (&status);
+
+  const gchar *future =
+      "{\"status\":\"partially_ready\",\"graphs_total\":1,"
+      "\"graphs_ready\":0,\"graphs_degraded\":1,\"graphs_sealed\":0,"
+      "\"graphs\":[{\"tenant_id\":\"tenant-a\",\"graph_id\":\"orders\","
+      "\"state\":\"actively_reconciling\",\"queryable\":false,"
+      "\"last_error_class\":\"future_reason\"}]}";
+  if (wyl_client_fact_status_decode (future, strlen (future), &status)
+      != WYRELOG_E_OK || status.status != WYL_CLIENT_FACT_STATUS_UNKNOWN
+      || g_strcmp0 (status.status_name, "partially_ready") != 0
+      || status.graphs[0].state != WYL_CLIENT_FACT_GRAPH_STATE_UNKNOWN
+      || g_strcmp0 (status.graphs[0].state_name,
+      "actively_reconciling") != 0)
+    return FALSE;
+  wyl_client_fact_status_clear (&status);
+
+  const gchar *invalid[] = {
+    /* Duplicate recognized key. */
+    "{\"status\":\"ready\",\"status\":\"ready\",\"graphs_total\":0,"
+    "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}",
+    /* Duplicate graph identity. */
+    "{\"status\":\"ready\",\"graphs_total\":2,\"graphs_ready\":2,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":0,\"graphs\":["
+    "{\"tenant_id\":\"t\",\"graph_id\":\"g\",\"state\":\"ready\","
+    "\"queryable\":true,\"last_error_class\":null},"
+    "{\"tenant_id\":\"t\",\"graph_id\":\"g\",\"state\":\"ready\","
+    "\"queryable\":true,\"last_error_class\":null}]}",
+    /* Duplicate recognized graph member. */
+    "{\"status\":\"ready\",\"graphs_total\":1,\"graphs_ready\":1,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":0,\"graphs\":[{"
+    "\"tenant_id\":\"t\",\"graph_id\":\"g\",\"state\":\"ready\","
+    "\"state\":\"sealed\",\"queryable\":true,"
+    "\"last_error_class\":null}]}",
+    /* Bucket mismatch. */
+    "{\"status\":\"ready\",\"graphs_total\":1,\"graphs_ready\":0,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":1,\"graphs\":[]}",
+    /* Wrong type and trailing junk. */
+    "{\"status\":\"ready\",\"graphs_total\":\"0\",\"graphs_ready\":0,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":0}",
+    /* VT and FF are accepted by generic ASCII whitespace helpers but not JSON. */
+    "\v{\"status\":\"ready\",\"graphs_total\":0,"
+    "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}",
+    "{\"status\":\"ready\",\f\"graphs_total\":0,"
+    "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}",
+    "{\"status\":\"ready\",\"graphs_total\":0,\"graphs_ready\":0,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":0} trailing",
+    /* Invalid additive JSON is not silently skipped. */
+    "{\"status\":\"ready\",\"graphs_total\":0,\"graphs_ready\":0,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":0,\"new\":[1,]}",
+    /* An unknown graph state still belongs to the server's degraded bucket. */
+    "{\"status\":\"degraded\",\"graphs_total\":1,\"graphs_ready\":0,"
+    "\"graphs_degraded\":0,\"graphs_sealed\":1,\"graphs\":["
+    "{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+    "\"state\":\"future\",\"queryable\":false,"
+    "\"last_error_class\":null}]}"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    status.status_name = g_strdup ("stale");
+    if (wyl_client_fact_status_decode (invalid[i], strlen (invalid[i]),
+        &status) == WYRELOG_E_OK || status.status_name != NULL
+        || status.graphs != NULL || status.n_graphs != 0
+        || status.graphs_total != 0)
+      return FALSE;
+  }
+  if (wyl_client_fact_status_decode ("x", (4u * 1024u * 1024u) + 1u,
+      &status) != WYRELOG_E_INVALID || status.status_name != NULL
+      || status.graphs != NULL)
+    return FALSE;
+
+  GString *nested = g_string_new ("{\"status\":\"ready\","
+          "\"graphs_total\":0,\"graphs_ready\":0,\"graphs_degraded\":0,"
+          "\"graphs_sealed\":0,\"future\":");
+  for (guint i = 0; i < 32; i++)
+    g_string_append_c (nested, '[');
+  g_string_append_c (nested, '0');
+  for (guint i = 0; i < 32; i++)
+    g_string_append_c (nested, ']');
+  g_string_append_c (nested, '}');
+  if (wyl_client_fact_status_decode (nested->str, nested->len, &status)
+      != WYRELOG_E_OK) {
+    g_string_free (nested, TRUE);
+    return FALSE;
+  }
+  wyl_client_fact_status_clear (&status);
+  g_string_truncate (nested, 0);
+  g_string_append (nested, "{\"status\":\"ready\","
+      "\"graphs_total\":0,\"graphs_ready\":0,\"graphs_degraded\":0,"
+      "\"graphs_sealed\":0,\"future\":");
+  for (guint i = 0; i < 33; i++)
+    g_string_append_c (nested, '[');
+  g_string_append_c (nested, '0');
+  for (guint i = 0; i < 33; i++)
+    g_string_append_c (nested, ']');
+  g_string_append_c (nested, '}');
+  gboolean excessive_depth = wyl_client_fact_status_decode (nested->str,
+          nested->len, &status) != WYRELOG_E_INVALID;
+  g_string_free (nested, TRUE);
+  if (excessive_depth || status.status_name != NULL)
+    return FALSE;
+
+  g_autofree gchar *long_name_64 = g_strnfill (64, 'x');
+  g_autofree gchar *wire_name_64 = g_strdup_printf
+        ("{\"status\":\"degraded\",\"graphs_total\":1,"
+          "\"graphs_ready\":0,\"graphs_degraded\":1,\"graphs_sealed\":0,"
+          "\"graphs\":[{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+          "\"state\":\"degraded\",\"queryable\":false,"
+          "\"last_error_class\":\"%s\"}]}", long_name_64);
+  if (wyl_client_fact_status_decode (wire_name_64, strlen (wire_name_64),
+      &status) != WYRELOG_E_OK
+      || status.graphs[0].reason_class != WYL_CLIENT_FACT_REASON_UNKNOWN)
+    return FALSE;
+  wyl_client_fact_status_clear (&status);
+  g_autofree gchar *long_name_65 = g_strnfill (65, 'x');
+  g_autofree gchar *wire_name_65 = g_strdup_printf
+        ("{\"status\":\"degraded\",\"graphs_total\":1,"
+          "\"graphs_ready\":0,\"graphs_degraded\":1,\"graphs_sealed\":0,"
+          "\"graphs\":[{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+          "\"state\":\"degraded\",\"queryable\":false,"
+          "\"last_error_class\":\"%s\"}]}", long_name_65);
+  if (wyl_client_fact_status_decode (wire_name_65, strlen (wire_name_65),
+      &status) != WYRELOG_E_INVALID || status.status_name != NULL)
+    return FALSE;
+
+  const gchar *max_document_prefix =
+      "{\"status\":\"ready\",\"graphs_total\":0,"
+      "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}";
+  GString *max_document = g_string_new (max_document_prefix);
+  gsize prefix_len = max_document->len;
+  g_string_set_size (max_document, 4u * 1024u * 1024u);
+  /* Replace the zero-filled extension with JSON whitespace, yielding a valid
+   * document exactly at the decoder's size boundary. */
+  memset (max_document->str + prefix_len, ' ',
+      max_document->len - prefix_len);
+  if (wyl_client_fact_status_decode (max_document->str, max_document->len,
+      &status) != WYRELOG_E_OK) {
+    g_string_free (max_document, TRUE);
+    return FALSE;
+  }
+  wyl_client_fact_status_clear (&status);
+  g_string_free (max_document, TRUE);
+
+  GString *many_graphs = g_string_new ("{\"status\":\"degraded\","
+          "\"graphs_total\":16385,\"graphs_ready\":0,"
+          "\"graphs_degraded\":16385,\"graphs_sealed\":0,\"graphs\":[");
+  for (guint i = 0; i < 16385; i++) {
+    if (i > 0)
+      g_string_append_c (many_graphs, ',');
+    g_string_append_printf (many_graphs,
+        "{\"tenant_id\":\"t\",\"graph_id\":\"g%u\","
+        "\"state\":\"degraded\",\"queryable\":false,"
+        "\"last_error_class\":\"degraded\"}", i);
+  }
+  g_string_append (many_graphs, "]}");
+  gboolean too_many_graphs = wyl_client_fact_status_decode (many_graphs->str,
+          many_graphs->len, &status) != WYRELOG_E_INVALID;
+  g_string_free (many_graphs, TRUE);
+  if (too_many_graphs || status.status_name != NULL || status.graphs != NULL)
+    return FALSE;
+
+  GString *max_graphs = g_string_new ("{\"status\":\"degraded\","
+          "\"graphs_total\":16384,\"graphs_ready\":0,"
+          "\"graphs_degraded\":16384,\"graphs_sealed\":0,\"graphs\":[");
+  for (guint i = 0; i < 16384; i++) {
+    if (i > 0)
+      g_string_append_c (max_graphs, ',');
+    g_string_append_printf (max_graphs,
+        "{\"tenant_id\":\"t\",\"graph_id\":\"g%u\","
+        "\"state\":\"degraded\",\"queryable\":false,"
+        "\"last_error_class\":\"degraded\"}", i);
+  }
+  g_string_append (max_graphs, "]}");
+  gboolean maximum_count_accepted = wyl_client_fact_status_decode
+        (max_graphs->str, max_graphs->len, &status) != WYRELOG_E_OK
+      || status.n_graphs != 16384;
+  g_string_free (max_graphs, TRUE);
+  wyl_client_fact_status_clear (&status);
+  if (maximum_count_accepted)
     return FALSE;
   return TRUE;
 }
@@ -531,6 +817,8 @@ main (void)
 {
   if (!check_service_credential_codecs ())
     return 230;
+  if (!check_fact_status_codec ())
+    return 232;
   if (!check_secret_url_preflight ())
     return 231;
   const gchar *version = wyrelog_client_version_string ();
@@ -555,6 +843,11 @@ main (void)
     return 3;
   if (client == NULL)
     return 4;
+  g_auto (WylClientFactStatus) nonlocal_fact_status = { 0 };
+  if (wyl_client_fact_status (client, &nonlocal_fact_status)
+      != WYRELOG_E_INVALID || nonlocal_fact_status.status_name != NULL
+      || nonlocal_fact_status.graphs != NULL)
+    return 284;
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (g_strcmp0 (base_url, "http://example.invalid") != 0)
     return 12;
@@ -577,7 +870,7 @@ main (void)
     return 15;
   g_autofree gchar *request_uri = wyl_audit_iter_dup_request_uri (iter);
   if (g_strcmp0 (request_uri,
-          "http://example.invalid/audit/events?filter=decision%3Ddeny") != 0)
+      "http://example.invalid/audit/events?filter=decision%3Ddeny") != 0)
     return 16;
   g_autoptr (SoupMessage) message = wyl_audit_iter_new_request_message (iter);
   if (message == NULL)
@@ -599,7 +892,7 @@ main (void)
   if (!soup_server_listen_local (http.server, 0, 0, &listen_error))
     return 21;
   GThread *thread = g_thread_new ("client-smoke-http",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
@@ -640,10 +933,10 @@ main (void)
     return 145;
   g_autoptr (WylAuditIter) missing_login_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
-          "public", 69, &missing_login_iter) != WYRELOG_E_INVALID)
+      "public", 69, &missing_login_iter) != WYRELOG_E_INVALID)
     return 153;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", 123, "public", 49) != WYRELOG_E_INVALID)
     return 510;
 
   http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
@@ -690,12 +983,12 @@ main (void)
   };
   http.body = "{\"access_token\":\"access-token-1\"}";
   if (wyl_client_service_token_exchange (local_client, &token_request,
-          &token_result) != WYRELOG_E_OK
+      &token_result) != WYRELOG_E_OK
       || g_strcmp0 (token_result.access_token.text, "access-token-1") != 0
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path, "/auth/service-token") != 0
       || strstr (http.last_body,
-          "{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq\"}")
+      "{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq\"}")
       == NULL || http.last_tenant != NULL || http.last_session_token != NULL
       || http.last_refresh_token != NULL || http.last_authorization != NULL)
     return 244;
@@ -703,7 +996,7 @@ main (void)
   memcpy (bounded_secret, credential_secret.text, sizeof bounded_secret);
   credential_secret.text = bounded_secret;
   if (wyl_client_service_token_exchange (local_client, &token_request,
-          &token_result) != WYRELOG_E_OK
+      &token_result) != WYRELOG_E_OK
       || g_strcmp0 (token_result.access_token.text, "access-token-1") != 0)
     return 247;
   credential_secret.text = (gchar *)
@@ -714,14 +1007,14 @@ main (void)
   };
   token_request.credential_secret = &invalid_secret;
   if (wyl_client_service_token_exchange (local_client, &token_request,
-          &token_result) != WYRELOG_E_INVALID
+      &token_result) != WYRELOG_E_INVALID
       || g_strcmp0 (http.last_path, "/auth/service-token") != 0)
     return 245;
   token_request.credential_secret = &credential_secret;
   http.status = 429;
   http.body = "{\"error\":\"rate_limited\"}";
   if (wyl_client_service_token_exchange (local_client, &token_request,
-          &token_result) != WYRELOG_E_IO
+      &token_result) != WYRELOG_E_IO
       || token_result.access_token.text != NULL)
     return 246;
   http.status = 0;
@@ -734,6 +1027,47 @@ main (void)
       "\"session_state\":\"active\"," "\"access_token\":\"management-access\"}";
   if (wyl_client_login_skip_mfa (management_client, "alice") != WYRELOG_E_OK)
     return 280;
+  g_auto (WylClientFactStatus) fact_status = { 0 };
+  http.body =
+      "{\"status\":\"degraded\",\"graphs_total\":1,"
+      "\"graphs_ready\":0,\"graphs_degraded\":1,\"graphs_sealed\":0,"
+      "\"graphs\":[{\"tenant_id\":\"tenant-a\",\"graph_id\":\"orders\","
+      "\"state\":\"forget_incomplete\",\"queryable\":true,"
+      "\"last_error_class\":\"forget_incomplete\"}]}";
+  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_OK
+      || fact_status.status != WYL_CLIENT_FACT_STATUS_DEGRADED
+      || fact_status.n_graphs != 1
+      || fact_status.graphs[0].state !=
+      WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE
+      || fact_status.graphs[0].reason_class !=
+      WYL_CLIENT_FACT_REASON_FORGET_INCOMPLETE
+      || !fact_status.graphs[0].queryable
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/facts/status") != 0
+      || http.last_authorization != NULL
+      || !client_last_response_is (management_client, 200, NULL))
+    return 281;
+  http.body = "{\"status\":\"ready\",\"private_detail\":\"do-not-leak\"}";
+  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_IO
+      || fact_status.status_name != NULL || fact_status.graphs != NULL
+      || fact_status.n_graphs != 0
+      || g_strcmp0 (http.body, "{\"status\":\"ready\",\"private_detail\":\"do-not-leak\"}") != 0)
+    return 282;
+  http.status = 503;
+  http.body = "{\"error\":\"unavailable\"}";
+  if (wyl_client_fact_status (management_client, &fact_status)
+      != WYRELOG_E_BUSY
+      || fact_status.status_name != NULL || fact_status.graphs != NULL
+      || fact_status.n_graphs != 0
+      || !client_last_response_is (management_client, 503, NULL))
+    return 283;
+  http.status = 0;
+  http.oversized_chunked_response = TRUE;
+  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_IO
+      || fact_status.status_name != NULL || fact_status.graphs != NULL
+      || fact_status.n_graphs != 0)
+    return 285;
+  http.oversized_chunked_response = FALSE;
   g_auto (WylClientServicePrincipal)
   principal = { 0 };
   g_auto (WylClientServicePrincipalList)
@@ -772,9 +1106,9 @@ main (void)
     http.status = 400;
     http.body = "{\"error\":\"stale_remote_failure\"}";
     if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-            &principal_list) != WYRELOG_E_INVALID
+        &principal_list) != WYRELOG_E_INVALID
         || !client_last_response_is (management_client, 400,
-            "stale_remote_failure"))
+        "stale_remote_failure"))
       return 546;
     guint request_count = http.request_count;
     if (local_invalid_calls[i] (management_client) != WYRELOG_E_INVALID
@@ -791,8 +1125,8 @@ main (void)
       "\"created_at_us\":1,\"updated_at_us\":1,"
       "\"disabled_by\":null,\"disabled_at_us\":0}}";
   if (wyl_client_service_principal_create (management_client,
-          "svc:alice:worker", "Worker", 123, "public", 49,
-          &principal) != WYRELOG_E_OK
+      "svc:alice:worker", "Worker", 123, "public", 49,
+      &principal) != WYRELOG_E_OK
       || g_strcmp0 (principal.subject_id, "svc:alice:worker") != 0
       || g_strcmp0 (principal.display_name, "Worker") != 0
       || g_strcmp0 (http.last_path, "/service-principals") != 0
@@ -809,14 +1143,14 @@ main (void)
   http.status = 400;
   http.body = "{\"error\":\"invalid_service_principal\"}";
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 400,
-          "invalid_service_principal"))
+      "invalid_service_principal"))
     return 540;
   g_free (http.last_path);
   http.last_path = g_strdup ("__metadata_local_validation__");
   if (wyl_client_service_principal_create (management_client, "alice", "bad",
-          123, "public", 49, &principal) != WYRELOG_E_INVALID
+      123, "public", 49, &principal) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 0, NULL)
       || g_strcmp0 (http.last_path, "__metadata_local_validation__") != 0)
     return 541;
@@ -836,7 +1170,7 @@ main (void)
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_error_bodies); i++) {
     http.body = invalid_error_bodies[i];
     if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-            &principal_list) != WYRELOG_E_INVALID
+        &principal_list) != WYRELOG_E_INVALID
         || !client_last_response_is (management_client, 400, NULL))
       return 542;
   }
@@ -845,35 +1179,35 @@ main (void)
   http.body = embedded_nul_error;
   http.body_size = sizeof embedded_nul_error - 1;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 400, NULL))
     return 548;
   http.body_size = 0;
 
   g_autofree gchar *maximum_error_value = g_strnfill (127, 'x');
   g_autofree gchar *maximum_error_body = g_strdup_printf
-      ("{\"error\":\"%s\"}", maximum_error_value);
+        ("{\"error\":\"%s\"}", maximum_error_value);
   http.body = maximum_error_body;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 400, maximum_error_value))
     return 549;
 
   g_autofree gchar *oversized_error_value = g_strnfill (128, 'x');
   g_autofree gchar *oversized_error_body = g_strdup_printf
-      ("{\"error\":\"%s\"}", oversized_error_value);
+        ("{\"error\":\"%s\"}", oversized_error_value);
   http.body = oversized_error_body;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 400, NULL))
     return 542;
 
   g_autofree gchar *oversized_envelope_padding = g_strnfill (4096, ' ');
   g_autofree gchar *oversized_envelope = g_strdup_printf
-      ("{\"error\":\"valid\"}%s", oversized_envelope_padding);
+        ("{\"error\":\"valid\"}%s", oversized_envelope_padding);
   http.body = oversized_envelope;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_INVALID
+      &principal_list) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 400, NULL))
     return 550;
 
@@ -884,16 +1218,16 @@ main (void)
       "\"created_by\":\"admin\",\"created_at_us\":1,"
       "\"updated_at_us\":1,\"disabled_by\":null," "\"disabled_at_us\":0}]}";
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_OK || principal_list.len != 1
+      &principal_list) != WYRELOG_E_OK || principal_list.len != 1
       || g_strcmp0 (principal_list.items[0].subject_id,
-          "svc:alice:worker") != 0
+      "svc:alice:worker") != 0
       || g_strcmp0 (http.last_method, "GET") != 0
       || g_strcmp0 (http.last_path, "/service-principals") != 0
       || !client_last_response_is (management_client, 200, NULL))
     return 233;
   guint principal_success_request_count = http.request_count;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
-          NULL) != WYRELOG_E_INVALID
+      NULL) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 0, NULL)
       || http.request_count != principal_success_request_count)
     return 553;
@@ -903,26 +1237,26 @@ main (void)
       "\"created_by\":\"admin\",\"created_at_us\":1,"
       "\"updated_at_us\":2,\"disabled_by\":\"admin\"," "\"disabled_at_us\":2}}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
-          "svc:alice:worker", "222222222222222222222222222", 123,
-          "public", 49, &principal) != WYRELOG_E_OK
+      "svc:alice:worker", "222222222222222222222222222", 123,
+      "public", 49, &principal) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
-          "/service-principals/svc:alice:worker/disable") != 0
+      "/service-principals/svc:alice:worker/disable") != 0
       || g_strcmp0 (http.last_body,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"222222222222222222222222222\"}") != 0
+      "{\"version\":\"1\",\"request_id\":"
+      "\"222222222222222222222222222\"}") != 0
       || g_strcmp0 (principal.subject_id, "svc:alice:worker") != 0
       || g_strcmp0 (principal.state, "disabled") != 0)
     return 234;
   wyl_client_service_principal_clear (&principal);
   guint keyed_disable_request_count = http.request_count;
   if (wyl_client_service_principal_disable_with_request_id (management_client,
-          "svc:alice:worker", "bad", 123, "public", 49,
-          &principal) != WYRELOG_E_INVALID
+      "svc:alice:worker", "bad", 123, "public", 49,
+      &principal) != WYRELOG_E_INVALID
       || http.request_count != keyed_disable_request_count)
     return 555;
   if (wyl_client_service_principal_disable (management_client,
-          "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
+      "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
       || http.last_body == NULL
       || strstr (http.last_body, "{\"version\":\"1\",\"request_id\":\"")
       != http.last_body)
@@ -934,31 +1268,31 @@ main (void)
       "\"updated_at_us\":2,\"disabled_by\":\"admin\","
       "\"disabled_at_us\":2,\"extra\":true}}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
-          "svc:alice:worker", "222222222222222222222222223", 123,
-          "public", 49, &principal) != WYRELOG_E_INVALID
+      "svc:alice:worker", "222222222222222222222222223", 123,
+      "public", 49, &principal) != WYRELOG_E_INVALID
       || principal.subject_id != NULL)
     return 557;
   http.status = 409;
   http.body = "{\"error\":\"service_principal_conflict\"}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
-          "svc:alice:worker", "222222222222222222222222224", 123,
-          "public", 49, &principal) != WYRELOG_E_CONFLICT
+      "svc:alice:worker", "222222222222222222222222224", 123,
+      "public", 49, &principal) != WYRELOG_E_CONFLICT
       || principal.subject_id != NULL
       || !client_last_response_is (management_client, 409,
-          "service_principal_conflict"))
+      "service_principal_conflict"))
     return 558;
   http.status = 503;
   http.body = "{\"error\":\"service_principal_failed\"}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
-          "svc:alice:worker", "222222222222222222222222225", 123,
-          "public", 49, &principal) != WYRELOG_E_IO
+      "svc:alice:worker", "222222222222222222222222225", 123,
+      "public", 49, &principal) != WYRELOG_E_IO
       || principal.subject_id != NULL
       || !client_last_response_is (management_client, 503,
-          "service_principal_failed"))
+      "service_principal_failed"))
     return 559;
   http.status = 0;
   if (wyl_client_service_principal_create (management_client, "alice", "bad",
-          123, "public", 49, &principal) != WYRELOG_E_INVALID)
+      123, "public", 49, &principal) != WYRELOG_E_INVALID)
     return 235;
   const gchar *mock_credential_json =
       "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
@@ -969,10 +1303,10 @@ main (void)
       "\"revoked_at_us\":4,\"rotated_from_id\":null}}";
   http.body = mock_credential_json;
   if (wyl_client_service_credential_get_for_tenant (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 49,
-          &credential) != WYRELOG_E_OK
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "tenant-a", 123, "public", 49,
+      &credential) != WYRELOG_E_OK
       || g_strcmp0 (http.last_path,
-          "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
       || g_strcmp0 (credential.state, "revoked") != 0
       || g_strcmp0 (http.last_tenant, "tenant-a") != 0
       || !client_last_response_is (management_client, 200, NULL))
@@ -981,41 +1315,41 @@ main (void)
   http.status = 401;
   http.body = "{\"error\":\"service_credential_auth_required\"}";
   if (wyl_client_service_credential_get (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
-          &credential) != WYRELOG_E_AUTH
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+      &credential) != WYRELOG_E_AUTH
       || !client_last_response_is (management_client, 401,
-          "service_credential_auth_required"))
+      "service_credential_auth_required"))
     return 543;
   http.status = 0;
   http.body = "{\"service_credentials\":[]}";
   if (wyl_client_service_credential_list_for_tenant (management_client,
-          "svc:alice:worker", "tenant-a", 123, "public", 49,
-          &credential_list) != WYRELOG_E_OK
+      "svc:alice:worker", "tenant-a", 123, "public", 49,
+      &credential_list) != WYRELOG_E_OK
       || credential_list.len != 0
       || g_strcmp0 (http.last_path,
-          "/service-principals/svc:alice:worker/credentials") != 0
+      "/service-principals/svc:alice:worker/credentials") != 0
       || g_strcmp0 (http.last_tenant, "tenant-a") != 0
       || !client_last_response_is (management_client, 200, NULL))
     return 237;
   guint credential_success_request_count = http.request_count;
   if (wyl_client_service_credential_get (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
-          NULL) != WYRELOG_E_INVALID
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+      NULL) != WYRELOG_E_INVALID
       || !client_last_response_is (management_client, 0, NULL)
       || http.request_count != credential_success_request_count)
     return 554;
   http.body = mock_credential_json;
   if (wyl_client_service_credential_revoke_for_tenant (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
-          "222222222222222222222222222", "tenant-a", 123, "public", 49,
-          &credential) != WYRELOG_E_OK
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+      "222222222222222222222222222", "tenant-a", 123, "public", 49,
+      &credential) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "DELETE") != 0
       || strstr (http.last_body, "request_id") == NULL
       || g_strcmp0 (http.last_tenant, "tenant-a") != 0)
     return 238;
   if (wyl_client_service_credential_revoke_for_tenant (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", "tenant-a", 123,
-          "public", 49, &credential) != WYRELOG_E_INVALID)
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", "tenant-a", 123,
+      "public", 49, &credential) != WYRELOG_E_INVALID)
     return 239;
   WylClientServiceCredentialIssueRequest issue_request = {
     .subject_id = "svc:alice:worker",
@@ -1031,11 +1365,11 @@ main (void)
       "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
       "\"delivered\":true}";
   wyrelog_error_t issue_rc = wyl_client_service_credential_issue
-      (management_client, &issue_request, 123, "public", 49, &issue_result);
+        (management_client, &issue_request, 123, "public", 49, &issue_result);
   if (issue_rc != WYRELOG_E_OK
       || g_strcmp0 (issue_result.state, "terminal") != 0
       || g_strcmp0 (issue_result.credential_id,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
       || issue_result.generation != 1 || !issue_result.delivered) {
     return 240;
   }
@@ -1052,19 +1386,19 @@ main (void)
     return 244;
   http.status = 409;
   if (wyl_client_service_credential_issue (management_client, &issue_request,
-          123, "public", 49, &issue_result) != WYRELOG_E_CONFLICT
+      123, "public", 49, &issue_result) != WYRELOG_E_CONFLICT
       || issue_result.state != NULL || issue_result.credential_id != NULL)
     return 242;
   http.status = 0;
   issue_request.tenant_id = "bad tenant";
   if (wyl_client_service_credential_issue (management_client, &issue_request,
-          123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
+      123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
     return 243;
   issue_request.tenant_id = "tenant-a";
   /* A missing destination must fail closed before any request is sent. */
   issue_request.destination = NULL;
   if (wyl_client_service_credential_issue (management_client, &issue_request,
-          123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
+      123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
     return 245;
   issue_request.destination = "issue.json";
   http.body =
@@ -1074,18 +1408,18 @@ main (void)
       "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
       "\"delivered\":true}";
   if (wyl_client_service_credential_rotate_for_tenant (management_client,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
-          "444444444444444444444444444", "issue.json", 4102444800000000,
-          "tenant-a", 123, "public", 49, &issue_result) != WYRELOG_E_OK
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+      "444444444444444444444444444", "issue.json", 4102444800000000,
+      "tenant-a", 123, "public", 49, &issue_result) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
-          "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv/rotate") != 0
+      "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv/rotate") != 0
       || strstr (http.last_body, "\"expires_at_us\":\"") == NULL
       || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL
       || g_strcmp0 (http.last_tenant, "tenant-a") != 0
       || issue_result.generation != 2 || !issue_result.delivered
       || g_strcmp0 (issue_result.credential_id,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0)
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0)
     return 241;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;
@@ -1100,7 +1434,7 @@ main (void)
     return 91;
   http.body = "{\"ok\":true}";
   if (wyl_client_policy_permission_grant (local_client, "fallback target",
-          "site.policy.read", "tenant/fallback", 123, "public", 49)
+      "site.policy.read", "tenant/fallback", 123, "public", 49)
       != WYRELOG_E_OK)
     return 170;
   if (g_strcmp0 (http.last_session_token, "session-1") != 0 ||
@@ -1109,7 +1443,7 @@ main (void)
     return 171;
   g_autoptr (WylAuditIter) fallback_guarded_audit_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
-          "public", 69, &fallback_guarded_audit_iter) != WYRELOG_E_OK)
+      "public", 69, &fallback_guarded_audit_iter) != WYRELOG_E_OK)
     return 173;
   g_autofree gchar *fallback_guarded_audit_uri =
       wyl_audit_iter_dup_request_uri (fallback_guarded_audit_iter);
@@ -1119,7 +1453,7 @@ main (void)
   g_autoptr (SoupMessage) fallback_guarded_audit_message =
       wyl_audit_iter_new_request_message (fallback_guarded_audit_iter);
   if (soup_message_headers_get_one (soup_message_get_request_headers
-          (fallback_guarded_audit_message), "Authorization") != NULL)
+        (fallback_guarded_audit_message), "Authorization") != NULL)
     return 175;
 
   http.body = "{\"session_token\":\"session-2\",\"username\":\"alice\","
@@ -1168,10 +1502,10 @@ main (void)
   http.status = 403;
   http.body = "{\"error\":\"service_credential_reconcile_denied\"}";
   if (wyl_client_service_credential_operation_reconcile_for_tenant
-      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
-          &reconcile_result) != WYRELOG_E_POLICY
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_POLICY
       || !client_last_response_is (local_client, 403,
-          "service_credential_reconcile_denied"))
+      "service_credential_reconcile_denied"))
     return 544;
   http.status = 0;
 
@@ -1186,22 +1520,22 @@ main (void)
       "\"credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"generation\":7}";
   if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
+      &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
     return 281;
   http.body = reconcile_issue_response;
   if (wyl_client_service_credential_operation_reconcile_for_tenant
-      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
-          &reconcile_result) != WYRELOG_E_OK)
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_OK)
     return 210;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED ||
       g_strcmp0 (reconcile_result.credential_id,
-          "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+      "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
       reconcile_result.generation != 7)
     return 211;
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
       g_strcmp0 (http.last_path,
-          "/service-credential-operations/reconcile") != 0 ||
+      "/service-credential-operations/reconcile") != 0 ||
       g_strcmp0 (http.last_tenant, "tenant-a") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
@@ -1212,7 +1546,7 @@ main (void)
       !client_last_response_is (local_client, 200, NULL))
     return 212;
   wyl_client_service_credential_operation_reconcile_result_clear
-      (&reconcile_result);
+    (&reconcile_result);
 
   /* Shape alone is insufficient: this is 27 alphanumeric characters but is
    * outside the canonical KSUID range. After the remote failure and success,
@@ -1220,7 +1554,7 @@ main (void)
   guint reconcile_success_request_count = http.request_count;
   reconcile_request.request_id = "abcdefghijklmnopqrstuvwxyz0";
   if (wyl_client_service_credential_operation_reconcile (local_client,
-          &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
+      &reconcile_request, &reconcile_result) != WYRELOG_E_INVALID)
     return 209;
   if (http.request_count != reconcile_success_request_count
       || !client_last_response_is (local_client, 0, NULL))
@@ -1245,8 +1579,8 @@ main (void)
       "\"status\":\"not_committed_terminal\"}";
   http.body = reconcile_rotate_response;
   if (wyl_client_service_credential_operation_reconcile_for_tenant
-      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
-          &reconcile_result) != WYRELOG_E_OK)
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_OK)
     return 213;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL
@@ -1256,36 +1590,36 @@ main (void)
   if (g_strcmp0 (http.last_body, reconcile_rotate_body) != 0)
     return 215;
   wyl_client_service_credential_operation_reconcile_result_clear
-      (&reconcile_result);
+    (&reconcile_result);
 
   const gchar *reconcile_conflict_body =
       "{\"error\":\"operation_request_conflict\"}";
   http.status = 409;
   http.body = reconcile_conflict_body;
   if (wyl_client_service_credential_operation_reconcile_for_tenant
-      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
-          &reconcile_result) != WYRELOG_E_OK)
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_OK)
     return 216;
   if (reconcile_result.kind !=
       WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT
       || reconcile_result.credential_id != NULL
       || reconcile_result.generation != 0
       || !client_last_response_is (local_client, 409,
-          "operation_request_conflict"))
+      "operation_request_conflict"))
     return 217;
   if (g_strcmp0 (http.last_body, reconcile_rotate_body) != 0 ||
       http.status != 409)
     return 218;
   http.status = 0;
   wyl_client_service_credential_operation_reconcile_result_clear
-      (&reconcile_result);
+    (&reconcile_result);
 
   http.body = "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
       "\"tenant\":\"tenant-a\",\"extra\":\"x\"}}";
   if (wyl_client_service_credential_operation_reconcile_for_tenant
-      (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
-          &reconcile_result) != WYRELOG_E_IO
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 200, NULL))
     return 219;
   if (reconcile_result.kind != 0 || reconcile_result.credential_id != NULL ||
@@ -1296,23 +1630,23 @@ main (void)
   /* Durable operation status-list and recover client APIs. */
   g_auto (WylClientServiceCredentialOperationStatusList) status_list = { 0 };
   if (wyl_client_service_credential_operation_status_list (NULL, 123, "public",
-          69, &status_list) != WYRELOG_E_INVALID)
+      69, &status_list) != WYRELOG_E_INVALID)
     return 250;
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, NULL) != WYRELOG_E_INVALID)
+      "public", 69, NULL) != WYRELOG_E_INVALID)
     return 251;
 
   /* Invalid guard context is rejected locally with no request sent. */
   g_free (http.last_path);
   http.last_path = g_strdup ("__unset__");
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 101, &status_list) != WYRELOG_E_INVALID)
+      "public", 101, &status_list) != WYRELOG_E_INVALID)
     return 272;
   if (wyl_client_service_credential_operation_status_list (local_client, -1,
-          "public", 69, &status_list) != WYRELOG_E_INVALID)
+      "public", 69, &status_list) != WYRELOG_E_INVALID)
     return 273;
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "not-a-loc-class", 69, &status_list) != WYRELOG_E_INVALID)
+      "not-a-loc-class", 69, &status_list) != WYRELOG_E_INVALID)
     return 274;
   if (g_strcmp0 (http.last_path, "__unset__") != 0)
     return 275;
@@ -1320,8 +1654,8 @@ main (void)
   http.status = 0;
   http.body = "{\"version\":1,\"operations\":[]}";
   if (wyl_client_service_credential_operation_status_list_for_tenant
-      (local_client, "tenant-a", 123, "public", 69,
-          &status_list) != WYRELOG_E_OK)
+        (local_client, "tenant-a", 123, "public", 69,
+      &status_list) != WYRELOG_E_OK)
     return 252;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 253;
@@ -1352,7 +1686,7 @@ main (void)
       "\"created_at_us\":1100,\"updated_at_us\":2100,"
       "\"expires_at_us\":3100}]}";
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_OK)
+      "public", 69, &status_list) != WYRELOG_E_OK)
     return 255;
   if (status_list.n_entries != 2)
     return 256;
@@ -1376,7 +1710,7 @@ main (void)
         g_strcmp0 (e1->state, "server_committed") != 0 ||
         g_strcmp0 (e1->destination, "rotate.json") != 0 ||
         g_strcmp0 (e1->successor_credential_id,
-            "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+        "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
         e1->expected_generation != 7 || e1->successor_generation != 8 ||
         e1->created_at_us != 1100 || e1->updated_at_us != 2100 ||
         e1->expires_at_us != 3100 || e1->recovery != NULL)
@@ -1394,7 +1728,7 @@ main (void)
       "\"created_at_us\":1000,\"updated_at_us\":2000,"
       "\"expires_at_us\":3000}]}";
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_IO)
+      "public", 69, &status_list) != WYRELOG_E_IO)
     return 259;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 260;
@@ -1403,68 +1737,68 @@ main (void)
   http.status = 400;
   http.body = "{\"error\":\"invalid_service_credential_operation_status\"}";
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_INVALID)
+      "public", 69, &status_list) != WYRELOG_E_INVALID)
     return 261;
   if (status_list.n_entries != 0 || status_list.entries != NULL
       || !client_last_response_is (local_client, 400,
-          "invalid_service_credential_operation_status"))
+      "invalid_service_credential_operation_status"))
     return 262;
 
   http.status = 503;
   http.body = "{\"error\":\"service_credential_operation_busy\"}";
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_BUSY
+      "public", 69, &status_list) != WYRELOG_E_BUSY
       || !client_last_response_is (local_client, 503,
-          "service_credential_operation_busy"))
+      "service_credential_operation_busy"))
     return 545;
   http.status = 0;
   http.body = "{\"version\":1,\"operations\":[]}";
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, &status_list) != WYRELOG_E_OK
+      "public", 69, &status_list) != WYRELOG_E_OK
       || !client_last_response_is (local_client, 200, NULL))
     return 555;
   guint status_success_request_count = http.request_count;
   if (wyl_client_service_credential_operation_status_list (local_client, 123,
-          "public", 69, NULL) != WYRELOG_E_INVALID
+      "public", 69, NULL) != WYRELOG_E_INVALID
       || !client_last_response_is (local_client, 0, NULL)
       || http.request_count != status_success_request_count)
     return 556;
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) recovered = { 0 };
   if (wyl_client_service_credential_operation_recover (NULL,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          &recovered) != WYRELOG_E_INVALID)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+      &recovered) != WYRELOG_E_INVALID)
     return 263;
   if (wyl_client_service_credential_operation_recover (local_client, NULL,
-          123, "public", 69, &recovered) != WYRELOG_E_INVALID)
+      123, "public", 69, &recovered) != WYRELOG_E_INVALID)
     return 264;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "not-canonical", 123, "public", 69, &recovered) != WYRELOG_E_INVALID)
+      "not-canonical", 123, "public", 69, &recovered) != WYRELOG_E_INVALID)
     return 265;
   /* A 27-character alphanumeric non-KSUID must also fail before HTTP. */
   g_free (http.last_path);
   http.last_path = g_strdup ("__unset__");
   if (wyl_client_service_credential_operation_recover (local_client,
-          "abcdefghijklmnopqrstuvwxyz0", 123, "public", 69,
-          &recovered) != WYRELOG_E_INVALID)
+      "abcdefghijklmnopqrstuvwxyz0", 123, "public", 69,
+      &recovered) != WYRELOG_E_INVALID)
     return 279;
   if (g_strcmp0 (http.last_path, "__unset__") != 0)
     return 280;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          NULL) != WYRELOG_E_INVALID)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+      NULL) != WYRELOG_E_INVALID)
     return 266;
 
   /* Invalid guard context is rejected locally with no request sent. */
   g_free (http.last_path);
   http.last_path = g_strdup ("__unset__");
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 101,
-          &recovered) != WYRELOG_E_INVALID)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 101,
+      &recovered) != WYRELOG_E_INVALID)
     return 276;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "not-a-loc-class", 69,
-          &recovered) != WYRELOG_E_INVALID)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "not-a-loc-class", 69,
+      &recovered) != WYRELOG_E_INVALID)
     return 277;
   if (g_strcmp0 (http.last_path, "__unset__") != 0)
     return 278;
@@ -1478,8 +1812,8 @@ main (void)
       "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
       "\"recovery\":\"server_committed\"}";
   if (wyl_client_service_credential_operation_recover_for_tenant
-      (local_client, "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public",
-          69, &recovered) != WYRELOG_E_OK)
+        (local_client, "tenant-a", "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public",
+      69, &recovered) != WYRELOG_E_OK)
     return 267;
   if (g_strcmp0 (recovered.request_id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
       recovered.operation !=
@@ -1487,7 +1821,7 @@ main (void)
       g_strcmp0 (recovered.state, "server_committed") != 0 ||
       g_strcmp0 (recovered.destination, "rotate.json") != 0 ||
       g_strcmp0 (recovered.successor_credential_id,
-          "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+      "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
       recovered.expected_generation != 1 ||
       recovered.successor_generation != 2 || recovered.created_at_us != 10 ||
       recovered.updated_at_us != 20 || recovered.expires_at_us != 30 ||
@@ -1495,13 +1829,13 @@ main (void)
     return 268;
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
       g_strcmp0 (http.last_path,
-          "/service-credential-operations/recover") != 0 ||
+      "/service-credential-operations/recover") != 0 ||
       g_strcmp0 (http.last_tenant, "tenant-a") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_body,
-          "{\"version\":\"1\",\"request_id\":"
-          "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0 ||
+      "{\"version\":\"1\",\"request_id\":"
+      "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
       g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
       g_strcmp0 (http.last_guard_risk, "69") != 0 ||
@@ -1513,12 +1847,12 @@ main (void)
   http.status = 404;
   http.body = "{\"error\":\"service_credential_operation_recover_not_found\"}";
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          &recovered) != WYRELOG_E_NOT_FOUND)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+      &recovered) != WYRELOG_E_NOT_FOUND)
     return 270;
   if (recovered.request_id != NULL || recovered.recovery != NULL
       || !client_last_response_is (local_client, 404,
-          "service_credential_operation_recover_not_found"))
+      "service_credential_operation_recover_not_found"))
     return 271;
   http.status = 0;
   http.body =
@@ -1530,87 +1864,87 @@ main (void)
       "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
       "\"recovery\":\"server_committed\"}";
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          &recovered) != WYRELOG_E_OK
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+      &recovered) != WYRELOG_E_OK
       || !client_last_response_is (local_client, 200, NULL))
     return 557;
   guint recover_success_request_count = http.request_count;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
-          NULL) != WYRELOG_E_INVALID
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+      NULL) != WYRELOG_E_INVALID
       || !client_last_response_is (local_client, 0, NULL)
       || http.request_count != recover_success_request_count)
     return 558;
 
   http.body = reconcile_issue_response;
   if (wyl_client_set_bearer_credentials (NULL, "access-ctl",
-          "__wr_default") != WYRELOG_E_INVALID)
+      "__wr_default") != WYRELOG_E_INVALID)
     return 192;
   if (wyl_client_set_bearer_credentials (local_client, NULL,
-          "__wr_default") != WYRELOG_E_INVALID)
+      "__wr_default") != WYRELOG_E_INVALID)
     return 193;
   if (wyl_client_set_bearer_credentials (local_client, "",
-          "__wr_default") != WYRELOG_E_INVALID)
+      "__wr_default") != WYRELOG_E_INVALID)
     return 194;
   if (wyl_client_set_bearer_credentials (local_client, "access ctl",
-          "__wr_default") != WYRELOG_E_INVALID)
+      "__wr_default") != WYRELOG_E_INVALID)
     return 195;
   if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
-          NULL) != WYRELOG_E_INVALID)
+      NULL) != WYRELOG_E_INVALID)
     return 196;
   if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
-          "") != WYRELOG_E_INVALID)
+      "") != WYRELOG_E_INVALID)
     return 197;
   if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
-          "__wr default") != WYRELOG_E_INVALID)
+      "__wr default") != WYRELOG_E_INVALID)
     return 198;
 
   if (wyl_client_policy_permission_grant (NULL, "target", "read", "scope",
-          123, "public", 49) != WYRELOG_E_INVALID)
+      123, "public", 49) != WYRELOG_E_INVALID)
     return 511;
   if (wyl_client_policy_permission_grant (local_client, NULL, "read",
-          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", 123, "public", 49) != WYRELOG_E_INVALID)
     return 512;
   if (wyl_client_policy_permission_grant (local_client, "target", NULL,
-          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", 123, "public", 49) != WYRELOG_E_INVALID)
     return 513;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          NULL, 123, "public", 49) != WYRELOG_E_INVALID)
+      NULL, 123, "public", 49) != WYRELOG_E_INVALID)
     return 514;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", -1, "public", 49) != WYRELOG_E_INVALID)
+      "scope", -1, "public", 49) != WYRELOG_E_INVALID)
     return 515;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "unknown", 49) != WYRELOG_E_INVALID)
+      "scope", 123, "unknown", 49) != WYRELOG_E_INVALID)
     return 516;
   if (wyl_client_policy_permission_transition (NULL, "target", "read",
-          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
     return 529;
   if (wyl_client_policy_permission_transition (local_client, NULL, "read",
-          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
     return 530;
   if (wyl_client_policy_permission_transition (local_client, "target", NULL,
-          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
     return 531;
   if (wyl_client_policy_permission_transition (local_client, "target", "read",
-          NULL, "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+      NULL, "grant", 123, "public", 49) != WYRELOG_E_INVALID)
     return 532;
   if (wyl_client_policy_permission_transition (local_client, "target", "read",
-          "scope", NULL, 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", NULL, 123, "public", 49) != WYRELOG_E_INVALID)
     return 533;
   if (wyl_client_policy_permission_transition (local_client, "target", "read",
-          "scope", "", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", "", 123, "public", 49) != WYRELOG_E_INVALID)
     return 534;
   if (wyl_client_policy_permission_transition (local_client, "target", "read",
-          "scope", "grant", -1, "public", 49) != WYRELOG_E_INVALID)
+      "scope", "grant", -1, "public", 49) != WYRELOG_E_INVALID)
     return 535;
   if (wyl_client_policy_permission_transition (local_client, "target", "read",
-          "scope", "grant", 123, "unknown", 49) != WYRELOG_E_INVALID)
+      "scope", "grant", 123, "unknown", 49) != WYRELOG_E_INVALID)
     return 536;
 
   http.body = "{\"ok\":true}";
   if (wyl_client_policy_permission_grant (local_client, "target user",
-          "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
+      "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
     return 517;
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
       g_strcmp0 (http.last_path, "/policy/permissions/grant") != 0 ||
@@ -1625,7 +1959,7 @@ main (void)
       g_strcmp0 (http.last_guard_risk, "49") != 0)
     return 518;
   if (wyl_client_policy_permission_revoke (local_client, "target user",
-          "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
+      "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
     return 519;
   if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0 ||
       g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
@@ -1633,7 +1967,7 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 520;
   if (wyl_client_policy_permission_transition (local_client, "target user",
-          "site.policy.read", "tenant/a", "grant", 123, "public", 49)
+      "site.policy.read", "tenant/a", "grant", 123, "public", 49)
       != WYRELOG_E_OK)
     return 537;
   if (g_strcmp0 (http.last_path, "/policy/permissions/transition") != 0 ||
@@ -1649,7 +1983,7 @@ main (void)
       g_strcmp0 (http.last_guard_risk, "49") != 0)
     return 538;
   if (wyl_client_policy_role_grant (local_client, "target user",
-          "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
+      "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
     return 521;
   if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
       g_strcmp0 (http.last_role, "site.reader") != 0 ||
@@ -1660,7 +1994,7 @@ main (void)
       g_strcmp0 (http.last_guard_risk, "29") != 0)
     return 522;
   if (wyl_client_policy_role_revoke (local_client, "target user",
-          "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
+      "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
     return 523;
   if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0 ||
       g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
@@ -1669,30 +2003,30 @@ main (void)
     return 524;
   http.status = 400;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+      "scope", 123, "public", 49) != WYRELOG_E_INVALID)
     return 525;
   http.status = 401;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "public", 49) != WYRELOG_E_AUTH)
+      "scope", 123, "public", 49) != WYRELOG_E_AUTH)
     return 526;
   http.status = 403;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
     return 527;
   http.status = 500;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
-          "scope", 123, "public", 49) != WYRELOG_E_IO)
+      "scope", 123, "public", 49) != WYRELOG_E_IO)
     return 528;
   http.status = 0;
 
   g_autoptr (WylAuditIter) guarded_audit_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client,
-          "decision=deny", 123, "public", 69, &guarded_audit_iter)
+      "decision=deny", 123, "public", 69, &guarded_audit_iter)
       != WYRELOG_E_OK)
     return 154;
   g_autoptr (WylAuditIter) invalid_guard_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
-          "unknown", 69, &invalid_guard_iter) != WYRELOG_E_INVALID)
+      "unknown", 69, &invalid_guard_iter) != WYRELOG_E_INVALID)
     return 161;
 
   http.body = "{\"session_token\":\"session-3\",\"username\":\"alice\","
@@ -1790,7 +2124,7 @@ main (void)
 
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide (local_client, "alice", "wr.audit.read",
-          "doc/42", &decision) != WYRELOG_E_OK)
+      "doc/42", &decision) != WYRELOG_E_OK)
     return 54;
   if (decision != WYL_DECISION_ALLOW)
     return 55;
@@ -1813,7 +2147,7 @@ main (void)
     return 69;
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide_ex (local_client, "alice", "wr.audit.read",
-          "doc/42", &decision_result) != WYRELOG_E_OK)
+      "doc/42", &decision_result) != WYRELOG_E_OK)
     return 179;
   if (decision_result == NULL ||
       wyl_client_decision_get_decision (decision_result) != WYL_DECISION_ALLOW)
@@ -1823,44 +2157,44 @@ main (void)
     return 181;
   g_clear_pointer (&decision_result, wyl_client_decision_free);
   if (wyl_client_decide_ex (local_client, NULL, "wr.audit.read", "doc/42",
-          &decision_result) != WYRELOG_E_INVALID)
+      &decision_result) != WYRELOG_E_INVALID)
     return 186;
   if (decision_result != NULL)
     return 187;
   g_clear_pointer (&decision_result, wyl_client_decision_free);
 
   if (wyl_client_decide_with_guard_context (NULL, "alice", "read", "doc/42",
-          123, "public", 69, &decision) != WYRELOG_E_INVALID)
+      123, "public", 69, &decision) != WYRELOG_E_INVALID)
     return 70;
   if (wyl_client_decide_with_guard_context (local_client, NULL, "read",
-          "doc/42", 123, "public", 69, &decision) != WYRELOG_E_INVALID)
+      "doc/42", 123, "public", 69, &decision) != WYRELOG_E_INVALID)
     return 71;
   if (wyl_client_decide_with_guard_context (local_client, "alice", NULL,
-          "doc/42", 123, "public", 69, &decision) != WYRELOG_E_INVALID)
+      "doc/42", 123, "public", 69, &decision) != WYRELOG_E_INVALID)
     return 72;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          NULL, 123, "public", 69, &decision) != WYRELOG_E_INVALID)
+      NULL, 123, "public", 69, &decision) != WYRELOG_E_INVALID)
     return 73;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          "doc/42", 123, NULL, 69, &decision) != WYRELOG_E_INVALID)
+      "doc/42", 123, NULL, 69, &decision) != WYRELOG_E_INVALID)
     return 74;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          "doc/42", -1, "public", 69, &decision) != WYRELOG_E_INVALID)
+      "doc/42", -1, "public", 69, &decision) != WYRELOG_E_INVALID)
     return 75;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          "doc/42", 123, "public", 101, &decision) != WYRELOG_E_INVALID)
+      "doc/42", 123, "public", 101, &decision) != WYRELOG_E_INVALID)
     return 76;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          "doc/42", 123, "unknown", 69, &decision) != WYRELOG_E_INVALID)
+      "doc/42", 123, "unknown", 69, &decision) != WYRELOG_E_INVALID)
     return 77;
   if (wyl_client_decide_with_guard_context (local_client, "alice", "read",
-          "doc/42", 123, "public", 69, NULL) != WYRELOG_E_INVALID)
+      "doc/42", 123, "public", 69, NULL) != WYRELOG_E_INVALID)
     return 78;
 
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide_with_guard_context (local_client, "alice",
-          "wr.audit.read", "doc/42", 123, "semi_trusted", 69,
-          &decision) != WYRELOG_E_OK)
+      "wr.audit.read", "doc/42", 123, "semi_trusted", 69,
+      &decision) != WYRELOG_E_OK)
     return 79;
   if (decision != WYL_DECISION_ALLOW)
     return 80;
@@ -1880,15 +2214,15 @@ main (void)
     return 85;
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide_with_guard_context_ex (local_client, "alice",
-          "wr.audit.read", "doc/42", 123, "semi_trusted", 69,
-          &decision_result) != WYRELOG_E_OK)
+      "wr.audit.read", "doc/42", 123, "semi_trusted", 69,
+      &decision_result) != WYRELOG_E_OK)
     return 188;
   if (decision_result == NULL)
     return 189;
   g_clear_pointer (&decision_result, wyl_client_decision_free);
   if (wyl_client_decide_with_guard_context_ex (local_client, "alice",
-          "wr.audit.read", "doc/42", 123, NULL, 69,
-          &decision_result) != WYRELOG_E_INVALID)
+      "wr.audit.read", "doc/42", 123, NULL, 69,
+      &decision_result) != WYRELOG_E_INVALID)
     return 190;
   if (decision_result != NULL)
     return 191;
@@ -1903,15 +2237,15 @@ main (void)
   http.body = "{\"decision\":0,\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\"}";
   if (wyl_client_decide_ex (local_client, "bob", "write", "doc/43",
-          &decision_result) != WYRELOG_E_OK)
+      &decision_result) != WYRELOG_E_OK)
     return 182;
   if (decision_result == NULL ||
       wyl_client_decision_get_decision (decision_result) != WYL_DECISION_DENY)
     return 183;
   if (g_strcmp0 (wyl_client_decision_get_deny_reason (decision_result),
-          "missing_grant") != 0 ||
+      "missing_grant") != 0 ||
       g_strcmp0 (wyl_client_decision_get_deny_origin (decision_result),
-          "policy") != 0)
+      "policy") != 0)
     return 184;
   g_autofree gchar *dup_deny_reason =
       wyl_client_decision_dup_deny_reason (decision_result);
@@ -1990,12 +2324,12 @@ main (void)
   if (g_strcmp0 (wyl_audit_event_get_subject_id (second_event), "bob") != 0)
     return 46;
   if (g_strcmp0 (wyl_audit_event_get_deny_reason (second_event),
-          "missing_grant") != 0)
+      "missing_grant") != 0)
     return 47;
   if (g_strcmp0 (wyl_audit_event_get_deny_origin (second_event), "policy") != 0)
     return 48;
   if (g_strcmp0 (wyl_audit_event_get_request_id (second_event),
-          "req-client-smoke") != 0)
+      "req-client-smoke") != 0)
     return 51;
   if (wyl_audit_event_get_decision (second_event) != WYL_DECISION_DENY)
     return 49;
@@ -2017,7 +2351,7 @@ main (void)
     return 37;
 
   if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
-          "__wr_default") != WYRELOG_E_OK)
+      "__wr_default") != WYRELOG_E_OK)
     return 199;
   g_clear_pointer (&client_access_token, g_free);
   client_access_token = wyl_client_dup_access_token (local_client);
@@ -2034,7 +2368,7 @@ main (void)
 
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide_ex (local_client, "alice", "wr.audit.read",
-          "doc/42", &decision_result) != WYRELOG_E_OK)
+      "doc/42", &decision_result) != WYRELOG_E_OK)
     return 201;
   if (g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
     return 202;
@@ -2046,7 +2380,7 @@ main (void)
 
   g_autoptr (WylAuditIter) bearer_guarded_audit_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client,
-          "decision=deny", 321, "semi_trusted", 89, &bearer_guarded_audit_iter)
+      "decision=deny", 321, "semi_trusted", 89, &bearer_guarded_audit_iter)
       != WYRELOG_E_OK)
     return 207;
   g_autofree gchar *bearer_guarded_audit_uri =
@@ -2056,15 +2390,15 @@ main (void)
       strstr (bearer_guarded_audit_uri, "session_token=") != NULL ||
       strstr (bearer_guarded_audit_uri, "guard_timestamp=321") == NULL ||
       strstr (bearer_guarded_audit_uri,
-          "guard_loc_class=semi_trusted") == NULL ||
+      "guard_loc_class=semi_trusted") == NULL ||
       strstr (bearer_guarded_audit_uri, "guard_risk=89") == NULL ||
       strstr (bearer_guarded_audit_uri, "filter=decision%3Ddeny") == NULL)
     return 208;
   g_autoptr (SoupMessage) bearer_guarded_audit_message =
       wyl_audit_iter_new_request_message (bearer_guarded_audit_iter);
   if (g_strcmp0 (soup_message_headers_get_one (soup_message_get_request_headers
-              (bearer_guarded_audit_message), "Authorization"),
-          "Bearer access-ctl") != 0)
+        (bearer_guarded_audit_message), "Authorization"),
+      "Bearer access-ctl") != 0)
     return 209;
 
   /*
@@ -2075,7 +2409,7 @@ main (void)
   http.body = "{\"ok\":true}";
   http.status = 0;
   if (wyl_client_policy_permission_grant (local_client, "bearer subject",
-          "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
+      "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
       != WYRELOG_E_OK)
     return 220;
   if (g_strcmp0 (http.last_method, "POST") != 0 ||
@@ -2091,7 +2425,7 @@ main (void)
       g_strcmp0 (http.last_guard_risk, "89") != 0)
     return 221;
   if (wyl_client_policy_permission_revoke (local_client, "bearer subject",
-          "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
+      "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
       != WYRELOG_E_OK)
     return 222;
   if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0 ||
@@ -2099,7 +2433,7 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
     return 223;
   if (wyl_client_policy_role_grant (local_client, "bearer subject",
-          "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
+      "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
       != WYRELOG_E_OK)
     return 224;
   if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
@@ -2108,7 +2442,7 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
     return 225;
   if (wyl_client_policy_role_revoke (local_client, "bearer subject",
-          "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
+      "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
       != WYRELOG_E_OK)
     return 226;
   if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0 ||
@@ -2116,8 +2450,8 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
     return 227;
   if (wyl_client_policy_permission_transition (local_client, "bearer subject",
-          "site.policy.read", "tenant/bearer", "grant", 321, "semi_trusted",
-          89) != WYRELOG_E_OK)
+      "site.policy.read", "tenant/bearer", "grant", 321, "semi_trusted",
+      89) != WYRELOG_E_OK)
     return 228;
   if (g_strcmp0 (http.last_path, "/policy/permissions/transition") != 0 ||
       g_strcmp0 (http.last_event, "grant") != 0 ||
@@ -2155,17 +2489,17 @@ main (void)
   http.status = 302;
   http.body = "{\"error\":\"service_management_redirect\"}";
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_IO
+      &principal_list) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 302,
-          "service_management_redirect"))
+      "service_management_redirect"))
     return 559;
 
   http.status = 418;
   http.body = "{\"error\":\"service_management_unmapped\"}";
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_IO
+      &principal_list) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 418,
-          "service_management_unmapped"))
+      "service_management_unmapped"))
     return 560;
 
   /* The peer sends a complete 503 header and then closes before the declared
@@ -2173,7 +2507,7 @@ main (void)
    * remains observable and no incomplete error code is retained. */
   http.truncate_response_body = TRUE;
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_IO
+      &principal_list) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 503, NULL))
     return 561;
   http.truncate_response_body = FALSE;
@@ -2183,9 +2517,9 @@ main (void)
   http.status = 403;
   http.body = "{\"error\":\"remote_before_transport\"}";
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_POLICY
+      &principal_list) != WYRELOG_E_POLICY
       || !client_last_response_is (local_client, 403,
-          "remote_before_transport"))
+      "remote_before_transport"))
     return 551;
   /* The server thread owns polling the listener. Stop and join that loop
    * before disconnect closes its file descriptors; otherwise poll can observe
@@ -2194,7 +2528,7 @@ main (void)
   g_thread_join (thread);
   soup_server_disconnect (http.server);
   if (wyl_client_service_principal_list (local_client, 123, "public", 49,
-          &principal_list) != WYRELOG_E_IO
+      &principal_list) != WYRELOG_E_IO
       || !client_last_response_is (local_client, 0, NULL))
     return 552;
 
