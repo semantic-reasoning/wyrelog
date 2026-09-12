@@ -186,12 +186,29 @@ wyl_fact_tenant_admission_manager_unref
 }
 
 static gboolean
-lease_can_acquire (TenantEntry *entry, gboolean writer)
+thread_holds_read_lease_locked (WylFactTenantAdmissionManager *manager,
+    TenantEntry *entry, GThread *thread)
+{
+  GHashTableIter iter;
+  gpointer key;
+  g_hash_table_iter_init (&iter, manager->active_leases);
+  while (g_hash_table_iter_next (&iter, &key, NULL)) {
+    WylFactTenantAdmissionLease *lease = key;
+    if (!lease->writer && lease->entry == entry && lease->owner == thread)
+      return TRUE;
+  }
+  return FALSE;
+}
+
+static gboolean
+lease_can_acquire (WylFactTenantAdmissionManager *manager, TenantEntry *entry,
+    gboolean writer, GThread *thread)
 {
   return entry->state == WYL_FACT_TENANT_ADMISSION_OPEN
          && !entry->active_writer
          && (writer ? entry->active_readers == 0
-                 : entry->waiting_writers == 0);
+                 : entry->waiting_writers == 0
+         || thread_holds_read_lease_locked (manager, entry, thread));
 }
 
 static wyrelog_error_t
@@ -219,7 +236,7 @@ acquire (WylFactTenantAdmissionManager *manager, const gchar *tenant_id,
   else
     entry->waiting_readers++;
   wyrelog_error_t rc = WYRELOG_E_OK;
-  while (!lease_can_acquire (entry, writer)) {
+  while (!lease_can_acquire (manager, entry, writer, g_thread_self ())) {
     if (manager->shutting_down || entry->state != WYL_FACT_TENANT_ADMISSION_OPEN) {
       rc = WYRELOG_E_BUSY;
       break;

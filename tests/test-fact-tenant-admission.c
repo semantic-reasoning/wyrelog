@@ -72,6 +72,112 @@ cancellation_and_shutdown (void)
 
 typedef struct
 {
+  WylFactTenantAdmissionManager *manager;
+  wyrelog_error_t result;
+} TenantLeaseAttempt;
+
+static gpointer
+tenant_writer_attempt (gpointer data)
+{
+  TenantLeaseAttempt *attempt = data;
+  WylFactTenantAdmissionLease *lease = NULL;
+  attempt->result = wyl_fact_tenant_admission_acquire_write
+        (attempt->manager, "tenant-reentrant", NULL, &lease);
+  if (attempt->result == WYRELOG_E_OK) {
+    attempt->result = wyl_fact_tenant_admission_close
+          (attempt->manager, "tenant-reentrant");
+    wyrelog_error_t release_rc = wyl_fact_tenant_admission_lease_release
+          (lease);
+    if (attempt->result == WYRELOG_E_OK)
+      attempt->result = release_rc;
+  }
+  return NULL;
+}
+
+static gpointer
+tenant_reader_attempt (gpointer data)
+{
+  TenantLeaseAttempt *attempt = data;
+  WylFactTenantAdmissionLease *lease = NULL;
+  attempt->result = wyl_fact_tenant_admission_acquire_read
+        (attempt->manager, "tenant-reentrant", NULL, &lease);
+  if (lease != NULL)
+    wyl_fact_tenant_admission_lease_release (lease);
+  return NULL;
+}
+
+static void
+wait_for_tenant_admission_waiters (WylFactTenantAdmissionManager *manager,
+    guint minimum_waiters)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  for (;;) {
+    WylFactTenantAdmissionState state = WYL_FACT_TENANT_ADMISSION_OPEN;
+    guint waiters = 0;
+    g_assert_cmpint (wyl_fact_tenant_admission_get_state (manager,
+        "tenant-reentrant", &state, NULL, &waiters), ==, WYRELOG_E_OK);
+    if (waiters >= minimum_waiters)
+      return;
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_usleep (1000);
+  }
+}
+
+static void
+reentrant_read_bypasses_waiting_writer_only_for_owner (void)
+{
+  g_autoptr (WylFactTenantAdmissionManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactTenantAdmissionLease) outer = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_acquire_read
+        (manager, "tenant-reentrant", NULL, &outer), ==, WYRELOG_E_OK);
+
+  TenantLeaseAttempt writer = { manager, WYRELOG_E_INTERNAL };
+  GThread *writer_thread = g_thread_new ("tenant-writer",
+          tenant_writer_attempt, &writer);
+  wait_for_tenant_admission_waiters (manager, 1);
+
+  /* A callback may synchronously query the same tenant again. Its nested
+   * lease must not deadlock behind a writer that is waiting for the outer
+   * callback lease to drain. */
+  g_autoptr (WylFactTenantAdmissionLease) nested = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_acquire_read
+        (manager, "tenant-reentrant", NULL, &nested), ==, WYRELOG_E_OK);
+  g_clear_pointer (&nested, wyl_fact_tenant_admission_lease_cleanup);
+
+  /* Writer preference still blocks a different thread from joining readers. */
+  TenantLeaseAttempt reader = { manager, WYRELOG_E_INTERNAL };
+  GThread *reader_thread = g_thread_new ("tenant-late-reader",
+          tenant_reader_attempt, &reader);
+  wait_for_tenant_admission_waiters (manager, 2);
+  g_clear_pointer (&outer, wyl_fact_tenant_admission_lease_cleanup);
+
+  g_thread_join (writer_thread);
+  g_thread_join (reader_thread);
+  g_assert_cmpint (writer.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (reader.result, ==, WYRELOG_E_BUSY);
+
+  g_autoptr (WylFactTenantAdmissionManager) shutdown_manager = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_manager_new (&shutdown_manager),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactTenantAdmissionLease) shutdown_outer = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_acquire_read
+        (shutdown_manager, "tenant-shutdown", NULL, &shutdown_outer), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_tenant_admission_manager_shutdown
+        (shutdown_manager), ==, WYRELOG_E_BUSY);
+  g_autoptr (WylFactTenantAdmissionLease) shutdown_nested = NULL;
+  g_assert_cmpint (wyl_fact_tenant_admission_acquire_read
+        (shutdown_manager, "tenant-shutdown", NULL, &shutdown_nested), ==,
+      WYRELOG_E_BUSY);
+  g_clear_pointer (&shutdown_outer, wyl_fact_tenant_admission_lease_cleanup);
+  g_assert_cmpint (wyl_fact_tenant_admission_manager_shutdown
+        (shutdown_manager), ==, WYRELOG_E_OK);
+}
+
+typedef struct
+{
   WylFactTenantAdmissionLease *lease;
   wyrelog_error_t result;
 } ReleaseAttempt;
@@ -263,6 +369,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/tenant-admission/open-close", open_close_and_writer_preference);
   g_test_add_func ("/fact/tenant-admission/cancel-shutdown", cancellation_and_shutdown);
+  g_test_add_func ("/fact/tenant-admission/reentrant-read-writer-preference",
+      reentrant_read_bypasses_waiting_writer_only_for_owner);
   g_test_add_func ("/fact/tenant-admission/wrong-thread-release", wrong_thread_release_is_reported);
   g_test_add_func ("/fact/tenant-admission/invalid", invalid_inputs);
   g_test_add_func ("/fact/tenant-admission/canonical-graph-order", canonical_graph_order);

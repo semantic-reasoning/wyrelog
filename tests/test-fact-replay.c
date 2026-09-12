@@ -3706,6 +3706,228 @@ refresh_race_reader (gpointer data)
   return NULL;
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *relation;
+  GMutex mutex;
+  GCond changed;
+  gboolean started;
+  gboolean callback_entered;
+  gboolean release_callback;
+  gboolean block_callback;
+  guint callback_count;
+  SnapshotProbe probe;
+  const gchar *nested_graph_id;
+  SnapshotProbe nested_probe;
+  wyrelog_error_t nested_result;
+  wyrelog_error_t result;
+} TenantSnapshotRequest;
+
+static void
+tenant_nested_snapshot_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  (void) engine;
+  snapshot_cb (relation, row, ncols, user_data);
+}
+
+static void
+tenant_snapshot_request_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  TenantSnapshotRequest *request = user_data;
+  (void) engine;
+  request->callback_count++;
+  if (request->block_callback) {
+    g_mutex_lock (&request->mutex);
+    request->callback_entered = TRUE;
+    g_cond_broadcast (&request->changed);
+    while (!request->release_callback)
+      g_cond_wait (&request->changed, &request->mutex);
+    g_mutex_unlock (&request->mutex);
+  }
+  if (request->nested_graph_id != NULL)
+    request->nested_result = wyl_handle_snapshot_fact_graph_relation
+          (request->handle, "tenant-a", request->nested_graph_id,
+            request->relation, tenant_nested_snapshot_cb,
+            &request->nested_probe);
+  snapshot_cb (relation, row, ncols, &request->probe);
+}
+
+static gpointer
+tenant_snapshot_request_run (gpointer data)
+{
+  TenantSnapshotRequest *request = data;
+  g_mutex_lock (&request->mutex);
+  request->started = TRUE;
+  g_cond_broadcast (&request->changed);
+  g_mutex_unlock (&request->mutex);
+  request->result = wyl_handle_snapshot_fact_graph_relation (request->handle,
+          "tenant-a", "orders", request->relation, tenant_snapshot_request_cb,
+          request);
+  return NULL;
+}
+
+static gpointer
+tenant_admission_writer_run (gpointer data)
+{
+  TenantSnapshotRequest *request = data;
+  request->result = wyl_handle_close_fact_tenant_admission_for_test
+        (request->handle, "tenant-a");
+  return NULL;
+}
+
+static void
+wait_for_tenant_snapshot_flag (TenantSnapshotRequest *request,
+    gboolean callback_entered)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&request->mutex);
+  while (!(callback_entered ? request->callback_entered : request->started)) {
+    if (!g_cond_wait_until (&request->changed, &request->mutex, deadline))
+      break;
+  }
+  g_assert_true (callback_entered ? request->callback_entered : request->started);
+  g_mutex_unlock (&request->mutex);
+}
+
+static void
+wait_for_tenant_admission_waiters (WylHandle *handle, guint minimum_waiters)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  for (;;) {
+    WylFactTenantAdmissionState state = WYL_FACT_TENANT_ADMISSION_OPEN;
+    guint readers = 0;
+    guint waiters = 0;
+    g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (handle,
+        "tenant-a", &state, &readers, &waiters), ==, WYRELOG_E_OK);
+    if (waiters >= minimum_waiters)
+      return;
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_usleep (1000);
+  }
+}
+
+static void
+test_tenant_admission_holds_query_snapshot_until_callback_returns (void)
+{
+  TEST ("tenant admission drains a complete graph snapshot callback");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-tenant-query-lease-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "inventory");
+    append_order_batches (policy, root, "tenant-a", "inventory");
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+
+  TenantSnapshotRequest admitted = {
+    .handle = handle,
+    .relation = observed,
+    .block_callback = TRUE,
+    .probe = { observed, 0, FALSE },
+    .nested_graph_id = "inventory",
+    .nested_probe = { observed, 0, FALSE },
+  };
+  g_mutex_init (&admitted.mutex);
+  g_cond_init (&admitted.changed);
+  GThread *query = g_thread_new ("tenant-query", tenant_snapshot_request_run,
+          &admitted);
+  wait_for_tenant_snapshot_flag (&admitted, TRUE);
+
+  /* Keep the graph runtime OPEN and queryable so the tenant lease is the only
+   * thing this lifecycle writer can be waiting on. */
+  WylFactGraphRuntimeStatus graph_status = { 0 };
+  g_assert_cmpint (wyl_handle_get_fact_graph_runtime_status (handle,
+      "tenant-a", "orders", &graph_status), ==, WYRELOG_E_OK);
+  g_assert_true (graph_status.queryable);
+  g_assert_cmpint (graph_status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&graph_status);
+
+  TenantSnapshotRequest writer = { .handle = handle };
+  g_mutex_init (&writer.mutex);
+  g_cond_init (&writer.changed);
+  GThread *seal = g_thread_new ("tenant-writer", tenant_admission_writer_run,
+          &writer);
+  wait_for_tenant_admission_waiters (handle, 1);
+  WylFactTenantAdmissionState tenant_state = WYL_FACT_TENANT_ADMISSION_OPEN;
+  guint readers = 0;
+  guint waiters = 0;
+  g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (handle,
+      "tenant-a", &tenant_state, &readers, &waiters), ==, WYRELOG_E_OK);
+  g_assert_cmpint (tenant_state, ==, WYL_FACT_TENANT_ADMISSION_OPEN);
+  g_assert_cmpuint (readers, ==, 1);
+
+  /* Writer preference queues this later query behind the lifecycle writer. */
+  TenantSnapshotRequest queued = {
+    .handle = handle,
+    .relation = observed,
+    .probe = { observed, 0, FALSE },
+  };
+  g_mutex_init (&queued.mutex);
+  g_cond_init (&queued.changed);
+  GThread *later_query = g_thread_new ("tenant-query-later",
+          tenant_snapshot_request_run, &queued);
+  wait_for_tenant_snapshot_flag (&queued, FALSE);
+  wait_for_tenant_admission_waiters (handle, 2);
+
+  g_mutex_lock (&admitted.mutex);
+  admitted.release_callback = TRUE;
+  g_cond_broadcast (&admitted.changed);
+  g_mutex_unlock (&admitted.mutex);
+
+  g_thread_join (query);
+  g_thread_join (seal);
+  g_thread_join (later_query);
+  g_assert_cmpint (admitted.result, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admitted.callback_count, ==, 1);
+  g_assert_cmpuint (admitted.probe.count, ==, 1);
+  g_assert_cmpint (admitted.nested_result, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admitted.nested_probe.count, ==, 1);
+  g_assert_cmpint (writer.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (queued.result, ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (queued.callback_count, ==, 0);
+
+  tenant_state = WYL_FACT_TENANT_ADMISSION_OPEN;
+  readers = 0;
+  waiters = 0;
+  g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (handle,
+      "tenant-a", &tenant_state, &readers, &waiters), ==, WYRELOG_E_OK);
+  g_assert_cmpint (tenant_state, ==, WYL_FACT_TENANT_ADMISSION_CLOSED);
+  g_assert_cmpuint (readers, ==, 0);
+  g_assert_cmpuint (waiters, ==, 0);
+
+  g_cond_clear (&queued.changed);
+  g_mutex_clear (&queued.mutex);
+  g_cond_clear (&writer.changed);
+  g_mutex_clear (&writer.mutex);
+  g_cond_clear (&admitted.changed);
+  g_mutex_clear (&admitted.mutex);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 /* Issue #546: concurrent single-graph refreshes and queries on the same graph
  * stay race-free -- readers never see a partial generation.  Run under the
  * sanitizer builds this also exercises the runtime manager's generation swap
@@ -4065,6 +4287,8 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
       test_handle_refresh_fact_graph_races_with_queries);
+  g_test_add_func ("/fact-replay/tenant-admission-query-drain",
+      test_tenant_admission_holds_query_snapshot_until_callback_returns);
   g_test_add_func ("/fact-replay/closed-graph-reports-sealed",
       test_closed_graph_reports_sealed_not_ready);
   g_test_add_func ("/fact-replay/barrier-refusal-is-not-degraded",
