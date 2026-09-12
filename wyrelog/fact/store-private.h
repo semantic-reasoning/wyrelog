@@ -188,6 +188,9 @@ typedef struct
    * after authorization.  These are never populated from request JSON. */
   const gchar *authenticated_actor_subject_id;
   const gchar *request_id;
+  /* Caller-supplied labels, never authenticated identity.  operator_id is
+   * retained in the legacy operator column; old rows keep it when migration
+   * adds the nullable attribution columns.  NULL attribution stays unknown. */
   const gchar *operator_annotation;
   const gchar *operator_id;
   const gchar *reason;

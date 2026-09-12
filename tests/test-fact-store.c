@@ -1717,6 +1717,127 @@ check_fact_forget_crash_convergence (void)
   return 0;
 }
 
+static wyrelog_error_t
+forget_attribution_migration_fault (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
+{
+  guint *failures = user_data;
+  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION
+      && phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT) {
+    (*failures)++;
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+/* Persist both a completed operation and a pending one.  A genuine old
+ * schema must gain unknown attribution, not invented identity, while a
+ * current schema must preserve its exact tuple across reopen and recovery. */
+static gint
+check_fact_forget_attribution_migration_and_recovery (void)
+{
+  for (guint legacy = 0; legacy < 2; legacy++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-forget-attribution-XXXXXX",
+            NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open (path, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      {"order_id", "symbol", FALSE, TRUE},
+      {"amount", "int64", FALSE, TRUE},
+    };
+    wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+            G_N_ELEMENTS (columns));
+    g_assert_cmpint (wyl_fact_store_ensure_projection (store, &schema, NULL),
+        ==, WYRELOG_E_OK);
+    for (guint pending = 0; pending < 2; pending++) {
+      const gchar *batch = pending ? "pending" : "completed";
+      g_assert_cmpint (forget_append_sample (store, &schema, batch, batch,
+          batch, 42), ==, 0);
+      const wyl_fact_store_forget_options_t opts = {
+        .batch_id = batch,
+        .operator_id = "caller-label",
+        .authenticated_actor_subject_id = "verified-subject",
+        .request_id = batch,
+        /* Pin an intentionally absent annotation on the modern audit row. */
+        .operator_annotation = pending ? "separate-annotation" : NULL,
+        .reason = "attribution-regression",
+        .checkpoint = pending ? forget_fault_checkpoint : NULL,
+        .checkpoint_data = (gpointer) "after_intent",
+      };
+      wyrelog_error_t rc = wyl_fact_store_forget (store, &schema, &opts, NULL);
+      if (pending)
+        g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+      else
+        g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    }
+    if (legacy)
+      g_assert_true (exec_ok (store,
+          "ALTER TABLE fact_forget_audit DROP COLUMN actor_subject_id;"
+          "ALTER TABLE fact_forget_audit DROP COLUMN request_id;"
+          "ALTER TABLE fact_forget_audit DROP COLUMN operator_annotation;"
+          "ALTER TABLE fact_forget_intent DROP COLUMN actor_subject_id;"
+          "ALTER TABLE fact_forget_intent DROP COLUMN request_id;"
+          "ALTER TABLE fact_forget_intent DROP COLUMN operator_annotation;"));
+    g_clear_pointer (&store, wyl_fact_store_close);
+    g_assert_cmpint (wyl_fact_store_open (path, &store), ==, WYRELOG_E_OK);
+    if (legacy) {
+      guint failures = 0;
+      wyl_fact_store_test_set_transaction_hook (store,
+          forget_attribution_migration_fault, &failures);
+      g_assert_cmpint (wyl_fact_store_create_schema (store), ==,
+          WYRELOG_E_IO);
+      wyl_fact_store_test_set_transaction_hook (store, NULL, NULL);
+      g_assert_cmpuint (failures, ==, 1);
+      gint64 count = -1;
+      g_assert_true (count_i64 (store,
+          "SELECT COUNT(*) FROM information_schema.columns WHERE "
+          "table_name IN ('fact_forget_audit', 'fact_forget_intent') "
+          "AND column_name IN ('actor_subject_id', 'request_id', "
+          "'operator_annotation');", &count));
+      g_assert_cmpint (count, ==, 0);
+    }
+    /* Repeated schema setup must not backfill an intentional modern NULL. */
+    for (guint repeat = 0; repeat < 2; repeat++)
+      g_assert_cmpint (wyl_fact_store_create_schema (store), ==,
+          WYRELOG_E_OK);
+    const gchar *identity = legacy ?
+        "actor_subject_id IS NULL AND request_id IS NULL "
+        "AND operator_annotation IS NULL" :
+        "actor_subject_id = 'verified-subject' AND request_id = batch_id "
+        "AND ((batch_id = 'completed' AND operator_annotation IS NULL) OR "
+        "(batch_id = 'pending' AND operator_annotation = 'separate-annotation'))";
+    g_autofree gchar *intent_sql = g_strdup_printf (
+      "SELECT COUNT(*) FROM fact_forget_intent WHERE operator = 'caller-label' "
+      "AND reason = 'attribution-regression' AND %s;", identity);
+    gint64 count = -1;
+    g_assert_true (count_i64 (store, intent_sql, &count));
+    g_assert_cmpint (count, ==, 2);
+    g_assert_true (count_i64 (store,
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'PENDING';",
+        &count));
+    g_assert_cmpint (count, ==, 1);
+    g_assert_cmpint (wyl_fact_store_forget_reconcile (store, "tenant-a",
+        "orders", NULL, NULL, &forget_outcome_discard), ==, WYRELOG_E_OK);
+    g_autofree gchar *audit_sql = g_strdup_printf (
+      "SELECT COUNT(*) FROM fact_forget_audit WHERE operator = 'caller-label' "
+      "AND reason = 'attribution-regression' AND rows_purged = 1 AND %s;",
+      identity);
+    g_assert_true (count_i64 (store, audit_sql, &count));
+    g_assert_cmpint (count, ==, 2);
+    g_assert_true (count_i64 (store,
+        "SELECT COUNT(*) FROM fact_forget_intent WHERE state = 'COMPLETED';",
+        &count));
+    g_assert_cmpint (count, ==, 2);
+    g_clear_pointer (&store, wyl_fact_store_close);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+  return 0;
+}
+
 /* A stale intent whose identifier was reused by a NEW batch must converge by
  * recording completion WITHOUT deleting the new batch (AC-2). */
 static gint
@@ -3920,6 +4041,9 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_crash_convergence ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_attribution_migration_and_recovery ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_rejects_identifier_reuse ();
