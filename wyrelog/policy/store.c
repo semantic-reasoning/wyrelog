@@ -29651,10 +29651,15 @@ wyl_policy_store_apply_principal_transition (wyl_policy_store_t *store,
   gint64 target_locked_at = G_MININT64;
   switch (event) {
     case WYL_PRINCIPAL_EVENT_LOGIN_OK:
+    case WYL_PRINCIPAL_EVENT_LOGOUT:
+      /* Neither starting nor abandoning an MFA ceremony proves possession
+       * of the enrolled seed; keep the consecutive failure count. */
+      target_count = observed_count;
+      target_locked_at = G_MININT64;
+      break;
     case WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA:
     case WYL_PRINCIPAL_EVENT_MFA_OK:
     case WYL_PRINCIPAL_EVENT_UNLOCK:
-    case WYL_PRINCIPAL_EVENT_LOGOUT:
       target_count = 0;
       target_locked_at = G_MININT64;
       break;

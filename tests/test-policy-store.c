@@ -4412,6 +4412,129 @@ check_store_apply_principal_transition_legal_edges (void)
   return 0;
 }
 
+/* Issue #1011: logout and a fresh login are not evidence of TOTP possession,
+ * so neither transition may erase the subject's durable failure count. */
+static gint
+check_store_principal_failures_survive_logout_and_login (void)
+{
+  g_autofree gchar *root = g_dir_make_tmp ("wyl-store-mfa-logout-XXXXXX",
+          NULL);
+  if (root == NULL)
+    return 1750;
+  g_autofree gchar *db_path = g_build_filename (root, "policy-store.db", NULL);
+  wyl_policy_store_open_options_t opts = {
+    .path = db_path,
+    .require_encrypted = FALSE,
+  };
+  gint result = 0;
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *state = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  gboolean found = FALSE;
+  if (wyl_policy_store_open_with_options (&opts, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK) {
+    result = 1751;
+    goto cleanup;
+  }
+
+  gboolean moved = FALSE;
+  if (wyl_policy_store_apply_principal_transition (store, "mfa.logout.victim",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 1000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved) {
+    result = 1752;
+    goto cleanup;
+  }
+  if (wyl_policy_store_apply_principal_transition (store,
+      "mfa.logout.bystander", WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 1000,
+      NULL, NULL, &moved, NULL) != WYRELOG_E_OK || !moved) {
+    result = 1753;
+    goto cleanup;
+  }
+
+  for (gint64 i = 1; i <= 4; i++) {
+    g_autofree gchar *state = NULL;
+    gint64 count = -1;
+    gint64 locked_at = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "mfa.logout.victim",
+        5, 2000 + i, &state, &count, &locked_at, NULL) != WYRELOG_E_OK
+        || g_strcmp0 (state, "mfa_required") != 0 || count != i
+        || locked_at != G_MININT64) {
+      result = 1754;
+      goto cleanup;
+    }
+  }
+
+  if (wyl_policy_store_apply_principal_transition (store, "mfa.logout.victim",
+      WYL_PRINCIPAL_EVENT_LOGOUT, 5, 3000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved) {
+    result = 1755;
+    goto cleanup;
+  }
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.victim",
+      &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "unverified") != 0 || count != 4
+      || locked_at != G_MININT64) {
+    result = 1756;
+    goto cleanup;
+  }
+
+  if (wyl_policy_store_apply_principal_transition (store, "mfa.logout.victim",
+      WYL_PRINCIPAL_EVENT_LOGIN_OK, 5, 4000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved) {
+    result = 1757;
+    goto cleanup;
+  }
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.victim",
+      &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "mfa_required") != 0 || count != 4) {
+    result = 1758;
+    goto cleanup;
+  }
+  g_clear_pointer (&state, g_free);
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.bystander",
+      &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "mfa_required") != 0 || count != 0) {
+    result = 1759;
+    goto cleanup;
+  }
+
+  /* The counter remains durable across the same file-backed close/reopen. */
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open_with_options (&opts, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK) {
+    result = 1760;
+    goto cleanup;
+  }
+  g_clear_pointer (&state, g_free);
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.victim",
+      &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "mfa_required") != 0 || count != 4) {
+    result = 1761;
+    goto cleanup;
+  }
+
+  /* A real MFA_OK edge is still allowed to clear the accumulated failures. */
+  if (wyl_policy_store_apply_principal_transition (store, "mfa.logout.victim",
+      WYL_PRINCIPAL_EVENT_MFA_OK, 5, 5000, NULL, NULL, &moved, NULL)
+      != WYRELOG_E_OK || !moved) {
+    result = 1762;
+    goto cleanup;
+  }
+  g_clear_pointer (&state, g_free);
+  if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.victim",
+      &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
+      || g_strcmp0 (state, "authenticated") != 0 || count != 0
+      || locked_at != G_MININT64)
+    result = 1763;
+
+cleanup:
+  g_clear_pointer (&store, wyl_policy_store_close);
+  (void) g_unlink (db_path);
+  (void) g_rmdir (root);
+  return result;
+}
+
 /* Issue #752: an illegal edge and a raced-away wrong-from-state are both
  * clean no-ops (E_OK, transitioned=FALSE) that append no phantom event. */
 static gint
@@ -4732,6 +4855,16 @@ check_store_apply_principal_login_folded_unlock (void)
   gint login_rows = 0;
   if (count_rows (store, login_sql, &login_rows) != 0 || login_rows != 1)
     return 1729;
+
+  g_autofree gchar *lock_state = NULL;
+  gint64 lock_count = -1;
+  gint64 lock_time = 0;
+  gboolean lock_found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lock.user",
+      &lock_state, &lock_count, &lock_time, &lock_found) != WYRELOG_E_OK
+      || !lock_found || g_strcmp0 (lock_state, "mfa_required") != 0
+      || lock_count != 0 || lock_time != G_MININT64)
+    return 1735;
 
   /* Skip-MFA elapsed unlock lands authenticated with a fresh epoch. */
   if (wyl_policy_store_apply_principal_transition (store, "lock.skip",
@@ -6611,6 +6744,8 @@ main (void)
   if ((rc = check_store_apply_principal_failure_requires_mfa_required ()) != 0)
     return rc;
   if ((rc = check_store_apply_principal_transition_legal_edges ()) != 0)
+    return rc;
+  if ((rc = check_store_principal_failures_survive_logout_and_login ()) != 0)
     return rc;
   if ((rc = check_store_apply_principal_transition_illegal_noop ()) != 0)
     return rc;
