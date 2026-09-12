@@ -24,6 +24,7 @@
 #include "fact/replay-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "fact/runtime-private.h"
+#include "fact/tenant-admission-private.h"
 #endif
 
 #define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
@@ -2648,6 +2649,35 @@ wyl_handle_set_fact_graph_admission_for_test (WylHandle *self,
   wyl_fact_graph_key_clear (&key);
   return rc;
 }
+
+wyrelog_error_t
+wyl_handle_close_fact_tenant_admission_for_test (WylHandle *self,
+    const gchar *tenant_id)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || self->fact_tenant_admission == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (WylFactTenantAdmissionLease) lease = NULL;
+  wyrelog_error_t rc = wyl_fact_tenant_admission_acquire_write
+        (self->fact_tenant_admission, tenant_id, NULL, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_tenant_admission_close (self->fact_tenant_admission,
+            tenant_id);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_get_fact_tenant_admission_for_test (WylHandle *self,
+    const gchar *tenant_id, WylFactTenantAdmissionState *out_state,
+    guint *out_readers, guint *out_waiters)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || self->fact_tenant_admission == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_tenant_admission_get_state (self->fact_tenant_admission,
+             tenant_id, out_state, out_readers, out_waiters);
+}
 #endif
 
 typedef struct
@@ -2682,12 +2712,24 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
 {
   if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
       || graph_id == NULL || relation == NULL || cb == NULL
-      || self->fact_graph_runtime == NULL)
+      || self->fact_graph_runtime == NULL
+      || self->fact_tenant_admission == NULL)
     return WYRELOG_E_INVALID;
 
+  /* Tenant admission spans the complete observable query, not just engine
+   * lookup: a seal writer must wait until the caller's callback has finished
+   * using the pinned snapshot.  Acquire before reading runtime status so a
+   * close cannot make the status decision stale between that check and the
+   * snapshot call. */
+  g_autoptr (WylFactTenantAdmissionLease) tenant_lease = NULL;
+  wyrelog_error_t rc = wyl_fact_tenant_admission_acquire_read
+        (self->fact_tenant_admission, tenant_id, NULL, &tenant_lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   WylFactGraphRuntimeStatus status = { 0 };
-  wyrelog_error_t rc = wyl_handle_get_fact_graph_runtime_status (self,
-          tenant_id, graph_id, &status);
+  rc = wyl_handle_get_fact_graph_runtime_status (self, tenant_id, graph_id,
+          &status);
   if (rc == WYRELOG_E_OK && !status.queryable) {
     rc = status.state == WYL_FACT_GRAPH_RUNTIME_DEGRADED
         ? WYRELOG_E_POLICY : WYRELOG_E_NOT_FOUND;

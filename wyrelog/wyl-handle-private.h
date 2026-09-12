@@ -288,6 +288,14 @@ wyrelog_error_t wyl_handle_get_fact_graph_runtime_status (WylHandle * self,
 wyrelog_error_t wyl_handle_set_fact_graph_admission_for_test
   (WylHandle * self, const gchar * tenant_id, const gchar * graph_id,
     gboolean open);
+/* Model a tenant lifecycle writer: obtain exclusive tenant admission, close
+ * it, and release the writer lease. */
+wyrelog_error_t wyl_handle_close_fact_tenant_admission_for_test
+  (WylHandle * self, const gchar * tenant_id);
+wyrelog_error_t wyl_handle_get_fact_tenant_admission_for_test
+  (WylHandle * self, const gchar * tenant_id,
+    WylFactTenantAdmissionState * out_state, guint * out_readers,
+    guint * out_waiters);
 #endif
 /*
  * Commit one fact mutation (append or retract) and refresh only the graph it
