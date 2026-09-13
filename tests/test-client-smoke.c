@@ -437,6 +437,26 @@ check_service_credential_codecs (void)
       "\"generation\":1,\"created_by\":\"admin\","
       "\"created_at_us\":1,\"updated_at_us\":1,"
       "\"disabled_by\":null,\"disabled_at_us\":0}]}";
+  const gchar *incomplete_principal =
+      "{\"subject_id\":\"svc:x:y\",\"display_name\":\"Worker X\","
+      "\"state\":\"active\"}";
+  const gchar *inconsistent_principal =
+      "{\"subject_id\":\"svc:x:y\",\"display_name\":\"Worker X\","
+      "\"state\":\"active\",\"generation\":1,"
+      "\"created_by\":\"admin\",\"created_at_us\":1,"
+      "\"updated_at_us\":2,\"disabled_by\":\"admin\","
+      "\"disabled_at_us\":2}";
+  g_autofree gchar *incomplete_principal_document =
+      g_strdup_printf ("{\"service_principal\":%s}", incomplete_principal);
+  g_autofree gchar *incomplete_principal_list =
+      g_strdup_printf ("{\"service_principals\":[%s]}",
+          incomplete_principal);
+  g_autofree gchar *inconsistent_principal_document =
+      g_strdup_printf ("{\"service_principal\":%s}",
+          inconsistent_principal);
+  g_autofree gchar *inconsistent_principal_list =
+      g_strdup_printf ("{\"service_principals\":[%s]}",
+          inconsistent_principal);
   if (wyl_client_service_principal_decode (principal_json,
       strlen (principal_json), &principal) != WYRELOG_E_OK
       || g_strcmp0 (principal.subject_id, "svc:tenant:worker") != 0
@@ -460,6 +480,22 @@ check_service_credential_codecs (void)
         || principal.subject_id != NULL || principal_list.items != NULL)
       return FALSE;
   }
+  if (wyl_client_service_principal_list_decode (incomplete_principal_list,
+      strlen (incomplete_principal_list), &principal_list) != WYRELOG_E_INVALID
+      || principal_list.items != NULL || principal_list.len != 0
+      || wyl_client_service_principal_list_decode (inconsistent_principal_list,
+      strlen (inconsistent_principal_list), &principal_list) != WYRELOG_E_INVALID
+      || principal_list.items != NULL || principal_list.len != 0)
+    return FALSE;
+  if (wyl_client_service_principal_decode (incomplete_principal_document,
+      strlen (incomplete_principal_document), &principal) != WYRELOG_E_INVALID
+      || principal.subject_id != NULL || principal.display_name != NULL
+      || principal.state != NULL
+      || wyl_client_service_principal_decode (inconsistent_principal_document,
+      strlen (inconsistent_principal_document), &principal) != WYRELOG_E_INVALID
+      || principal.subject_id != NULL || principal.display_name != NULL
+      || principal.state != NULL)
+    return FALSE;
   WylClientServiceCredential credential = { 0 };
   WylClientServiceCredentialList credential_list = { 0 };
   const gchar *credential_json =

@@ -425,16 +425,19 @@ parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
       goto invalid;
   }
   g_free (key);
-  return seen_subject && seen_display && seen_state && seen_generation
-         && seen_created_by && seen_created_at && seen_updated_at
-         && seen_disabled_by && seen_disabled_at
-         && updated_at_us >= created_at_us
-         && ((g_strcmp0 (out->state, "active") == 0 && disabled_by == NULL
-         && disabled_at_us == 0)
-         || (g_strcmp0 (out->state, "disabled") == 0 && disabled_by != NULL
-         && disabled_at_us > 0 && updated_at_us >= disabled_at_us));
+  if (seen_subject && seen_display && seen_state && seen_generation
+      && seen_created_by && seen_created_at && seen_updated_at
+      && seen_disabled_by && seen_disabled_at
+      && updated_at_us >= created_at_us
+      && ((g_strcmp0 (out->state, "active") == 0 && disabled_by == NULL
+      && disabled_at_us == 0)
+      || (g_strcmp0 (out->state, "disabled") == 0 && disabled_by != NULL
+      && disabled_at_us > 0 && updated_at_us >= disabled_at_us)))
+    return TRUE;
+  goto invalid_no_key;
 invalid:
   g_free (key);
+invalid_no_key:
   wyl_client_service_principal_clear (out);
   return FALSE;
 }
