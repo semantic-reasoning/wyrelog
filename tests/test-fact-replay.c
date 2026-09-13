@@ -2113,7 +2113,8 @@ test_replay_keeps_legacy_nullable_null_fail_closed (void)
   g_assert_cmpuint (status.ready, ==, 0);
   g_assert_cmpint (status.last_state, ==,
       WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH);
-  g_autofree gchar *status_json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *status_json = wyl_daemon_fact_status_json (handle, TRUE,
+          NULL);
   g_assert_nonnull (status_json);
   g_assert_nonnull (strstr (status_json, "\"state\":\"schema_mismatch\""));
   g_assert_nonnull (strstr (status_json, "\"queryable\":false"));
