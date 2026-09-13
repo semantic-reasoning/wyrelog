@@ -845,11 +845,16 @@ POST /tenants/seal
   { "version": "1", "request_id": "<canonical-request-id>" }
 ```
 
-After any of these, a fresh exchange for an affected credential fails, an
-already-minted token stops authenticating (HTTP 401 at the bearer gate), and a
-request that carries a sealed tenant is rejected with HTTP 400 and error
-`tenant_sealed` (`wyrelog/daemon/http.c`). This zero-survivor property is proven
-end to end by `service-credential-zero-survivor-e2e` (Linux packaged runtime).
+After any of these, a fresh exchange for an affected credential fails and an
+already-minted token stops being accepted. The status depends on which action
+was taken: a credential revoke or a principal disable leaves the token unable
+to resolve at all, so the bearer gate answers HTTP 401; a tenant seal leaves
+the credential resolving against a closed tenant, so the bearer gate answers
+HTTP 409 `tenant_sealed` (#1032). A request that merely names a sealed tenant
+is rejected earlier, with HTTP 400 and error `tenant_sealed`
+(`wyrelog/daemon/http.c`). This zero-survivor property is proven end to end by
+`service-credential-zero-survivor-e2e` (Linux packaged runtime), which
+exercises the two 401 cases and the 400 case.
 
 ### Publication failure and orphan recovery (#383)
 

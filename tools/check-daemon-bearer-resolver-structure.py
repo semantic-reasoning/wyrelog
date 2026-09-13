@@ -453,6 +453,33 @@ def check(path: Path) -> list[str]:
                   f"{owner} must call resolve_bearer_session exactly once "
                   f"with retain mode {expected_mode}; found {modes}")
 
+    # #1032: a sealed tenant is not a credential failure.  The resolvers
+    # report it through the auth tenant-error out-param, and a reader that
+    # renders it as a literal 401 tells the client to re-authenticate -- the
+    # prescribed refresh-and-retry succeeds at the refresh and fails
+    # identically at the retry, so a correct client never terminates.  Readers
+    # must route through set_auth_failure_error instead.
+    #
+    # What this pins is narrower than that rule: a literal 401 textually
+    # adjacent to the identifier auth_tenant_error inside one set_json_error
+    # call.  Renaming the variable, or hoisting the ternary into a local
+    # first, evades it.  That is the same spelling-bound shape as every other
+    # rule in this file, and it catches the concrete hazard it was written
+    # for -- a new reader added on a branch whose diff is disjoint from the
+    # commit that made the old spelling wrong, so the two merge clean and the
+    # defect returns unreviewed.  Do not read it as a proof.
+    raw_401 = re.compile(
+        r"set_json_error\s*\([^;]*?\b401\b[^;]*?auth_tenant_error", re.S)
+    for match in raw_401.finditer(source):
+        # masked() substitutes equal-length spaces, so offsets are shared
+        # with raw -- but it destroys newlines inside block comments, so the
+        # count must be taken on raw or the reported line is plausibly wrong.
+        line = raw.count(chr(10), 0, match.start()) + 1
+        errors.append(
+            "set_json_error with a literal 401 on auth_tenant_error at "
+            f"line {line}; route it through set_auth_failure_error so a "
+            "sealed tenant answers 409 (#1032)")
+
     lease_field = "service_lease"
     if re.search(r"\bWylServiceAuthReadLease\s*\*\s*" + lease_field + r"\s*;",
                  source):

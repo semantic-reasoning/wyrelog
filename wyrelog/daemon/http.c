@@ -6633,6 +6633,33 @@ set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+/*
+ * #1032: a credential-resolution failure is 401, but a sealed tenant is not a
+ * credential problem -- the credential verified and the resource is closed.
+ * Answering 401 tells the client to re-authenticate, and the prescribed
+ * reaction is refresh-and-retry: the refresh succeeds, the retry fails
+ * identically, and a correct client never reaches a terminal state.  409
+ * matches graph_sealed, the same condition one level down.
+ *
+ * The precondition is narrower than "the session is live".  At two of the
+ * three resolver sites the tenant gate runs immediately after signature
+ * verification and before the live-session comparison, so a revoked or
+ * superseded but unexpired token also reaches it.  Reporting it is safe
+ * regardless: /auth/login answers tenant_sealed to a caller presenting no
+ * credential at all, so 409 discloses nothing that is not already public.
+ */
+static void
+set_auth_failure_error (SoupServerMessage *msg, const gchar *tenant_error,
+    const gchar *auth_required_code)
+{
+  if (g_strcmp0 (tenant_error, WYL_DAEMON_ERR_TENANT_SEALED) == 0) {
+    set_json_error (msg, 409, tenant_error);
+    return;
+  }
+  set_json_error (msg, 401,
+      tenant_error != NULL ? tenant_error : auth_required_code);
+}
+
 /* soup_server_add_handler() owns a path prefix, even when callers intend to
  * register a singleton resource.  Keep the exact-path check in one reusable
  * adapter so terminal handlers can never observe a trailing or deeper alias.
@@ -7180,8 +7207,8 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
         : resolve_bearer_session (server, ctx, bearer_token, &auth,
             &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401, auth_tenant_error != NULL
-          ? auth_tenant_error : "fact_status_auth_required");
+      set_auth_failure_error (msg, auth_tenant_error,
+          "fact_status_auth_required");
       return;
     }
     /* Same gate every other tenant-scoped route uses, so a request for a
@@ -7523,16 +7550,14 @@ authorize_guarded_session_action_extended (SoupServer *server,
         resolve_session_token_auth (server, ctx, session_token, &auth,
             &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401,
-          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
+      set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
       return FALSE;
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
             bearer_token, &auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401,
-          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
+      set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
       return FALSE;
     }
   }
@@ -7888,8 +7913,7 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
           bearer_token, &auth, &auth_tenant_error, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
-    set_json_error (msg, 401,
-        auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
+    set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
     return FALSE;
   }
   if (!auth.bearer || g_strcmp0 (auth.tenant, WYL_TENANT_DEFAULT) != 0) {
@@ -15658,8 +15682,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
             bearer_token, &bearer_auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401, auth_tenant_error != NULL
-          ? auth_tenant_error : "logout_auth_required");
+      set_auth_failure_error (msg, auth_tenant_error, "logout_auth_required");
       return;
     }
     session_token = bearer_auth.session_id;
@@ -15775,8 +15798,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
           bearer_token, &auth, &auth_tenant_error, TRUE);
   if (auth_rc != WYRELOG_E_OK) {
-    set_json_error (msg, 401, auth_tenant_error != NULL
-        ? auth_tenant_error : "decide_auth_required");
+    set_auth_failure_error (msg, auth_tenant_error, "decide_auth_required");
     return;
   }
   if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))

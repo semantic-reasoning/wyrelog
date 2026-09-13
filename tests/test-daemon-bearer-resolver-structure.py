@@ -128,6 +128,16 @@ wyl_daemon_http_lookup_service_registry_for_test(void) {
 def main() -> int:
     guard = sys.argv[1]
     mutants = [
+        # #1032: a reader that renders the tenant-error out-param as a
+        # literal 401 instead of routing through set_auth_failure_error.
+        # BASE carries no set_json_error at all, so without this case the
+        # rule would be satisfied vacuously and a later regex edit could
+        # neuter it with this self-test still green.
+        BASE + (
+            "\nstatic void reader(void) {\n"
+            "  set_json_error (msg, 401, auth_tenant_error != 0\n"
+            "      ? auth_tenant_error : \"x_auth_required\");\n}\n"
+        ),
         BASE.replace("static wyrelog_error_t\nresolve_bearer_session", "wyrelog_error_t\nresolve_bearer_session"),
         BASE + "\nstatic wyrelog_error_t resolve_service_bearer_session(void) { return 0; }\n",
         BASE.replace("  wyl_service_auth_registry_lookup();\n", "")
@@ -158,7 +168,7 @@ def main() -> int:
         BASE.replace("    wyl_service_auth_authority_acquire_read();", "    /* wyl_service_auth_authority_acquire_read(); */"),
         BASE.replace("  wyl_jwt_verify_hs256_access_token();", "  const char *fake_verify = \"wyl_jwt_verify_hs256_access_token();\";"),
     ]
-    if len(mutants) != 26:
+    if len(mutants) != 27:
         return 3
     management_mutants = [
         BASE + "\nstatic void elsewhere(void) { "
