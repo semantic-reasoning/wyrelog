@@ -547,6 +547,24 @@ wyl_client_set_bearer_credentials (WylClient *client,
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  gpointer data;
+  gsize size;
+} ClientSecretBytes;
+
+static void
+client_secret_bytes_free (gpointer user_data)
+{
+  ClientSecretBytes *owner = user_data;
+  if (owner == NULL)
+    return;
+  if (owner->data != NULL)
+    sodium_memzero (owner->data, owner->size);
+  g_free (owner->data);
+  g_free (owner);
+}
+
 wyrelog_error_t
 wyl_client_token_refresh (WylClient *client)
 {
@@ -561,13 +579,52 @@ wyl_client_token_refresh (WylClient *client)
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
 
-  g_autofree gchar *escaped_refresh =
-      g_uri_escape_string (client->refresh_token, NULL, TRUE);
-  g_autofree gchar *uri = g_strdup_printf ("%s/auth/refresh?refresh_token=%s",
-          base_url, escaped_refresh);
+  g_autofree gchar *uri = g_strdup_printf ("%s/auth/refresh", base_url);
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
+
+  /*
+   * #1030: the token goes in the body, not the query.  In a URL it reaches
+   * shell history, /proc/<pid>/cmdline for any process that can read this
+   * one's arguments, and any proxy or client log -- and it is the
+   * longest-lived credential this client holds.  The daemon still accepts the
+   * query form for callers that already exist, but this client never sends it
+   * there, including as a fallback: a fallback that ever fires puts the token
+   * back in all three places, and retrying a credential on a second channel
+   * after a failure is the shape d8abfc9b removed from this client.
+   */
+  g_autoptr (GString) json = g_string_new ("{\"refresh_token\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, client->refresh_token);
+  g_string_append_c (json, '}');
+
+  gsize json_len = json->len;
+  gpointer request_data = g_memdup2 (json->str, json_len);
+  if (request_data == NULL) {
+    sodium_memzero (json->str, json->len);
+    return WYRELOG_E_NOMEM;
+  }
+  ClientSecretBytes *body_owner = g_new (ClientSecretBytes, 1);
+  if (body_owner == NULL) {
+    sodium_memzero (request_data, json_len);
+    g_free (request_data);
+    sodium_memzero (json->str, json->len);
+    return WYRELOG_E_NOMEM;
+  }
+  body_owner->data = request_data;
+  body_owner->size = json_len;
+  g_autoptr (GBytes) request_body = g_bytes_new_with_free_func (request_data,
+          json_len, client_secret_bytes_free, body_owner);
+  if (request_body == NULL) {
+    client_secret_bytes_free (body_owner);
+    sodium_memzero (json->str, json->len);
+    return WYRELOG_E_NOMEM;
+  }
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request_body);
+  sodium_memzero (json->str, json->len);
 
   g_autoptr (GBytes) body = NULL;
   wyrelog_error_t rc = wyl_client_send_message (client, message, &body);
@@ -1105,24 +1162,6 @@ client_decode_token_result (GBytes *body, WylClientServiceTokenResult *out)
   sodium_memzero (copy, body_size);
   g_free (copy);
   return rc;
-}
-
-typedef struct
-{
-  gpointer data;
-  gsize size;
-} ClientSecretBytes;
-
-static void
-client_secret_bytes_free (gpointer user_data)
-{
-  ClientSecretBytes *owner = user_data;
-  if (owner == NULL)
-    return;
-  if (owner->data != NULL)
-    sodium_memzero (owner->data, owner->size);
-  g_free (owner->data);
-  g_free (owner);
 }
 
 static gboolean

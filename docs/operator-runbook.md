@@ -513,6 +513,30 @@ same. The distinction the client needs -- and previously could not make, since
 every one of these conditions returned a bare `401` with no header at all -- is
 between a credential worth refreshing and one that was never usable.
 
+`/auth/refresh` takes the token in the request body:
+
+```
+POST /auth/refresh
+  {"refresh_token": "<token>"}
+  -> 200 { access_token, expires_in, refresh_token, refresh_expires_in, … }
+  -> 400 invalid_refresh_request
+  -> 401 refresh_auth_required
+```
+
+The older `POST /auth/refresh?refresh_token=<token>` form is **retained for
+compatibility** and answers identically. It is not scheduled for removal, but
+prefer the body: a token in a URL reaches shell history, `/proc/<pid>/cmdline`
+for any process that can read another's arguments, and any proxy or client
+log, and the refresh token is the longest-lived credential the human login
+path issues. The bundled client sends the body form only.
+
+Sending the token in both channels at once is refused with `400
+invalid_refresh_request` rather than resolved in favour of one. If a proxy
+logged the query token while the daemon honoured the body token, the log would
+name a credential the daemon never used. A request body that is present but
+does not parse is likewise refused, rather than being treated as absent and
+falling back to the query parameter.
+
 `/auth/login` does not enumerate enrolled vs unenrolled subjects: an
 unenrolled but otherwise-valid subject still receives an `mfa_required`
 session, and only `/auth/mfa/verify` surfaces `enrollment_required`.

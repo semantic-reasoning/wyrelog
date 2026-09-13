@@ -31,6 +31,7 @@ typedef struct
   gchar *last_event;
   gchar *last_session_token;
   gchar *last_refresh_token;
+  gchar *last_query_refresh_token;
   gchar *last_authorization;
   gchar *last_password;
   gchar *last_skip_mfa;
@@ -88,6 +89,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_event);
   g_free (http->last_session_token);
   g_free (http->last_refresh_token);
+  g_free (http->last_query_refresh_token);
   g_free (http->last_authorization);
   g_free (http->last_password);
   g_free (http->last_skip_mfa);
@@ -125,9 +127,30 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
-  http->last_refresh_token =
+  http->last_query_refresh_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "refresh_token")) : NULL;
+  http->last_refresh_token = g_strdup (http->last_query_refresh_token);
+  /*
+   * #1030: the client sends the refresh token in the body now, so a mock that
+   * reads only the query would record NULL and every assertion on it would
+   * pass vacuously.  The read is keyed on the field name rather than on "this
+   * request had a body": other routes post bodies of their own -- the service
+   * token exchange sends credential_id and credential_secret -- and those must
+   * keep leaving this NULL, which is what the assertion at the /auth/service-
+   * token call asserts.
+   */
+  if (http->last_refresh_token == NULL && http->last_body != NULL) {
+    const gchar *found = strstr (http->last_body, "\"refresh_token\"");
+    if (found != NULL) {
+      found = strchr (found + strlen ("\"refresh_token\""), ':');
+      const gchar *open = found != NULL ? strchr (found, '"') : NULL;
+      const gchar *close = open != NULL ? strchr (open + 1, '"') : NULL;
+      if (close != NULL)
+        http->last_refresh_token = g_strndup (open + 1,
+                (gsize) (close - open - 1));
+    }
+  }
   http->last_authorization = g_strdup (soup_message_headers_get_one
             (soup_server_message_get_request_headers (msg), "Authorization"));
   http->last_password =
@@ -2516,6 +2539,27 @@ main (void)
       g_strcmp0 (http.last_path, "/auth/refresh") != 0 ||
       g_strcmp0 (http.last_refresh_token, "refresh-relogin") != 0)
     return 211;
+  /*
+   * #1030: assert the channel, not just the value.  The mock reads the query
+   * parameter first and falls back to the body, so every check above would
+   * still pass if the client went back to putting the token in the URL --
+   * which is the half of this change that matters, since a token in a URL is
+   * what reaches shell history and proxy logs.  Only the body carries it now.
+   */
+  if (http.last_body == NULL
+      || strstr (http.last_body, "\"refresh_token\":\"refresh-relogin\"")
+      == NULL)
+    return 248;
+  /*
+   * And not in the URL.  Asserting only that the body carries it would still
+   * pass for a client that sent both, which is the shape the comment in
+   * wyl_client_token_refresh warns against and which the daemon refuses with
+   * 400 -- so a both-channels client would break every refresh in production
+   * while this test stayed green.  last_query_refresh_token records the query
+   * separately for exactly this reason; last_refresh_token merges the two.
+   */
+  if (http.last_query_refresh_token != NULL)
+    return 249;
   g_clear_pointer (&client_access_token, g_free);
   client_access_token = wyl_client_dup_access_token (local_client);
   if (g_strcmp0 (client_access_token, "access-refresh") != 0)
@@ -2582,6 +2626,7 @@ main (void)
   g_clear_pointer (&http.last_event, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_refresh_token, g_free);
+  g_clear_pointer (&http.last_query_refresh_token, g_free);
   g_clear_pointer (&http.last_authorization, g_free);
   g_clear_pointer (&http.last_password, g_free);
   g_clear_pointer (&http.last_skip_mfa, g_free);

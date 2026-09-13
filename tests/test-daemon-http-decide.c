@@ -1963,6 +1963,57 @@ send_raw_login (SoupSession *session, const gchar *method,
 
 static gchar *extract_json_string (const gchar * body, const gchar * name);
 
+/*
+ * #1030: drive /auth/refresh with the token in a JSON body, optionally
+ * alongside a query parameter.  query_token and body_json are independent so
+ * a caller can send either channel, both, or neither -- the handler answers
+ * all four differently and the check below asserts each.  body_json is sent
+ * verbatim, including deliberately malformed JSON.
+ */
+static gint
+send_raw_refresh_body (SoupSession *session, const gchar *base_url,
+    const gchar *query_token, const gchar *body_json, guint *out_status,
+    gchar **out_body)
+{
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = NULL;
+  if (query_token != NULL) {
+    g_autofree gchar *escaped = g_uri_escape_string (query_token, NULL, TRUE);
+    uri = g_strdup_printf ("%s/auth/refresh?refresh_token=%s", root, escaped);
+  } else {
+    uri = g_strdup_printf ("%s/auth/refresh", root);
+  }
+
+  g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
+  if (msg == NULL)
+    return 1;
+  g_autoptr (GBytes) request_body = NULL;
+  if (body_json != NULL) {
+    /* soup takes its own ref; the autoptr drops the one g_bytes_new returns,
+     * which is otherwise leaked once per request this helper sends. */
+    request_body = g_bytes_new (body_json, strlen (body_json));
+    soup_message_set_request_body_from_bytes (msg, "application/json",
+        request_body);
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+          &error);
+  if (bytes == NULL)
+    return 2;
+  gint rc = check_response_request_id_header (msg, 573);
+  if (rc != 0)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
 static gint
 send_raw_refresh (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *refresh_token, guint *out_status,
@@ -21510,6 +21561,96 @@ send_logout_challenge_probe (SoupSession *session, const gchar *base_url,
  * private too, the login permission has to be seeded here rather than
  * inherited from the main.
  */
+/*
+ * #1030: the refresh token is the longest-lived credential the human auth
+ * path issues, and carrying it in the URL puts it in shell history,
+ * /proc/<pid>/cmdline for any curl-style caller, and any proxy or client log.
+ * The body form is the fix; the query form stays for callers that already
+ * exist.
+ *
+ * Five arms, because four cannot tell the two failure causes apart.  The
+ * body parser returns FALSE for "no body was sent" and for "a body was sent
+ * and would not parse" alike, and those must answer differently: the first is
+ * the retained alias, the second is a refusal.  Collapsing them would let a
+ * client that meant to use the body form, and got its JSON slightly wrong, be
+ * downgraded in silence to the channel this issue exists to get the token out
+ * of.  The malformed-body arm is what pins that apart.
+ */
+static gint
+check_refresh_body_form_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  if (send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body) != 0
+      || status != 200)
+    return 230;
+  g_autofree gchar *first = extract_json_string (body, "refresh_token");
+  if (first == NULL)
+    return 230;
+  g_clear_pointer (&body, g_free);
+
+  /* The body form works and rotates, exactly as the query form does. */
+  g_autofree gchar *body_json = g_strdup_printf
+        ("{\"refresh_token\":\"%s\"}", first);
+  if (send_raw_refresh_body (session, base_url, NULL, body_json, &status,
+      &body) != 0 || status != 200)
+    return 231;
+  g_autofree gchar *second = extract_json_string (body, "refresh_token");
+  if (second == NULL || g_strcmp0 (first, second) == 0)
+    return 231;
+  g_clear_pointer (&body, g_free);
+
+  /* The query form still works: this arm sends no body at all, which is what
+   * makes it distinguishable from the malformed-body arm below. */
+  if (send_raw_refresh_body (session, base_url, second, NULL, &status, &body)
+      != 0 || status != 200)
+    return 232;
+  g_autofree gchar *third = extract_json_string (body, "refresh_token");
+  if (third == NULL || g_strcmp0 (second, third) == 0)
+    return 232;
+  g_clear_pointer (&body, g_free);
+
+  /* Both channels carrying a credential is unresolvable, not an opportunity
+   * to pick a winner: if a proxy logged the query token while the daemon
+   * honoured the body token, the log names a credential that was never used. */
+  g_autofree gchar *both_json = g_strdup_printf
+        ("{\"refresh_token\":\"%s\"}", third);
+  if (send_raw_refresh_body (session, base_url, third, both_json, &status,
+      &body) != 0 || status != 400
+      || strstr (body, "\"error\":\"invalid_refresh_request\"") == NULL)
+    return 233;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * A body that will not parse is refused, not ignored -- and the query token
+   * alongside it is what makes this arm discriminating.  An implementation
+   * that treats every parse failure as "no body was sent" would fall through
+   * to the query parameter here and answer 200, silently moving a client that
+   * meant to use the body form onto the channel this change exists to get the
+   * token out of.  Sending the malformed body *without* a query token would
+   * not catch that: both the correct refusal and the silent fallback end at
+   * the same 400, by different routes.
+   */
+  g_autofree gchar *bad_json = g_strdup_printf
+        ("{\"refresh_token\":\"%s\",\"extra\":1}", third);
+  if (send_raw_refresh_body (session, base_url, third, bad_json, &status,
+      &body) != 0 || status != 400
+      || strstr (body, "\"error\":\"invalid_refresh_request\"") == NULL)
+    return 234;
+  g_clear_pointer (&body, g_free);
+
+  /* The same malformed body with no query parameter is refused too, so the
+   * refusal is a property of the body rather than of the pair. */
+  if (send_raw_refresh_body (session, base_url, NULL, bad_json, &status,
+      &body) != 0 || status != 400
+      || strstr (body, "\"error\":\"invalid_refresh_request\"") == NULL)
+    return 235;
+  return 0;
+}
+
 static gint
 check_bearer_challenge_contract (void)
 {
@@ -21847,6 +21988,9 @@ main (void)
   gint challenge_rc = check_bearer_challenge_contract ();
   if (challenge_rc != 0)
     return challenge_rc;
+  gint body_form_rc = check_refresh_body_form_contract (base_url);
+  if (body_form_rc != 0)
+    return body_form_rc;
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
         (http.server, base_url);
   if (refresh_shutdown_rc != 0)
