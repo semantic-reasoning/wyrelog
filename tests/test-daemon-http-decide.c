@@ -4762,6 +4762,175 @@ check_service_resolver_terminal_failure (void)
            (server) == 0;
 }
 
+static gint
+check_retained_auth_context_release_case
+  (WylDaemonRetainedResolverReleaseFault fault)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = NULL;
+  g_autoptr (SoupServer) server = NULL;
+  g_autoptr (GThread) thread = NULL;
+  g_autoptr (SoupSession) session = NULL;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *body = NULL;
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  MainLoopReadyBarrier barrier = { 0 };
+  TestHttpServer http = { 0 };
+  gint result = 0;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 2680;
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,.listen_port = 0,
+  };
+  context = g_main_context_new ();
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (server == NULL) {
+    result = 2681;
+    goto cleanup;
+  }
+  http.server = server;
+  thread = g_thread_new ("retained-auth-context-release",
+          test_http_server_thread_ctx, &http);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready)
+    g_cond_wait_until (&barrier.changed, &barrier.mutex,
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC);
+  gboolean loop_ready = barrier.ready;
+  g_mutex_unlock (&barrier.mutex);
+  if (!loop_ready) {
+    result = 2682;
+    goto cleanup;
+  }
+  guint maintenance_ticks = 0;
+  if (!wyl_daemon_http_service_auth_maintenance_active_for_test (server,
+      &maintenance_ticks)) {
+    result = 2683;
+    goto cleanup;
+  }
+  wyl_daemon_http_suspend_service_auth_maintenance_for_test (server);
+  if (!service_resolver_fixture_init (server, &fixture,
+      WYL_SERVICE_AUTH_ACTIVE, 0)) {
+    result = 2684;
+    goto cleanup;
+  }
+
+  GSList *uris = soup_server_get_uris (server);
+  if (uris == NULL) {
+    result = 2685;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  session = soup_session_new ();
+  soup_session_set_timeout (session, 5);
+  const gchar *request_subject = fault ==
+      WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_BEFORE_HANDOFF
+      ? fixture.subject : "svc:resolver:wrong-subject";
+  if (fault != WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_NONE)
+    wyl_daemon_http_fail_next_retained_resolver_release_for_test (server,
+        fault);
+  guint status = 0;
+  gint send_rc = send_raw_decide_bearer (session, "POST", base_url,
+          request_subject, "wr.datalog.query", fixture.tenant, NULL,
+          fixture.token, &status, &body);
+  gboolean cleanup_fault = fault ==
+      WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_PREVALIDATION
+      || fault == WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_RANK_AFTER_POP;
+  gboolean handoff_fault = fault ==
+      WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_BEFORE_HANDOFF;
+  if (send_rc != 0 || (cleanup_fault && (status != 500
+      || strstr (body, "\"error\":\"decide_failed\"") == NULL))
+      || (handoff_fault && (status != 500
+      || strstr (body, "\"error\":\"decide_failed\"") == NULL))
+      || (!cleanup_fault && !handoff_fault && (status != 403
+      || strstr (body, "\"error\":\"decide_denied\"") == NULL)))
+    result = 2686;
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  if (result == 0 && (snapshot.active_readers != 0 || snapshot.waiting_readers != 0
+      || snapshot.waiting_writers != 0 || snapshot.writer_active
+      || wyl_daemon_http_service_resolver_terminal_entries_for_test
+        (server) != 1
+      || !wyl_daemon_http_retained_resolver_thread_match_for_test (server)))
+    result = 2687;
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  wyrelog_error_t available_rc = wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason);
+  if (result == 0 && cleanup_fault) {
+    if (available_rc != WYRELOG_E_BUSY
+        || reason != WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT
+        || !service_resolver_expect (server, &fixture, fixture.token,
+        FALSE))
+      result = 2688;
+  } else if (result == 0 && (available_rc != WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)) {
+    result = 2689;
+  }
+
+cleanup:
+  if (http.loop != NULL)
+    g_main_loop_quit (http.loop);
+  if (thread != NULL)
+    g_thread_join (g_steal_pointer (&thread));
+  if (server != NULL)
+    soup_server_disconnect (server);
+  http.server = NULL;
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
+static gint
+check_retained_auth_context_release_contract (void)
+{
+  const WylDaemonRetainedResolverReleaseFault cases[] = {
+    WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_NONE,
+    WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_PREVALIDATION,
+    WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_RANK_AFTER_POP,
+    WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_BEFORE_HANDOFF,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gint rc = check_retained_auth_context_release_case (cases[i]);
+    if (rc != 0)
+      return rc;
+  }
+  return 0;
+}
+
+static gint
+check_unconsumed_auth_lease_fail_stop_subprocess (const gchar *program)
+{
+  g_autofree gchar *executable = g_canonicalize_filename (program, NULL);
+  gchar *child_argv[] = { executable, "--test-unconsumed-auth-lease", NULL };
+  g_autofree gchar *stdout_text = NULL;
+  g_autofree gchar *stderr_text = NULL;
+  gint wait_status = 0;
+  g_autoptr (GError) error = NULL;
+  if (!g_spawn_sync (NULL, child_argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
+      &stdout_text, &stderr_text, &wait_status, &error))
+    return 2692;
+  g_autoptr (GError) wait_error = NULL;
+  if (g_spawn_check_wait_status (wait_status, &wait_error)
+      || stderr_text == NULL
+      || strstr (stderr_text,
+      "daemon_auth_context_cleanup invariant=unconsumed_lease") == NULL
+      || strstr (stderr_text, "session_id") != NULL
+      || strstr (stderr_text, "access_token") != NULL)
+    return 2693;
+  return 0;
+}
+
 static gboolean
 check_service_resolver_conflicting_candidate (SoupServer *server)
 {
@@ -22767,10 +22936,23 @@ main (void)
 }
 #elif defined(WYL_TEST_VARIANT_SERVICE)
 int
-main (void)
+main (int argc, char **argv)
 {
+  if (argc == 2
+      && g_strcmp0 (argv[1], "--test-unconsumed-auth-lease") == 0) {
+    wyl_daemon_http_test_fatal_unconsumed_auth_lease_for_test ();
+    return 0;
+  }
   gint result = 0;
   GThread *thread = NULL;
+  gint fail_stop_rc = check_unconsumed_auth_lease_fail_stop_subprocess
+        (argv[0]);
+  if (fail_stop_rc != 0)
+    return fail_stop_rc;
+  gint retained_release_rc =
+      check_retained_auth_context_release_contract ();
+  if (retained_release_rc != 0)
+    return retained_release_rc;
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
     return tenant_gate_rc;

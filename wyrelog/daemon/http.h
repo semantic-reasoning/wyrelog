@@ -33,6 +33,13 @@ typedef enum
   WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED = 1,
   WYL_DAEMON_SERVICE_RESOLVER_RELEASED,
 } WylDaemonServiceResolverPhase;
+typedef enum
+{
+  WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_NONE = 0,
+  WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_PREVALIDATION,
+  WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_RANK_AFTER_POP,
+  WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_BEFORE_HANDOFF,
+} WylDaemonRetainedResolverReleaseFault;
 typedef void (*WylDaemonServiceResolverCheckpoint)
   (WylDaemonServiceResolverPhase phase, gpointer data);
 typedef enum
@@ -224,8 +231,13 @@ void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     gpointer data);
 void wyl_daemon_http_fail_next_service_resolver_read_release_for_test
   (SoupServer * server);
+void wyl_daemon_http_fail_next_retained_resolver_release_for_test
+  (SoupServer * server, WylDaemonRetainedResolverReleaseFault fault);
 guint wyl_daemon_http_service_resolver_terminal_entries_for_test
   (SoupServer * server);
+gboolean wyl_daemon_http_retained_resolver_thread_match_for_test
+  (SoupServer * server);
+void wyl_daemon_http_test_fatal_unconsumed_auth_lease_for_test (void);
 wyrelog_error_t wyl_daemon_http_service_registry_transition_for_test
   (SoupServer * server, const gchar * session_id, const gchar * jti,
     const gchar * credential_id, guint64 generation, const gchar * principal,

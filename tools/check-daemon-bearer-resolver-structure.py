@@ -86,20 +86,8 @@ def check(path: Path) -> list[str]:
             "wyl_service_auth_read_lease_get_policy_store": 1,
         },
     }
-    # The auth context destructor is the last-resort release for a lease that
-    # reached request teardown still owned by the context: the resolver hands
-    # one back only for POST /decide, and the decision authority is expected to
-    # consume it first. Registering it keeps it inside the reviewed set with a
-    # pinned count instead of leaving an unaccounted terminal release.
-    #
-    # Registered only when present, unlike the mandatory owners above, because
-    # the self-test drives this checker with synthetic sources that define no
-    # such destructor. It is also the one owner that cannot report a failed
-    # release -- G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC fixes the void signature --
-    # so it stays outside the discard-result prohibition further down, which
-    # covers the owners that can report.
-    if re.search(r"^wyl_daemon_auth_context_clear\s*\(", source, re.M):
-        management_counts["wyl_daemon_auth_context_clear"] = {
+    if re.search(r"^wyl_daemon_auth_context_release_service_lease\s*\(", source, re.M):
+        management_counts["wyl_daemon_auth_context_release_service_lease"] = {
             "wyl_service_auth_read_lease_release_terminal": 1,
         }
     management_edges = {
@@ -158,6 +146,83 @@ def check(path: Path) -> list[str]:
     authorize_span = management_spans.get(
         "service_principal_management_authorize_session"
     )
+    auth_context_release_span = management_spans.get(
+        "wyl_daemon_auth_context_release_service_lease"
+    )
+    if auth_context_release_span is not None:
+        release_start, release_end = auth_context_release_span
+        release_body = source[release_start:release_end]
+        if re.search(
+            r"\(\s*void\s*\)\s*wyl_service_auth_read_lease_release_terminal",
+            release_body,
+        ):
+            errors.append(
+                "auth-context finalizer must observe the terminal READ release result"
+            )
+        if not re.search(
+            r"if\s*\(\s*auth->service_lease\s*!=\s*NULL\s*\)\s*"
+            r"auth_context_unconsumed_lease_fail_stop\s*\(",
+            release_body,
+            re.S,
+        ):
+            errors.append(
+                "auth-context finalizer must fail-stop when release errors leave "
+                "the lease pointer live"
+            )
+    if auth_context_release_span is not None:
+        try:
+            clear_start, clear_end = function_span(
+                source, "wyl_daemon_auth_context_clear"
+            )
+            clear_body = source[clear_start:clear_end]
+            if len(re.findall(
+                r"\bwyl_daemon_auth_context_release_service_lease\s*\(",
+                clear_body,
+            )) != 1 or re.search(
+                r"\bwyl_service_auth_read_lease_release_terminal\s*\(",
+                clear_body,
+            ):
+                errors.append(
+                    "auth-context destructor must be fallback-only through the "
+                    "checked finalizer, with no direct terminal release"
+                )
+        except ValueError as exc:
+            errors.append(str(exc))
+        try:
+            finish_start, finish_end = function_span(source, "decide_reply_finish")
+            finish_body = source[finish_start:finish_end]
+            finalize = finish_body.find(
+                "wyl_daemon_auth_context_release_service_lease"
+            )
+            attaches = [
+                match.start()
+                for match in re.finditer(
+                    r"\b(?:set_json_error|soup_server_message_set_status|"
+                    r"soup_server_message_set_response)\s*\(",
+                    finish_body,
+                )
+            ]
+            if finalize < 0 or not attaches or min(attaches) < finalize:
+                errors.append(
+                    "decide_reply_finish must finalize the auth-context lease before "
+                    "attaching any response"
+                )
+            decide_start, decide_end = function_span(source, "decide_handler")
+            decide_body = source[decide_start:decide_end]
+            if len(re.findall(r"\bdecide_reply_finish\s*\(", decide_body)) != 6:
+                errors.append(
+                    "every post-resolution /decide result must use decide_reply_finish"
+                )
+            post_auth = decide_body.find("const gchar *tenant_error")
+            if post_auth < 0 or re.search(
+                r"\bset_json_error\s*\(", decide_body[post_auth:]
+            ):
+                errors.append(
+                    "post-resolution /decide responses must not bypass the checked "
+                    "finish path"
+                )
+        except ValueError as exc:
+            errors.append(str(exc))
     if authorize_span is not None:
         owner_start, owner_end = authorize_span
         acquire = source.find(
@@ -192,6 +257,15 @@ def check(path: Path) -> list[str]:
             )
         )
     acquire_owner_bodies.append(("resolve_bearer_session", source[start:end]))
+    if auth_context_release_span is not None:
+        acquire_owner_bodies.append(
+            (
+                "wyl_daemon_auth_context_release_service_lease",
+                source[
+                    auth_context_release_span[0]:auth_context_release_span[1]
+                ],
+            )
+        )
     for owner_name, owner_body in acquire_owner_bodies:
         if re.search(
             r"\(\s*void\s*\)\s*wyl_service_auth_read_lease_release_terminal",
@@ -395,6 +469,58 @@ def check(path: Path) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
 
+    if auth_context_release_span is not None:
+        release_start, release_end = auth_context_release_span
+        release_body = source[release_start:release_end]
+        fail_stop_start, fail_stop_end = -1, -1
+        try:
+            fail_stop_start, fail_stop_end = function_span(
+                source, "auth_context_unconsumed_lease_fail_stop"
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        if fail_stop_start >= 0:
+            fatal_body = source[fail_stop_start:fail_stop_end]
+            if "g_error" not in fatal_body:
+                errors.append(
+                    "unconsumed auth-context lease fail-stop must terminate the process"
+                )
+            if "auth_context_unconsumed_lease_fail_stop" not in release_body:
+                errors.append(
+                    "auth-context finalizer must call the unconsumed-lease fail-stop"
+                )
+        clear_span = None
+        try:
+            clear_span = function_span(source, "wyl_daemon_auth_context_clear")
+        except ValueError:
+            pass
+        finish_span = None
+        try:
+            finish_span = function_span(source, "decide_reply_finish")
+        except ValueError:
+            pass
+        if clear_span is not None and finish_span is not None:
+            clear_start, clear_end = clear_span
+            finish_start, finish_end = finish_span
+            call_positions = [
+                match.start()
+                for match in re.finditer(
+                    r"\bwyl_daemon_auth_context_release_service_lease\s*\(",
+                    source,
+                )
+                if not (release_start <= match.start() < release_end)
+            ]
+            expected_positions = [
+                pos for pos in call_positions
+                if (clear_start <= pos < clear_end)
+                or (finish_start <= pos < finish_end)
+            ]
+            if len(call_positions) != 2 or len(expected_positions) != 2:
+                errors.append(
+                    "auth-context lease finalizer may only be called by the "
+                    "fallback destructor and /decide finish path"
+                )
+
     # The service READ lease the resolver keeps for the decision authority.
     #
     # An earlier revision guarded this on "retain_service_decision_authority"
@@ -483,9 +609,20 @@ def check(path: Path) -> list[str]:
     lease_field = "service_lease"
     if re.search(r"\bWylServiceAuthReadLease\s*\*\s*" + lease_field + r"\s*;",
                  source):
+        test_fatal_span = None
+        try:
+            test_fatal_span = function_span(
+                source, "wyl_daemon_http_test_fatal_unconsumed_auth_lease_for_test"
+            )
+        except ValueError:
+            pass
         assignments = [
             match.start()
-            for match in re.finditer(r"\b" + lease_field + r"\s*=", source)
+            for match in re.finditer(
+                r"\b" + lease_field + r"\s*(?<![=!])=(?!=)", source
+            )
+            if test_fatal_span is None
+            or not (test_fatal_span[0] <= match.start() < test_fatal_span[1])
         ]
         if len(assignments) != 1:
             errors.append(
@@ -500,7 +637,7 @@ def check(path: Path) -> list[str]:
         consumers = list(
             re.finditer(r"&\s*\w+(?:\.|->)" + lease_field + r"\b", source)
         )
-        release_owner = "wyl_daemon_auth_context_clear"
+        release_owner = "wyl_daemon_auth_context_release_service_lease"
         try:
             release_start, release_end = function_span(source, release_owner)
         except ValueError as exc:
