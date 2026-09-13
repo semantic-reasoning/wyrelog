@@ -525,6 +525,11 @@ typedef struct _WylDaemonHttpContext
   WylPolicyWriteAcquireTestLatch policy_write_acquire_latch;
   gboolean fail_next_retirement_latch;
   gboolean fail_next_resolver_read_release;
+  WylDaemonRetainedResolverReleaseFault
+      fail_next_retained_resolver_release;
+  GThread *retained_resolver_owner_thread;
+  GThread *retained_resolver_release_thread;
+  gboolean fail_next_decide_authority_handoff;
   gboolean fail_next_fact_op_audit;
   gboolean fail_next_tenant_lifecycle_audit_insert;
   gboolean fail_next_tenant_lifecycle_audit_append;
@@ -1577,6 +1582,47 @@ tenant_is_active (WylDaemonHttpContext *ctx, const gchar *tenant)
 }
 
 static void
+auth_context_unconsumed_lease_fail_stop (const gchar *owner,
+    const gchar *primary_code, wyrelog_error_t cleanup_rc)
+{
+  g_error ("daemon_auth_context_cleanup invariant=unconsumed_lease "
+      "owner=%s primary=%s cleanup_rc=%d",
+      owner != NULL ? owner : "unknown",
+      primary_code != NULL ? primary_code : "unknown", cleanup_rc);
+}
+
+static wyrelog_error_t
+wyl_daemon_auth_context_release_service_lease (WylDaemonAuthContext *auth,
+    WylDaemonHttpContext *ctx, const gchar *owner, const gchar *primary_code)
+{
+  if (auth == NULL || auth->service_lease == NULL)
+    return WYRELOG_E_OK;
+
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (ctx != NULL) {
+    g_mutex_lock (&ctx->lock);
+    ctx->retained_resolver_release_thread = g_thread_self ();
+    g_mutex_unlock (&ctx->lock);
+  }
+#else
+  (void) ctx;
+#endif
+
+  wyrelog_error_t rc = wyl_service_auth_read_lease_release_terminal
+        (&auth->service_lease);
+  if (rc == WYRELOG_E_OK)
+    return rc;
+  if (auth->service_lease != NULL)
+    auth_context_unconsumed_lease_fail_stop (owner, primary_code, rc);
+  WYL_LOG_ERROR (WYL_LOG_SECTION_SESSION,
+      "daemon_auth_context_cleanup owner=%s primary=%s cleanup_rc=%d "
+      "lease_consumed=1",
+      owner != NULL ? owner : "unknown",
+      primary_code != NULL ? primary_code : "unknown", rc);
+  return rc;
+}
+
+static void
 wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
 {
   if (auth == NULL)
@@ -1585,7 +1631,8 @@ wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
   g_free (auth->actor);
   g_free (auth->tenant);
   if (auth->service_lease != NULL)
-    (void) wyl_service_auth_read_lease_release_terminal (&auth->service_lease);
+    (void) wyl_daemon_auth_context_release_service_lease (auth, NULL,
+        "auth_context_fallback", "unwound");
   memset (auth, 0, sizeof *auth);
 }
 
@@ -2896,11 +2943,50 @@ void wyl_daemon_http_fail_next_service_resolver_read_release_for_test
     ctx->fail_next_resolver_read_release = TRUE;
 }
 
+void
+wyl_daemon_http_fail_next_retained_resolver_release_for_test (SoupServer *server,
+    WylDaemonRetainedResolverReleaseFault fault)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->fail_next_retained_resolver_release = fault;
+  ctx->retained_resolver_owner_thread = NULL;
+  ctx->retained_resolver_release_thread = NULL;
+  ctx->fail_next_decide_authority_handoff = FALSE;
+  g_mutex_unlock (&ctx->lock);
+}
+
 guint wyl_daemon_http_service_resolver_terminal_entries_for_test
   (SoupServer * server)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   return ctx != NULL ? ctx->resolver_terminal_entries : 0;
+}
+
+gboolean
+wyl_daemon_http_retained_resolver_thread_match_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  gboolean matches = ctx->retained_resolver_owner_thread != NULL
+      && ctx->retained_resolver_owner_thread
+      == ctx->retained_resolver_release_thread;
+  g_mutex_unlock (&ctx->lock);
+  return matches;
+}
+
+void
+wyl_daemon_http_test_fatal_unconsumed_auth_lease_for_test (void)
+{
+  WylDaemonAuthContext auth = {
+    .service_lease = (WylServiceAuthReadLease *) (guintptr) 1,
+  };
+  if (auth.service_lease != NULL)
+    auth_context_unconsumed_lease_fail_stop ("test", "synthetic", WYRELOG_E_INVALID);
 }
 
 static void
@@ -6197,8 +6283,33 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
       /* Only the decision path keeps it.  Everywhere else |lease| survives
        * into the checked terminal release below, which is what reports a
        * failed release and emits the RESOLVER_RELEASED checkpoint. */
-      if (retain_service_lease)
+      if (retain_service_lease) {
         out_auth->service_lease = g_steal_pointer (&lease);
+#ifdef WYL_TEST_DAEMON_HTTP
+        WylDaemonRetainedResolverReleaseFault retained_fault;
+        g_mutex_lock (&ctx->lock);
+        retained_fault = ctx->fail_next_retained_resolver_release;
+        ctx->fail_next_retained_resolver_release =
+            WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_NONE;
+        ctx->retained_resolver_owner_thread = g_thread_self ();
+        ctx->retained_resolver_release_thread = NULL;
+        if (retained_fault
+            == WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_BEFORE_HANDOFF)
+          ctx->fail_next_decide_authority_handoff = TRUE;
+        g_mutex_unlock (&ctx->lock);
+        wyl_service_auth_read_lease_test_set_terminal_checkpoint
+          (out_auth->service_lease, service_resolver_terminal_entry_for_test,
+            &ctx->resolver_terminal_entries);
+        if (retained_fault ==
+            WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_PREVALIDATION)
+          wyl_service_auth_read_lease_test_fail_terminal_prevalidation
+            (out_auth->service_lease);
+        else if (retained_fault ==
+            WYL_DAEMON_RETAINED_RESOLVER_RELEASE_FAULT_RANK_AFTER_POP)
+          wyl_service_auth_read_lease_test_fail_terminal_rank_after_pop
+            (out_auth->service_lease);
+#endif
+      }
 #ifdef WYL_TEST_DAEMON_HTTP
       if (ctx->resolver_checkpoint != NULL)
         ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED,
@@ -7554,6 +7665,35 @@ decide_authenticated_request (WylHandle *handle, const wyl_decide_req_t *req,
   rc = wyl_decide_with_service_authority (handle, req, authority, resp);
   wyl_service_decision_authority_free (authority);
   return rc;
+}
+
+static void
+decide_reply_finish (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+    WylDaemonAuthContext *auth, guint status, const gchar *error_code,
+    const gchar *success_body)
+{
+  const gchar *primary_code = error_code != NULL ? error_code : "success";
+  wyrelog_error_t cleanup_rc =
+      wyl_daemon_auth_context_release_service_lease (auth, ctx, "decide",
+          primary_code);
+  if (cleanup_rc != WYRELOG_E_OK) {
+    status = 500;
+    error_code = "decide_failed";
+    success_body = NULL;
+  }
+
+  if (error_code != NULL) {
+    set_json_error (msg, status, error_code);
+    return;
+  }
+  if (success_body == NULL) {
+    set_json_error (msg, 500, "decide_failed");
+    return;
+  }
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, status, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, success_body, strlen (success_body));
 }
 
 static gboolean
@@ -16044,10 +16184,15 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     attach_bearer_challenge (msg, "invalid_token");
     return;
   }
-  if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
+  const gchar *tenant_error = NULL;
+  guint tenant_status = decide_request_tenant_gate (ctx,
+          lookup_request_tenant (query), auth.tenant, &tenant_error);
+  if (tenant_status != 0) {
+    decide_reply_finish (msg, ctx, &auth, tenant_status, tenant_error, NULL);
     return;
+  }
   if (g_strcmp0 (auth.actor, user) != 0) {
-    set_json_error (msg, 403, "decide_denied");
+    decide_reply_finish (msg, ctx, &auth, 403, "decide_denied", NULL);
     return;
   }
 
@@ -16065,7 +16210,8 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
         !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
         risk < 0 || risk > 100 ||
         !wyl_guard_loc_class_is_valid (guard_loc_class)) {
-      set_json_error (msg, 400, "invalid_decide_request");
+      decide_reply_finish (msg, ctx, &auth, 400, "invalid_decide_request",
+          NULL);
       return;
     }
     wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
@@ -16075,23 +16221,31 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyl_decide_req_set_service_bearer_authenticated (req,
       auth.service_authenticated);
 
-  wyrelog_error_t rc = decide_authenticated_request (handle, req,
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_mutex_lock (&ctx->lock);
+  gboolean fail_handoff = ctx->fail_next_decide_authority_handoff;
+  ctx->fail_next_decide_authority_handoff = FALSE;
+  g_mutex_unlock (&ctx->lock);
+  if (fail_handoff)
+    rc = WYRELOG_E_INTERNAL;
+  else
+#endif
+  rc = decide_authenticated_request (handle, req,
           auth.service_authenticated, auth.actor, auth.tenant,
           &auth.service_lease, resp);
   if (rc == WYRELOG_E_INVALID) {
-    set_json_error (msg, 400, "invalid_decide_request");
+    decide_reply_finish (msg, ctx, &auth, 400, "invalid_decide_request",
+        NULL);
     return;
   }
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 500, "decide_failed");
+    decide_reply_finish (msg, ctx, &auth, 500, "decide_failed", NULL);
     return;
   }
 
   g_autofree gchar *body = build_decide_json (resp);
-  attach_request_id_header (msg);
-  soup_server_message_set_status (msg, 200, NULL);
-  soup_server_message_set_response (msg, "application/json",
-      SOUP_MEMORY_COPY, body, strlen (body));
+  decide_reply_finish (msg, ctx, &auth, 200, NULL, body);
 }
 
 /* The two service-management permissions armed by the self-arm route, in a

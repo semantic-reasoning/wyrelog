@@ -276,6 +276,21 @@ def main() -> int:
         return 4
     if run(guard, BASE) != 0 or run(guard, BASE_WITH_REGISTRY_TEST_SEAM) != 0:
         return 1
+    production_source = (
+        Path(guard).resolve().parent.parent / "wyrelog/daemon/http.c"
+    ).read_text(encoding="utf-8")
+    fail_stop_call = (
+        "    auth_context_unconsumed_lease_fail_stop (owner, primary_code, rc);"
+    )
+    if production_source.count(fail_stop_call) != 1:
+        return 5
+    fail_stop_mutant = production_source.replace(
+        fail_stop_call,
+        "    /* mutation: silently continue with an unconsumed lease */",
+        1,
+    )
+    if run(guard, fail_stop_mutant) == 0:
+        return 6
     seam_mutant = BASE_WITH_REGISTRY_TEST_SEAM + (
         "\nstatic void elsewhere(void) { wyl_service_auth_registry_lookup(); }\n"
     )

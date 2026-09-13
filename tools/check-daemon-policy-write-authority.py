@@ -506,7 +506,8 @@ def validate_owner_fault_matrix(root):
                 if value==api and values[i+1]=="(")
             if calls!=1:
                 raise GuardError(f"daemon WRITE owner fault {label} {api}={calls}")
-    service_marker="#elif defined(WYL_TEST_VARIANT_SERVICE)\nint\nmain (void)\n{"
+    service_marker=("#elif defined(WYL_TEST_VARIANT_SERVICE)\nint\n"
+        "main (int argc, char **argv)\n{")
     service_end_marker="\n#else /* WYL_TEST_VARIANT_AUDIT */"
     if source.count(service_marker)!=1:
         raise GuardError("daemon WRITE service test main mismatch")
@@ -514,6 +515,15 @@ def validate_owner_fault_matrix(root):
     service_end=source.index(service_end_marker,service_start)
     service=source[service_start:service_end]
     masked_service=mask_comments_and_literals(service)
+    fatal_test_dispatch=("if","(","argc","==","2","&&","g_strcmp0",
+        "(","argv","[","1","]",",",")","==","0",")","{",
+        "wyl_daemon_http_test_fatal_unconsumed_auth_lease_for_test","(",
+        ")",";","return","0",";","}")
+    service_tokens=[value for _,value in lex(masked_service,preserve_pp=True)]
+    if not has_token_sequence(service_tokens,fatal_test_dispatch) \
+            or not re.search(r'g_strcmp0\s*\(\s*argv\s*\[\s*1\s*\]\s*,\s*'
+                r'"--test-unconsumed-auth-lease"\s*\)',service):
+        raise GuardError("daemon WRITE service fail-stop test dispatch mismatch")
     main_items=defs.get("main",[])
     service_mains=[item for item in main_items
         if "check_service_access_token_state_contract" in
