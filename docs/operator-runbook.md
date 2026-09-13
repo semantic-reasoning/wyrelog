@@ -1135,6 +1135,30 @@ which in nearly every case also shows up as a degraded graph. Collecting `BOOT`
 output at `warn` at least once after a configuration change is still worthwhile
 for that reason.
 
+Fact append/retract and schema registration use TSV with LF or CRLF record
+terminators. Only the terminator is removed: spaces and other field whitespace
+are preserved, including a lone CR on an unterminated final record. One final
+terminator is optional. Empty records (including leading/interior blank lines
+and repeated final terminators) are rejected, not skipped. A whitespace-only
+string record is data. Schema boolean/type tokens must match their accepted
+spelling; trailing whitespace is not silently trimmed.
+
+The exact first record matching the relation's column names is reserved header
+syntax. To write those names as a data row, send the header followed by the same
+record again; later matching records are data. The schema header
+`column_name<TAB>column_type<TAB>nullable<TAB>visible` is likewise optional only
+in the first record. There is no quoting or backslash escape syntax: tabs delimit
+fields and LF delimits records, so tab/LF-containing field values cannot be
+represented. Embedded NUL bytes are rejected before text parsing.
+
+Nullable `string`/`symbol` fields cannot encode an empty string or the literal
+`NULL`: both are rejected with HTTP 400 `invalid_fact_payload`, not converted to
+SQL NULL. Non-nullable text fields retain literal `NULL` and empty cells in
+multi-column records; a wholly empty record is still rejected. Other nullable
+types retain their existing NULL-token parsing and store validation. Invalid
+TSV rejects the whole batch before persistence, including any preceding valid
+rows. Invalid schema TSV returns HTTP 400 `invalid_schema_payload`.
+
 The following unary `fact(V)` flow shows the required contract for a registered
 `fact(value:int64)` relation:
 

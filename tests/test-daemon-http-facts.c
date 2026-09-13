@@ -796,6 +796,223 @@ check_provisioned_http_identity (WylHandle *handle, SoupSession *session,
 }
 #endif
 
+/* Explicit lengths are essential: strlen would hide the NUL regression. */
+static void
+tsv_post (SoupSession *session, const gchar *base_url, const gchar *token,
+    const gchar *path, const gchar *query, const gchar *payload, gsize length,
+    guint expected_status, const gchar *expected_body)
+{
+  g_autofree gchar *uri = build_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", token);
+  soup_message_headers_replace (soup_message_get_request_headers (msg),
+      "Authorization", authorization);
+  g_autoptr (GBytes) request = g_bytes_new (payload, length);
+  soup_message_set_request_body_from_bytes (msg,
+      "text/tab-separated-values", request);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) response = soup_session_send_and_read (session, msg,
+          NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (response);
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (response, &size);
+  g_autofree gchar *body = g_strndup (data, size);
+  if (soup_message_get_status (msg) != expected_status
+      || strstr (body, expected_body) == NULL)
+    g_printerr ("TSV response: %s\n", body);
+  g_assert_cmpuint (soup_message_get_status (msg), ==, expected_status);
+  g_assert_nonnull (strstr (body, expected_body));
+}
+
+/* Read-only proof covers durable rows, events and batch accounting, without
+ * provisioning a missing table as a side effect of the assertion. */
+static void
+tsv_check_store (const gchar *root, const gchar *relation,
+    const gchar *expected_a, const gchar *expected_b, gint64 expected_rows,
+    gint64 expected_batches)
+{
+  WylFactGraphLocator locator = { 0 };
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator,
+      WYL_TENANT_DEFAULT, "tsv"), ==, WYRELOG_E_OK);
+  g_autofree gchar *path = wyl_fact_graph_locator_descriptive_path (root,
+          &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  duckdb_config config = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (duckdb_create_config (&config), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_set_config (config, "access_mode", "READ_ONLY"),
+      ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_open_ext (db_path, &db, config, NULL), ==,
+      DuckDBSuccess);
+  g_assert_cmpint (duckdb_connect (db, &conn), ==, DuckDBSuccess);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "a", "string", FALSE, TRUE }, { "b", "string", FALSE, TRUE }
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "tsv",
+    .namespace_id = "shop", .relation_name = relation, .schema_version = 1,
+    .columns = columns, .n_columns = 2, .relation_visible = TRUE,
+  };
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *sql = g_strdup_printf ("SELECT * FROM %s ORDER BY "
+          "__wyl_batch_id, __wyl_row_index;", table);
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
+  g_assert_cmpuint (duckdb_row_count (&result), ==, expected_rows);
+  if (expected_a != NULL) {
+    gchar *a = duckdb_value_varchar (&result, 0, 0);
+    g_assert_cmpstr (a, ==, expected_a);
+    duckdb_free (a);
+  }
+  if (expected_b != NULL) {
+    gchar *b = duckdb_value_varchar (&result, 1, 0);
+    g_assert_cmpstr (b, ==, expected_b);
+    duckdb_free (b);
+  }
+  if (g_strcmp0 (relation, "single") == 0) {
+    const gchar *values[] = { "   ", "NULL", "v", "last\r" };
+    for (gsize i = 0; i < G_N_ELEMENTS (values); i++) {
+      gchar *value = duckdb_value_varchar (&result, 0, i);
+      g_assert_cmpstr (value, ==, values[i]);
+      duckdb_free (value);
+    }
+  }
+  duckdb_destroy_result (&result);
+  g_assert_cmpint (duckdb_query (conn,
+      "SELECT (SELECT count(*) FROM fact_batches), "
+      "(SELECT count(*) FROM fact_event_log);", &result), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, expected_batches);
+  g_assert_cmpint (duckdb_value_int64 (&result, 1, 0), ==,
+      expected_rows + (g_strcmp0 (relation, "single") == 0 ? 2 : 0));
+  duckdb_destroy_result (&result);
+  /* Nullable writes are all rejected. Check their target projection directly,
+   * including the legitimate case where no physical table was ever created. */
+  wyl_policy_fact_relation_schema_options_t nullable_schema = schema;
+  nullable_schema.relation_name = "nullable";
+  g_autofree gchar *nullable_table =
+      wyl_fact_store_projection_table_name (&nullable_schema);
+  g_autofree gchar *exists_sql = g_strdup_printf (
+    "SELECT count(*) FROM information_schema.tables WHERE "
+    "table_schema='main' AND table_name='%s';", nullable_table);
+  g_assert_cmpint (duckdb_query (conn, exists_sql, &result), ==, DuckDBSuccess);
+  gboolean exists = duckdb_value_int64 (&result, 0, 0) != 0;
+  duckdb_destroy_result (&result);
+  if (exists) {
+    g_autofree gchar *empty_sql = g_strdup_printf (
+      "SELECT count(*) FROM %s;", nullable_table);
+    g_assert_cmpint (duckdb_query (conn, empty_sql, &result), ==, DuckDBSuccess);
+    g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, 0);
+    duckdb_destroy_result (&result);
+  }
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  duckdb_destroy_config (&config);
+}
+
+static void
+tsv_check_schema_absent (WylHandle *handle)
+{
+  wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
+  gsize n_columns = 0;
+  gboolean visible = FALSE;
+  g_assert_cmpint (wyl_policy_store_load_fact_relation_schema_columns (
+        wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "tsv",
+        "shop", "single", 1, &visible, &columns, &n_columns), ==,
+      WYRELOG_E_NOT_FOUND);
+  wyl_policy_fact_relation_schema_columns_free (columns, n_columns);
+}
+
+static void
+check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *root)
+{
+  const gchar *create = "tenant=__wr_default&graph=tsv&" FACT_GUARD;
+  tsv_post (session, base_url, token, "/graphs/create", create, "", 0,
+      200, "\"created\":true");
+  const gchar *schema_query = "tenant=__wr_default&graph=tsv&namespace=shop&"
+      "relation=pair&schema_version=1&" FACT_GUARD;
+  const gchar *schema = "column_name\tcolumn_type\tnullable\tvisible\r\n"
+      "a\tstring\tfalse\ttrue\r\nb\tstring\tfalse\ttrue\r\n";
+  tsv_post (session, base_url, token, "/facts/schema/register", schema_query,
+      schema, strlen (schema), 200, "\"ok\":true");
+  const gchar *append = "/facts/__wr_default/tsv/pair:append";
+  const gchar *batch = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=pad&idempotency_key=pad&" FACT_GUARD;
+  const gchar *padding = "a\tb\r\npad   \tpad   \r\n";
+  tsv_post (session, base_url, token, append, batch, padding,
+      strlen (padding), 200, "\"logical_byte_delta\":12");
+  tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
+
+  const gchar *bad_rows[] = { "a\tb\nok\tok\n\nbad\tbad\n",
+                              "a\tb\nok\tok\n\n", "a\tb\r\nok\tok\r\n\r\n",
+                              "a\tb\nok\tok\nwrong\twidth\textra\n" };
+  const gchar *reject_batch = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=reject&idempotency_key=reject&" FACT_GUARD;
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_rows); i++) {
+    tsv_post (session, base_url, token, append, reject_batch, bad_rows[i],
+        strlen (bad_rows[i]), 400, "invalid_fact_payload");
+    tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
+  }
+  static const gchar nul_rows[] = "a\tb\nok\tok\n\0ignored\trow\n";
+  tsv_post (session, base_url, token, append, reject_batch, nul_rows,
+      sizeof nul_rows - 1, 400, "invalid_fact_payload");
+  tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
+
+  /* Nullable text rejects ambiguous cells atomically, after a valid row. */
+  const gchar *nullable_schema = "a\tstring\ttrue\ttrue\n"
+      "b\tsymbol\ttrue\ttrue";
+  const gchar *nullable_query = "tenant=__wr_default&graph=tsv&namespace=shop&"
+      "relation=nullable&schema_version=1&" FACT_GUARD;
+  tsv_post (session, base_url, token, "/facts/schema/register", nullable_query,
+      nullable_schema, strlen (nullable_schema), 200, "\"ok\":true");
+  const gchar *nullable_rows[] = { "a\tb\nok\tok\nNULL\tx\n",
+                                   "a\tb\nok\tok\n\tx\n", "a\tb\nok\tok\nx\tNULL\n",
+                                   "a\tb\nok\tok\nx\t\n" };
+  for (gsize i = 0; i < G_N_ELEMENTS (nullable_rows); i++) {
+    tsv_post (session, base_url, token,
+        "/facts/__wr_default/tsv/nullable:append", reject_batch,
+        nullable_rows[i], strlen (nullable_rows[i]), 400,
+        "invalid_fact_payload");
+    tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
+  }
+
+  const gchar *header_batch = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=header&idempotency_key=header&" FACT_GUARD;
+  const gchar *header_rows = "a\tb\na\tb";
+  tsv_post (session, base_url, token, append, header_batch, header_rows,
+      strlen (header_rows), 200, "\"committed_row_delta\":1");
+  tsv_check_store (root, "pair", "a", "b", 2, 2);
+
+  const gchar *bad_schemas[] = { "v\tstring\tfalse\ttrue   \n",
+                                 "v\tstring\tfalse\ttrue\n\n", "\nv\tstring\tfalse\ttrue\n",
+                                 "v\tstring\tfalse\ttrue\r\n\r\n",
+                                 "v\tstring\tfalse\ttrue\ncolumn_name\tcolumn_type\tnullable\tvisible\n" };
+  const gchar *single_query = "tenant=__wr_default&graph=tsv&namespace=shop&"
+      "relation=single&schema_version=1&" FACT_GUARD;
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_schemas); i++) {
+    tsv_post (session, base_url, token, "/facts/schema/register", single_query,
+        bad_schemas[i], strlen (bad_schemas[i]), 400, "invalid_schema_payload");
+    tsv_check_schema_absent (handle);
+  }
+  static const gchar nul_schema[] = "v\tstring\tfalse\ttrue\n\0ignored";
+  tsv_post (session, base_url, token, "/facts/schema/register", single_query,
+      nul_schema, sizeof nul_schema - 1, 400, "invalid_schema_payload");
+  tsv_check_schema_absent (handle);
+  const gchar *single_schema = "v\tstring\tfalse\ttrue";
+  tsv_post (session, base_url, token, "/facts/schema/register", single_query,
+      single_schema, strlen (single_schema), 200, "\"ok\":true");
+  const gchar *single_path = "/facts/__wr_default/tsv/single:append";
+  const gchar *single_rows = "v\n   \nNULL\nv\nlast\r";
+  const gchar *single_batch = "tenant=__wr_default&namespace=shop&schema_version=1&"
+      "batch_id=single&idempotency_key=single&" FACT_GUARD;
+  tsv_post (session, base_url, token, single_path, single_batch, single_rows,
+      strlen (single_rows), 200, "\"committed_row_delta\":4");
+  tsv_check_store (root, "single", "   ", NULL, 4, 3);
+}
+
 static gint
 check_fact_http_contract (WylHandle *handle, SoupServer *server,
     const gchar *fact_root, const gchar *base_url)
@@ -824,6 +1041,8 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (admin_token == NULL || deny_token == NULL)
     return 13;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
 
   guint status = 0;
   g_autofree gchar *body = NULL;
