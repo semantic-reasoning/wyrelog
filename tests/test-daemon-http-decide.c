@@ -21703,6 +21703,170 @@ check_refresh_body_form_contract (const gchar *base_url)
   return 0;
 }
 
+/*
+ * #1041: /facts/status delegates its tenant refusal to the shared gate, and
+ * nothing asserted that this route answers in the same vocabulary as its
+ * peers.  Two of the gate's three refusal branches are covered here -- the
+ * cross-tenant 403 and the sealed 400.  The third, an unknown or empty
+ * request tenant answering 400 tenant_invalid, is not: that is a different
+ * branch and belongs to whoever tests it, so read this as two branches
+ * rather than as "the tenant gate".
+ *
+ * The bearer's tenant must be active and must not be the tenant under test;
+ * seed_management_human_access_token supplies __wr_default, which satisfies
+ * both.  That requirement is load-bearing rather than incidental:
+ * facts_status_handler resolves the bearer before it calls the gate, so
+ * sealing the caller's OWN tenant is caught by the resolver and
+ * answered 409, the gate is never reached, and deleting the gate call would
+ * not change the response.  A test built that way passes while proving
+ * nothing.
+ *
+ * The wire codes are written as literals rather than read from the daemon's
+ * own symbols.  That is the contract statement, not a workaround: an
+ * assertion derived from the emitting constant checks it against itself and
+ * cannot catch a value change, which is why check_login_expires_in_contract
+ * below asserts the literal 86400 rather than the daemon's own define.  The
+ * constants are also private to http.c and moving them would perturb that
+ * file's frozen preprocessor profile -- true, but incidental.
+ */
+static gint
+check_fact_status_tenant_gate_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 236;
+
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 237;
+  }
+  GThread *thread = g_thread_new ("fact-status-tenant-gate",
+          test_http_server_thread_ctx, &http);
+  gint result = 0;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *token = NULL;
+  GSList *uris = NULL;
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready
+      && !g_cond_wait_until (&barrier.changed, &barrier.mutex,
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC))
+    result = 237;
+  g_mutex_unlock (&barrier.mutex);
+  if (result != 0)
+    goto cleanup;
+
+  uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    result = 237;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  {
+    wyl_id_t sid_value = WYL_ID_NIL;
+    gchar session_id[WYL_ID_STRING_BUF] = { 0 };
+    if (wyl_id_new (&sid_value) != WYRELOG_E_OK
+        || wyl_id_format (&sid_value, session_id, sizeof session_id)
+        != WYRELOG_E_OK
+        || !seed_management_human_access_token (http.server, session_id,
+        "fact-status-gate-user", &token)) {
+      result = 238;
+      goto cleanup;
+    }
+    if (wyl_daemon_http_configure_tenant_for_test (http.server,
+        "tenant-fact-gate", TRUE, FALSE) != WYRELOG_E_OK) {
+      result = 238;
+      goto cleanup;
+    }
+
+    g_autoptr (SoupSession) session = soup_session_new ();
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+
+    /* Active but not the caller's: the gate's identity branch. */
+    if (send_raw_service_principal_bearer (session, "GET", base_url,
+        "/facts/status", "tenant=tenant-fact-gate", token, NULL, &status,
+        &body) != 0) {
+      result = 242;
+      goto cleanup;
+    }
+    /* 401 split out for the same reason the neighbouring #1044 arm does it:
+     * a seeded token the daemon rejects would otherwise be indistinguishable
+     * from the gate answering the wrong code. */
+    if (status == 401) {
+      result = 243;
+      goto cleanup;
+    }
+    if (status != 403
+        || strstr (body, "\"error\":\"tenant_denied\"") == NULL) {
+      result = 239;
+      goto cleanup;
+    }
+    g_clear_pointer (&body, g_free);
+
+    /*
+     * Sealing happens between the arms, so the 403 above is already
+     * captured.  The order is self-checking: sealing too early would make
+     * that arm answer 400 and fail, because it asserts 403 exactly.  No
+     * engine reload is needed -- both gate predicates read the policy store
+     * directly rather than a cached pair.
+     */
+    if (wyl_daemon_http_configure_tenant_for_test (http.server,
+        "tenant-fact-gate", FALSE, TRUE) != WYRELOG_E_OK) {
+      result = 240;
+      goto cleanup;
+    }
+
+    /*
+     * 400, not 409.  That distinction is the point: 409 is what the resolver
+     * answers for the caller's own sealed tenant, so an exact match fails
+     * loudly if a future edit routes this request through the wrong refusal.
+     */
+    if (send_raw_service_principal_bearer (session, "GET", base_url,
+        "/facts/status", "tenant=tenant-fact-gate", token, NULL, &status,
+        &body) != 0) {
+      result = 242;
+      goto cleanup;
+    }
+    if (status == 401) {
+      result = 243;
+      goto cleanup;
+    }
+    if (status != 400
+        || strstr (body, "\"error\":\"tenant_sealed\"") == NULL) {
+      result = 241;
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
 static gint
 check_bearer_challenge_contract (void)
 {
@@ -22040,6 +22204,20 @@ main (void)
   gint challenge_rc = check_bearer_challenge_contract ();
   if (challenge_rc != 0)
     return challenge_rc;
+  gint fact_gate_rc = check_fact_status_tenant_gate_contract ();
+  if (fact_gate_rc != 0) {
+    /*
+     * #1041/#1062: this main has no cleanup-block diagnostic, and the exit
+     * status is truncated to 8 bits.  The two assertion codes collide there
+     * -- 239 with 495, 241 with 497 and 2801 -- so the status cannot name
+     * the arm that failed and the printed value is the discriminator.  The
+     * setup codes 237, 238, 242 and 243 are each shared across sites that
+     * mean the same thing (fixture failure, rejected token), which is
+     * deliberate; 236, 239, 240 and 241 appear once.
+     */
+    g_printerr ("WYRELOG_TEST_DIAG refresh_variant result=%d\n", fact_gate_rc);
+    return fact_gate_rc;
+  }
   gint body_form_rc = check_refresh_body_form_contract (base_url);
   if (body_form_rc != 0)
     return body_form_rc;
