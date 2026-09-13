@@ -4123,10 +4123,25 @@ build_login_json (const gchar *session_token, const gchar *username,
   if (access_token != NULL) {
     g_string_append (json, ",\"access_token\":");
     append_json_string (json, access_token);
+    /*
+     * #1030: a client that treats the token as opaque -- the correct default
+     * for a bearer it does not verify -- could otherwise learn the lifetime
+     * only by decoding the JWT or by hitting a 401.
+     *
+     * This is the constant, not the remaining time.  The refresh replay path
+     * rebuilds this body from the stored tokens to answer an idempotent
+     * retry, so a decaying value would make a replayed response differ from
+     * the one it replays.  A caller that needs the true remaining life of an
+     * already-issued token has the exp claim.
+     */
+    g_string_append_printf (json, ",\"expires_in\":%d",
+        WYL_JWT_ACCESS_TTL_SECONDS);
   }
   if (refresh_token != NULL) {
     g_string_append (json, ",\"refresh_token\":");
     append_json_string (json, refresh_token);
+    g_string_append_printf (json, ",\"refresh_expires_in\":%d",
+        WYL_DAEMON_REFRESH_TTL_SECONDS);
   }
   g_string_append_c (json, '}');
   return g_string_free (g_steal_pointer (&json), FALSE);

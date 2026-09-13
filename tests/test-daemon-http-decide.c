@@ -21432,6 +21432,66 @@ check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
  * the build silences the resulting -Wunused-function warnings.
  */
 #if defined(WYL_TEST_VARIANT_REFRESH)
+/*
+ * #1030: a client that treats the access token as opaque -- the correct
+ * default for a bearer it does not verify -- has no way to schedule a refresh
+ * unless the response says how long the token lives.  Today the lifetime
+ * exists only in the JWT exp claim, so the only way to discover it is to hit
+ * a 401.  Assert the constant, not a remaining time: the refresh replay path
+ * rebuilds this body for an idempotent retry, and a decaying value would make
+ * a replayed response differ from the one it is replaying.
+ */
+static gint
+check_login_expires_in_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) login = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_login (login, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body) != 0
+      || status != 200)
+    return 191;
+
+  /*
+   * Both needles carry the byte that follows the number, because strstr
+   * matches a prefix: without the trailing delimiter, "expires_in":900 also
+   * matches an emitted 9000.  Every response this check reads carries a
+   * refresh token, so a comma always follows the access lifetime, and
+   * refresh_expires_in is the last key before the closing brace.
+   */
+  g_autofree gchar *expected = g_strdup_printf ("\"expires_in\":%d,",
+          WYL_JWT_ACCESS_TTL_SECONDS);
+  /*
+   * The refresh lifetime is spelled out rather than taken from the daemon's
+   * constant.  That constant is private to http.c, and a whole-file
+   * preprocessor freeze (check-daemon-policy-write-authority.py) pins the
+   * file's directive profile, so exporting it to a header to satisfy a test
+   * trips the guard -- removing the define is enough to break it.  Restating
+   * the value keeps the assertion strong: if the daemon's TTL changes
+   * without this line changing with it, this test fails, which is the point.
+   */
+  const gchar *refresh_key = "\"refresh_expires_in\":86400}";
+  if (strstr (body, expected) == NULL)
+    return 192;
+  if (strstr (body, refresh_key) == NULL)
+    return 196;
+
+  g_autofree gchar *refresh_token = extract_json_string (body,
+          "refresh_token");
+  if (refresh_token == NULL)
+    return 193;
+  g_clear_pointer (&body, g_free);
+
+  if (send_raw_refresh (login, "POST", base_url, refresh_token, &status,
+      &body) != 0 || status != 200)
+    return 194;
+  if (strstr (body, expected) == NULL)
+    return 195;
+  if (strstr (body, refresh_key) == NULL)
+    return 197;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -21519,6 +21579,9 @@ main (void)
           base_url);
   if (jwt_rc != 0)
     return jwt_rc;
+  gint expires_in_rc = check_login_expires_in_contract (base_url);
+  if (expires_in_rc != 0)
+    return expires_in_rc;
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
         (http.server, base_url);
   if (refresh_shutdown_rc != 0)
