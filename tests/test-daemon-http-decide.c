@@ -1467,6 +1467,20 @@ send_raw_decide_authorization_full (SoupSession *session, const gchar *method,
   gint rc = check_response_request_id_header (msg, 50);
   if (rc != 0)
     return rc;
+  /*
+   * #1030: the RFC 6750 challenge belongs on a 401 and nowhere else.  The
+   * case this actually guards is the 409 a sealed tenant answers with:
+   * attach_bearer_challenge is called on that path, and only its check for a
+   * final status of exactly 401 keeps the header off the reply.  A challenge
+   * there would send a client back into the refresh-and-retry loop that
+   * answering 409 exists to break.  Asserted here rather than in a fixture of
+   * its own because every decide caller already routes through this helper,
+   * and one of them drives a sealed tenant to a real 409.
+   */
+  if (soup_message_get_status (msg) != 401
+      && soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "WWW-Authenticate") != NULL)
+    return 51;
 
   gsize body_size = 0;
   const gchar *body_data = g_bytes_get_data (body, &body_size);
@@ -21441,6 +21455,254 @@ check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
  * rebuilds this body for an idempotent retry, and a decaying value would make
  * a replayed response differ from the one it is replaying.
  */
+/*
+ * #1030: send one logout request and report the WWW-Authenticate challenge
+ * it answers with.  authorization is the literal header value, or NULL to
+ * send none at all -- the difference between "no credential presented" and
+ * "one presented and refused" is the whole point of the check below, so the
+ * two cases must be distinguishable at the point the request is built.
+ */
+static gint
+send_logout_challenge_probe (SoupSession *session, const gchar *base_url,
+    const gchar *authorization, guint *out_status, gchar **out_challenge)
+{
+  *out_status = 0;
+  *out_challenge = NULL;
+
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+  g_autofree gchar *uri = g_strdup_printf ("%s/auth/logout", root);
+  g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
+  if (msg == NULL)
+    return 214;
+  if (authorization != NULL)
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+        "Authorization", authorization);
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+          &error);
+  if (bytes == NULL)
+    return 215;
+  *out_status = soup_message_get_status (msg);
+  const gchar *challenge = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "WWW-Authenticate");
+  *out_challenge = g_strdup (challenge);
+  return 0;
+}
+
+/*
+ * #1030: a 401 from a bearer-protected route must say so in the RFC 6750
+ * header, and must let a client tell "you sent nothing" from "what you sent
+ * is not usable".  Without that split a client's only correct strategy is to
+ * refresh on every 401 and treat a second 401 as terminal, which turns a
+ * routine expiry into two extra round trips.
+ *
+ * This runs against its own handle and its own server, following the
+ * isolated-fixture convention at check_service_resolver_prelatched_unavailable
+ * and check_unknown_tenant_create_outcome_isolated.  That is not tidiness:
+ * the expired arm injects a clock, and service_auth_now_seconds ratchets
+ * ctx->service_auth_clock_floor upward and never lowers it.  The floor is a
+ * per-context field, so a private server confines the injection to this
+ * check; on the shared server it would pin the clock for every check that
+ * ran afterwards and leave their tokens born expired.  Because the handle is
+ * private too, the login permission has to be seeded here rather than
+ * inherited from the main.
+ */
+static gint
+check_bearer_challenge_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 210;
+  if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
+        (handle), "login-user", "wr.login.skip_mfa", "login")
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
+        (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
+      != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 210;
+
+  /*
+   * A private GMainContext, not the global default: the REFRESH main's own
+   * server is already being driven on the default context by another thread,
+   * and a second server there would have its listening socket torn down out
+   * from under that thread's accept (seen as a G_IS_SOCKET assertion, and as
+   * a segfault once MALLOC_PERTURB_ fills the freed socket).  See the comment
+   * on test_http_server_thread_ctx.
+   */
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 211;
+  }
+  GThread *thread = g_thread_new ("bearer-challenge",
+          test_http_server_thread_ctx, &http);
+  gint result = 0;
+  /*
+   * Declared before the first goto below.  cleanup: is in this scope, so a
+   * goto that jumps over this initializer still runs its g_autofree handler
+   * at scope exit -- freeing whatever the slot happens to hold, which at -O2
+   * is not necessarily NULL.
+   */
+  g_autofree gchar *base_url = NULL;
+  GSList *uris = NULL;
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready
+      && !g_cond_wait_until (&barrier.changed, &barrier.mutex,
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC))
+    result = 211;
+  g_mutex_unlock (&barrier.mutex);
+  if (result != 0)
+    goto cleanup;
+  uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    result = 211;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  {
+    g_autoptr (SoupSession) session = soup_session_new ();
+    guint status = 0;
+    g_autofree gchar *login_body = NULL;
+    if (send_raw_login (session, "POST", base_url,
+        "username=login-user&skip_mfa=true", &status, &login_body) != 0
+        || status != 200) {
+      result = 212;
+      goto cleanup;
+    }
+    g_autofree gchar *access_token = extract_json_string (login_body,
+            "access_token");
+    if (access_token == NULL) {
+      result = 212;
+      goto cleanup;
+    }
+
+    /* Nothing presented: the challenge names the scheme and claims nothing
+     * about a token, because none was sent. */
+    guint absent_status = 0;
+    g_autofree gchar *absent = NULL;
+    result = send_logout_challenge_probe (session, base_url, NULL,
+            &absent_status, &absent);
+    if (result != 0)
+      goto cleanup;
+    if (absent_status != 401
+        || g_strcmp0 (absent, "Bearer realm=\"wyrelog\"") != 0) {
+      result = 216;
+      goto cleanup;
+    }
+
+    /*
+     * A scheme the route does not take.  lookup_bearer_token returns the
+     * empty-string sentinel for any non-Bearer scheme, so has_bearer_token is
+     * false and this lands on the same "no credential presented" branch as
+     * the probe above -- not on the separate present-but-empty branch, which
+     * logout_handler cannot actually reach (getting there needs a session
+     * token, and the preceding branch already answers 400 for that).  The
+     * challenge is therefore byte-equal to the absent one, and that is
+     * correct twice over: error="invalid_token" would assert a token was
+     * presented when none was, and the bare form tells a wrong-scheme client
+     * which scheme this route wants.
+     */
+    guint scheme_status = 0;
+    g_autofree gchar *scheme = NULL;
+    result = send_logout_challenge_probe (session, base_url,
+            "Basic dXNlcjpwYXNz", &scheme_status, &scheme);
+    if (result != 0)
+      goto cleanup;
+    if (scheme_status != 401
+        || g_strcmp0 (scheme, "Bearer realm=\"wyrelog\"") != 0) {
+      result = 217;
+      goto cleanup;
+    }
+
+    /* Presented and refused. */
+    guint bogus_status = 0;
+    g_autofree gchar *bogus = NULL;
+    result = send_logout_challenge_probe (session, base_url,
+            "Bearer not-a-token", &bogus_status, &bogus);
+    if (result != 0)
+      goto cleanup;
+    if (bogus_status != 401
+        || g_strcmp0 (bogus,
+        "Bearer realm=\"wyrelog\", error=\"invalid_token\"") != 0) {
+      result = 218;
+      goto cleanup;
+    }
+
+    /*
+     * Genuinely expired, not merely malformed: the token was minted against
+     * the real clock a moment ago and is now verified against an injected
+     * one past its TTL.  The daemon cannot distinguish expiry from a bad
+     * signature -- resolve_bearer_session collapses both to
+     * WYRELOG_E_POLICY -- so this arm and the bogus arm above answer
+     * identically.  RFC 6750 covers both under invalid_token.
+     */
+    g_autofree gchar *bearer = g_strdup_printf ("Bearer %s", access_token);
+    wyl_daemon_http_set_service_auth_clock_for_test (http.server, TRUE,
+        g_get_real_time () / G_USEC_PER_SEC + WYL_JWT_ACCESS_TTL_SECONDS + 1);
+    guint expired_status = 0;
+    g_autofree gchar *expired = NULL;
+    result = send_logout_challenge_probe (session, base_url, bearer,
+            &expired_status, &expired);
+    if (result != 0)
+      goto cleanup;
+    if (expired_status != 401
+        || g_strcmp0 (expired,
+        "Bearer realm=\"wyrelog\", error=\"invalid_token\"") != 0) {
+      result = 219;
+      goto cleanup;
+    }
+
+    /*
+     * The issue's acceptance criterion stated directly: a client can tell an
+     * expired credential from an absent one by the response alone.  No
+     * mutation can reach this -- it is entailed by the two checks above, so
+     * it guards a future edit that makes both arms converge while each still
+     * passes its own check.  It is not independent coverage.
+     */
+    if (g_strcmp0 (absent, expired) == 0) {
+      result = 213;
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  /*
+   * A quit that lands before the thread reaches g_main_loop_run is lost, so
+   * the join below would wait out the harness timeout rather than return the
+   * barrier failure.  Only the 5-second barrier timeout can arrive that
+   * early, and the precedent fixtures share the shape.
+   */
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
 static gint
 check_login_expires_in_contract (const gchar *base_url)
 {
@@ -21582,6 +21844,9 @@ main (void)
   gint expires_in_rc = check_login_expires_in_contract (base_url);
   if (expires_in_rc != 0)
     return expires_in_rc;
+  gint challenge_rc = check_bearer_challenge_contract ();
+  if (challenge_rc != 0)
+    return challenge_rc;
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
         (http.server, base_url);
   if (refresh_shutdown_rc != 0)

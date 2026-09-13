@@ -6649,6 +6649,41 @@ set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 }
 
 /*
+ * #1030: RFC 6750 challenge for a 401 from a route that takes a bearer.
+ * Without it a client cannot tell "you sent no credential" from "what you
+ * sent is not usable", so its only correct strategy is to refresh on every
+ * 401 and treat a second 401 as terminal -- two extra round trips for a
+ * routine expiry, and a genuine credential error that looks transient.
+ *
+ * rfc_error is NULL for the bare challenge and "invalid_token" only where a
+ * bearer was certainly presented and certainly not accepted.  Most sites take
+ * NULL, and that is deliberate rather than unfinished: lookup_bearer_token
+ * returns the same empty-string sentinel for a non-Bearer scheme as for an
+ * empty Bearer token, so a branch that fires on both cannot claim a token was
+ * presented.  The bare form is also the more useful answer there -- it tells
+ * a wrong-scheme client which scheme this route wants.
+ *
+ * Callers invoke this AFTER the response is set, not before: set_json_error
+ * can rewrite a 401 into 503 server_shutting_down or 500, and can return
+ * having set no status at all.  Reading the status here, once it is final,
+ * is what keeps the challenge off those replies and off the 409 that a
+ * sealed tenant answers with, without naming any of them.
+ */
+static void
+attach_bearer_challenge (SoupServerMessage *msg, const gchar *rfc_error)
+{
+  static const gchar *const challenge = "Bearer realm=\"wyrelog\"";
+  if (soup_server_message_get_status (msg) != 401)
+    return;
+  g_autofree gchar *value = rfc_error != NULL
+      ? g_strdup_printf ("%s, error=\"%s\"", challenge, rfc_error)
+      : g_strdup (challenge);
+  soup_message_headers_replace
+    (soup_server_message_get_response_headers (msg), "WWW-Authenticate",
+      value);
+}
+
+/*
  * #1032: a credential-resolution failure is 401, but a sealed tenant is not a
  * credential problem -- the credential verified and the resource is closed.
  * Answering 401 tells the client to re-authenticate, and the prescribed
@@ -7212,6 +7247,7 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
    * prevent; every other route refuses it here (see :7490). */
   if (bearer_token != NULL && !has_bearer) {
     set_json_error (msg, 401, "fact_status_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
   if (has_bearer || has_session) {
@@ -7224,6 +7260,7 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error,
           "fact_status_auth_required");
+      attach_bearer_challenge (msg, has_bearer ? "invalid_token" : NULL);
       return;
     }
     /* Same gate every other tenant-scoped route uses, so a request for a
@@ -7533,6 +7570,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
   gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
   if (!has_session_token && !has_bearer_token) {
     set_json_error (msg, 401, auth_required_code);
+    attach_bearer_challenge (msg, NULL);
     return FALSE;
   }
   if (has_session_token && bearer_token != NULL) {
@@ -7541,6 +7579,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
   }
   if (bearer_token != NULL && !has_bearer_token) {
     set_json_error (msg, 401, auth_required_code);
+    attach_bearer_challenge (msg, NULL);
     return FALSE;
   }
   if (guard_timestamp == NULL || guard_loc_class == NULL || guard_risk == NULL) {
@@ -7566,6 +7605,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
             &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
+      attach_bearer_challenge (msg, NULL);
       return FALSE;
     }
   } else {
@@ -7573,6 +7613,7 @@ authorize_guarded_session_action_extended (SoupServer *server,
             bearer_token, &auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
+      attach_bearer_challenge (msg, "invalid_token");
       return FALSE;
     }
   }
@@ -7902,6 +7943,7 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
   gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
   if (!has_bearer_token) {
     set_json_error (msg, 401, auth_required_code);
+    attach_bearer_challenge (msg, NULL);
     return FALSE;
   }
   if (has_session_token && has_bearer_token) {
@@ -7929,6 +7971,7 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
           bearer_token, &auth, &auth_tenant_error, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
     set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
+    attach_bearer_challenge (msg, "invalid_token");
     return FALSE;
   }
   if (!auth.bearer || g_strcmp0 (auth.tenant, WYL_TENANT_DEFAULT) != 0) {
@@ -13165,6 +13208,7 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
   if (bearer == NULL || bearer[0] == '\0' ||
       (query != NULL && g_hash_table_contains (query, "session_token"))) {
     set_json_error (msg, 401, "mfa_enroll_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return FALSE;
   }
   g_autofree gchar *actor = NULL;
@@ -13178,6 +13222,7 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
       &tenant_error, FALSE) != WYRELOG_E_OK ||
       g_strcmp0 (actor, out_auth->actor) != 0) {
     set_json_error (msg, 401, "mfa_enroll_auth_required");
+    attach_bearer_challenge (msg, "invalid_token");
     return FALSE;
   }
   return TRUE;
@@ -15680,6 +15725,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
   if (!has_session_token && !has_bearer_token) {
     set_json_error (msg, 401, "logout_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
   if (has_session_token && bearer_token != NULL) {
@@ -15688,6 +15734,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
   if (bearer_token != NULL && !has_bearer_token) {
     set_json_error (msg, 401, "logout_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
 
@@ -15698,6 +15745,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
             bearer_token, &bearer_auth, &auth_tenant_error, FALSE);
     if (auth_rc != WYRELOG_E_OK) {
       set_auth_failure_error (msg, auth_tenant_error, "logout_auth_required");
+      attach_bearer_challenge (msg, "invalid_token");
       return;
     }
     session_token = bearer_auth.session_id;
@@ -15707,6 +15755,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       wyl_daemon_http_ref_session (server, session_token);
   if (session == NULL) {
     set_json_error (msg, 401, "logout_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
 
@@ -15748,6 +15797,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 
   if (!wyl_daemon_http_context_remove_session (ctx, session_token)) {
     set_json_error (msg, 401, "logout_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
 
@@ -15806,6 +15856,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *bearer_token = lookup_bearer_token (msg);
   if (bearer_token == NULL || bearer_token[0] == '\0') {
     set_json_error (msg, 401, "decide_auth_required");
+    attach_bearer_challenge (msg, NULL);
     return;
   }
   g_auto (WylDaemonAuthContext) auth = { 0 };
@@ -15814,6 +15865,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
           bearer_token, &auth, &auth_tenant_error, TRUE);
   if (auth_rc != WYRELOG_E_OK) {
     set_auth_failure_error (msg, auth_tenant_error, "decide_auth_required");
+    attach_bearer_challenge (msg, "invalid_token");
     return;
   }
   if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))

@@ -491,6 +491,28 @@ answers a retried request by rebuilding the original response, so a decaying
 value there would make a replay differ from what it replays. The service
 token response does not carry `expires_in`; its lifetime is 300 seconds.
 
+A 401 from a route that takes a bearer carries an RFC 6750 challenge, so a
+client can tell a credential it should refresh from one it never sent:
+
+```
+WWW-Authenticate: Bearer realm="wyrelog"
+WWW-Authenticate: Bearer realm="wyrelog", error="invalid_token"
+```
+
+The `error="invalid_token"` form means a bearer was presented and refused --
+expired, revoked, or not verifying. Refresh once and retry; a second such 401
+is terminal. The bare form means no usable bearer reached the route, which
+covers a missing `Authorization` header and also a header in another scheme,
+such as `Basic`: the daemon cannot report a token as invalid when none was
+sent, and the bare challenge names the scheme the route wants. Re-authenticate
+rather than refresh.
+
+Expiry and a bad signature deliberately answer alike. Both are `invalid_token`,
+which RFC 6750 defines to cover each, and the client's response to them is the
+same. The distinction the client needs -- and previously could not make, since
+every one of these conditions returned a bare `401` with no header at all -- is
+between a credential worth refreshing and one that was never usable.
+
 `/auth/login` does not enumerate enrolled vs unenrolled subjects: an
 unenrolled but otherwise-valid subject still receives an `mfa_required`
 session, and only `/auth/mfa/verify` surfaces `enrollment_required`.
