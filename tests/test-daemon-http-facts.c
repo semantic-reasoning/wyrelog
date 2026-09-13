@@ -409,6 +409,90 @@ check_fact_projection_row_count (const gchar *fact_root,
 }
 
 static gint
+check_fact_batch_absent (const gchar *fact_root, const gchar *graph_id,
+    const gchar *batch_id)
+{
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 300;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  if (path == NULL)
+    return 301;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  if (!g_file_test (db_path, G_FILE_TEST_EXISTS))
+    return 0;
+
+  duckdb_config config = NULL;
+  duckdb_database database = NULL;
+  duckdb_connection connection = NULL;
+  duckdb_result result = { 0 };
+  duckdb_prepared_statement statement = NULL;
+  char *open_error = NULL;
+  gboolean have_result = FALSE;
+  gint rc = 302;
+  if (duckdb_create_config (&config) != DuckDBSuccess)
+    goto out;
+  if (duckdb_set_config (config, "access_mode", "READ_ONLY")
+      != DuckDBSuccess
+      || duckdb_set_config (config, "autoinstall_known_extensions", "false")
+      != DuckDBSuccess)
+    goto out;
+  if (duckdb_open_ext (db_path, &database, config, &open_error)
+      != DuckDBSuccess)
+    goto out;
+  if (duckdb_connect (database, &connection) != DuckDBSuccess) {
+    rc = 303;
+    goto out;
+  }
+  if (duckdb_query (connection,
+      "SELECT COUNT(*) FROM information_schema.tables "
+      "WHERE table_schema = 'main' AND table_name = 'fact_batches';",
+      &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    rc = 304;
+    goto out;
+  }
+  have_result = TRUE;
+  gint64 table_count = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  have_result = FALSE;
+  /* Secure graph provisioning creates an identity-bearing store before any
+   * fact batch or its metadata tables exist. */
+  if (table_count == 0) {
+    rc = 0;
+    goto out;
+  }
+  if (duckdb_prepare (connection,
+      "SELECT COUNT(*) FROM main.fact_batches WHERE batch_id = ?;",
+      &statement) != DuckDBSuccess) {
+    rc = 305;
+    goto out;
+  }
+  if (duckdb_bind_varchar (statement, 1, batch_id) != DuckDBSuccess
+      || duckdb_execute_prepared (statement, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    rc = 306;
+    goto out;
+  }
+  have_result = TRUE;
+  gint64 batch_count = duckdb_value_int64 (&result, 0, 0);
+  rc = batch_count == 0 ? 0 : 307;
+
+out:
+  if (have_result)
+    duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&statement);
+  duckdb_disconnect (&connection);
+  duckdb_close (&database);
+  duckdb_destroy_config (&config);
+  duckdb_free (open_error);
+  return rc;
+}
+
+static gint
 check_fact_projection_batch_rows (const gchar *fact_root,
     const gchar *graph_id, const gchar *batch_id, gint64 expected_rows)
 {
@@ -1171,7 +1255,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
     return 357;
-  if (check_fact_projection_row_count (fact_root, "null-bulk", 0) != 0)
+  if (check_fact_batch_absent (fact_root, "null-bulk", "null-bulk-1") != 0)
     return 358;
 
   g_clear_pointer (&body, g_free);
