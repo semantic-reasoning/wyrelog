@@ -1165,14 +1165,46 @@ handoff_maintenance_stops_execution
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_service_credential_operation_coordinator_execute_handoff
+/* Incoming handoff intent is normalized by the front door. Binding digests
+ * and lifecycle metadata are minted by the server, not supplied by retries. */
+static gboolean
+handoff_optional_text_matches (const gchar *request, const gchar *record)
+{
+  /* The journal encodes absent optional strings as zero-length text. */
+  return g_strcmp0 (request != NULL ? request : "",
+             record != NULL ? record : "") == 0;
+}
+
+static gboolean
+handoff_intent_matches (const WylServiceCredentialOperationCoordinatorRequest *request,
+    const WylServiceCredentialOperationRecord *record,
+    const WylServiceCredentialOperationHandoffExecuteRuntime *runtime)
+{
+  return request->kind == record->kind
+         && g_strcmp0 (request->request_id, record->request_id) == 0
+         && handoff_optional_text_matches (request->subject_id, record->subject_id)
+         && handoff_optional_text_matches (request->tenant_id, record->tenant_id)
+         && g_strcmp0 (request->destination, record->destination) == 0
+         && g_strcmp0 (request->parent_identity, record->parent_identity) == 0
+         && g_strcmp0 (request->actor_subject_id, record->actor_subject_id) == 0
+         && handoff_optional_text_matches (request->old_credential_id,
+             record->old_credential_id)
+         && g_strcmp0 (request->escrow_id, record->escrow_id) == 0
+         && request->expires_at_us == record->expires_at_us
+         && ((runtime->expected_generation_is_server_derived
+         && request->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
+         || request->expected_generation == record->expected_generation);
+}
+
+static wyrelog_error_t
+execute_handoff_with_intent
   (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
     const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
-    WylServiceCredentialOperationRecord * out_record)
+    WylServiceCredentialOperationRecord * out_record,
+    const WylServiceCredentialOperationCoordinatorRequest *expected_request)
 {
   WylServiceCredentialOperationCoordinatorLock lifecycle_lock =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
@@ -1259,6 +1291,12 @@ wyl_service_credential_operation_coordinator_execute_handoff
     }
   } else {
     rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+
+  if (expected_request != NULL && !handoff_intent_matches (expected_request,
+      &record, runtime)) {
+    rc = WYRELOG_E_CONFLICT;
     goto out;
   }
 
@@ -1391,6 +1429,20 @@ out:
     wyl_service_credential_operation_coordinator_lock_release (storage,
         anchor, &lifecycle_lock);
   return rc;
+}
+
+/* Recovery has no incoming caller intent: the stored record is authoritative.
+ * Authenticated issue/rotate retries use execute_handoff_with_intent instead. */
+wyrelog_error_t
+wyl_service_credential_operation_coordinator_execute_handoff
+  (WylHandle *handle, const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const gchar *request_id,
+    const WylServiceCredentialOperationHandoffExecuteRuntime *runtime,
+    WylServiceCredentialOperationRecord *out_record)
+{
+  return execute_handoff_with_intent (handle, storage, anchor, request_id,
+             runtime, out_record, NULL);
 }
 
 wyrelog_error_t
@@ -1536,6 +1588,58 @@ handoff_derive_escrow (WylServiceCredentialOperationCoordinatorRequest *request)
   return request->escrow_id != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
 
+/* A guarded begin may lose an initial-miss race. Classify only: a successful
+ * reload must never turn a policy refusal into maintenance or execution. */
+static wyrelog_error_t
+handoff_classify_guarded_policy (WylHandle *handle,
+    const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationCoordinatorRequest *request,
+    const WylServiceCredentialOperationHandoffExecuteRuntime *runtime)
+{
+  WylServiceCredentialOperationCoordinatorLock lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  wyl_service_credential_t old = { 0 };
+  wyrelog_error_t rc = WYRELOG_E_POLICY;
+  if (wyl_service_credential_operation_coordinator_lock_acquire (storage,
+      anchor, request->request_id, &lock) != WYRELOG_E_OK)
+    return rc;
+  rc = handoff_front_authorize (handle, request, runtime);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = WYRELOG_E_POLICY;
+  if (wyl_service_credential_operation_coordinator_load (storage, anchor,
+      request->request_id, &record) != WYRELOG_E_OK)
+    goto out;
+  if (g_strcmp0 (record.actor_subject_id,
+      runtime->authenticated_actor_subject_id) != 0)
+    goto out;
+  if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
+    if (g_strcmp0 (record.tenant_id, runtime->target_tenant) != 0)
+      goto out;
+  } else if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
+    rc = wyl_service_credential_operation_coordinator_get_credential_pinned
+          (handle, runtime->cancellable, record.old_credential_id, &old);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    rc = WYRELOG_E_POLICY;
+    if (g_strcmp0 (old.tenant_id, runtime->target_tenant) != 0)
+      goto out;
+  } else {
+    goto out;
+  }
+  if (!handoff_intent_matches (request, &record, runtime))
+    rc = WYRELOG_E_CONFLICT;
+out:
+  wyl_service_credential_clear (&old);
+  wyl_service_credential_operation_record_clear (&record);
+  wyl_service_credential_operation_coordinator_lock_release (storage, anchor,
+      &lock);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_service_credential_operation_coordinator_handoff
   (WylHandle * handle,
@@ -1560,7 +1664,8 @@ wyl_service_credential_operation_coordinator_handoff
 
   /* Shallow copy borrows the caller's strings; only escrow_id is ever owned by
    * this frame.  expires_at_us and expected_generation are carried through
-   * unchanged as the caller-supplied immutable operation identity. */
+   * unchanged for initial persistence. HTTP ROTATE marks its derived generation
+   * separately so a retry compares caller intent without redefining the CAS. */
   local = *request;
   local.escrow_id = NULL;
   memset (local.escrow_binding_digest, 0, sizeof local.escrow_binding_digest);
@@ -1579,10 +1684,17 @@ wyl_service_credential_operation_coordinator_handoff
   rc = wyl_service_credential_operation_coordinator_load (storage, anchor,
           local.request_id, &existing);
   if (rc == WYRELOG_E_NOT_FOUND) {
+    if (runtime->after_missing_lookup != NULL)
+      runtime->after_missing_lookup (runtime->missing_lookup_data);
     rc =
         wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
           (handle, storage, anchor, &local, runtime->cancellable, &guarded);
     wyl_service_credential_operation_guarded_begin_result_clear (&guarded);
+    if (rc == WYRELOG_E_POLICY) {
+      rc = handoff_classify_guarded_policy (handle, storage, anchor, &local,
+              runtime);
+      goto out;
+    }
     if (rc != WYRELOG_E_OK)
       goto out;
   } else if (rc == WYRELOG_E_OK) {
@@ -1591,8 +1703,8 @@ wyl_service_credential_operation_coordinator_handoff
     goto out;
   }
 
-  rc = wyl_service_credential_operation_coordinator_execute_handoff (handle,
-          storage, anchor, local.request_id, runtime, out_record);
+  rc = execute_handoff_with_intent (handle,
+          storage, anchor, local.request_id, runtime, out_record, &local);
 
 out:
   g_free (local.escrow_id);

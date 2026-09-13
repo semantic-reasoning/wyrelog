@@ -12,7 +12,7 @@
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 
 G_BEGIN_DECLS
-    typedef struct wyctl_publication_backend_vtable_t
+typedef struct wyctl_publication_backend_vtable_t
     WyctlPublicationBackendVTable;
 /* Injected authority revalidation. Returns WYRELOG_E_OK to permit the bound
  * actor to proceed, or a denial code that the boundary propagates verbatim.
@@ -68,8 +68,8 @@ typedef struct
  * generation-binding denial, the domain rc on dispatch, or the revalidation rc
  * when authority is refused. */
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_authorize_and_execute
-    (WylHandle * handle, const WylServiceCredentialOperationRecord * record,
+wyl_service_credential_operation_coordinator_authorize_and_execute
+  (WylHandle * handle, const WylServiceCredentialOperationRecord * record,
     const gchar * authenticated_actor_subject_id,
     const WylServiceCredentialOperationExecuteRuntime * runtime,
     wyl_service_credential_issue_result_t * out);
@@ -89,13 +89,20 @@ typedef struct
   const WyctlPublicationBackendVTable *publication;
   gpointer publication_data;
   const wyl_service_credential_rotate_runtime_t *rotate_runtime;
-    gint64 (*now_us) (gpointer data);
+  /* Only HTTP ROTATE derives generation from the current credential row.
+   * Explicit-generation callers leave FALSE; stored mutation guards remain. */
+  gboolean expected_generation_is_server_derived;
+  gint64 (*now_us) (gpointer data);
   gpointer clock_data;
   GCancellable *cancellable;
   /* Deterministic private test checkpoint immediately after an ALLOW while
    * the current service-auth WRITE lease is still held.  Non-reentrant. */
   void (*after_authorization) (gpointer data);
   gpointer authorization_checkpoint_data;
+  /* Private test checkpoint after a missing journal lookup, before begin.
+   * A nested winner must leave this callback NULL. */
+  void (*after_missing_lookup) (gpointer data);
+  gpointer missing_lookup_data;
 } WylServiceCredentialOperationHandoffExecuteRuntime;
 
 /* Execute or resume one v5 journal operation without returning credential
@@ -105,8 +112,8 @@ typedef struct
  * mutation lease it enters.  out_record is caller-owned and contains durable,
  * non-secret state only; it is unchanged on failure. */
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_execute_handoff
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_execute_handoff
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
@@ -131,8 +138,8 @@ wyrelog_error_t
  * from the client request as an absolute value and MUST NOT server-recompute
  * now()+TTL, which would diverge retries and force a spurious conflict. */
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_handoff
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_handoff
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
@@ -158,7 +165,7 @@ wyrelog_error_t
  * libwyrelog.so and could not resolve a hidden symbol.  Privacy is enforced by
  * this header never being installed, not by symbol visibility. */
 void wyl_service_credential_operation_coordinator_arm_publication_fault_once
-    (void);
+  (void);
 #endif /* WYL_ENABLE_FAULT_INJECTION */
 
 G_END_DECLS

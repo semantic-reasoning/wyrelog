@@ -244,6 +244,35 @@ CRED_ID=$("$PY" "$SC_E2E_PY" receipt-field --field credential_id \
   || fail "issue receipt did not carry a credential_id" "$TMPDIR/issue.out"
 test -s "$PUBROOT/credA" || fail "escrow doc not written to \$PUBROOT/credA"
 
+# A request ID is bound to its original intent, even after delivery.
+ISSUE_REQUEST_ID=$("$PY" "$SC_E2E_PY" receipt-field --field request_id \
+  <"$TMPDIR/issue.out") \
+  || fail "issue receipt missing request_id" "$TMPDIR/issue.out"
+"$PY" "$SC_E2E_PY" assert-http-status --base-url "$URL" \
+  --path /service-principals/svc:svc-app/credentials \
+  --token-file "$ADMIN2_TOKEN" \
+  --query tenant=tenant-a \
+  --query "guard_timestamp=$(now_us)" --query guard_loc_class=trusted \
+  --query guard_risk=0 --json-field version=1 --json-field tenant=tenant-a \
+  --json-field "request_id=$ISSUE_REQUEST_ID" \
+  --json-field destination=changed.json --json-field "expires_at_us=$EXPIRES" \
+  --expect-status 409 --expect-error service_credential_conflict \
+  >"$TMPDIR/conflict.out" 2>"$TMPDIR/conflict.err" \
+  || fail "changed-intent retry was not a conflict" "$TMPDIR/conflict.err"
+test ! -e "$PUBROOT/changed.json" \
+  || fail "changed-intent retry published another document"
+"$WYCTL" --daemon-url "$URL" service-credential issue \
+  --subject svc:svc-app --tenant tenant-a --destination credA \
+  --request-id "$ISSUE_REQUEST_ID" \
+  --expires-at-us "$EXPIRES" --access-token-file "$ADMIN2_TOKEN" \
+  --guard-timestamp "$(now_us)" --guard-loc-class trusted --guard-risk 0 \
+  >"$TMPDIR/retry.out" 2>"$TMPDIR/retry.err" \
+  || fail "identical retry failed" "$TMPDIR/retry.err"
+RETRY_CRED_ID=$("$PY" "$SC_E2E_PY" receipt-field --field credential_id \
+  <"$TMPDIR/retry.out")
+[ "$RETRY_CRED_ID" = "$CRED_ID" ] \
+  || fail "identical retry returned a different credential"
+
 # --- 10. exchange the escrow doc for a live service JWT. ----------------------
 SVC_TOKEN="$TMPDIR/svc.token"
 rm -f "$SVC_TOKEN"

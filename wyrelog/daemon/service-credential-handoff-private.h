@@ -13,14 +13,13 @@ G_BEGIN_DECLS;
 typedef struct wyctl_publication_backend_vtable_t WyctlPublicationBackendVTable;
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 
-/* Immutable, caller-supplied identity of one escrow credential handoff.  These
- * fields describe WHAT the operation is; they must be resent verbatim on every
- * retry.  In particular expires_at_us is the operator-chosen ABSOLUTE credential
- * expiry and expected_generation is the rotate CAS target: the daemon takes them
- * from the client request and never server-recomputes now()+TTL, so retries do
- * not diverge.  The publication parent_identity is NOT a client input: the daemon
- * derives it from its own credential_publication_root via the publication
- * backend's root_identity accessor. */
+/* Intent of one escrow credential handoff. Caller-supplied fields must be
+ * resent verbatim on every retry. In particular expires_at_us is an absolute
+ * expiry, never a server-recomputed now()+TTL. expected_generation is the rotate
+ * CAS target; HTTP derives it from the current credential row and marks that
+ * provenance below, while direct callers supply an explicit binding. The
+ * publication parent_identity is also server-derived, from the daemon's own
+ * credential_publication_root via the backend's root_identity accessor. */
 typedef struct
 {
   WylServiceCredentialOperationKind kind;
@@ -31,6 +30,8 @@ typedef struct
   /* ROTATE only. */
   const gchar *old_credential_id;
   guint64 expected_generation;
+  /* Trusted HTTP ROTATE provenance, never accepted from request JSON. */
+  gboolean expected_generation_is_server_derived;
   const gchar *destination;
   gint64 expires_at_us;
 } WylDaemonServiceCredentialHandoffInputs;
