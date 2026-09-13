@@ -13,6 +13,7 @@
 #include "wyl-common-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
+#include "wyl-log-private.h"
 #include "wyl-permission-scope-private.h"
 #include "wyl-session-layout-private.h"
 
@@ -1197,6 +1198,18 @@ handoff_intent_matches (const WylServiceCredentialOperationCoordinatorRequest *r
 }
 
 static wyrelog_error_t
+handoff_fresh_provider_check (gpointer user_data)
+{
+  WylHandle *handle = user_data;
+  if (wyl_policy_store_has_service_credential_provider
+        (wyl_handle_get_policy_store (handle)))
+    return WYRELOG_E_OK;
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: effective-provider-unavailable");
+  return WYRELOG_E_NOT_FOUND;
+}
+
+static wyrelog_error_t
 execute_handoff_with_intent
   (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
@@ -1686,9 +1699,13 @@ wyl_service_credential_operation_coordinator_handoff
   if (rc == WYRELOG_E_NOT_FOUND) {
     if (runtime->after_missing_lookup != NULL)
       runtime->after_missing_lookup (runtime->missing_lookup_data);
+    /* Retirement receipts take precedence. The capability check runs only at
+     * the locked fresh-create edge, after retired-ID and concurrent replay
+     * classification, without ever leaving a journal on refusal. */
     rc =
-        wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-          (handle, storage, anchor, &local, runtime->cancellable, &guarded);
+        wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
+          (handle, storage, anchor, &local, runtime->cancellable, &guarded,
+            handoff_fresh_provider_check, handle);
     wyl_service_credential_operation_guarded_begin_result_clear (&guarded);
     if (rc == WYRELOG_E_POLICY) {
       rc = handoff_classify_guarded_policy (handle, storage, anchor, &local,

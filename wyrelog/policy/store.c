@@ -23045,6 +23045,14 @@ out:
   return rc;
 }
 
+gboolean
+wyl_policy_store_has_service_credential_provider (const wyl_policy_store_t *store)
+{
+  /* Ownership is fixed for an open handle. Offline provider rotation uses a
+   * separate, privately opened store and never changes a live handle. */
+  return store != NULL && store->keyprovider.owned;
+}
+
 static wyrelog_error_t
 service_cvk_materialize (wyl_policy_store_t *store, gboolean allow_create,
     const guint8 **out_cvk, gsize *out_len)

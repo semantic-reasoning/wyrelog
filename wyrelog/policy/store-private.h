@@ -2040,6 +2040,9 @@ wyrelog_error_t wyl_policy_store_lookup_service_credential_by_id
 wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
     * store, const gchar * subject_id, const gchar * tenant_id,
     wyl_policy_service_credential_cb cb, gpointer user_data);
+/* Read-only capability check; never probes a provider or materializes a CVK. */
+gboolean wyl_policy_store_has_service_credential_provider
+  (const wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_load_service_cvk (wyl_policy_store_t * store,
     wyl_policy_service_cvk_info_t * out);
 wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing

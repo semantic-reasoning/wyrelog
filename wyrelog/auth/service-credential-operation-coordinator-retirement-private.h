@@ -18,12 +18,12 @@ G_BEGIN_DECLS typedef struct
 #define WYL_SERVICE_CREDENTIAL_OPERATION_RETIREMENT_RESULT_INIT { 0 }
 
 G_GNUC_INTERNAL void
-    wyl_service_credential_operation_retirement_result_clear
-    (WylServiceCredentialOperationRetirementResult * result);
+wyl_service_credential_operation_retirement_result_clear
+  (WylServiceCredentialOperationRetirementResult * result);
 
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_purge_retired
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_purge_retired
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, GCancellable * cancellable,
@@ -32,8 +32,8 @@ G_GNUC_INTERNAL wyrelog_error_t
 /* Test-only one-shot observation immediately before the destructive
  * cancellation gate. */
 G_GNUC_INTERNAL void
-    wyl_service_credential_operation_retirement_set_before_delete_hook_for_test
-    (void (*hook) (gpointer data), gpointer data);
+wyl_service_credential_operation_retirement_set_before_delete_hook_for_test
+  (void (*hook) (gpointer data), gpointer data);
 
 typedef struct
 {
@@ -45,16 +45,26 @@ typedef struct
   { .record = WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT }
 
 G_GNUC_INTERNAL void
-    wyl_service_credential_operation_guarded_begin_result_clear
-    (WylServiceCredentialOperationGuardedBeginResult * result);
+wyl_service_credential_operation_guarded_begin_result_clear
+  (WylServiceCredentialOperationGuardedBeginResult * result);
 
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-    (WylHandle * handle,
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+  (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     GCancellable * cancellable,
     WylServiceCredentialOperationGuardedBeginResult * out_result);
+
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
+  (WylHandle * handle,
+    const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    GCancellable * cancellable,
+    WylServiceCredentialOperationGuardedBeginResult * out_result,
+    WylServiceCredentialFreshBeginCheck fresh_check, gpointer user_data);
 
 G_END_DECLS

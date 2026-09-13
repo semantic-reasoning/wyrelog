@@ -37,7 +37,7 @@ MIGRATED_OWNERS = {
     "service_mutation_finish": 2,
     "resume_committed_handoff": 1,
     "wyl_service_credential_operation_coordinator_purge_retired": 1,
-    "wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded": 1,
+    "wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check": 1,
     "resolve_current_attention": 1,
     "wyl_service_credential_operation_coordinator_maintain_expired_locked": 1,
     "service_exchange_authority_dispose": 1,

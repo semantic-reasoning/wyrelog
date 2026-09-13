@@ -184,7 +184,7 @@ fixture_clear (Fixture *fixture)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (Fixture, fixture_clear);
 
 static void
-fixture_init (Fixture *fixture)
+fixture_init_mode (Fixture *fixture, gboolean production_mode)
 {
   *fixture = (Fixture) {
     .storage = WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT,.anchor =
@@ -208,7 +208,7 @@ fixture_init (Fixture *fixture)
     .policy_store_path = fixture->db_path,
     .policy_keyprovider_path = fixture->key_spec,
     .audit_store_path = fixture->audit_path,
-    .production_mode = TRUE,
+    .production_mode = production_mode,
   };
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture->handle),
       ==, WYRELOG_E_OK);
@@ -216,6 +216,12 @@ fixture_init (Fixture *fixture)
         (fixture->operation_root, &fixture->storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
         (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
+}
+
+static void
+fixture_init (Fixture *fixture)
+{
+  fixture_init_mode (fixture, TRUE);
 }
 
 /* Mock owner publication backend; the non-failure subset drives a fresh ISSUE
@@ -814,10 +820,10 @@ test_frontdoor_malformed_is_invalid (void)
 /* A request_id with a durable retirement receipt fails closed with POLICY and
  * creates no operation record. */
 static void
-test_frontdoor_retired_is_policy (void)
+test_frontdoor_retired_is_policy_mode (gboolean production_mode)
 {
   g_auto (Fixture) fixture = { 0 };
-  fixture_init (&fixture);
+  fixture_init_mode (&fixture, production_mode);
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
@@ -872,6 +878,18 @@ test_frontdoor_retired_is_policy (void)
       WYRELOG_E_NOT_FOUND);
 
   wyl_service_credential_operation_coordinator_request_clear (&request);
+}
+
+static void
+test_frontdoor_retired_is_policy (void)
+{
+  test_frontdoor_retired_is_policy_mode (TRUE);
+}
+
+static void
+test_frontdoor_retired_without_provider_is_policy (void)
+{
+  test_frontdoor_retired_is_policy_mode (FALSE);
 }
 
 /* A foreign but valid human session cannot drive an existing operation bound to
@@ -1044,10 +1062,72 @@ test_frontdoor_initial_miss_race (void)
   }
 }
 
+static void
+test_frontdoor_missing_provider_is_unavailable (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  /* A provider option alone does not initialize it outside production mode. */
+  fixture_init_mode (&fixture, FALSE);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:executor");
+  g_autoptr (WylSession) session = handoff_human_session_new ("admin",
+          "tenant-a");
+  authorize_session (handle, "admin", session);
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  gint64 now = g_get_real_time ();
+  WylServiceCredentialOperationCoordinatorRequest request =
+      issue_request_new (request_id, "svc:handoff:executor", now);
+  HandoffPublication publication = { .store = store_of (handle) };
+  WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
+    .session = session,
+    .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
+    .guard_timestamp = now,
+    .guard_loc_class = "trusted",
+    .decision_request_id = request_id,
+    .publication = &handoff_test_vtable,
+    .publication_data = &publication,
+  };
+  WylServiceCredentialOperationRecord outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+
+  /* Authorization still dominates configuration discovery. */
+  g_atomic_int_set (&session->mfa_assured, 0);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
+      &fixture.storage, &fixture.anchor, &request, &runtime, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_atomic_int_set (&session->mfa_assured, 1);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
+      &fixture.storage, &fixture.anchor, &request, &runtime, &outcome), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+        (&fixture.storage, &fixture.anchor, request_id, &outcome), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpuint (publication.plan_calls, ==, 0);
+  g_assert_cmpuint (publication.stage_calls, ==, 0);
+  g_assert_cmpuint (publication.preflight_calls, ==, 0);
+  g_assert_cmpuint (publication.inspect_calls, ==, 0);
+  g_assert_cmpuint (publication.commit_calls, ==, 0);
+  g_assert_false (publication.published);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==, 0);
+  g_assert_cmpint (count_events (db_of (handle)), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_cvk;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_handoff_escrows;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_handoff_dispositions;"), ==, 0);
+  wyl_service_credential_operation_record_clear (&outcome);
+  wyl_service_credential_operation_coordinator_request_clear (&request);
+}
+
 int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/service-credential-operation-handoff/missing-provider",
+      test_frontdoor_missing_provider_is_unavailable);
   g_test_add_func ("/service-credential-operation-handoff/issue-happy-path",
       test_frontdoor_issue_happy_path);
   g_test_add_func ("/service-credential-operation-handoff/retry-replay",
@@ -1061,6 +1141,9 @@ main (int argc, char *argv[])
       test_frontdoor_malformed_is_invalid);
   g_test_add_func ("/service-credential-operation-handoff/retired-policy",
       test_frontdoor_retired_is_policy);
+  g_test_add_func
+    ("/service-credential-operation-handoff/retired-policy-no-provider",
+      test_frontdoor_retired_without_provider_is_policy);
   g_test_add_func
     ("/service-credential-operation-handoff/actor-mismatch-policy",
       test_frontdoor_actor_mismatch_is_policy);

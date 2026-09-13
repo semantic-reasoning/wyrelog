@@ -59,6 +59,12 @@ STORE_INSPECT=$3
 TEMPLATE_DIR=$4
 PY=$5
 SC_E2E_PY=$6
+MODE=${7:-production}
+case "$MODE" in
+  production) PRODUCTION_FLAG=--production ;;
+  missing-provider) PRODUCTION_FLAG= ;;
+  *) echo "invalid lifecycle mode" >&2; exit 2 ;;
+esac
 
 : "${STORE_INSPECT:?store-inspect helper path required}"
 
@@ -123,7 +129,11 @@ chmod 700 "$FACT_ROOT" "$PUBROOT" "$OPROOT"
 PORT=$("$PY" "$SC_E2E_PY" pick-port)
 URL="http://127.0.0.1:$PORT"
 
-"$WYRELOGD" --production --profile system --template-dir "$TEMPLATE_DIR" \
+if [ "$MODE" = missing-provider ]; then
+  export WYL_LOG=policy:debug
+fi
+
+"$WYRELOGD" ${PRODUCTION_FLAG:+"$PRODUCTION_FLAG"} --profile system --template-dir "$TEMPLATE_DIR" \
   --policy-db "$POLICY_DB" --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" --fact-root "$FACT_ROOT" \
   --credential-publication-root "$PUBROOT" --operation-root "$OPROOT" \
@@ -217,6 +227,23 @@ grep -q "subject_id=svc:svc-app" "$TMPDIR/principal.out" \
     "$TMPDIR/principal.out"
 
 # --- 9. issue credential A (escrowed to $PUBROOT/credA). ----------------------
+if [ "$MODE" = missing-provider ]; then
+  PREFLIGHT_PY=$(dirname "$SC_E2E_PY")/check-service-credential-provider-preflight.py
+  preflight_check() {
+    "$PY" "$PREFLIGHT_PY" "$1" --url "$URL" --policy "$POLICY_DB" \
+      --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+      --token-file "$ADMIN2_TOKEN" --state "$TMPDIR/preflight-state.json" \
+      --log "$LOG.out" --log "$LOG.err"
+  }
+  # The helper never prints response bodies, log contents, or sentinel values.
+  preflight_check request || fail "provider preflight request regression"
+  kill -TERM "$PID"
+  wait "$PID" || fail "provider preflight daemon shutdown failed"
+  PID=
+  preflight_check verify-stopped || fail "provider preflight durable regression"
+  exit 0
+fi
+
 EXPIRES=$(( $(now_us) + 315360000000000 ))     # ~10 years out
 "$WYCTL" --daemon-url "$URL" service-credential issue \
   --subject svc:svc-app --tenant tenant-a --destination credA \

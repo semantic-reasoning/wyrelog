@@ -108,6 +108,9 @@ wyrelog/auth/service-credential-operation-coordinator-execute-private.h
 wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c
 wyrelog/auth/service-credential-operation-coordinator-remediate-private.c
 wyrelog/auth/service-credential-operation-coordinator-retirement-private.c
+wyrelog/auth/service-credential-operation-coordinator-retirement-private.h
+wyrelog/auth/service-credential-operation-coordinator-storage-private.c
+wyrelog/auth/service-credential-operation-coordinator-storage-private.h
 wyrelog/auth/service-exchange-private.c
 wyrelog/auth/service-exchange-projector-private.c
 wyrelog/auth/service-session-private.c

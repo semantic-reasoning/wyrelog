@@ -45,7 +45,7 @@ typedef struct
   wyl_service_credential_handoff_disposition_reason_t source_reason;
   wyl_service_credential_handoff_remediation_journal_state_t oar_source_state;
   wyl_service_credential_handoff_remediation_oar_cause_t oar_cause;
-    wyl_service_credential_handoff_remediation_journal_state_t
+  wyl_service_credential_handoff_remediation_journal_state_t
       resume_target_state;
   wyl_service_credential_handoff_remediation_outcome_t outcome;
   wyl_service_credential_handoff_remediation_escrow_outcome_t escrow_outcome;
@@ -79,12 +79,12 @@ typedef struct
 #define WYL_SERVICE_CREDENTIAL_OPERATION_EXACT_DELETE_EXPECTATION_INIT { 0 }
 
 wyrelog_error_t wyl_service_credential_operation_coordinator_lock_acquire
-    (const WylServiceCredentialOperationStorage * storage,
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
     WylServiceCredentialOperationCoordinatorLock * out_lock);
 void wyl_service_credential_operation_coordinator_lock_release
-    (const WylServiceCredentialOperationStorage * storage,
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     WylServiceCredentialOperationCoordinatorLock * lock);
 
@@ -94,8 +94,8 @@ void wyl_service_credential_operation_coordinator_lock_release
  * only the higher-level purge coordinator may normalize a permanent-receipt
  * replay to success. */
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
     const WylServiceCredentialOperationExactDeleteExpectation * expectation);
@@ -104,20 +104,32 @@ G_GNUC_INTERNAL wyrelog_error_t
  * The matching lifecycle lock is mandatory, so begin and permanent receipt
  * creation serialize on one request ID. */
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay_locked
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_begin_or_replay_locked
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 
+typedef wyrelog_error_t (*WylServiceCredentialFreshBeginCheck)
+  (gpointer user_data);
+G_GNUC_INTERNAL wyrelog_error_t
+wyl_service_credential_operation_coordinator_begin_or_replay_locked_with_check
+  (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record,
+    WylServiceCredentialFreshBeginCheck fresh_check, gpointer user_data);
+
 #ifdef WYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS
 /* Storage/journal tests deliberately bypass the authority retirement guard;
  * production code must use begin_or_replay_retirement_guarded(). */
 static inline wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay_locked_for_test
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_begin_or_replay_locked_for_test
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
     const WylServiceCredentialOperationCoordinatorRequest * request,
@@ -125,13 +137,13 @@ static inline wyrelog_error_t
     WylServiceCredentialOperationRecord * out_record)
 {
   return wyl_service_credential_operation_coordinator_begin_or_replay_locked
-      (storage, anchor, lifecycle_lock, request, now_us, out_replayed,
-      out_record);
+           (storage, anchor, lifecycle_lock, request, now_us, out_replayed,
+             out_record);
 }
 
 static inline wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay_for_test
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     gint64 now_us, gboolean * out_replayed,
@@ -145,11 +157,11 @@ static inline wyrelog_error_t
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc =
       wyl_service_credential_operation_coordinator_lock_acquire (storage,
-      anchor, request != NULL ? request->request_id : NULL, &lifecycle_lock);
+          anchor, request != NULL ? request->request_id : NULL, &lifecycle_lock);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked
-        (storage, anchor, &lifecycle_lock, request, now_us, out_replayed,
-        out_record);
+          (storage, anchor, &lifecycle_lock, request, now_us, out_replayed,
+            out_record);
   wyl_service_credential_operation_coordinator_lock_release (storage, anchor,
       &lifecycle_lock);
   return rc;
@@ -164,12 +176,12 @@ static inline wyrelog_error_t
  * Missing records return WYRELOG_E_NOT_FOUND. Malformed, unsupported, or
  * mismatched records fail closed with WYRELOG_E_POLICY. */
 wyrelog_error_t wyl_service_credential_operation_coordinator_load
-    (const WylServiceCredentialOperationStorage * storage,
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationRecord * out_record);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_load_snapshot
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_load_snapshot
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
     guint8 out_snapshot_digest
@@ -181,15 +193,15 @@ G_GNUC_INTERNAL wyrelog_error_t
  * replaced only for PREPARED -> SERVER_COMMITTED.  A matching durable
  * SERVER_COMMITTED tuple is a replay and leaves its bytes unchanged. */
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_server_committed
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_server_committed
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * successor_credential_id,
     guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * successor_credential_id,
     guint64 successor_generation, const guint8 * binding_digest,
@@ -197,24 +209,24 @@ wyrelog_error_t
     WylServiceCredentialOperationRecord * out_record);
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_publication_planned
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * reservation_id,
     const gchar * stage_basename, const gchar * publication_receipt_id,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * reservation_id,
     const gchar * stage_basename, const gchar * stage_identity,
     const gchar * publication_receipt_id, gint64 now_us,
     gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_file_published
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_file_published
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * reservation_id,
     const gchar * stage_basename, const gchar * stage_identity,
@@ -225,56 +237,56 @@ wyrelog_error_t
  * operation, so callers cannot provide journal reason strings.  A matching
  * target record is an exact replay whose bytes and timestamp are retained. */
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationOarCause cause,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationOarCause cause,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationOarCause cause,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_operator_resume
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
     const WylServiceCredentialOperationRemediationProof * proof,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
-    (const WylServiceCredentialOperationStorage * storage,
+wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+  (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
     const WylServiceCredentialOperationRemediationProof * proof,

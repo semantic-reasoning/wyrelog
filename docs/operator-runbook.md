@@ -548,6 +548,17 @@ and require a live, MFA-assured human bearer session that holds
 management resolver tenant `__wr_default`; `--tenant` independently selects
 the credential target.
 
+The daemon must also run with `--production` and a successfully initialized
+`--policy-keyprovider` (or their configuration equivalents). A provider option
+alone is not sufficient: outside production mode it is not initialized. The
+operation and publication roots do not replace this requirement. An authorized
+fresh handoff without an effective provider returns HTTP 503
+`service_credential_unavailable` before creating an operation journal, credential
+vault key, or escrow. With `WYL_LOG=policy:debug`, the static diagnostic is
+`service-credential handoff refused: effective-provider-unavailable`. Existing
+operation retries retain their recovery path; this preflight does not diagnose
+other policy or storage refusals.
+
 ### Arming the service-management authority (prerequisite)
 
 Before `service-principal create`, `service-credential issue`, or any other

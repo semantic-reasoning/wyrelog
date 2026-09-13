@@ -360,13 +360,14 @@ out:
 }
 
 wyrelog_error_t
-wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
   (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     GCancellable * cancellable,
-    WylServiceCredentialOperationGuardedBeginResult * out_result)
+    WylServiceCredentialOperationGuardedBeginResult * out_result,
+    WylServiceCredentialFreshBeginCheck fresh_check, gpointer user_data)
 {
   WylServiceCredentialOperationCoordinatorLock lifecycle_lock =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
@@ -424,9 +425,9 @@ wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
     rc = WYRELOG_E_POLICY;
     goto out;
   }
-  rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked
+  rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked_with_check
         (storage, anchor, &lifecycle_lock, request, now_us, &replayed,
-          &out_result->record);
+          &out_result->record, fresh_check, user_data);
   if (rc == WYRELOG_E_OK)
     out_result->replayed = replayed;
 out:
@@ -443,4 +444,17 @@ out:
   if (rc != WYRELOG_E_OK)
     wyl_service_credential_operation_guarded_begin_result_clear (out_result);
   return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+  (WylHandle *handle,
+    const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationCoordinatorRequest *request,
+    GCancellable *cancellable,
+    WylServiceCredentialOperationGuardedBeginResult *out_result)
+{
+  return wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
+           (handle, storage, anchor, request, cancellable, out_result, NULL, NULL);
 }
