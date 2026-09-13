@@ -1690,12 +1690,23 @@ client_fact_guard_query (const gchar *tenant, gint64 guard_timestamp,
 }
 
 wyrelog_error_t
-wyl_client_fact_status (WylClient *client, WylClientFactStatus *out_status)
+wyl_client_fact_status (WylClient *client, const gchar *access_token,
+    const gchar *tenant, WylClientFactStatus *out_status)
 {
   if (out_status == NULL)
     return WYRELOG_E_INVALID;
   wyl_client_fact_status_clear (out_status);
   if (client == NULL || !WYL_IS_CLIENT (client))
+    return WYRELOG_E_INVALID;
+  /* A token without a tenant cannot be scoped, and a tenant without a token
+   * cannot be authorized; either alone is a caller error rather than a
+   * silent downgrade to the anonymous body (#1031).  Empty strings are
+   * refused for the same reason and not merely as hygiene: an empty token is
+   * dropped by client_fact_attach_auth, so accepting one would send the
+   * tenant with no credential and answer OK with no graphs. */
+  if ((access_token != NULL) != (tenant != NULL))
+    return WYRELOG_E_INVALID;
+  if (access_token != NULL && (access_token[0] == '\0' || tenant[0] == '\0'))
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
@@ -1704,10 +1715,16 @@ wyl_client_fact_status (WylClient *client, WylClientFactStatus *out_status)
     return WYRELOG_E_INVALID;
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
-  g_autofree gchar *uri = g_strconcat (base_url, "/facts/status", NULL);
+  g_autofree gchar *escaped_tenant = tenant != NULL
+      ? g_uri_escape_string (tenant, NULL, FALSE) : NULL;
+  g_autofree gchar *uri = escaped_tenant != NULL
+      ? g_strconcat (base_url, "/facts/status?tenant=", escaped_tenant, NULL)
+      : g_strconcat (base_url, "/facts/status", NULL);
   g_autoptr (SoupMessage) message = soup_message_new ("GET", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
+  if (access_token != NULL)
+    client_fact_attach_auth (message, access_token);
 
   client_clear_last_http_error (client);
   g_autoptr (GBytes) body = NULL;

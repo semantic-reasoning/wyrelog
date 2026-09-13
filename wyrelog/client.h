@@ -421,13 +421,29 @@ wyrelog_error_t wyl_client_graph_create (WylClient * client,
 void wyl_client_fact_graph_status_clear (WylClientFactGraphStatus * status);
 void wyl_client_fact_status_clear (WylClientFactStatus * status);
 void wyl_client_fact_status_free (WylClientFactStatus * status);
-/* Fetches the local daemon's sanitized GET /facts/status response. This
- * endpoint is intentionally unauthenticated and only suitable for the
- * daemon's local listener. The result is fully owned and must be cleared with
+/* Fetches the local daemon's sanitized GET /facts/status response, and is
+ * only suitable for the daemon's local listener.
+ *
+ * Pass both access_token and tenant NULL to request the response
+ * anonymously: the aggregate counts alone, with no per-graph rows, because
+ * each row names a tenant and a graph (#1031). Pass an access token together
+ * with the tenant it authenticates to receive that tenant's per-graph rows;
+ * tenant must name the caller's own tenant, since the daemon otherwise
+ * resolves the request tenant to __wr_default and refuses the mismatch.
+ * Supplying only one of the two, or an empty string for either, is
+ * WYRELOG_E_INVALID rather than a silent downgrade to the anonymous body.
+ *
+ * An authenticated response narrows the aggregate counts to the same tenant,
+ * so they are not comparable with the anonymous or /readyz counts. The
+ * status verdict is derived from those counts and narrows with them: it
+ * reports ready while another tenant is degraded.
+ *
+ * The result is fully owned and must be cleared with
  * wyl_client_fact_status_clear(). On error, out_status is left empty. Heap
  * allocated results may be released with wyl_client_fact_status_free() or
  * g_autoptr(WylClientFactStatus). */
 wyrelog_error_t wyl_client_fact_status (WylClient * client,
+    const gchar * access_token, const gchar * tenant,
     WylClientFactStatus * out_status);
 wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     const gchar * tenant,

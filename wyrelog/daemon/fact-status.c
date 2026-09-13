@@ -6,6 +6,9 @@
 typedef struct
 {
   GString *graphs;
+  /* NULL renders every tenant's graphs; a tenant id renders only that
+   * tenant's (#1031). */
+  const gchar *tenant_filter;
   guint total;
   guint ready;
   guint degraded;
@@ -56,6 +59,13 @@ append_graph_status_json (const wyl_fact_graph_status_t *status,
     gpointer user_data)
 {
   FactStatusJsonCtx *ctx = user_data;
+  /* Skip before counting, not just before rendering.  A caller scoped to one
+   * tenant that still saw a global graphs_total would learn how many graphs
+   * every other tenant holds -- the same disclosure #1031 closes, only
+   * quieter. */
+  if (ctx->tenant_filter != NULL
+      && g_strcmp0 (status->tenant_id, ctx->tenant_filter) != 0)
+    return WYRELOG_E_OK;
   ctx->total++;
   /* Sealed is neither bucket.  It is an operator's own decision, so counting
    * it as degraded raises an alert for an intended state, and counting it as
@@ -91,11 +101,13 @@ append_graph_status_json (const wyl_fact_graph_status_t *status,
 #endif
 
 gchar *
-wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs)
+wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs,
+    const gchar *tenant_filter)
 {
   FactStatusJsonCtx ctx = { 0 };
   g_autoptr (GString) graphs = include_graphs ? g_string_new (NULL) : NULL;
   ctx.graphs = graphs;
+  ctx.tenant_filter = tenant_filter;
 
 #ifdef WYL_HAS_FACT_STORE
   if (handle != NULL)

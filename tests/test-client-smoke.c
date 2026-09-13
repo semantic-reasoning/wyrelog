@@ -844,7 +844,7 @@ main (void)
   if (client == NULL)
     return 4;
   g_auto (WylClientFactStatus) nonlocal_fact_status = { 0 };
-  if (wyl_client_fact_status (client, &nonlocal_fact_status)
+  if (wyl_client_fact_status (client, NULL, NULL, &nonlocal_fact_status)
       != WYRELOG_E_INVALID || nonlocal_fact_status.status_name != NULL
       || nonlocal_fact_status.graphs != NULL)
     return 284;
@@ -1034,7 +1034,8 @@ main (void)
       "\"graphs\":[{\"tenant_id\":\"tenant-a\",\"graph_id\":\"orders\","
       "\"state\":\"forget_incomplete\",\"queryable\":true,"
       "\"last_error_class\":\"forget_incomplete\"}]}";
-  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_OK
+  if (wyl_client_fact_status (management_client, NULL, NULL, &fact_status)
+      != WYRELOG_E_OK
       || fact_status.status != WYL_CLIENT_FACT_STATUS_DEGRADED
       || fact_status.n_graphs != 1
       || fact_status.graphs[0].state !=
@@ -1048,14 +1049,15 @@ main (void)
       || !client_last_response_is (management_client, 200, NULL))
     return 281;
   http.body = "{\"status\":\"ready\",\"private_detail\":\"do-not-leak\"}";
-  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_IO
+  if (wyl_client_fact_status (management_client, NULL, NULL, &fact_status)
+      != WYRELOG_E_IO
       || fact_status.status_name != NULL || fact_status.graphs != NULL
       || fact_status.n_graphs != 0
       || g_strcmp0 (http.body, "{\"status\":\"ready\",\"private_detail\":\"do-not-leak\"}") != 0)
     return 282;
   http.status = 503;
   http.body = "{\"error\":\"unavailable\"}";
-  if (wyl_client_fact_status (management_client, &fact_status)
+  if (wyl_client_fact_status (management_client, NULL, NULL, &fact_status)
       != WYRELOG_E_BUSY
       || fact_status.status_name != NULL || fact_status.graphs != NULL
       || fact_status.n_graphs != 0
@@ -1063,11 +1065,46 @@ main (void)
     return 283;
   http.status = 0;
   http.oversized_chunked_response = TRUE;
-  if (wyl_client_fact_status (management_client, &fact_status) != WYRELOG_E_IO
+  if (wyl_client_fact_status (management_client, NULL, NULL, &fact_status)
+      != WYRELOG_E_IO
       || fact_status.status_name != NULL || fact_status.graphs != NULL
       || fact_status.n_graphs != 0)
     return 285;
   http.oversized_chunked_response = FALSE;
+  /*
+   * #1031: with a token the request must carry the bearer AND name the
+   * tenant, because the daemon resolves an unnamed request tenant to
+   * __wr_default and refuses the mismatch for any other tenant.  Passing
+   * only one of the two is a caller error, not a quiet downgrade to the
+   * anonymous body.  Restore the stub's status and body first: the cases
+   * above deliberately leave it mid-fault, and the checks that follow this
+   * section read the same shared stub.
+   */
+  http.status = 200;
+  http.body =
+      "{\"status\":\"ready\",\"graphs_total\":0,\"graphs_ready\":0,"
+      "\"graphs_degraded\":0,\"graphs_sealed\":0}";
+  if (wyl_client_fact_status (management_client, "tok-a", NULL, &fact_status)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_status (management_client, NULL, "tenant-a",
+      &fact_status) != WYRELOG_E_INVALID)
+    return 287;
+  /* The token and the tenant must reach the wire, or the scoping this API
+   * promises is silently absent and the caller still gets a 200. */
+  if (wyl_client_fact_status (management_client, "tok-a", "tenant-a",
+      &fact_status) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_path, "/facts/status") != 0
+      || g_strcmp0 (http.last_tenant, "tenant-a") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer tok-a") != 0)
+    return 288;
+  /* An empty token is dropped by client_fact_attach_auth, so accepting it
+   * would send the tenant with no credential and return OK with no graphs --
+   * the same silent-zero-graphs shape this API was changed to avoid. */
+  if (wyl_client_fact_status (management_client, "", "tenant-a", &fact_status)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_status (management_client, "tok-a", "",
+      &fact_status) != WYRELOG_E_INVALID)
+    return 289;
   g_auto (WylClientServicePrincipal)
   principal = { 0 };
   g_auto (WylClientServicePrincipalList)
