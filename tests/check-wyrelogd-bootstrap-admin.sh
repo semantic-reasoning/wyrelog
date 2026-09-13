@@ -213,6 +213,7 @@ PY
 # Enrollment routes are bearer-only and reject malformed bounded JSON before
 # creating a challenge or mutating policy state.
 "$PYTHON" - "http://127.0.0.1:$PORT" "$TOKEN_FILE" <<'PY'
+import json
 import sys
 import urllib.error
 import urllib.request
@@ -227,7 +228,7 @@ for authorization, body, expected in (
         ("token", b'{"wrapper":{"subject":"admin2"}}', 400),
         ("token", b'{"note":"subject admin2"}', 400),
         ("token", b'{"subject":"admin2"} trailing', 400),
-        ("token", b'{"subject":"' + b'a' * 5000 + b'"}', 400)):
+        ("token", b'{"subject":"' + b'a' * 5000 + b'"}', 413)):
     headers = {"Content-Type": "application/json"}
     if authorization:
         with open(token_path, encoding="utf-8") as f:
@@ -239,6 +240,8 @@ for authorization, body, expected in (
     except urllib.error.HTTPError as exc:
         if exc.code != expected:
             raise
+        if expected == 413:
+            assert json.loads(exc.read())["error"] == "request_body_too_large"
     else:
         raise SystemExit(f"enrollment request unexpectedly succeeded: {body!r}")
 PY

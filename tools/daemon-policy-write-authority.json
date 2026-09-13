@@ -1,8 +1,8 @@
 {
-  "aggregate": "0c5a8ddefc16b8ed0dcdb1ea2ced6e0c9c1ca3958422dc00dde08778ad95e5b5",
+  "aggregate": "9e76d39daea38a882e763407361905e4eb3beec5280a17a6bd204a5d086dacfe",
   "directives": {
-    "count": 515,
-    "sha256": "2ecc2d084829c7b8db6b449c5a3341dc597184fb038abe9092dcb4eb3b3bed42"
+    "count": 516,
+    "sha256": "7ac3ef284cff630342710436260c2f32b4ea97487a9d0c44aa62d6bad793af64"
   },
   "functions": {
     "direct_permission_mutation_handler": "a92ce39084b189af1cc8a3fa09412338b774397d870852ad20fb3c08ec5a4656",
