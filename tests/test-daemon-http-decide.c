@@ -5395,6 +5395,29 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
     return 4633;
   g_clear_pointer (&body, g_free);
 
+  /*
+   * (6) #1032: the same sealed tenant reached through the CREDENTIAL rather
+   * than the request.  The request tenant stays __wr_default so the
+   * request-tenant pre-check at decide_handler passes, leaving the bearer's
+   * own claim tenant -- which is sealed -- to be caught by the resolver's
+   * tenant gate.  That refusal must not be 401: the credential verified, and
+   * 401 tells a client to re-authenticate.  The prescribed reaction is
+   * refresh-and-retry; the refresh succeeds and the retry fails identically,
+   * so a correct client never reaches a terminal state.
+   */
+  g_autofree gchar *default_tenant_query =
+      g_strdup_printf ("tenant=%s", WYL_TENANT_DEFAULT);
+  rc = send_raw_decide_bearer (session, "POST", base_url, svc, perm,
+          WYL_TENANT_DEFAULT, default_tenant_query, fixture.token, &status,
+          &body);
+  if (rc != 0)
+    return rc;
+  if (status == 401)
+    return 4634;
+  if (status != 409 || strstr (body, "tenant_sealed") == NULL)
+    return 4635;
+  g_clear_pointer (&body, g_free);
+
   return 0;
 }
 

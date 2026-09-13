@@ -90,12 +90,20 @@ The HTTP gate emits stable string codes in the JSON `error` field:
 | Code              | HTTP status | Meaning |
 |-------------------|-------------|---------|
 | `tenant_invalid`  | 400 or 401  | The request or credential names a syntactically invalid or unknown tenant. |
-| `tenant_sealed`   | 400 or 401  | The tenant exists but is sealed and cannot accept new authenticated work. |
+| `tenant_sealed`   | 400 or 409  | The tenant exists but is sealed and cannot accept new authenticated work. |
 | `tenant_denied`   | 403         | The authenticated principal's tenant does not match the tenant declared on the request, or a non-default tenant attempts to mutate another tenant's scope. |
 
-The status is 401 when the failure is detected while resolving
-credentials, and 400/403 when it is detected while validating the
+For `tenant_invalid` the status is 401 when the failure is detected while
+resolving credentials, and 400/403 when it is detected while validating the
 request body or query parameters.
+
+`tenant_sealed` never uses 401 (#1032). A credential that resolves against a
+sealed tenant has not failed authentication -- the tenant is closed -- so the
+bearer gate answers 409, matching `graph_sealed`. Answering 401 would tell a
+client to re-authenticate, and the prescribed refresh-and-retry succeeds at
+the refresh and fails identically at the retry, so a correct client would
+never reach a terminal state. The request-tenant and login gates still answer
+400 when a sealed tenant is named in the request rather than the credential.
 
 ## Isolation Rules
 
