@@ -467,7 +467,8 @@ POST /auth/login?username=<subject>&tenant=<tenant>
   -> 200 { session_token, principal_state: "mfa_required" }
 
 POST /auth/mfa/verify?session_token=<token>&code=NNNNNN
-  -> 200 { access_token, refresh_token, principal_state: "authenticated" }
+  -> 200 { access_token, expires_in, refresh_token, refresh_expires_in,
+           principal_state: "authenticated" }
   -> 400 invalid_mfa_request   (malformed query)
   -> 400 tenant_sealed | tenant_invalid
                                (session's tenant no longer active)
@@ -477,6 +478,18 @@ POST /auth/mfa/verify?session_token=<token>&code=NNNNNN
   -> 429 mfa_locked            (5+ failures within 15 min)
   -> 500 mfa_verify_failed     (counter persistence IO error)
 ```
+
+Any response in this flow that carries tokens also reports their issued
+lifetimes, so a client that treats the access token as opaque -- the correct
+default for a bearer it does not verify -- can schedule a refresh without
+decoding the JWT:
+`expires_in` beside `access_token` (900 seconds) and `refresh_expires_in`
+beside `refresh_token` (86400). This holds for `/auth/login`,
+`/auth/mfa/verify` and `/auth/refresh`. Both are the lifetimes the token was
+issued with, not the remaining life of one already in hand: `/auth/refresh`
+answers a retried request by rebuilding the original response, so a decaying
+value there would make a replay differ from what it replays. The service
+token response does not carry `expires_in`; its lifetime is 300 seconds.
 
 `/auth/login` does not enumerate enrolled vs unenrolled subjects: an
 unenrolled but otherwise-valid subject still receives an `mfa_required`
@@ -714,7 +727,9 @@ alongside the human admins that own the deployment. Keep the pieces distinct:
 - **Session and token.** Exchanging a credential (next section) creates an
   ordinary live session and a short-TTL access token (a JWT) carrying the exact
   service auth method, credential id/generation, subject, tenant, session id,
-  and `jti`. There is no workload refresh token in v1.
+  and `jti`. A service access token lives 300 seconds and its response carries
+  no `expires_in`; the human lifetimes and how they are reported are described
+  with the login example above. There is no workload refresh token in v1.
 - **Role.** A freshly issued credential holds no role. Its token authenticates
   but is unauthorized for every protected operation until a human grants it a
   workload-safe, tenant-scoped role. Roles carrying any direct, inherited, or

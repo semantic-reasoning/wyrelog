@@ -3195,6 +3195,19 @@ parse_login_response_json (const gchar *data, gsize size,
         return FALSE;
       have_session_state = TRUE;
       *out_session_state = g_steal_pointer (&value);
+    } else if (g_strcmp0 (key, "expires_in") == 0
+        || g_strcmp0 (key, "refresh_expires_in") == 0) {
+      /*
+       * #1030: the daemon reports token lifetimes here.  This parser rejects
+       * unknown keys outright, so it has to consume them or every login and
+       * refresh fails.  Parsed and discarded rather than surfaced: exposing
+       * them is a separate API change, and a client that ignores them is no
+       * worse off than before.  Duplicates are not rejected -- the strictness
+       * elsewhere guards fields this parser returns, and these it does not.
+       */
+      guint64 seconds = 0;
+      if (!json_parse_uint64 (&cursor, &seconds))
+        return FALSE;
     } else {
       return FALSE;
     }
