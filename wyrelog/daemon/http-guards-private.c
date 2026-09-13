@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include <sodium.h>
+
 static const gchar *
 skip_ws (const gchar *cursor)
 {
@@ -96,7 +98,7 @@ parse_json_string (const gchar **cursor, gchar **out, gsize *out_len)
           if (!append_codepoint (value, codepoint))
             return FALSE;
         }
-          break;
+        break;
         default:
           return FALSE;
       }
@@ -165,6 +167,21 @@ clear_values (gchar **values, gsize n_values)
   if (values == NULL)
     return;
   for (gsize i = 0; i < n_values; i++) {
+    /*
+     * #1030: zero before freeing.  This parser is how credentials arrive --
+     * a refresh token at /auth/refresh, a credential secret at the
+     * service-token route.  It closes the failure path only: on success the
+     * caller's g_auto (GStrv) frees through g_strfreev, which does not zero,
+     * so a value that must not survive has to be moved into a wiping cleanup
+     * by its caller -- as the refresh handler does, and as the service-token
+     * route does not yet.  The NULL test is not defensive
+     * padding: a failure partway through a multi-field object leaves the
+     * later slots NULL and the earlier ones populated, and that mixed array
+     * is exactly what this function is called with on the path the wipe
+     * exists for.
+     */
+    if (values[i] != NULL)
+      sodium_memzero (values[i], strlen (values[i]));
     g_clear_pointer (&values[i], g_free);
   }
 }
@@ -249,7 +266,7 @@ parse_json_object_values (const gchar *json, gsize json_len,
       if (!parse_json_string (&p, &value, &value_len))
         goto fail;
       if (!value_is_valid_utf8_and_bounded (value, value_len,
-              fields[slot].max_len))
+          fields[slot].max_len))
         goto fail;
     }
     out_values[slot] = g_steal_pointer (&value);
@@ -278,7 +295,7 @@ wyl_daemon_http_dup_strict_json_object (const gchar *json, gsize json_len,
     gchar **out_values)
 {
   return parse_json_object_values (json, json_len, fields, n_fields,
-      out_values);
+             out_values);
 }
 
 gboolean
@@ -295,7 +312,7 @@ wyl_daemon_http_request_body_dup_strict_json_object (SoupServerMessage *msg,
   if ((gsize) body->length > max_len)
     return FALSE;
   return parse_json_object_values (body->data, (gsize) body->length, fields,
-      n_fields, out_values);
+             n_fields, out_values);
 }
 
 static gboolean
@@ -305,8 +322,8 @@ inet_address_is_actual_loopback (GInetAddress *address)
 }
 
 gboolean
-    wyl_daemon_http_socket_addresses_are_actual_loopback
-    (const GSocketAddress * local, const GSocketAddress * peer)
+wyl_daemon_http_socket_addresses_are_actual_loopback
+  (const GSocketAddress * local, const GSocketAddress * peer)
 {
   if (!G_IS_INET_SOCKET_ADDRESS (local) || !G_IS_INET_SOCKET_ADDRESS (peer))
     return FALSE;
@@ -316,7 +333,7 @@ gboolean
   GInetAddress *peer_addr =
       g_inet_socket_address_get_address (G_INET_SOCKET_ADDRESS (peer));
   return inet_address_is_actual_loopback (local_addr)
-      && inet_address_is_actual_loopback (peer_addr);
+         && inet_address_is_actual_loopback (peer_addr);
 }
 
 gboolean
@@ -325,6 +342,6 @@ wyl_daemon_http_message_has_actual_loopback_transport (SoupServerMessage *msg)
   if (msg == NULL)
     return FALSE;
   return wyl_daemon_http_socket_addresses_are_actual_loopback
-      (soup_server_message_get_local_address (msg),
-      soup_server_message_get_remote_address (msg));
+           (soup_server_message_get_local_address (msg),
+             soup_server_message_get_remote_address (msg));
 }

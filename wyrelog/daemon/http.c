@@ -15455,9 +15455,57 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  const gchar *refresh_token = query != NULL
+  const gchar *query_token = query != NULL
       ? g_hash_table_lookup (query, "refresh_token") : NULL;
-  if (refresh_token == NULL || refresh_token[0] == '\0') {
+  if (query_token != NULL && query_token[0] == '\0')
+    query_token = NULL;
+
+  /*
+   * #1030: the refresh token belongs in the body.  In a URL it reaches shell
+   * history, /proc/<pid>/cmdline for any curl-style caller, and any proxy or
+   * client log -- and it is the longest-lived credential this path issues.
+   * The query form is retained for callers that already exist.
+   *
+   * The body is inspected for length before it is parsed, because the parser
+   * cannot distinguish "no body was sent" from "a body was sent and would not
+   * parse" -- it answers FALSE to both.  A request using the query form sends
+   * no body, so treating every FALSE as a refusal would reject the very form
+   * this keeps working; treating every FALSE as absence would silently
+   * downgrade a client whose JSON was merely malformed onto the channel this
+   * change exists to get the token out of.  Only a body that is present and
+   * unparseable is a refusal.
+   */
+  g_autoptr (WylSensitiveChar) body_token = NULL;
+  SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
+  if (request_body != NULL && request_body->length > 0) {
+    static const WylDaemonHttpStrictJsonField fields[] = {
+      {"refresh_token", WYL_ID_STRING_BUF - 1,
+       WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    };
+    g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
+        fields, G_N_ELEMENTS (fields), values) || values[0][0] == '\0') {
+      set_json_error (msg, 400, "invalid_refresh_request");
+      return;
+    }
+    /* Out of the plain array and into a wiping cleanup: on success the array
+     * is freed by g_strfreev, which does not zero.  The parser's own failure
+     * path zeroes what it frees. */
+    body_token = g_steal_pointer (&values[0]);
+  }
+
+  /*
+   * Both channels carrying a credential is unresolvable, not an occasion to
+   * pick a winner.  If a proxy logged the query token while the daemon
+   * honoured the body token, the log names a credential that was never used.
+   * The two values are not compared: comparing secrets buys nothing here.
+   */
+  if (body_token != NULL && query_token != NULL) {
+    set_json_error (msg, 400, "invalid_refresh_request");
+    return;
+  }
+  const gchar *refresh_token = body_token != NULL ? body_token : query_token;
+  if (refresh_token == NULL) {
     set_json_error (msg, 400, "invalid_refresh_request");
     return;
   }
