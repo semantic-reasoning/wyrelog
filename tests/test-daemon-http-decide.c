@@ -10987,7 +10987,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
           &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "invalid_tenant_request") == NULL)
+  if (status != 413 || strstr (body, "request_body_too_large") == NULL)
     return 2004;
   g_clear_pointer (&body, g_free);
 
@@ -16949,8 +16949,8 @@ check_service_principal_management_contract (void)
   if (send_raw_service_principal_bearer (session, "POST", base_url,
       "/service-principals/svc:tenant-a:worker/disable", query,
       access_token, oversized_principal_disable_body, &status,
-      &body) != 0 || status != 400 || body == NULL
-      || strstr (body, "invalid_service_principal_request") == NULL) {
+      &body) != 0 || status != 413 || body == NULL
+      || strstr (body, "request_body_too_large") == NULL) {
     rc = 2166;
     goto cleanup;
   }
