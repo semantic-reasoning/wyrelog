@@ -13042,10 +13042,15 @@ policy_permission_transition_handler (SoupServer *server,
     return;
 
   WylDaemonHttpContext *ctx = user_data;
-  g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
       "wr.policy.write", scope, "policy_auth_required",
-      "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+      "invalid_policy_auth", "policy_denied", "policy_auth_failed", &auth,
+      NULL, &session, &guard_timestamp, &guard_loc_class, &guard_risk))
     return;
   if (!tenant_scope_is_allowed (lookup_request_tenant (query), scope)) {
     set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
@@ -13063,11 +13068,48 @@ policy_permission_transition_handler (SoupServer *server,
   if (!ensure_policy_permission_exists (msg, write.store, perm))
     return;
 
+  /* Both FSM edges into armed (dormant + grant and cooldown + reset) cross
+   * this public mutation boundary.  The guard tuple is client asserted and is
+   * not evidence of MFA.  Reauthorize the caller, never the target subject,
+   * after obtaining the write lease so a session revoked while queued cannot
+   * arm authority.  Keep this before target lookup, transition audit creation,
+   * and the state/ledger mutation. */
+  if (g_strcmp0 (event, "grant") == 0 || g_strcmp0 (event, "reset") == 0) {
+    wyrelog_error_t reauth_rc = WYRELOG_E_AUTH;
+    if (!auth.service_authenticated) {
+      WylManagementReauthorization reauthorization = {
+        .ctx = ctx,
+        .handle = ctx->handle,
+        .session = session,
+        .session_id = auth.session_id,
+        .actor = auth.actor,
+        .expected_session_tenant = auth.tenant,
+        .action = "wr.policy.write",
+        .resource_id = scope,
+        .target_tenant = NULL,
+        .decision_request_id = ensure_request_id_header (msg),
+        .require_mfa = TRUE,
+        .guard_timestamp = guard_timestamp,
+        .guard_loc_class = guard_loc_class,
+        .guard_risk = guard_risk,
+      };
+      reauth_rc = management_reauthorize_inside_write (&reauthorization,
+              auth.actor);
+    }
+    if (reauth_rc != WYRELOG_E_OK) {
+      if (reauth_rc == WYRELOG_E_AUTH || reauth_rc == WYRELOG_E_POLICY)
+        set_json_error (msg, 403, "policy_denied");
+      else
+        set_policy_transition_error (msg, reauth_rc);
+      return;
+    }
+  }
+
   g_autoptr (WylAuditEvent) audit_event = NULL;
   g_autofree gchar *audit_action = NULL;
 
   audit_event = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (audit_event, actor);
+  wyl_audit_event_set_subject_id (audit_event, auth.actor);
   audit_action = g_strdup_printf ("permission_state.%s", event);
   wyl_audit_event_set_action (audit_event, audit_action);
   wyl_audit_event_set_resource_id (audit_event, perm);
