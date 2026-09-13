@@ -527,7 +527,7 @@ assert_handle_fact_status (WylHandle *handle)
   g_assert_true (probe.saw_tenant_a_ready);
   g_assert_true (probe.saw_tenant_b_unavailable);
 
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
   g_assert_nonnull (strstr (json, "\"tenant_id\":\"tenant-a\""));
@@ -537,6 +537,34 @@ assert_handle_fact_status (WylHandle *handle)
       "\"last_error_class\":\"store_unavailable\""));
   g_assert_null (strstr (json, "facts.duckdb"));
   g_assert_null (strstr (json, "storage_path"));
+
+  /*
+   * #1031: a tenant filter renders one tenant's graphs and counts only.  The
+   * unfiltered call above cannot tell "scoped to my tenant" from "not scoped
+   * at all", so this is the assertion that dies if the filter is dropped.
+   * tenant-b holds the unavailable graph, so the scoped aggregate must also
+   * fall back to "ready" and a total of one -- pinning that the filter skips
+   * before counting, not merely before rendering.
+   */
+  g_autofree gchar *scoped = wyl_daemon_fact_status_json (handle, TRUE,
+          "tenant-a");
+  g_assert_nonnull (scoped);
+  g_assert_nonnull (strstr (scoped, "\"tenant_id\":\"tenant-a\""));
+  g_assert_null (strstr (scoped, "\"tenant_id\":\"tenant-b\""));
+  g_assert_nonnull (strstr (scoped, "\"graphs_total\":1"));
+  g_assert_nonnull (strstr (scoped, "\"graphs_ready\":1"));
+  g_assert_nonnull (strstr (scoped, "\"status\":\"ready\""));
+  g_assert_null (strstr (scoped, "\"last_error_class\":\"store_unavailable\""));
+
+  /* The anonymous shape keeps the deployment-wide counts and emits no rows,
+   * so no identifier reaches a caller that presented no credential. */
+  g_autofree gchar *aggregate = wyl_daemon_fact_status_json (handle, FALSE,
+          NULL);
+  g_assert_nonnull (aggregate);
+  g_assert_nonnull (strstr (aggregate, "\"graphs_total\":2"));
+  g_assert_null (strstr (aggregate, "\"graphs\""));
+  g_assert_null (strstr (aggregate, "\"tenant_id\""));
+  g_assert_null (strstr (aggregate, "\"graph_id\""));
 }
 
 typedef struct
@@ -1559,7 +1587,7 @@ assert_no_graph_reports_forget_state (WylHandle *handle)
 {
   g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
       no_forget_state_cb, NULL), ==, WYRELOG_E_OK);
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_null (strstr (json, "forget_incomplete"));
 }
@@ -1648,7 +1676,7 @@ test_forget_state_clears_on_convergence_but_not_on_refresh (void)
   /* Converged, and the verdict cleared itself. */
   g_assert_cmpint (assert_single_graph_state (handle), ==,
       WYL_FACT_GRAPH_STATE_READY);
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"status\":\"ready\""));
   g_assert_null (strstr (json, "forget_incomplete"));
@@ -1756,7 +1784,7 @@ test_replay_failure_outranks_an_outstanding_erasure (void)
   /* The replay reason wins, and the compliance state does not surface. */
   g_assert_cmpint (assert_single_graph_state (handle), !=,
       WYL_FACT_GRAPH_STATE_FORGET_INCOMPLETE);
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_null (strstr (json, "forget_incomplete"));
   g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
@@ -1912,7 +1940,7 @@ test_status_is_not_ready_while_an_erasure_is_outstanding (void)
   g_assert_cmpuint (probe.total, ==, 1);
   g_assert_cmpuint (probe.ready, ==, 0);
 
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   /* The literal state name, not merely the tally: without its own case in
    * wyl_fact_graph_state_name an appended enum value renders as some other
@@ -3379,7 +3407,7 @@ test_closed_graph_reports_sealed_not_ready (void)
    * error class. */
   g_assert_false (probe.saw_sealed_error_class);
 
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"state\":\"sealed\""));
   /* The negative is the load-bearing half: a body carrying both would satisfy
@@ -3417,7 +3445,7 @@ test_closed_graph_reports_sealed_not_ready (void)
     g_assert_false (booted.saw_sealed_error_class);
 
     g_autofree gchar *booted_json = wyl_daemon_fact_status_json (rebooted,
-            TRUE);
+            TRUE, NULL);
     g_assert_nonnull (booted_json);
     g_assert_nonnull (strstr (booted_json, "\"state\":\"sealed\""));
     /* The reason the runbook currently names for this graph, and the one it
@@ -3500,7 +3528,7 @@ test_evicted_and_closed_reports_evicted_not_sealed (void)
   g_assert_cmpuint (probe.total, ==, 0);
   g_assert_cmpuint (probe.sealed, ==, 0);
 
-  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
   g_assert_nonnull (json);
   g_assert_nonnull (strstr (json, "\"graphs_total\":0"));
   g_assert_null (strstr (json, "\"state\":\"sealed\""));

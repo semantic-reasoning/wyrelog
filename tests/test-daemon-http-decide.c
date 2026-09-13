@@ -1330,9 +1330,44 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
   if (send_raw_path (session, "GET", base_url, "/facts/status", &status,
       &body) != 0)
     return 1930;
+  /* #1031: a caller that presented no credential receives the aggregate
+   * only.  Every per-graph row names a tenant and a graph, so an anonymous
+   * caller must not be able to enumerate them; /readyz?format=json already
+   * publishes these same counts without identifiers. */
   if (status != 200 || strstr (body, "\"graphs_total\"") == NULL
-      || strstr (body, "\"graphs\"") == NULL)
+      || strstr (body, "\"graphs\"") != NULL
+      || strstr (body, "\"tenant_id\"") != NULL
+      || strstr (body, "\"graph_id\"") != NULL)
     return 1931;
+
+  /* #1031: a credential that does not resolve is refused, never answered
+   * with the anonymous body.  Degrading here would report a rejected
+   * credential as success and hand back a 200 the caller would trust. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "GET", base_url, "/facts/status",
+      "Bearer not-a-real-token", NULL, &status, &body) != 0)
+    return 1932;
+  if (status != 401 || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 1933;
+
+  /* An Authorization header the caller meant as a credential but that is not
+   * a usable Bearer is still a presented credential, not an absent one. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "GET", base_url, "/facts/status",
+      "Basic dXNlcjpwYXNz", NULL, &status, &body) != 0)
+    return 1934;
+  if (status != 401 || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 1935;
+
+  /* Presenting both credential kinds is ambiguous; every other route refuses
+   * it rather than silently preferring one. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "GET", base_url,
+      "/facts/status?session_token=01a00000-0000-7000-8000-000000000000",
+      "Bearer not-a-real-token", NULL, &status, &body) != 0)
+    return 1936;
+  if (status != 400 || strstr (body, "\"invalid_fact_status_auth\"") == NULL)
+    return 1937;
 
   g_atomic_int_set (&runtime->delta_session_live, FALSE);
   g_clear_pointer (&body, g_free);

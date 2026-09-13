@@ -221,15 +221,36 @@ PY
 }
 
 assert_fact_status() {
-  expected=$1
-  "$PYTHON" - "$BASE_URL" "$expected" <<'PY'
+  token_file=$1
+  expected=$2
+  "$PYTHON" - "$BASE_URL" "$expected" "$token_file" <<'PY'
 import json
 import sys
 import urllib.request
-base, expected = sys.argv[1:]
-text = urllib.request.urlopen(f"{base}/facts/status", timeout=3).read().decode()
+base, expected, token_file = sys.argv[1:]
+with open(token_file, encoding="utf-8") as handle:
+    token = handle.read().strip()
+
+# #1031: the per-graph rows name a tenant and a graph, so they are returned
+# only to an authenticated caller and only for that caller's own tenant.
+request = urllib.request.Request(
+    f"{base}/facts/status?tenant=__wr_default",
+    headers={"Authorization": f"Bearer {token}"},
+)
+text = urllib.request.urlopen(request, timeout=3).read().decode()
 if "storage_path" in text or "facts.duckdb" in text:
     raise SystemExit("facts status leaked storage details")
+
+# The same endpoint without a credential must disclose no identifier at all.
+anon = urllib.request.urlopen(f"{base}/facts/status", timeout=3).read().decode()
+anon_body = json.loads(anon)
+if "graphs" in anon_body:
+    raise SystemExit("anonymous facts status disclosed graph rows")
+if "tenant_id" in anon or "graph_id" in anon:
+    raise SystemExit("anonymous facts status disclosed identifiers")
+if anon_body.get("graphs_total") != 2:
+    raise SystemExit("anonymous facts status lost its aggregate")
+
 body = json.loads(text)
 if body.get("status") != expected:
     raise SystemExit("unexpected facts status")
@@ -285,14 +306,14 @@ create_graph_schema_and_facts "$TOKEN_FILE" orders-a order-a 42
 create_graph_schema_and_facts "$TOKEN_FILE" orders-b order-b 7
 assert_query_row "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
-assert_fact_status ready
+assert_fact_status "$TOKEN_FILE" ready
 
 stop_daemon
 start_daemon
 login_token "$TOKEN_FILE"
 assert_query_row "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
-assert_fact_status ready
+assert_fact_status "$TOKEN_FILE" ready
 
 stop_daemon
 "$PYTHON" - "$FACT_ROOT" <<'PY'
@@ -326,8 +347,10 @@ except OSError:
     raise SystemExit("failed to corrupt fact store") from None
 PY
 start_daemon
-READY_GRAPH=$(assert_fact_status degraded)
+# The restart invalidated the previous token, and the status probe now needs
+# one, so mint it before the probe rather than after (#1031).
 login_token "$TOKEN_FILE"
+READY_GRAPH=$(assert_fact_status "$TOKEN_FILE" degraded)
 case "$READY_GRAPH" in
   orders-a)
     assert_query_row "$TOKEN_FILE" orders-a order-a 42

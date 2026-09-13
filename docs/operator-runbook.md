@@ -1217,8 +1217,26 @@ and fact root. Mint a fresh token after restart and run the same
 store. Check graph health with:
 
 ```sh
-curl -fsS "$BASE_URL/facts/status"
+curl -fsS -H "Authorization: Bearer $(cat "$TOKEN")" \
+  "$BASE_URL/facts/status?tenant=$TENANT"
 ```
+
+The per-graph rows name a tenant and a graph, so they are returned only to an
+authenticated caller and only for that caller's own tenant; `tenant` must name
+it explicitly, because the request tenant otherwise defaults to
+`__wr_default`. A caller that presents no credential still receives the
+aggregate (`status` and the four counts) with no `graphs` array, which is the
+same shape `/readyz?format=json` publishes. A request for a tenant the caller
+is not in is refused with `tenant_denied`, and a credential that fails to
+resolve is refused with `401` rather than quietly falling back to the
+anonymous body.
+
+The authenticated response narrows the four counts to the same tenant, so
+`graphs_degraded` read this way counts that tenant's graphs alone. The
+top-level `status` verdict is derived from those counts and narrows with
+them: an authenticated `/facts/status` reports `ready` while another tenant is
+degraded. Alert on `/readyz?format=json` when you want the deployment-wide
+figure.
 
 A single corrupted graph should report a degraded graph entry while unrelated
 graphs remain queryable. Stop the daemon before repairing or replacing a damaged
@@ -1378,11 +1396,14 @@ decision and its reasons.
 to watch for an outstanding erasure.
 
 The typed C client exposes the current aggregate and per-graph fields through
-`wyl_client_fact_status()`. This endpoint is unauthenticated and reports tenant
-and graph identifiers, so use it only through the daemon's local listener; do
-not expose it through a remote proxy. The C client rejects non-loopback daemon
-URLs for this API and deliberately sends no bearer
-credentials for this read. Future status names are retained as wire strings
+`wyl_client_fact_status()`. The per-graph rows report tenant and graph
+identifiers, so the daemon returns them only to an authenticated caller and
+only for that caller's own tenant; pass the access token together with the
+tenant it authenticates. Called with `NULL` for both, the client requests the
+response anonymously and receives the aggregate counts alone. Use this API
+only through the daemon's local listener and do not expose it through a remote
+proxy: the C client rejects non-loopback daemon URLs for it. Future status
+names are retained as wire strings
 and map to the client's `UNKNOWN` enum value until that client is updated.
 The decoder rejects snapshots larger than 4 MiB, more than 16,384 graphs, or
 status/reason names longer than 64 bytes; it never returns a truncated list.
@@ -1396,7 +1417,7 @@ the open #550 scope.
 | is the process serving | `GET /readyz` | `200` and `ready\n`, or `503` with a reason |
 | is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded`, `graphs_sealed` |
 | did an audit record go missing | `GET /readyz?format=json` | `audit_errors`, monotonic; non-zero means at least one emission failed |
-| which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate |
+| which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate; the per-graph rows require a credential and are scoped to the caller's tenant, so an anonymous caller receives the aggregate alone |
 
 Three consequences worth knowing before you wire an alert.
 

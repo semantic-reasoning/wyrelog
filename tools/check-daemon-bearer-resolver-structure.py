@@ -427,6 +427,11 @@ def check(path: Path) -> list[str]:
           "service_management_front_door": "FALSE",
           "mfa_enroll_authorize": "FALSE",
           "logout_handler": "FALSE",
+          # #1031: /facts/status resolves an optional bearer to scope its
+          # per-graph rows to the caller's tenant.  It reads status and takes
+          # no lease of its own, so it has nothing to hand a retained lease
+          # to; FALSE releases it terminally inside the resolver.
+          "facts_status_handler": "FALSE",
           "decide_handler": "TRUE",
       }
       retain_pattern = re.compile(

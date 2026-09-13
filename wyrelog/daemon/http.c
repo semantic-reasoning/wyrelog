@@ -6901,7 +6901,7 @@ set_readyz_json (SoupServerMessage *msg, guint status, const gchar *state,
 {
   attach_request_id_header (msg);
 
-  g_autofree gchar *facts = wyl_daemon_fact_status_json (handle, FALSE);
+  g_autofree gchar *facts = wyl_daemon_fact_status_json (handle, FALSE, NULL);
   g_autoptr (GString) body = g_string_new ("{\"status\":");
   append_json_string (body, state);
   if (reason != NULL) {
@@ -7137,15 +7137,64 @@ static void
 facts_status_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
-  (void) server;
   (void) path;
-  (void) query;
 
   if (!require_method (msg, "GET"))
     return;
 
   WylDaemonHttpContext *ctx = user_data;
-  g_autofree gchar *body = wyl_daemon_fact_status_json (ctx->handle, TRUE);
+
+  /*
+   * #1031: the aggregate is public health data, but every per-graph row
+   * names a tenant and a graph.  Branch on whether a credential was
+   * PRESENTED, never on whether one resolved: deciding on the resolution
+   * outcome would let a forged or expired token fall through to the
+   * anonymous body and read as success.
+   */
+  const gchar *bearer_token = lookup_bearer_token (msg);
+  const gchar *session_token = query != NULL
+      ? g_hash_table_lookup (query, "session_token") : NULL;
+  gboolean has_bearer = bearer_token != NULL && bearer_token[0] != '\0';
+  gboolean has_session = session_token != NULL && session_token[0] != '\0';
+  const gchar *tenant_filter = NULL;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+
+  if (has_session && bearer_token != NULL) {
+    set_json_error (msg, 400, "invalid_fact_status_auth");
+    return;
+  }
+  /* An Authorization header that is present but not a usable Bearer -- a
+   * Basic scheme, or an empty token -- is a credential the caller meant to
+   * present.  Treating it as absent would hand it the anonymous body and
+   * call that success, which is the same fall-through this branch exists to
+   * prevent; every other route refuses it here (see :7490). */
+  if (bearer_token != NULL && !has_bearer) {
+    set_json_error (msg, 401, "fact_status_auth_required");
+    return;
+  }
+  if (has_bearer || has_session) {
+    const gchar *auth_tenant_error = NULL;
+    wyrelog_error_t auth_rc = has_session
+        ? resolve_session_token_auth (server, ctx, session_token, &auth,
+            &auth_tenant_error)
+        : resolve_bearer_session (server, ctx, bearer_token, &auth,
+            &auth_tenant_error, FALSE);
+    if (auth_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 401, auth_tenant_error != NULL
+          ? auth_tenant_error : "fact_status_auth_required");
+      return;
+    }
+    /* Same gate every other tenant-scoped route uses, so a request for a
+     * tenant the caller is not in is refused the same way.  It reads the
+     * `tenant` query parameter, which defaults to __wr_default, so a caller
+     * in any other tenant must name its own tenant explicitly. */
+    if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
+      return;
+    tenant_filter = auth.tenant;
+  }
+
+  g_autofree gchar *body = wyl_daemon_fact_status_json (ctx->handle,
+          tenant_filter != NULL, tenant_filter);
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
