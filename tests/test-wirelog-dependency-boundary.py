@@ -36,7 +36,7 @@ if root_meson.count(selector_call) != 1:
 selector_offset = root_meson.index(selector_call)
 for required_input in (
     "cc = meson.get_compiler('c')",
-    "wirelog_version = '>= 0.54.0'",
+    "wirelog_version = '>= 0.62.0'",
     "force_fallback_for = get_option('force_fallback_for')",
     "wrap_mode = get_option('wrap_mode')",
 ):
