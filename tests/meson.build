@@ -359,6 +359,16 @@ if host_machine.system() != 'windows'
       ],
       depends : wyrelogd_exe,
     )
+    test('daemon-http-body-limits', python3,
+      args : [
+        meson.current_source_dir() / 'test-daemon-http-body-limits.py',
+        wyrelogd_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        wyrelogd_healthz_expect_audit,
+      ],
+      depends : wyrelogd_exe,
+      timeout : 60,
+    )
     test('wyrelogd-startup-readiness', sh,
       args : [
         meson.current_source_dir() / 'check-wyrelogd-startup-readiness.sh',
@@ -610,6 +620,12 @@ if build_client
     dependencies : [wyrelog_dep, libsoup_dep, daemon_http_private_dep],
   )
   test('daemon-http-guards', test_daemon_http_guards)
+
+  test_daemon_http_body_limit = executable('test-daemon-http-body-limit',
+    'test-daemon-http-body-limit.c',
+    dependencies : [wyrelog_dep, libsoup_dep, daemon_http_private_dep],
+  )
+  test('daemon-http-body-limit-writes', test_daemon_http_body_limit)
 
   test('daemon-http-guards-structure', python3,
     args : [

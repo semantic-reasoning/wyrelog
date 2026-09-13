@@ -5,6 +5,24 @@ Wyrelog application service deployment. It assumes the package installs
 `wyrelogd`, `wyctl`, the access-control template tree, and the systemd
 support files from `packaging/`.
 
+## HTTP request body limits
+
+The local daemon bounds request bodies before authentication. Append, retract,
+and schema registration accept at most 1 MiB; Datalog queries and service-token
+exchange accept 16 KiB; fact forget, MFA enrollment, service-principal creation,
+credential issue/rotation and operation recovery/reconciliation accept 4 KiB.
+Profile events, tenant sealing, principal disabling and credential revocation
+accept 1 KiB. Other routes have a 1 MiB transport ceiling.
+
+An oversized declared Content-Length is rejected before reading the body.
+Chunked requests are rejected as soon as received bytes exceed the limit,
+without waiting for the final chunk. The response is HTTP 413 with
+`{"error":"request_body_too_large"}`, a server-generated
+`X-Wyrelog-Request-Id`, and `Connection: close`. Malformed bodies within the
+limit retain the endpoint's normal validation response. If the peer cannot
+receive the error or the socket write fails, the daemon closes the connection
+without waiting; clients may then observe a transport error instead of 413.
+
 ## Installed Layout
 
 - Binaries: `/usr/bin/wyrelogd`, `/usr/bin/wyctl`

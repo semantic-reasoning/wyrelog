@@ -16,6 +16,7 @@
 
 #include "daemon/auth-registry-private.h"
 #include "daemon/http-guards-private.h"
+#include "daemon/http-body-limit-private.h"
 #include "daemon/service-credential-handoff-private.h"
 #include "daemon/delta.h"
 #include "daemon/fact-status.h"
@@ -16225,6 +16226,7 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   }
 
   SoupServer *server = soup_server_new (NULL, NULL);
+  wyl_daemon_http_install_body_limit (server);
   WylDaemonHttpContext *ctx =
       wyl_daemon_http_context_new (opts, handle, runtime, error);
   if (ctx == NULL) {

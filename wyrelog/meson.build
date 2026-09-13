@@ -364,6 +364,7 @@ wyrelogd_c_args = [
 if libsoup_dep.found()
   daemon_http_private_lib = static_library('wyrelog-daemon-http-private',
     'daemon/http-guards-private.c',
+    'daemon/http-body-limit-private.c',
     'daemon/service-credential-handoff-private.c',
     include_directories : wyrelog_inc,
     dependencies : [glib_dep, gio_dep, libsoup_dep, publication_private_dep],
