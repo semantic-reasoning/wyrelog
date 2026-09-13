@@ -5295,6 +5295,12 @@ static gint send_raw_service_principal_bearer (SoupSession * session,
     const gchar * method, const gchar * base_url, const gchar * path,
     const gchar * query, const gchar * access_token, const gchar * body,
     guint * out_status, gchar ** out_body);
+/* Defined below, beside the other raw senders; declared here for the #1044
+ * sealed-tenant policy-route arm. */
+static gint send_raw_policy_mutation_bearer (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, const gchar * access_token, guint * out_status,
+    gchar ** out_body);
 
 static gint
 check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
@@ -5479,8 +5485,54 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
     return rc;
   if (status == 401)
     return 4634;
-  if (status != 409 || strstr (body, "tenant_sealed") == NULL)
+  if (status != 409
+      || strstr (body, "\"error\":\"tenant_sealed\"") == NULL)
     return 4635;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * (7) #1044: the same refusal on a policy-mutation route, because that is
+   * where the client maps it.  The client's status ladder for these five
+   * routes had no 409 arm and fell through to WYRELOG_E_IO, which reads as
+   * transient and invites the retry loop answering 409 exists to break.
+   * Mapping it correctly is worth nothing if the route does not in fact
+   * answer 409, and until now nothing asserted that it does -- the only
+   * sealed-tenant 409 in the suite drove /decide.  The 401 is split out so a
+   * rejected fixture token cannot masquerade as a contract failure.
+   *
+   * This arm depends on step (5)'s wyl_policy_store_set_tenant_sealed above,
+   * not on step (6), which only observes what (5) sealed.  That setup is
+   * load-bearing for more than /decide now, so a decide-motivated change to
+   * it breaks this arm too.  It cannot go vacuous, though -- the
+   * assertion is the sealing's own observable consequence, so an unsealed
+   * tenant answers 200 or 403 and fails here rather than passing quietly.
+   *
+   * The codes continue the local run and are unique as literals.  They are
+   * not unique modulo 256, and chasing a pair that is would be wasted: the
+   * exit status is truncated to 8 bits, and a conservative count over this
+   * main's own returns, its direct check callees, and the two computed
+   * matrices already occupies at least 243 of the 256 residues.  That
+   * saturation is why check_service_credential_operation_reconcile_contract
+   * carries the note making the structured WYRELOG_TEST_DIAG line the
+   * authoritative discriminator rather than the exit status.  This check
+   * reaches the main's cleanup block, which prints result untruncated; the
+   * early-return checks bypass that print, which is what separates them
+   * from an aliasing cleanup code in the log.
+   */
+  g_autofree gchar *sealed_grant_query =
+      g_strdup_printf ("subject=%s&perm=%s&scope=%s"
+          "&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0", svc, perm,
+          WYL_TENANT_DEFAULT);
+  rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
+          "/policy/permissions/grant", sealed_grant_query, fixture.token,
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status == 401)
+    return 4636;
+  if (status != 409
+      || strstr (body, "\"error\":\"tenant_sealed\"") == NULL)
+    return 4637;
   g_clear_pointer (&body, g_free);
 
   return 0;

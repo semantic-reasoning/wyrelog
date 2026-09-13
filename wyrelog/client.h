@@ -385,7 +385,27 @@ wyrelog_error_t wyl_client_audit_query_with_guard_context (WylClient * client,
     gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk, WylAuditIter ** out_iter);
 
-/* Policy mutation */
+/*
+ * Policy mutation
+ *
+ * All five share one status mapping: 2xx -> WYRELOG_E_OK, 400 ->
+ * WYRELOG_E_INVALID, 401 -> WYRELOG_E_AUTH, 403 and 409 ->
+ * WYRELOG_E_POLICY, any other error status -> WYRELOG_E_IO.  A request that
+ * fails outright, yielding no status at all, is also WYRELOG_E_IO.
+ *
+ * WYRELOG_E_INVALID is also returned without sending a request, and not
+ * only for a bad argument: for client state -- no session or access token,
+ * no tenant, no base URL -- and for a base URL that is present but will not
+ * form a request URI.  It does not mean the caller passed something wrong.
+ *
+ * 403 and 409 both mean a terminal authority condition -- the caller lacks
+ * the permission, or the tenant is sealed -- and neither should be retried.
+ * These functions do not expose which one occurred: the last-error
+ * accessors are not populated on this path, so
+ * wyl_client_dup_last_error_code after one of these calls reflects an
+ * earlier unrelated call, or nothing at all if there has been none -- never
+ * this one.
+ */
 wyrelog_error_t wyl_client_policy_permission_grant (WylClient * client,
     const gchar * subject,
     const gchar * perm,

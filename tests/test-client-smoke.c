@@ -2073,6 +2073,30 @@ main (void)
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
       "scope", 123, "public", 49) != WYRELOG_E_POLICY)
     return 527;
+  /*
+   * #1044: a sealed tenant answers 409 on these routes, and it used to fall
+   * through to WYRELOG_E_IO -- a transport code, the class a caller retries,
+   * on a condition that never clears.  POLICY, not CONFLICT: error.h scopes
+   * CONFLICT to an idempotency-key collision and excludes authority
+   * failures, and the daemon's only 409 here is tenant_sealed.  The body is
+   * set for realism but not asserted: the mock supplies it, so checking it
+   * would only confirm the fixture.
+   *
+   * Codes 64 and 65 are free in the modulo-256 space, not merely as
+   * literals: this binary's exit status is truncated to 8 bits, so 562 would
+   * have surfaced as 50 and been indistinguishable from the assertion that
+   * already returns 50.
+   */
+  http.status = 409;
+  http.body = "{\"error\":\"tenant_sealed\"}";
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return 64;
+  /* The role path shares the helper; this guards a future split of it. */
+  if (wyl_client_policy_role_grant (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return 65;
+  http.body = NULL;
   http.status = 500;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
       "scope", 123, "public", 49) != WYRELOG_E_IO)
