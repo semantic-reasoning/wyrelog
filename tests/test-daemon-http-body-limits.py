@@ -13,7 +13,7 @@ import time
 
 def resident_kib(pid):
     if sys.platform.startswith("linux"):
-        for line in pathlib.Path(f"/proc/{pid}/status").read_text().splitlines():
+        for line in pathlib.Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
             if line.startswith("VmRSS:"):
                 return int(line.split()[1])
     if sys.platform == "darwin":
