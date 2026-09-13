@@ -771,6 +771,28 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
     return WYRELOG_E_AUTH;
   if (status == 403)
     return WYRELOG_E_POLICY;
+  /*
+   * #1044: a sealed tenant answers 409 here, and without this arm it fell
+   * through to WYRELOG_E_IO -- which reads as a transport failure, the class
+   * a caller retries.  That seeds at this layer the same non-terminating
+   * loop the daemon's 409 exists to break, because the retry fails
+   * identically forever.
+   *
+   * POLICY rather than CONFLICT: error.h scopes CONFLICT to an idempotency
+   * key already bound to a different mutation, and says it is distinct from
+   * POLICY so callers can report a conflict without misclassifying authority
+   * failures.  A sealed tenant is an authority state.
+   *
+   * The service ladder below maps 409 to CONFLICT, which is right for the
+   * existence and idempotency conflicts its routes mostly answer with -- but
+   * not for a sealed tenant, which reaches it too, because
+   * service_management_front_door resolves its bearer through the same
+   * set_auth_failure_error.  That ladder therefore still misclassifies the
+   * condition this arm exists to classify.  Fixing it is out of scope here
+   * and tracked separately; do not read the mapping below as settled.
+   */
+  if (status == 409)
+    return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
 }
 
