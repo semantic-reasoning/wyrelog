@@ -11212,6 +11212,8 @@ request_body_dup (SoupServerMessage *msg, gsize max_len, gchar **out_body)
     return FALSE;
   if ((gsize) body->length > max_len)
     return FALSE;
+  if (memchr (body->data, '\0', (gsize) body->length) != NULL)
+    return FALSE;
   *out_body = g_strndup (body->data, (gsize) body->length);
   return *out_body != NULL;
 }
@@ -11256,6 +11258,16 @@ schema_columns_clear_array (GArray **cols)
   schema_columns_clear (columns, n_columns);
 }
 
+/* g_strsplit removes LF. Only a CR immediately preceding that LF belongs
+ * to the terminator; a lone final CR is part of the field. */
+static void
+tsv_strip_crlf (gchar *line, gboolean followed_by_lf)
+{
+  gsize length = strlen (line);
+  if (followed_by_lf && length > 0 && line[length - 1] == '\r')
+    line[length - 1] = '\0';
+}
+
 static gboolean
 parse_schema_tsv (const gchar *body,
     wyl_policy_fact_relation_schema_column_t **out_columns,
@@ -11269,10 +11281,14 @@ parse_schema_tsv (const gchar *body,
           sizeof (wyl_policy_fact_relation_schema_column_t));
 
   for (gsize i = 0; lines[i] != NULL; i++) {
-    g_strchomp (lines[i]);
-    if (lines[i][0] == '\0')
-      continue;
-    if (g_strcmp0 (lines[i], "column_name\tcolumn_type\tnullable\tvisible")
+    if (lines[i][0] == '\0' && lines[i + 1] == NULL)
+      break;
+    tsv_strip_crlf (lines[i], lines[i + 1] != NULL);
+    if (lines[i][0] == '\0') {
+      schema_columns_clear_array (&cols);
+      return FALSE;
+    }
+    if (i == 0 && g_strcmp0 (lines[i], "column_name\tcolumn_type\tnullable\tvisible")
         == 0)
       continue;
     g_auto (GStrv) fields = g_strsplit (lines[i], "\t", 5);
@@ -11339,6 +11355,9 @@ parse_fact_value (const gchar *text,
 {
   if ((text == NULL || text[0] == '\0' || g_strcmp0 (text, "NULL") == 0)
       && column->nullable) {
+    if (g_strcmp0 (column->column_type, "string") == 0
+        || g_strcmp0 (column->column_type, "symbol") == 0)
+      return FALSE;
     out->type = WYL_FACT_VALUE_NULL;
     return TRUE;
   }
@@ -11409,9 +11428,13 @@ parse_fact_tsv (const gchar *body,
   gboolean first_data = TRUE;
 
   for (gsize i = 0; lines[i] != NULL; i++) {
-    g_strchomp (lines[i]);
-    if (lines[i][0] == '\0')
-      continue;
+    if (lines[i][0] == '\0' && lines[i + 1] == NULL)
+      break;
+    tsv_strip_crlf (lines[i], lines[i + 1] != NULL);
+    if (lines[i][0] == '\0') {
+      fact_rows_clear_array (&rows);
+      return FALSE;
+    }
     g_auto (GStrv) fields = g_strsplit (lines[i], "\t", n_columns + 2);
     if (first_data && line_is_fact_header (fields, columns, n_columns)) {
       first_data = FALSE;
