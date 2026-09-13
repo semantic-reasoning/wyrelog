@@ -8239,6 +8239,7 @@ service_credential_handoff_emit (SoupServerMessage *msg,
     case WYRELOG_E_BUSY:
       set_json_error (msg, 503, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_UNAVAILABLE);
       return;
+    case WYRELOG_E_CONFLICT:
     case WYRELOG_E_POLICY:
       set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
       return;
@@ -8581,6 +8582,7 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
     .subject_id = rotate_subject,
     .old_credential_id = credential_id,
     .expected_generation = current_generation,
+    .expected_generation_is_server_derived = TRUE,
     .destination = values[2],
     .expires_at_us = expires_at_us,
   };

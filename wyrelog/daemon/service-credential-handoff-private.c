@@ -48,9 +48,9 @@ handoff_record_delivered (const WylServiceCredentialOperationRecord *record)
 {
   WylServiceCredentialOperationTerminalKind kind = 0;
   return record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
-      && wyl_service_credential_operation_terminal_reason_parse
-      (record->terminal_reason, &kind, NULL)
-      && kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED;
+         && wyl_service_credential_operation_terminal_reason_parse
+           (record->terminal_reason, &kind, NULL)
+         && kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED;
 }
 
 static void
@@ -189,18 +189,18 @@ wyl_daemon_service_credential_handoff (const
       && inputs->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
     return WYRELOG_E_INVALID;
   if (!wyl_service_credential_operation_coordinator_request_id_is_valid
-      (inputs->request_id)
+        (inputs->request_id)
       || !wyl_service_credential_operation_destination_is_valid
-      (inputs->destination))
+        (inputs->destination))
     return WYRELOG_E_INVALID;
 
   rc = wyl_service_credential_operation_storage_open (ctx->operation_root,
-      &storage);
+          &storage);
   if (rc != WYRELOG_E_OK)
     goto out;
   storage_opened = TRUE;
   rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
-      &anchor);
+          &anchor);
   if (rc != WYRELOG_E_OK)
     goto out;
 
@@ -214,7 +214,7 @@ wyl_daemon_service_credential_handoff (const
 #endif
   {
     rc = wyctl_publication_backend_open (&backend,
-        ctx->credential_publication_root);
+            ctx->credential_publication_root);
     if (rc != WYRELOG_E_OK)
       goto out;
     backend_opened = TRUE;
@@ -253,10 +253,12 @@ wyl_daemon_service_credential_handoff (const
     .rotate_runtime = inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ?
         &rotate_runtime : NULL,
     .cancellable = ctx->cancellable,
+    .expected_generation_is_server_derived =
+        inputs->expected_generation_is_server_derived,
   };
 
   rc = wyl_service_credential_operation_coordinator_handoff (ctx->handle,
-      &storage, &anchor, &request, &runtime, &record);
+          &storage, &anchor, &request, &runtime, &record);
   if (rc == WYRELOG_E_OK)
     *out_json = handoff_build_receipt (&record);
 

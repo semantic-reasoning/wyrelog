@@ -17,6 +17,7 @@ tests/test-daemon-http-mfa.c
 tests/test-daemon-http-profile-events.c
 tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
+tests/test-daemon-service-credential-handoff.c
 tests/test-decide-req.c
 tests/test-decide-resp.c
 tests/test-duckdb-source-offbridge-c-consumer.c
@@ -70,6 +71,7 @@ tests/test-posix-errno-capability.c
 tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
 tests/test-service-credential-domain.c
+tests/test-service-credential-operation-coordinator-handoff.c
 tests/test-service-credential-operation-root.h
 tests/test-service-decision-authority.c
 tests/test-service-exchange-private.c
@@ -102,6 +104,7 @@ wyrelog/auth/mfa-validator.h
 wyrelog/auth/service-auth-coordination.c
 wyrelog/auth/service-credential-domain.c
 wyrelog/auth/service-credential-operation-coordinator-execute-private.c
+wyrelog/auth/service-credential-operation-coordinator-execute-private.h
 wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c
 wyrelog/auth/service-credential-operation-coordinator-remediate-private.c
 wyrelog/auth/service-credential-operation-coordinator-retirement-private.c
@@ -122,6 +125,7 @@ wyrelog/daemon/http.h
 wyrelog/daemon/options.h
 wyrelog/daemon/runtime.c
 wyrelog/daemon/runtime.h
+wyrelog/daemon/service-credential-handoff-private.c
 wyrelog/daemon/service-credential-handoff-private.h
 wyrelog/daemon/signals.c
 wyrelog/daemon/signals.h
