@@ -1,5 +1,5 @@
 {
-  "aggregate": "9e76d39daea38a882e763407361905e4eb3beec5280a17a6bd204a5d086dacfe",
+  "aggregate": "7b3c4902233e863085d0c5839f9269f4b2c3c73a413fa23e1957cd729c2e96fc",
   "directives": {
     "count": 516,
     "sha256": "7ac3ef284cff630342710436260c2f32b4ea97487a9d0c44aa62d6bad793af64"
@@ -17,7 +17,7 @@
     "mutate_tenant_lifecycle_publication": "26dd679c7632772e4b848ff98e6f8833433f49667a8f5ee0a7bdda2564e903b6",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
-    "policy_permission_transition_handler": "dee6193f7b999901e44b1275711972c08998f661aeb668b4da9f7ea8b1cdae02",
+    "policy_permission_transition_handler": "1c4848bc791fd181d4b2be5b022ee1ba2c2810deef653fbfad121540318af5d9",
     "policy_role_grant_handler": "dc65e4712f0cf0f334b7e1aa23cb8c20bbd3c16607b46dcd5deb358becf1bdc7",
     "policy_role_revoke_handler": "e3acff4dec329c9ffe946248a53d6058f136f6591942a9adef6b71df12bdddf4",
     "policy_write_acquire_fault_hit_count": "2605b465d8d8e648c155cb9f2e6d3c6e6fe877657fdc60ae6b4cb4bad0211f9b",

@@ -999,19 +999,57 @@ wyrelogd --production \
   --listen-port 8765
 ```
 
-Mint the first token and arm the packaged administrator's Datalog authorities on
-the tenant scope. The bootstrap role already grants these permissions; the
-permission-state transition records that the operator intentionally armed them
-for this scope.
+Use the bootstrap bypass only to enroll the administrator's TOTP factor. A
+successful enrollment atomically revokes `wr.login.skip_mfa`; it does not mint
+the MFA-assured session needed to arm permissions. After enrollment, perform a
+fresh normal login, verify TOTP, and use only the resulting access token for
+permission transitions and Datalog operations.
+The enrollment-confirmation code cannot be replayed for login; if the current
+30-second TOTP code was just used to enroll, wait for the next code before
+completing the fresh login below.
 
 ```sh
 python3 - <<'PY'
-import json, urllib.request
+import json, os, urllib.request
 url = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default&skip_mfa=true"
 req = urllib.request.Request(url, method="POST")
 with urllib.request.urlopen(req) as response:
     token = json.load(response)["access_token"]
 open("/run/wyrelog/operator.token", "w", encoding="utf-8").write(token + "\n")
+os.chmod("/run/wyrelog/operator.token", 0o600)
+PY
+
+wyctl --daemon-url "$BASE_URL" mfa enroll \
+  --subject alice \
+  --access-token-file "$TOKEN"
+
+python3 - "$BASE_URL" "$TOKEN" <<'PY'
+import getpass
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+
+base, token_path = sys.argv[1:]
+login_url = base + "/auth/login?" + urllib.parse.urlencode({
+    "username": "alice", "tenant": "__wr_default",
+})
+with urllib.request.urlopen(urllib.request.Request(login_url, method="POST")) as response:
+    login = json.load(response)
+if login.get("principal_state") != "mfa_required":
+    raise SystemExit("fresh login did not return an MFA challenge")
+code = getpass.getpass("Current 6-digit TOTP code: ")
+verify_url = base + "/auth/mfa/verify?" + urllib.parse.urlencode({
+    "session_token": login["session_token"], "code": code,
+})
+with urllib.request.urlopen(urllib.request.Request(verify_url, method="POST")) as response:
+    verified = json.load(response)
+if verified.get("principal_state") != "authenticated" or not verified.get("access_token"):
+    raise SystemExit("MFA verification did not return an access token")
+with open(token_path, "w", encoding="utf-8") as output:
+    output.write(verified["access_token"] + "\n")
+os.chmod(token_path, 0o600)
 PY
 
 for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do

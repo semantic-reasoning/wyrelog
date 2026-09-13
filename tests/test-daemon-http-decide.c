@@ -10197,6 +10197,32 @@ cleanup:
   return result;
 }
 
+typedef struct
+{
+  SoupServer *server;
+  WylSession *session;
+  guint calls;
+} PermissionTransitionMfaRevocationProbe;
+
+static wyrelog_error_t
+permission_transition_revoke_actor_before_write (WylHandle *handle,
+    const gchar *actor, const gchar *action, const gchar *session_id,
+    const gchar *target_tenant, gpointer user_data)
+{
+  PermissionTransitionMfaRevocationProbe *probe = user_data;
+  (void) target_tenant;
+  if (handle == NULL || actor == NULL || session_id == NULL || probe == NULL
+      || probe->server == NULL || probe->session == NULL
+      || g_strcmp0 (action, "wr.policy.write") != 0)
+    return WYRELOG_E_INVALID;
+  probe->calls++;
+  wyrelog_error_t close_rc = wyl_session_close (handle, probe->session);
+  if (close_rc != WYRELOG_E_OK)
+    return close_rc;
+  wyl_daemon_http_revoke_human_session_for_test (probe->server, session_id);
+  return WYRELOG_E_OK;
+}
+
 static gint
 check_policy_permission_mutation_contract (SoupServer *server,
     WylHandle *handle, WylClient *client, const gchar *base_url)
@@ -10893,8 +10919,19 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (wyl_policy_store_upsert_role (store, "site.creator-role",
       "creator role") != WYRELOG_E_OK)
     return 2260;
+  wyl_id_t transition_mfa_id = WYL_ID_NIL;
+  gchar transition_mfa_session[WYL_ID_STRING_BUF] = { 0 };
+  g_autofree gchar *transition_mfa_access = NULL;
+  g_autofree gchar *transition_mfa_refresh = NULL;
+  if (wyl_id_new (&transition_mfa_id) != WYRELOG_E_OK
+      || wyl_id_format (&transition_mfa_id, transition_mfa_session,
+      sizeof transition_mfa_session) != WYRELOG_E_OK
+      || !seed_human_tokens_with_assurance (server, transition_mfa_session,
+      "http-policy-admin", WYL_TENANT_DEFAULT, TRUE,
+      &transition_mfa_access, &transition_mfa_refresh))
+    return 2679;
   gint arm_creator_rc = arm_tenant_creator_role_grant (session, handle,
-          base_url, session_token, "tenant-a", 2261);
+          base_url, transition_mfa_session, "tenant-a", 2261);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
   g_autofree gchar *tenant_role_grant_query =
@@ -10927,7 +10964,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   arm_creator_rc = arm_tenant_creator_role_grant (session, handle, base_url,
-          session_token, "tenant-revoke", 2265);
+          transition_mfa_session, "tenant-revoke", 2265);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
 
@@ -11579,10 +11616,48 @@ check_policy_permission_mutation_contract (SoupServer *server,
 #endif
   g_clear_pointer (&body, g_free);
 
-  g_autofree gchar *transition_allowed_query =
+  /* A non-MFA bootstrap-style session can still authorize wr.policy.write,
+   * but it must not create an armed permission state or success audit. */
+  PermissionMutationSnapshot nonmfa_transition_before;
+  PermissionMutationSnapshot nonmfa_transition_after = { 0 };
+  if (!capture_permission_mutation_snapshot (store, "state-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &nonmfa_transition_before))
+    return 2670;
+  g_autofree gchar *nonmfa_transition_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/permissions/transition", nonmfa_transition_query,
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL
+      || !capture_permission_mutation_snapshot (store, "state-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &nonmfa_transition_after)
+      || !permission_mutation_snapshot_unchanged (&nonmfa_transition_before,
+      &nonmfa_transition_after))
+    return 2671;
+  g_autoptr (wyl_decide_req_t) denied_transition_req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) denied_transition_resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (denied_transition_req, "state-target");
+  wyl_decide_req_set_action (denied_transition_req, "site.policy.read");
+  wyl_decide_req_set_resource_id (denied_transition_req, "tenant-a");
+  wyl_decide_req_set_guard_context (denied_transition_req, 123, "public", 49);
+  if (wyl_decide (handle, denied_transition_req, denied_transition_resp)
+      != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (denied_transition_resp)
+      != WYL_DECISION_DENY)
+    return 2672;
+  g_clear_pointer (&body, g_free);
+
+  /* The caller has MFA; the target intentionally has no MFA session. */
+  g_autofree gchar *transition_allowed_query =
+      g_strdup_printf ("subject=state-target&perm=site.policy.read"
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
           "/policy/permissions/transition", transition_allowed_query, 2680);
   if (rc != 0)
@@ -11619,6 +11694,189 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 179;
   g_clear_pointer (&body, g_free);
 
+  /* Exercise the second FSM edge into armed (cooldown + reset).  A direct
+   * grant leaves the target's protected permission dormant until this state
+   * transition succeeds. */
+  if (wyl_policy_store_set_principal_state (store, "reset-target",
+      "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store, "reset-target",
+      "site.policy.read", "tenant-a") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "reset-target",
+      "site.policy.read", "tenant-a", "cooldown") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 2689;
+  gboolean reset_target_cooldown = FALSE;
+  if (wyl_policy_store_permission_state_is (store, "reset-target",
+      "site.policy.read", "tenant-a", "cooldown", &reset_target_cooldown)
+      != WYRELOG_E_OK || !reset_target_cooldown)
+    return 2690;
+  g_autoptr (wyl_decide_req_t) reset_target_decide = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) reset_target_resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (reset_target_decide, "reset-target");
+  wyl_decide_req_set_action (reset_target_decide, "site.policy.read");
+  wyl_decide_req_set_resource_id (reset_target_decide, "tenant-a");
+  wyl_decide_req_set_guard_context (reset_target_decide, 123, "public", 49);
+  if (wyl_decide (handle, reset_target_decide, reset_target_resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (reset_target_resp) != WYL_DECISION_DENY)
+    return 2691;
+
+  PermissionStateEventAnyProbe reset_events_before = {
+    .subject_id = "reset-target",
+    .perm_id = "site.policy.read",
+    .scope = "tenant-a",
+  };
+  AuditEventProbe reset_audit_before = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_state.reset",
+    .resource_id = "site.policy.read",
+    .deny_reason = "reset",
+    .deny_origin = "tenant-a",
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+      permission_state_event_any_probe_cb, &reset_events_before)
+      != WYRELOG_E_OK
+      || wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+      &reset_audit_before) != WYRELOG_E_OK)
+    return 2692;
+  g_autofree gchar *nonmfa_reset_query =
+      g_strdup_printf ("subject=reset-target&perm=site.policy.read"
+          "&scope=tenant-a&event=reset&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/permissions/transition", nonmfa_reset_query,
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  gboolean still_cooldown = FALSE;
+  PermissionStateEventAnyProbe reset_events_after = {
+    .subject_id = "reset-target",
+    .perm_id = "site.policy.read",
+    .scope = "tenant-a",
+  };
+  AuditEventProbe reset_audit_after = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_state.reset",
+    .resource_id = "site.policy.read",
+    .deny_reason = "reset",
+    .deny_origin = "tenant-a",
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL
+      || wyl_policy_store_permission_state_is (store, "reset-target",
+      "site.policy.read", "tenant-a", "cooldown", &still_cooldown)
+      != WYRELOG_E_OK || !still_cooldown
+      || wyl_policy_store_foreach_permission_state_event (store,
+      permission_state_event_any_probe_cb, &reset_events_after) != WYRELOG_E_OK
+      || reset_events_after.matches != reset_events_before.matches
+      || wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+      &reset_audit_after) != WYRELOG_E_OK
+      || reset_audit_after.matches != reset_audit_before.matches)
+    return 2693;
+  if (wyl_decide (handle, reset_target_decide, reset_target_resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (reset_target_resp) != WYL_DECISION_DENY)
+    return 2697;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *mfa_reset_query =
+      g_strdup_printf ("subject=reset-target&perm=site.policy.read"
+          "&scope=tenant-a&event=reset&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/permissions/transition", mfa_reset_query, &status, &body);
+  gboolean reset_target_armed = FALSE;
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL
+      || wyl_policy_store_permission_state_is (store, "reset-target",
+      "site.policy.read", "tenant-a", "armed", &reset_target_armed)
+      != WYRELOG_E_OK || !reset_target_armed)
+    return 2694;
+  if (wyl_decide (handle, reset_target_decide, reset_target_resp) != WYRELOG_E_OK
+      || wyl_decide_resp_get_decision (reset_target_resp) != WYL_DECISION_ALLOW)
+    return 2695;
+  PermissionStateProbe reset_event = {
+    .subject_id = "reset-target",
+    .perm_id = "site.policy.read",
+    .scope = "tenant-a",
+    .event = "reset",
+    .from_state = "cooldown",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+      permission_state_event_probe_cb, &reset_event) != WYRELOG_E_OK
+      || reset_event.matches != 1)
+    return 2696;
+  AuditEventProbe reset_success_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_state.reset",
+    .resource_id = "site.policy.read",
+    .deny_reason = "reset",
+    .deny_origin = "tenant-a",
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+      &reset_success_audit) != WYRELOG_E_OK
+      || reset_success_audit.matches != 1)
+    return 2696;
+  g_clear_pointer (&body, g_free);
+
+  /* An expired access token for an otherwise live MFA session is rejected by
+   * bearer resolution and cannot create transition state or success audit. */
+  wyl_id_t expired_session_id = WYL_ID_NIL;
+  wyl_id_t expired_jti_id = WYL_ID_NIL;
+  gchar expired_session_token[WYL_ID_STRING_BUF] = { 0 };
+  gchar expired_jti[WYL_ID_STRING_BUF] = { 0 };
+  g_autofree gchar *expired_access_token = NULL;
+  g_autofree gchar *expired_key_id =
+      wyl_daemon_http_dup_access_token_key_id (server);
+  gint64 expired_issued_at = g_get_real_time () / G_USEC_PER_SEC
+      - WYL_JWT_ACCESS_TTL_SECONDS - 10;
+  if (expired_key_id == NULL
+      || wyl_id_new (&expired_session_id) != WYRELOG_E_OK
+      || wyl_id_new (&expired_jti_id) != WYRELOG_E_OK
+      || wyl_id_format (&expired_session_id, expired_session_token,
+      sizeof expired_session_token) != WYRELOG_E_OK
+      || wyl_id_format (&expired_jti_id, expired_jti, sizeof expired_jti)
+      != WYRELOG_E_OK
+      || !wyl_daemon_http_seed_mfa_human_session_for_test (server,
+      expired_session_token, "http-policy-admin", WYL_TENANT_DEFAULT)
+      || !wyl_daemon_http_store_human_access_token_for_test (server,
+      expired_jti, expired_session_token, "http-policy-admin",
+      WYL_TENANT_DEFAULT, expired_key_id, expired_issued_at,
+      expired_issued_at + WYL_JWT_ACCESS_TTL_SECONDS)
+      || sign_test_access_token_with_jti (server, expired_jti,
+      expired_session_token, "http-policy-admin", "authenticated", "wyrelogd",
+      "wyrelog-client", expired_issued_at, &expired_access_token)
+      != WYRELOG_E_OK)
+    return 2697;
+  PermissionMutationSnapshot expired_transition_before;
+  PermissionMutationSnapshot expired_transition_after = { 0 };
+  if (!capture_permission_mutation_snapshot (store, "expired-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &expired_transition_before))
+    return 2698;
+  g_autofree gchar *expired_transition_query =
+      g_strdup ("subject=expired-target&perm=site.policy.read&scope=tenant-a"
+          "&event=grant&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49");
+  rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
+          "/policy/permissions/transition", expired_transition_query,
+          expired_access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401
+      || !capture_permission_mutation_snapshot (store, "expired-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &expired_transition_after)
+      || !permission_mutation_snapshot_unchanged (&expired_transition_before,
+      &expired_transition_after))
+    return 2699;
+  g_clear_pointer (&body, g_free);
+
   /*
    * #762 unchanged: the public POST /policy/permissions/transition path
    * still rejects a svc: subject. The read-path transient arming does NOT
@@ -11630,7 +11888,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *svc_transition_query =
       g_strdup_printf ("subject=svc:transition-reject-762&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", session_token);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", svc_transition_query, &status, &body);
   if (rc != 0)
@@ -11642,9 +11900,16 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (wyl_policy_store_set_principal_state (store, "client-state-target",
       "authenticated") != WYRELOG_E_OK)
     return 180;
-  if (wyl_client_policy_permission_transition (client, "client-state-target",
-      "site.policy.read", "tenant-a", "grant", 123, "public", 49)
-      != WYRELOG_E_OK)
+  g_autofree gchar *client_state_transition_query =
+      g_strdup_printf ("subject=client-state-target&perm=site.policy.read"
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/permissions/transition", client_state_transition_query,
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 182;
   if (!permission_state_exists (handle, "client-state-target",
       "site.policy.read", "tenant-a"))
@@ -11984,6 +12249,77 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 147;
   if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
     return 148;
+
+  /* A validated service-credential bearer cannot arm policy state through the
+   * generic route, even with a syntactically valid guard tuple. */
+  g_auto (ServiceResolverFixture) service_bearer = { 0 };
+  if (!service_resolver_fixture_init (server, &service_bearer,
+      WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &service_bearer,
+      service_bearer.token, TRUE))
+    return 2699;
+  PermissionMutationSnapshot service_transition_before;
+  PermissionMutationSnapshot service_transition_after = { 0 };
+  if (!capture_permission_mutation_snapshot (store, "service-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &service_transition_before))
+    return 2700;
+  g_autofree gchar *service_transition_query =
+      g_strdup ("subject=service-target&perm=site.policy.read&scope=tenant-a"
+          "&event=grant&guard_timestamp=123&guard_loc_class=public"
+          "&guard_risk=49");
+  rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
+          "/policy/permissions/transition", service_transition_query,
+          service_bearer.token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if ((status != 401 && status != 403)
+      || !capture_permission_mutation_snapshot (store, "service-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &service_transition_after)
+      || !permission_mutation_snapshot_unchanged (&service_transition_before,
+      &service_transition_after))
+    return 2701;
+  g_clear_pointer (&body, g_free);
+
+  /* Revoke the MFA session after its initial allow but while the transition
+   * holds the policy write lease. The decisive in-lease check must stop the
+   * mutation before state, ledger, or success audit publication. */
+  PermissionTransitionMfaRevocationProbe revoke_probe = {
+    .server = server,
+    .session = NULL,
+  };
+  g_autoptr (WylSession) transition_mfa_live_session =
+      wyl_daemon_http_ref_session (server, transition_mfa_session);
+  revoke_probe.session = transition_mfa_live_session;
+  if (revoke_probe.session == NULL)
+    return 2697;
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (server, permission_transition_revoke_actor_before_write, &revoke_probe);
+  PermissionMutationSnapshot revoked_transition_before;
+  PermissionMutationSnapshot revoked_transition_after = { 0 };
+  if (!capture_permission_mutation_snapshot (store, "race-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &revoked_transition_before))
+    return 2697;
+  g_autofree gchar *revoked_transition_query =
+      g_strdup_printf ("subject=race-target&perm=site.policy.read"
+          "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/permissions/transition", revoked_transition_query,
+          &status, &body);
+  if (rc != 0)
+    return rc;
+  if (revoke_probe.calls != 1 || status != 403
+      || strstr (body, "\"policy_denied\"") == NULL
+      || !capture_permission_mutation_snapshot (store, "race-target",
+      "site.policy.read", "tenant-a", "permission_state.grant",
+      "site.policy.read", "tenant-a", &revoked_transition_after)
+      || !permission_mutation_snapshot_unchanged (&revoked_transition_before,
+      &revoked_transition_after))
+    return 2698;
+  g_clear_pointer (&body, g_free);
 
   return 0;
 }

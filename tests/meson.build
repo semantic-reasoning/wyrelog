@@ -1313,7 +1313,9 @@ if host_machine.system() != 'windows' and build_client
       ],
       depends : [wyctl_exe, wyrelogd_exe],
       is_parallel : false,
-      timeout : 90,
+      # Fresh TOTP proofs must use a new 30-second step after enrollment and
+      # each login, so the end-to-end restarts may wait for a step boundary.
+      timeout : 180,
     )
   endif
 

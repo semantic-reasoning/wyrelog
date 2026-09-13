@@ -117,6 +117,114 @@ os.chmod(token_path, 0o600)
 PY
 }
 
+enroll_admin_mfa() {
+  token_file=$1
+  secret_file=$2
+  "$PYTHON" - "$WYCTL" "$BASE_URL" "$token_file" "$secret_file" <<'PY'
+import base64
+import hashlib
+import hmac
+import os
+import struct
+import subprocess
+import sys
+import time
+
+wyctl, daemon_url, token_file, secret_path = sys.argv[1:]
+proc = subprocess.Popen(
+    [wyctl, "--daemon-url", daemon_url, "mfa", "enroll",
+     "--subject", "admin1", "--access-token-file", token_file],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, encoding="utf-8",
+)
+uri_line = proc.stdout.readline().strip()
+secret_line = proc.stdout.readline().strip()
+if not uri_line.startswith("otpauth_uri=") or not secret_line.startswith(
+        "secret_base32="):
+    sys.stderr.write("online enrollment did not emit enrollment material\n")
+    proc.kill()
+    _, stderr = proc.communicate(timeout=10)
+    sys.stderr.write(stderr)
+    raise SystemExit(1)
+secret = secret_line.split("=", 1)[1]
+seed = base64.b32decode(secret)
+step = int(time.time()) // 30
+digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
+offset = digest[-1] & 0x0f
+code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
+proc.stdin.write(f"{code:06d}\n")
+proc.stdin.flush()
+_, stderr = proc.communicate(timeout=10)
+if proc.returncode != 0:
+    sys.stderr.write("online MFA enrollment failed\n")
+    sys.stderr.write(stderr)
+    raise SystemExit(proc.returncode)
+with open(secret_path, "w", encoding="ascii") as secret_file:
+    secret_file.write(secret)
+os.chmod(secret_path, 0o600)
+step_path = secret_path + ".last-step"
+with open(step_path, "w", encoding="ascii") as last_step:
+    last_step.write(str(step) + "\n")
+os.chmod(step_path, 0o600)
+PY
+}
+
+login_mfa_token() {
+  secret_file=$1
+  token_file=$2
+  "$PYTHON" - "$BASE_URL" "$secret_file" "$token_file" <<'PY'
+import base64
+import hashlib
+import hmac
+import json
+import os
+import struct
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+base, secret_path, token_path = sys.argv[1:]
+with open(secret_path, encoding="ascii") as source:
+    seed = base64.b32decode(source.read().strip())
+login_url = base + "/auth/login?" + urllib.parse.urlencode({
+    "username": "admin1", "tenant": "__wr_default",
+})
+request = urllib.request.Request(login_url, method="POST")
+with urllib.request.urlopen(request, timeout=3) as response:
+    login = json.load(response)
+session_token = login.get("session_token")
+if not session_token or login.get("principal_state") != "mfa_required":
+    raise SystemExit("fresh login did not return an MFA challenge")
+step_path = secret_path + ".last-step"
+if os.path.exists(step_path):
+    with open(step_path, encoding="ascii") as source:
+        last_step = int(source.read().strip())
+    remaining = (last_step + 1) * 30 - time.time() + 0.25
+    if remaining > 0:
+        time.sleep(remaining)
+step = int(time.time()) // 30
+digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
+offset = digest[-1] & 0x0f
+code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
+verify_url = base + "/auth/mfa/verify?" + urllib.parse.urlencode({
+    "session_token": session_token, "code": f"{code:06d}",
+})
+request = urllib.request.Request(verify_url, method="POST")
+with urllib.request.urlopen(request, timeout=3) as response:
+    verified = json.load(response)
+token = verified.get("access_token")
+if not token or verified.get("principal_state") != "authenticated":
+    raise SystemExit("MFA verification did not mint an authenticated access token")
+with open(token_path, "w", encoding="utf-8") as output:
+    output.write(token + "\n")
+os.chmod(token_path, 0o600)
+with open(step_path, "w", encoding="ascii") as output:
+    output.write(str(step) + "\n")
+os.chmod(step_path, 0o600)
+PY
+}
+
 http_post_with_token() {
   token_file=$1
   path=$2
@@ -295,10 +403,29 @@ else:
 PY
 }
 
+BOOTSTRAP_TOKEN_FILE="$TMPDIR/bootstrap.token"
 TOKEN_FILE="$TMPDIR/admin.token"
+MFA_SECRET_FILE="$TMPDIR/admin1.secret"
 
 start_daemon
-login_token "$TOKEN_FILE"
+login_token "$BOOTSTRAP_TOKEN_FILE"
+enroll_admin_mfa "$BOOTSTRAP_TOKEN_FILE" "$MFA_SECRET_FILE"
+# The successful bootstrap enrollment atomically revokes skip-MFA. Only a new
+# login followed by MFA verification may mint the token used for administration.
+"$PYTHON" - "$BASE_URL" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+url = sys.argv[1] + "/auth/login?username=admin1&tenant=__wr_default&skip_mfa=true"
+try:
+    urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=3)
+except urllib.error.HTTPError as exc:
+    if exc.code != 403:
+        raise
+else:
+    raise SystemExit("bootstrap skip-MFA remained active after enrollment")
+PY
+login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
 for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
   arm_permission "$TOKEN_FILE" "$perm"
 done
@@ -310,7 +437,7 @@ assert_fact_status "$TOKEN_FILE" ready
 
 stop_daemon
 start_daemon
-login_token "$TOKEN_FILE"
+login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
 assert_query_row "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
@@ -349,7 +476,7 @@ PY
 start_daemon
 # The restart invalidated the previous token, and the status probe now needs
 # one, so mint it before the probe rather than after (#1031).
-login_token "$TOKEN_FILE"
+login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
 READY_GRAPH=$(assert_fact_status "$TOKEN_FILE" degraded)
 case "$READY_GRAPH" in
   orders-a)
