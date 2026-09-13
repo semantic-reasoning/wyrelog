@@ -10,9 +10,11 @@ tests/test-client-audit-daemon.c
 tests/test-client-smoke.c
 tests/test-daemon-checks-noaudit.c
 tests/test-daemon-checks.c
+tests/test-daemon-http-body-limit.c
 tests/test-daemon-http-decide.c
 tests/test-daemon-http-facts.c
 tests/test-daemon-http-mfa.c
+tests/test-daemon-http-profile-events.c
 tests/test-daemon-mfa-validator-race.c
 tests/test-daemon-mfa-validator.c
 tests/test-decide-req.c
@@ -113,6 +115,8 @@ wyrelog/daemon/delta.c
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
 wyrelog/daemon/fact-status.h
+wyrelog/daemon/http-body-limit-private.c
+wyrelog/daemon/http-body-limit-private.h
 wyrelog/daemon/http.c
 wyrelog/daemon/http.h
 wyrelog/daemon/options.h

@@ -81,11 +81,11 @@ test_server_start (TestServer *ts, WylDaemonProfile profile)
   ts->loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   ts->server = wyl_daemon_start_http_server_with_runtime (&opts, ts->handle,
-      &runtime, &error);
+          &runtime, &error);
   if (ts->server == NULL)
     return FALSE;
   ts->thread = g_thread_new ("daemon-http-profile-events",
-      test_http_server_thread, ts);
+          test_http_server_thread, ts);
 
   GSList *uris = soup_server_get_uris (ts->server);
   if (uris == NULL)
@@ -132,11 +132,11 @@ send_event_path (SoupSession *session, const gchar *method,
   }
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (bytes == NULL)
     return 2;
   const gchar *request_id = soup_message_headers_get_one
-      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
   if (request_id == NULL || request_id[0] == '\0')
     return 3;
   gsize size = 0;
@@ -151,7 +151,7 @@ send_event (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *json, guint *out_status, gchar **out_body)
 {
   return send_event_path (session, method, base_url, "/profile/events", json,
-      out_status, out_body);
+             out_status, out_body);
 }
 
 static gint
@@ -169,7 +169,7 @@ check_exact_alias_producer_canary (SoupServer *server, const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_event_path (session, "POST", base_url, aliases[i],
-            PRODUCER_PAYLOAD, &status, &body) != 0)
+        PRODUCER_PAYLOAD, &status, &body) != 0)
       return 801 + (gint) i *10;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
       return 802 + (gint) i *10;
@@ -187,7 +187,7 @@ check_happy_path (const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_event (session, "POST", base_url, PRODUCER_PAYLOAD, &status,
-          &body) != 0)
+      &body) != 0)
     return 100;
   if (status != 200)
     return 101;
@@ -202,9 +202,9 @@ check_happy_path (const gchar *base_url)
   g_autofree gchar *out_event = NULL;
   gint64 out_ts = 0;
   if (wyl_daemon_http_profile_events_ingest_for_test
-      (WYL_DAEMON_PROFILE_SYSTEM, TRUE, FALSE, PRODUCER_PAYLOAD,
-          strlen (PRODUCER_PAYLOAD), &core_status, &token, &out_profile,
-          &out_event, &out_ts) != WYRELOG_E_OK)
+        (WYL_DAEMON_PROFILE_SYSTEM, TRUE, FALSE, PRODUCER_PAYLOAD,
+      strlen (PRODUCER_PAYLOAD), &core_status, &token, &out_profile,
+      &out_event, &out_ts) != WYRELOG_E_OK)
     return 103;
   if (core_status != 200)
     return 104;
@@ -225,8 +225,8 @@ check_literal_producer_payload (const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_event (session, "POST", base_url,
-          "{\"profile\":\"service\",\"event\":\"startup\","
-          "\"timestamp_us\":1750000000000000}", &status, &body) != 0)
+      "{\"profile\":\"service\",\"event\":\"startup\","
+      "\"timestamp_us\":1750000000000000}", &status, &body) != 0)
     return 200;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 201;
@@ -283,7 +283,7 @@ check_oversized_rejected (const gchar *base_url)
   g_autoptr (SoupSession) session = soup_session_new ();
   /* Build a >1024-byte well-formed-looking body (padded event value). */
   g_autoptr (GString) big = g_string_new
-      ("{\"profile\":\"service\",\"event\":\"");
+        ("{\"profile\":\"service\",\"event\":\"");
   for (gsize i = 0; i < 1200; i++)
     g_string_append_c (big, 'a');
   g_string_append (big, "\",\"timestamp_us\":1}");
@@ -292,8 +292,8 @@ check_oversized_rejected (const gchar *base_url)
   g_autofree gchar *body = NULL;
   if (send_event (session, "POST", base_url, big->str, &status, &body) != 0)
     return 500;
-  if (status != 400
-      || strstr (body, "\"invalid_profile_event_request\"") == NULL)
+  if (status != 413
+      || strstr (body, "\"request_body_too_large\"") == NULL)
     return 501;
   return 0;
 }
@@ -305,22 +305,21 @@ check_non_system_profile_denied (const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
   if (send_event (session, "POST", base_url, PRODUCER_PAYLOAD, &status,
-          &body) != 0)
+      &body) != 0)
     return 600;
   if (status != 403 || strstr (body, "\"profile_event_ingest_denied\"") == NULL)
     return 601;
   g_clear_pointer (&body, g_free);
 
-  /* Precedence over the wire: a SERVICE-profile daemon sending an oversize
-   * body is denied 403 (profile gate) rather than 400 (size gate). */
+  /* The transport cap rejects oversized bodies before the profile gate. */
   g_autoptr (GString) big = g_string_new
-      ("{\"profile\":\"service\",\"event\":\"");
+        ("{\"profile\":\"service\",\"event\":\"");
   for (gsize i = 0; i < 1200; i++)
     g_string_append_c (big, 'a');
   g_string_append (big, "\",\"timestamp_us\":1}");
   if (send_event (session, "POST", base_url, big->str, &status, &body) != 0)
     return 602;
-  if (status != 403 || strstr (body, "\"profile_event_ingest_denied\"") == NULL)
+  if (status != 413 || strstr (body, "\"request_body_too_large\"") == NULL)
     return 603;
   return 0;
 }
@@ -336,9 +335,9 @@ check_non_loopback_denied (void)
   g_autofree gchar *out_event = NULL;
   gint64 out_ts = 0;
   if (wyl_daemon_http_profile_events_ingest_for_test
-      (WYL_DAEMON_PROFILE_SYSTEM, FALSE, FALSE, PRODUCER_PAYLOAD,
-          strlen (PRODUCER_PAYLOAD), &status, &token, &out_profile, &out_event,
-          &out_ts) != WYRELOG_E_OK)
+        (WYL_DAEMON_PROFILE_SYSTEM, FALSE, FALSE, PRODUCER_PAYLOAD,
+      strlen (PRODUCER_PAYLOAD), &status, &token, &out_profile, &out_event,
+      &out_ts) != WYRELOG_E_OK)
     return 700;
   if (status != 403)
     return 701;
@@ -361,16 +360,16 @@ check_denial_precedes_oversize (void)
   g_autofree gchar *out_event = NULL;
   gint64 out_ts = 0;
   if (wyl_daemon_http_profile_events_ingest_for_test
-      (WYL_DAEMON_PROFILE_SYSTEM, FALSE, TRUE, NULL, 0, &status, &token,
-          &out_profile, &out_event, &out_ts) != WYRELOG_E_OK)
+        (WYL_DAEMON_PROFILE_SYSTEM, FALSE, TRUE, NULL, 0, &status, &token,
+      &out_profile, &out_event, &out_ts) != WYRELOG_E_OK)
     return 750;
   if (status != 403 || g_strcmp0 (token, "profile_event_ingest_denied") != 0)
     return 751;
 
   /* Same precedence for a SERVICE-profile caller with an oversize body. */
   if (wyl_daemon_http_profile_events_ingest_for_test
-      (WYL_DAEMON_PROFILE_SERVICE, TRUE, TRUE, NULL, 0, &status, &token,
-          &out_profile, &out_event, &out_ts) != WYRELOG_E_OK)
+        (WYL_DAEMON_PROFILE_SERVICE, TRUE, TRUE, NULL, 0, &status, &token,
+      &out_profile, &out_event, &out_ts) != WYRELOG_E_OK)
     return 752;
   if (status != 403 || g_strcmp0 (token, "profile_event_ingest_denied") != 0)
     return 753;
