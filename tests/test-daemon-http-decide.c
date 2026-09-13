@@ -12070,6 +12070,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 194;
   if (client_transition_audit.matches != 2)
     return 195;
+  g_clear_pointer (&body, g_free);
   g_autoptr (wyl_decide_req_t) client_state_decide = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) client_state_resp = wyl_decide_resp_new ();
   wyl_decide_req_set_subject_id (client_state_decide, "client-state-target");
@@ -12366,6 +12367,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 147;
   if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
     return 148;
+  g_clear_pointer (&body, g_free);
 
   /* A validated service-credential bearer cannot arm policy state through the
    * generic route, even with a syntactically valid guard tuple. */
