@@ -425,16 +425,30 @@ parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
       goto invalid;
   }
   g_free (key);
-  return seen_subject && seen_display && seen_state && seen_generation
-         && seen_created_by && seen_created_at && seen_updated_at
-         && seen_disabled_by && seen_disabled_at
-         && updated_at_us >= created_at_us
-         && ((g_strcmp0 (out->state, "active") == 0 && disabled_by == NULL
-         && disabled_at_us == 0)
-         || (g_strcmp0 (out->state, "disabled") == 0 && disabled_by != NULL
-         && disabled_at_us > 0 && updated_at_us >= disabled_at_us));
+  /*
+   * #1058: returning the completeness conjunction here bypassed the clear
+   * below, so an object that parsed cleanly but proved incomplete or
+   * inconsistent kept the strings already written into |out| --
+   * subject_id, display_name and state.  Only the list path leaked in
+   * practice: wyl_client_service_principal_decode clears out_principal in
+   * its own invalid arm, while list_decode abandons a stack-local element.
+   * The ownership error was the parser's either way.  Route it through the
+   * same failure path the goto arms use, split in two so this one does not
+   * free |key| twice.  parse_credential_object has always had this shape.
+   */
+  if (seen_subject && seen_display && seen_state && seen_generation
+      && seen_created_by && seen_created_at && seen_updated_at
+      && seen_disabled_by && seen_disabled_at
+      && updated_at_us >= created_at_us
+      && ((g_strcmp0 (out->state, "active") == 0 && disabled_by == NULL
+      && disabled_at_us == 0)
+      || (g_strcmp0 (out->state, "disabled") == 0 && disabled_by != NULL
+      && disabled_at_us > 0 && updated_at_us >= disabled_at_us)))
+    return TRUE;
+  goto invalid_no_key;
 invalid:
   g_free (key);
+invalid_no_key:
   wyl_client_service_principal_clear (out);
   return FALSE;
 }
