@@ -12575,6 +12575,10 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 138;
+  /* The body from the revoke above outlived its last use once a request was
+   * inserted after it: send_raw_policy_mutation overwrites the slot without
+   * freeing, so whoever adds a request here owns the previous body. */
+  g_clear_pointer (&body, g_free);
 
   /*
    * What the mutation did to the store, not what it was asked to do (#1033).
