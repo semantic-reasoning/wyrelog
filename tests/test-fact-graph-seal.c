@@ -246,8 +246,14 @@ capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
 {
   GraphPathProbe *probe = user_data;
   if (g_strcmp0 (probe->tenant_id, info->tenant_id) == 0
-      && g_strcmp0 (probe->graph_id, info->graph_id) == 0)
+      && g_strcmp0 (probe->graph_id, info->graph_id) == 0) {
+    /* Replace rather than overwrite.  One tenant/graph pair is expected to
+     * match once, but the callback has no say in how often it is invoked,
+     * and a plain assignment would drop the previous duplicate on the floor
+     * (#1105). */
+    g_free (probe->storage_path);
     probe->storage_path = g_strdup (info->storage_path);
+  }
   return WYRELOG_E_OK;
 }
 
@@ -1632,6 +1638,9 @@ test_unseal_build_failure_rolls_back_and_stays_closed (void)
   g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
       "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
   g_assert_nonnull (path.storage_path);
+  /* Owns the capture for the rest of this scope; every derived
+   * filename below is built before it goes out of scope (#1105). */
+  g_autofree gchar *captured_storage_path = path.storage_path;
   g_autofree gchar *fact_path = g_build_filename (path.storage_path,
           "facts.duckdb", NULL);
   g_assert_cmpint (g_remove (fact_path), ==, 0);
@@ -2645,6 +2654,9 @@ test_unseal_replacement_after_validation_and_retry (void)
   g_assert_cmpint (wyl_policy_store_foreach_fact_graph (fixture.policy,
       "tenant-a", capture_graph_path_cb, &path), ==, WYRELOG_E_OK);
   g_assert_nonnull (path.storage_path);
+  /* Owns the capture for the rest of this scope; every derived
+   * filename below is built before it goes out of scope (#1105). */
+  g_autofree gchar *captured_storage_path = path.storage_path;
   g_autofree gchar *fact_path = g_build_filename (path.storage_path,
           "facts.duckdb", NULL);
   g_autofree gchar *replacement_path = g_build_filename (path.storage_path,
