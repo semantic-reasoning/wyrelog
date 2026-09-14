@@ -1736,7 +1736,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
           "('tenant_id','__wr_default');"
           "INSERT INTO fact_batches VALUES ('existing','__wr_default',"
           "'partial-identity','shop','orders',1,NULL,NULL,'existing:1',"
-          "'assert',0,'hash',1);");
+          "'assert',0,0,'hash',1);");
   if (rc != 0)
     return rc;
   g_clear_pointer (&body, g_free);

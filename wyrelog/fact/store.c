@@ -1288,6 +1288,12 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             "  idempotency_key VARCHAR NOT NULL UNIQUE,"
             "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
             "  row_count BIGINT NOT NULL,"
+            /* The batch's logical fact-byte cost, so a quota settle can
+             * recover what a committed batch consumed after a restart
+             * instead of only from the committing call's return value
+             * (#1013).  Distinct from the physical artifact inventory of
+             * #622, which measures storage rather than fact payload. */
+            "  logical_bytes BIGINT NOT NULL,"
             "  content_hash VARCHAR NOT NULL,"
             "  created_at_us BIGINT NOT NULL"
             ");"
@@ -1344,7 +1350,24 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
               "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
               "request_id VARCHAR;"
               "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
-              "operator_annotation VARCHAR;");
+              "operator_annotation VARCHAR;"
+              /* DuckDB 1.5.5 refuses ADD COLUMN with a constraint, and
+               * refuses SET NOT NULL on fact_batches at all while
+               * fact_event_log's foreign key references it, so a migrated
+               * store's column stays nullable where a fresh one is NOT
+               * NULL.  The shapes cannot be converged; the invariant is
+               * held in C instead, where insert_batch_unlocked always
+               * binds the column.
+               *
+               * DEFAULT -1 backfills rows that predate the column with an
+               * explicit "cost unknown" rather than 0, which is a real
+               * charge an empty-valued batch can have.  DROP DEFAULT then
+               * removes it, so a future omitted bind writes NULL and fails
+               * loudly instead of silently minting the sentinel. */
+              "ALTER TABLE fact_batches ADD COLUMN IF NOT EXISTS "
+              "logical_bytes BIGINT DEFAULT -1;"
+              "ALTER TABLE fact_batches ALTER COLUMN logical_bytes "
+              "DROP DEFAULT;");
     rc = wyl_fact_store_transaction_finish (&migration, rc);
   }
   if (rc == WYRELOG_E_OK)
@@ -1680,15 +1703,15 @@ next_sequence_unlocked (wyl_fact_store_t *store, gint64 *out_seq)
 static wyrelog_error_t
 insert_batch_unlocked (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch, const gchar *content_hash,
-    gint64 created_at_us)
+    gint64 logical_bytes, gint64 created_at_us)
 {
   duckdb_prepared_statement stmt = NULL;
   static const gchar *sql =
       "INSERT INTO fact_batches "
       "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
       " schema_version, source, request_id, idempotency_key, op, row_count, "
-      " content_hash, created_at_us) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+      " logical_bytes, content_hash, created_at_us) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
     /* duckdb_prepare allocates the statement even when it fails: the
      * object carries the error text.  duckdb.h:1892 requires destroying
@@ -1710,8 +1733,9 @@ insert_batch_unlocked (wyl_fact_store_t *store,
       | duckdb_bind_varchar (stmt, 10,
           batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" : "assert")
       | duckdb_bind_int64 (stmt, 11, (gint64) batch->n_rows)
-      | duckdb_bind_varchar (stmt, 12, content_hash)
-      | duckdb_bind_int64 (stmt, 13, created_at_us);
+      | duckdb_bind_int64 (stmt, 12, logical_bytes)
+      | duckdb_bind_varchar (stmt, 13, content_hash)
+      | duckdb_bind_int64 (stmt, 14, created_at_us);
   if (ok != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -1917,10 +1941,14 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
 #endif
   gint64 first_seq = 0;
   gint64 created_at_us = g_get_real_time ();
+  /* One number for the durable row and the returned delta, so the two cannot
+   * drift apart (#1013). */
+  gint64 logical_bytes = batch_logical_bytes (schema, batch);
   if (rc == WYRELOG_E_OK)
     rc = next_sequence_unlocked (store, &first_seq);
   if (rc == WYRELOG_E_OK)
-    rc = insert_batch_unlocked (store, batch, content_hash, created_at_us);
+    rc = insert_batch_unlocked (store, batch, content_hash, logical_bytes,
+            created_at_us);
 
   duckdb_appender appender = NULL;
   if (rc == WYRELOG_E_OK
@@ -1976,7 +2004,7 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
     if (out_delta != NULL) {
       out_delta->inserted = TRUE;
       out_delta->committed_row_delta = (gint64) batch->n_rows;
-      out_delta->logical_byte_delta = batch_logical_bytes (schema, batch);
+      out_delta->logical_byte_delta = logical_bytes;
     }
   }
   return rc;
@@ -2382,7 +2410,8 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
     goto unlock_return;
   attempted_insert = TRUE;
   created_at_us = g_get_real_time ();
-  rc = insert_batch_unlocked (store, &batch_meta, content_hash, created_at_us);
+  rc = insert_batch_unlocked (store, &batch_meta, content_hash,
+          batch_logical_bytes (schema, &batch_meta), created_at_us);
   if (rc == WYRELOG_E_OK && n_select_rows > 0)
     rc = next_sequence_unlocked (store, &first_seq);
   if (rc == WYRELOG_E_OK && n_select_rows > 0
