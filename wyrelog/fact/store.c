@@ -1763,9 +1763,10 @@ insert_event_unlocked (wyl_fact_store_t *store,
 static wyrelog_error_t
 append_value (duckdb_appender appender, const wyl_fact_value_t *value)
 {
-  if (value->type == WYL_FACT_VALUE_NULL)
-    return duckdb_append_null (appender) == DuckDBSuccess ? WYRELOG_E_OK :
-           WYRELOG_E_IO;
+  /* No early NULL arm: appending duckdb_append_null here would write the one
+   * thing value_matches_column and the schema validator both exist to keep
+   * out, and would do it silently.  A NULL that somehow reached this point is
+   * a broken invariant, so fall through to the switch and fail loudly. */
   switch (value->type) {
     case WYL_FACT_VALUE_SYMBOL:
     case WYL_FACT_VALUE_STRING:
@@ -1787,8 +1788,13 @@ append_value (duckdb_appender appender, const wyl_fact_value_t *value)
 }
 
 /* Stable, backend-independent logical size of a single fact value, used for
- * quota accounting (issue #546).  Fixed-width scalars count their natural
- * width; text counts its UTF-8 byte length; NULL counts nothing. */
+ * quota accounting (#546, consumed by #553).  Fixed-width scalars count their
+ * natural width; text counts its UTF-8 byte length.
+ *
+ * Every value reaching here is non-NULL by construction: validate_batch_shape
+ * rejects a NULL cell before the append path prices anything, so the NULL arm
+ * below is a defensive zero rather than a rule a caller can exercise.  Do not
+ * read it as a price for NULL and do not write a quota rule around it (#1069). */
 static gint64
 fact_value_logical_bytes (const wyl_fact_value_t *value)
 {
