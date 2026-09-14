@@ -1470,6 +1470,27 @@ jobs:
           & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Measure bearer-resolver structure timings for issue 1080
+        if: matrix.job_suffix == '-fact'
+        shell: powershell
+        run: |
+          $command = @'
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          for /L %%i in (1,1,3) do (
+            echo === round %%i isolated guard ===
+            meson test -C builddir check-daemon-bearer-resolver-structure --no-rebuild
+            echo === round %%i isolated self-test ===
+            meson test -C builddir check-daemon-bearer-resolver-structure-self-test --no-rebuild
+            echo === round %%i paired ===
+            meson test -C builddir check-daemon-bearer-resolver-structure check-daemon-bearer-resolver-structure-self-test --no-rebuild
+          )
+          '@
+          & "$env:GITHUB_WORKSPACE\tools\run-windows-with-symbolic-link-privilege.ps1" -Command $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test fact forget transaction cleanup seam (clang-cl)
         if: matrix.secure_bridge == 'enabled'
         shell: powershell
