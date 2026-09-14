@@ -201,6 +201,45 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSensitiveChar, wyl_sensitive_string_free);
 
 typedef struct
 {
+  gchar *value;
+#ifdef WYL_TEST_DAEMON_HTTP
+  const gchar *expected_for_test;
+  gboolean *matched_for_test;
+  gboolean *zeroed_for_test;
+#endif
+} WylSensitiveServiceTokenSecret;
+
+static void
+wyl_sensitive_service_token_secret_clear (WylSensitiveServiceTokenSecret *secret)
+{
+  if (secret == NULL)
+    return;
+  if (secret->value != NULL) {
+    gsize len = strlen (secret->value);
+#ifdef WYL_TEST_DAEMON_HTTP
+    if (secret->expected_for_test != NULL
+        && secret->matched_for_test != NULL) {
+      gsize expected_len = strlen (secret->expected_for_test);
+      *secret->matched_for_test = len == expected_len
+          && sodium_memcmp (secret->value, secret->expected_for_test, len) == 0;
+    }
+#endif
+    sodium_memzero (secret->value, len);
+#ifdef WYL_TEST_DAEMON_HTTP
+    if (secret->zeroed_for_test != NULL)
+      *secret->zeroed_for_test = sodium_is_zero
+            ((const unsigned char *) secret->value, len + 1);
+#endif
+    g_free (secret->value);
+  }
+  sodium_memzero (secret, sizeof *secret);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylSensitiveServiceTokenSecret,
+    wyl_sensitive_service_token_secret_clear);
+
+typedef struct
+{
   gchar *jti;
   gchar *session_id;
   gchar *subject;
@@ -5284,8 +5323,14 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
   }
 
   const gchar *credential_id = values[0];
-  const gchar *credential_secret = values[1];
-  if (credential_id == NULL || credential_secret == NULL
+  g_auto (WylSensitiveServiceTokenSecret) credential_secret = { 0 };
+  credential_secret.value = g_steal_pointer (&values[1]);
+#ifdef WYL_TEST_DAEMON_HTTP
+  credential_secret.expected_for_test = request->secret_cleanup_expected;
+  credential_secret.matched_for_test = request->secret_cleanup_matched;
+  credential_secret.zeroed_for_test = request->secret_cleanup_zeroed;
+#endif
+  if (credential_id == NULL || credential_secret.value == NULL
       || !wyl_service_credential_id_is_canonical (credential_id,
       strlen (credential_id))) {
     WylServiceExchangeLimiterDecision decision = { 0 };
@@ -5326,8 +5371,9 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
 
   g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) response_authority = NULL;
-  rc = service_token_exchange_prepare (ctx, credential_id, credential_secret,
-          strlen (credential_secret), &response, &response_authority);
+  rc = service_token_exchange_prepare (ctx, credential_id,
+          credential_secret.value, strlen (credential_secret.value), &response,
+          &response_authority);
   if (rc == WYRELOG_E_AUTH) {
     *out_status = 401;
     *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
