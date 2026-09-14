@@ -2089,7 +2089,7 @@ check_session_elevation_rejects_invalid_args (void)
   if (wyl_session_idle_timeout (NULL, NULL) != WYRELOG_E_INVALID)
     return 255;
   if (wyl_session_idle_timeout (handle, NULL) != WYRELOG_E_INVALID)
-    return 256;
+    return 259;
   if (wyl_session_expire (NULL, NULL) != WYRELOG_E_INVALID)
     return 257;
   if (wyl_session_expire (handle, NULL) != WYRELOG_E_INVALID)

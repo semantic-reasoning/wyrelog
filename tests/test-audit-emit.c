@@ -1620,7 +1620,7 @@ check_policy_store_audit_intention_reconciles_runtime_query (void)
   }
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
-    return 512;
+    return 527;
   }
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -2862,7 +2862,7 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
   if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_events;",
       &count)) {
     g_object_unref (handle);
-    return 256;
+    return 272;
   }
   if (count != 0) {
     g_object_unref (handle);
@@ -3465,7 +3465,7 @@ check_audit_projection_classification_is_read_only (void)
       || wyl_handle_get_delta_engine (handle) != delta_engine
       || wyl_handle_policy_store_validate_generation (handle, store,
       generation) != WYRELOG_E_OK)
-    return 512;
+    return 529;
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   gint64 symbol = 0;
   if (session == NULL

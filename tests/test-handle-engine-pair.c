@@ -7135,7 +7135,7 @@ check_policy_store_auditor_admin_cross_scope_opens (void)
       != WYRELOG_E_OK)
     return 511;
   if (wyl_handle_get_read_engine (handle) == NULL)
-    return 512;
+    return 525;
   return wyl_handle_get_delta_engine (handle) != NULL ? 0 : 513;
 }
 

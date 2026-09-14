@@ -1766,7 +1766,7 @@ main (void)
       "public", 69, &status_list) != WYRELOG_E_OK)
     return 255;
   if (status_list.n_entries != 2)
-    return 256;
+    return 318;
   {
     const WylClientServiceCredentialOperationStatusEntry *e0 =
         &status_list.entries[0];
@@ -1981,7 +1981,7 @@ main (void)
     return 511;
   if (wyl_client_policy_permission_grant (local_client, NULL, "read",
       "scope", 123, "public", 49) != WYRELOG_E_INVALID)
-    return 512;
+    return 575;
   if (wyl_client_policy_permission_grant (local_client, "target", NULL,
       "scope", 123, "public", 49) != WYRELOG_E_INVALID)
     return 513;

@@ -451,7 +451,7 @@ test_maintenance_symlink_rejected (void)
   }
   if (create_file_symlink (target, store) != 0) {
     rmrf (dir);
-    return 512;
+    return 515;
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,

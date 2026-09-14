@@ -1083,7 +1083,7 @@ check_guard_context_template_contract (void)
       return 511;
     if (insert_guard_eval (handle, "window-user", "wr.stream.write_reserved",
         "window-scope", 1234, "trusted", 10, NULL) != WYRELOG_E_OK)
-      return 512;
+      return 537;
     if (contains_armed (handle, "window-user", "wr.stream.write_reserved",
         "window-scope", &found) != WYRELOG_E_OK)
       return 513;

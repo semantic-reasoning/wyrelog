@@ -2267,7 +2267,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = wyl_handle_set_fact_graph_admission_for_test
         (handle, WYL_TENANT_DEFAULT, "barrier", TRUE);
   if (rc != WYRELOG_E_OK)
-    return 512;
+    return 545;
   barrier_status = (WylFactGraphRuntimeStatus) { 0 };
   rc = wyl_handle_get_fact_graph_runtime_status (handle, WYL_TENANT_DEFAULT,
           "barrier", &barrier_status);

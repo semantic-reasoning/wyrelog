@@ -3560,7 +3560,7 @@ check_store_permission_state_transition_rejects_invalid_edge (void)
   };
   if (wyl_policy_store_foreach_permission_state_event (store,
       permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
-    return 256;
+    return 342;
   if (expect.matches != 0)
     return 257;
   return 0;
@@ -3955,7 +3955,7 @@ check_store_apply_principal_failure_transitions_to_locked (void)
         return 1535;
     } else {
       if (g_strcmp0 (st, "locked") != 0)
-        return 1536;
+        return 1544;
       if (count != 5)
         return 1537;
       if (locked_at != 200000 + 5)
@@ -5638,7 +5638,7 @@ check_store_audit_intention_is_idempotent (void)
   if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
       "audit-user", "different.action", NULL, NULL, NULL, "req-same",
       WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_POLICY)
-    return 256;
+    return 343;
 
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql =
