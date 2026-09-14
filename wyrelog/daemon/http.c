@@ -6435,9 +6435,28 @@ ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
 
 #ifdef WYL_TEST_DAEMON_HTTP
 gboolean
-wyl_daemon_http_check_request_tenant_for_test (const gchar *request_tenant,
+wyl_daemon_http_check_request_tenant_for_test (SoupServer *server,
+    const gchar *request_tenant,
     const gchar *auth_tenant, guint *out_status, gchar **out_code)
 {
+  /*
+   * #1064: this delegates to decide_request_tenant_gate rather than
+   * reimplementing it.  The previous body was a parallel implementation that
+   * knew only WYL_TENANT_DEFAULT, so it answered 400 tenant_invalid for an
+   * active non-default tenant the gate refuses with 403 tenant_denied, and
+   * had no tenant_sealed branch at all.  A contract check driving that copy
+   * could not fail when the gate changed.
+   */
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL) {
+    /* Fixture error, not a gate rejection: status 0 keeps the two apart,
+     * since every rejection the gate makes carries a non-zero status. */
+    if (out_status != NULL)
+      *out_status = 0;
+    if (out_code != NULL)
+      *out_code = NULL;
+    return FALSE;
+  }
   /*
    * Mirrors lookup_request_tenant()'s NULL-query fallback: if the
    * caller passes request_tenant=NULL we treat that as "no tenant
@@ -6447,15 +6466,8 @@ wyl_daemon_http_check_request_tenant_for_test (const gchar *request_tenant,
   const gchar *effective = request_tenant != NULL ? request_tenant
       : WYL_TENANT_DEFAULT;
   const gchar *code = NULL;
-  guint status = 0;
-  if (effective == NULL || effective[0] == '\0' ||
-      g_strcmp0 (effective, WYL_TENANT_DEFAULT) != 0) {
-    status = 400;
-    code = WYL_DAEMON_ERR_TENANT_INVALID;
-  } else if (auth_tenant == NULL || g_strcmp0 (auth_tenant, effective) != 0) {
-    status = 403;
-    code = WYL_DAEMON_ERR_TENANT_DENIED;
-  }
+  guint status = decide_request_tenant_gate (ctx, effective, auth_tenant,
+          &code);
   if (out_status != NULL)
     *out_status = status;
   if (out_code != NULL)

@@ -605,20 +605,27 @@ gint wyl_daemon_http_policy_write_last_cancel_reason_for_test
 gint wyl_daemon_http_policy_write_last_watch_armed_for_test
   (SoupServer * server);
 /*
- * Test seam: drive the tenant-gate cross-check between the tenant
- * declared by the request (request_tenant, may be NULL meaning "no
- * tenant query param", which causes lookup_request_tenant() to fall
- * back to the default tenant) and a synthesised authenticated
- * principal tenant (auth_tenant, may be NULL). Parameter order
- * mirrors decide_request_tenant_gate(): (request_tenant, auth_tenant).
- * Returns TRUE on pass and FALSE on rejection; on rejection out_status
- * / out_code (caller-owned, copy via g_strdup) are populated with the
- * wire-format response that the helper would have set on a real
- * SoupServerMessage.
+ * Test seam: drive decide_request_tenant_gate() directly, between the tenant
+ * declared by the request (request_tenant, may be NULL meaning "no tenant
+ * query param", which this seam mirrors by substituting the default tenant
+ * as lookup_request_tenant() would) and a synthesised authenticated
+ * principal tenant (auth_tenant, may be NULL). server supplies the daemon
+ * context the gate needs to decide whether a tenant is known and active;
+ * the remaining parameters mirror the gate's own order.
+ *
+ * It exists because a real handler cannot reach every arm: routes resolve
+ * the bearer before the gate runs, so auth_tenant is never NULL and never
+ * foreign there. Synthesising both is the point (#1064).
+ *
+ * Returns TRUE on pass, with out_status 0 and out_code NULL. Returns FALSE
+ * in two distinguishable cases: a gate rejection, where out_status is the
+ * non-zero wire status and out_code (caller-owned, copied with g_strdup) the
+ * wire error code; and a fixture error where server carries no daemon
+ * context, where out_status is 0 and out_code NULL.
  */
 gboolean wyl_daemon_http_check_request_tenant_for_test
-  (const gchar * request_tenant, const gchar * auth_tenant,
-    guint * out_status, gchar ** out_code);
+  (SoupServer * server, const gchar * request_tenant,
+    const gchar * auth_tenant, guint * out_status, gchar * *out_code);
 /*
  * Inject a mock owner-publication backend into the running daemon HTTP
  * context so the service credential issue/rotate handlers drive it through the

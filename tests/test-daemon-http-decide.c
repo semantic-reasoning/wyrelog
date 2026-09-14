@@ -21529,41 +21529,89 @@ out:
 static gint
 check_tenant_gate_codes_contract (void)
 {
-  /* Pass: matching default tenant on both sides. */
-  guint status = 0;
-  g_autofree gchar *code = NULL;
-  if (!wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
-      "__wr_default", &status, &code))
+  /*
+   * #1064: this drives decide_request_tenant_gate through the test seam,
+   * which now delegates to it.  The seam used to carry its own copy of the
+   * rule that knew only WYL_TENANT_DEFAULT, so this check -- named for the
+   * gate's contract -- asserted the copy and stayed green when the gate
+   * changed.  The two arms that copy got wrong, an active non-default tenant
+   * and a sealed one, are the last two below.
+   */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1900;
-  if (status != 0 || code != NULL)
+
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
     return 1901;
+  }
+  GThread *thread = g_thread_new ("tenant-gate-codes",
+          test_http_server_thread_ctx, &http);
+  gint result = 0;
+  g_autofree gchar *code = NULL;
+  guint status = 0;
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready
+      && !g_cond_wait_until (&barrier.changed, &barrier.mutex,
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC))
+    result = 1902;
+  g_mutex_unlock (&barrier.mutex);
+  if (result != 0)
+    goto cleanup;
+
+  /* Pass: matching default tenant on both sides. */
+  if (!wyl_daemon_http_check_request_tenant_for_test (http.server,
+      "__wr_default", "__wr_default", &status, &code)
+      || status != 0 || code != NULL) {
+    result = 1903;
+    goto cleanup;
+  }
 
   /* Pass: NULL request tenant falls back to the default, matches auth. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (!wyl_daemon_http_check_request_tenant_for_test (NULL, "__wr_default",
-      &status, &code))
-    return 1902;
-  if (status != 0 || code != NULL)
-    return 1903;
+  if (!wyl_daemon_http_check_request_tenant_for_test (http.server, NULL,
+      "__wr_default", &status, &code)
+      || status != 0 || code != NULL) {
+    result = 1904;
+    goto cleanup;
+  }
 
-  /* Reject: request tenant is not known to the test seam. */
+  /* Reject: request tenant is not known. 400 tenant_invalid. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("unknown",
-      "__wr_default", &status, &code))
-    return 1904;
-  if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
-    return 1905;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server, "unknown",
+      "__wr_default", &status, &code)
+      || status != 400 || g_strcmp0 (code, "tenant_invalid") != 0) {
+    result = 1905;
+    goto cleanup;
+  }
 
   /* Reject: empty request tenant. 400 tenant_invalid. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("", "__wr_default",
-      &status, &code))
-    return 1906;
-  if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
-    return 1907;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server, "",
+      "__wr_default", &status, &code)
+      || status != 400 || g_strcmp0 (code, "tenant_invalid") != 0) {
+    result = 1906;
+    goto cleanup;
+  }
 
   /*
    * Reject: request tenant is the known default but the authenticated
@@ -21571,22 +21619,71 @@ check_tenant_gate_codes_contract (void)
    */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
-      "other-tenant", &status, &code))
-    return 1908;
-  if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
-    return 1909;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server,
+      "__wr_default", "other-tenant", &status, &code)
+      || status != 403 || g_strcmp0 (code, "tenant_denied") != 0) {
+    result = 1907;
+    goto cleanup;
+  }
 
-  /* Reject: missing auth tenant on a default-tenant request. 403 tenant_denied. */
+  /* Reject: missing auth tenant on a default-tenant request. 403. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default", NULL,
-      &status, &code))
-    return 1910;
-  if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
-    return 1911;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server,
+      "__wr_default", NULL, &status, &code)
+      || status != 403 || g_strcmp0 (code, "tenant_denied") != 0) {
+    result = 1908;
+    goto cleanup;
+  }
 
-  return 0;
+  /*
+   * The first arm the old copy got wrong: an active tenant that is not the
+   * caller's is an identity refusal, 403 tenant_denied.  The copy answered
+   * 400 tenant_invalid, because it treated every non-default tenant as
+   * unknown.
+   */
+  if (wyl_daemon_http_configure_tenant_for_test (http.server,
+      "tenant-gate-live", TRUE, FALSE) != WYRELOG_E_OK) {
+    result = 1909;
+    goto cleanup;
+  }
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server,
+      "tenant-gate-live", "__wr_default", &status, &code)
+      || status != 403 || g_strcmp0 (code, "tenant_denied") != 0) {
+    result = 1910;
+    goto cleanup;
+  }
+
+  /*
+   * The second: a known but inactive tenant is 400 tenant_sealed.  The copy
+   * had no sealed branch at all, so this rule had no coverage here.  Sealing
+   * after the arm above keeps that arm's 403 assertion meaningful.
+   */
+  if (wyl_daemon_http_configure_tenant_for_test (http.server,
+      "tenant-gate-live", FALSE, TRUE) != WYRELOG_E_OK) {
+    result = 1909;
+    goto cleanup;
+  }
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test (http.server,
+      "tenant-gate-live", "tenant-gate-live", &status, &code)
+      || status != 400 || g_strcmp0 (code, "tenant_sealed") != 0) {
+    result = 1911;
+    goto cleanup;
+  }
+
+cleanup:
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
 }
 
 /*
