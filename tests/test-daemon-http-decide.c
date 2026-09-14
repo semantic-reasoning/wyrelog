@@ -1128,17 +1128,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 37;
+  const guint expected_exact = 33;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 36;
   const guint expected_exact = 32;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 35;
-  const guint expected_exact = 31;
 #elif defined(WYL_HAS_AUDIT)
+  const guint expected_total = 34;
+  const guint expected_exact = 30;
+#else
   const guint expected_total = 33;
   const guint expected_exact = 29;
-#else
-  const guint expected_total = 32;
-  const guint expected_exact = 28;
 #endif
   if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -1148,6 +1148,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/healthz",
     "/readyz",
     "/facts/status",
+    "/facts/quota",
     "/facts/schema/register",
     "/profile/status",
     "/profile/events",
@@ -1185,7 +1186,8 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   for (gsize i = 0; i < G_N_ELEMENTS (exact_paths); i++) {
     guint canonical_method_status = 405;
 #ifndef WYL_HAS_FACT_STORE
-    if (g_strcmp0 (exact_paths[i], "/facts/schema/register") == 0)
+    if (g_strcmp0 (exact_paths[i], "/facts/schema/register") == 0
+        || g_strcmp0 (exact_paths[i], "/facts/quota") == 0)
       canonical_method_status = 503;
 #endif
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
@@ -18760,6 +18762,8 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
    500, "mfa_enroll_failed"},
   {15, "self_arm", WYL_DAEMON_POLICY_WRITE_RESOURCE_ENGINE,
    500, "service_authority_failed"},
+  {16, "fact_quota_configure", 0, 500,
+   "fact_quota_configuration_failed"},
 };
 
 static wyrelog_error_t
@@ -19045,6 +19049,11 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       query = g_strdup (guard);
       body = "{}";
       break;
+    case 16:
+      path = "/facts/quota";
+      query = g_strdup_printf ("tenant=%s&limit=1&%s",
+              WYL_TENANT_DEFAULT, guard);
+      break;
     default:
       return 8;
   }
@@ -19065,19 +19074,28 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       POLICY_WRITE_OWNER_FAULT_FINALIZE ?
       g_strdup ("{\"error\":\"policy_write_cleanup_failed\"}")
       : g_strdup_printf ("{\"error\":\"%s\"}", test_case->acquire_code);
-  if (send_raw_service_principal_bearer (env->session, method, env->base_url,
-      path, query, env->access_token, body, &status, &response) != 0
-      || status != (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE ? 500 :
+  gint send_rc = send_raw_service_principal_bearer (env->session, method,
+          env->base_url,
+          path, query, env->access_token, body, &status, &response) != 0
+      ? 1 : 0;
+  if (send_rc != 0 || status != (mode == POLICY_WRITE_OWNER_FAULT_FINALIZE ? 500 :
       test_case->acquire_status)
-      || g_strcmp0 (response, expected_response) != 0)
+      || g_strcmp0 (response, expected_response) != 0){
+    g_printerr ("owner fault mismatch mode=%u owner=%u http=%d status=%u "
+        "expected_status=%u body=%s expected_body=%s\n", mode,
+        test_case->owner, send_rc, status,
+        mode == POLICY_WRITE_OWNER_FAULT_FINALIZE ? 500 :
+        test_case->acquire_status, response != NULL ? response : "(null)",
+        expected_response);
     return 9;
+  }
   return 0;
 }
 
 static gint
 check_policy_write_all_owner_faults (void)
 {
-  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 16);
+  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 17);
   G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
   for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
     for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {

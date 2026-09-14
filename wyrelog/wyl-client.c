@@ -1705,6 +1705,149 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
   return WYRELOG_E_IO;
 }
 
+static wyrelog_error_t client_fact_prepare (WylClient *client,
+    const gchar *tenant, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gchar **out_base_url,
+    gchar **out_access_token, gchar **out_session_token);
+static void client_fact_attach_auth (SoupMessage *message,
+    const gchar *access_token);
+static gchar *client_fact_guard_query (const gchar *tenant,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    const gchar *session_token);
+
+static gboolean
+parse_simple_json_uint64_member (const gchar *data, gsize size,
+    const gchar *member, guint64 *out_value)
+{
+  if (data == NULL || member == NULL || out_value == NULL)
+    return FALSE;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\":", member);
+  const gchar *start = g_strstr_len (data, (gssize) size, needle);
+  if (start == NULL)
+    return FALSE;
+  start += strlen (needle);
+  const gchar *limit = data + size;
+  while (start < limit && g_ascii_isspace (*start))
+    start++;
+  if (start == limit || !g_ascii_isdigit (*start))
+    return FALSE;
+  g_autofree gchar *number = g_strndup (start, (gsize) (limit - start));
+  errno = 0;
+  gchar *end = NULL;
+  guint64 value = g_ascii_strtoull (number, &end, 10);
+  if (errno != 0 || end == number ||
+      (*end != ',' && *end != '}' && !g_ascii_isspace (*end)))
+    return FALSE;
+  *out_value = value;
+  return TRUE;
+}
+
+void
+wyl_client_fact_quota_status_clear (WylClientFactQuotaStatus *status)
+{
+  if (status == NULL)
+    return;
+  g_clear_pointer (&status->tenant_id, g_free);
+  *status = (WylClientFactQuotaStatus) { 0 };
+}
+
+static wyrelog_error_t
+client_fact_quota_decode (const gchar *data, gsize size,
+    const gchar *expected_tenant, WylClientFactQuotaStatus *out_status)
+{
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size,
+          "tenant_id");
+  g_autofree gchar *dimension = parse_simple_json_string_member (data, size,
+          "dimension");
+  guint64 committed = 0, pending = 0, hard_limit = 0;
+  if (g_strcmp0 (tenant, expected_tenant) != 0 ||
+      g_strcmp0 (dimension, "graph_count") != 0 ||
+      !parse_simple_json_uint64_member (data, size, "committed", &committed) ||
+      !parse_simple_json_uint64_member (data, size, "pending", &pending))
+    return WYRELOG_E_IO;
+  g_autofree gchar *limit_needle = g_strdup ("\"limit\":");
+  const gchar *limit = g_strstr_len (data, (gssize) size, limit_needle);
+  if (limit == NULL)
+    return WYRELOG_E_IO;
+  limit += strlen (limit_needle);
+  if ((gsize) (data + size - limit) >= strlen ("null") &&
+      strncmp (limit, "null", strlen ("null")) == 0) {
+    out_status->has_limit = FALSE;
+  } else {
+    if (!parse_simple_json_uint64_member (data, size, "limit", &hard_limit))
+      return WYRELOG_E_IO;
+    out_status->has_limit = TRUE;
+    out_status->hard_limit = hard_limit;
+  }
+  out_status->tenant_id = g_steal_pointer (&tenant);
+  out_status->committed = committed;
+  out_status->pending = pending;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+client_fact_quota_request (WylClient *client, const gchar *tenant,
+    gboolean configure, guint64 hard_limit, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactQuotaStatus *out_status)
+{
+  if (out_status == NULL || (configure && hard_limit > G_MAXINT64))
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_quota_status_clear (out_status);
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *uri = configure
+      ? g_strdup_printf ("%s/facts/quota?%s&limit=%" G_GUINT64_FORMAT,
+          base_url, guard_query, hard_limit)
+      : g_strdup_printf ("%s/facts/quota?%s", base_url, guard_query);
+  g_autoptr (SoupMessage) message = soup_message_new (configure ? "POST" : "GET",
+          uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_POLICY && client->last_http_status == 409
+        && g_strcmp0 (client->last_error_code,
+        "fact_quota_limit_below_usage") == 0)
+      return WYRELOG_E_CONFLICT;
+    if (client->last_http_status == 429)
+      return WYRELOG_E_BUSY;
+    return rc;
+  }
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  return client_fact_quota_decode (data, size, tenant, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_quota_status (WylClient *client, const gchar *tenant,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactQuotaStatus *out_status)
+{
+  return client_fact_quota_request (client, tenant, FALSE, 0,
+             guard_timestamp, guard_loc_class, guard_risk, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_quota_configure (WylClient *client, const gchar *tenant,
+    guint64 hard_limit, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactQuotaStatus *out_status)
+{
+  return client_fact_quota_request (client, tenant, TRUE, hard_limit,
+             guard_timestamp, guard_loc_class, guard_risk, out_status);
+}
+
 static gboolean
 client_guard_args_are_valid (gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk)
@@ -1868,7 +2011,10 @@ wyl_client_graph_create (WylClient *client, const gchar *tenant,
   if (message == NULL)
     return WYRELOG_E_INVALID;
   client_fact_attach_auth (message, access_token);
-  return client_send_fact_message (client, message, NULL);
+  rc = client_send_fact_message (client, message, NULL);
+  if (rc != WYRELOG_E_OK && client->last_http_status == 429)
+    return WYRELOG_E_BUSY;
+  return rc;
 }
 
 wyrelog_error_t

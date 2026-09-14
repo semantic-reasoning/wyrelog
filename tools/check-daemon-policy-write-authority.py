@@ -35,7 +35,8 @@ FUNCTIONS = (
     "tenant_seal_recovery_retain", "tenant_seal_recovery_discard",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler",
-    "graph_create_handler", "graph_seal_handler", "schema_register_handler",
+    "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
+    "schema_register_handler",
     "facts_route_handler", "direct_permission_mutation_handler",
     "policy_permission_transition_handler", "role_membership_mutation_handler",
     "mfa_enroll_confirm_handler", "wyl_daemon_http_policy_write_for_test",
@@ -64,6 +65,8 @@ OWNER_INVENTORY = {
     "tenant_recovery_attempt_before_authorization":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
     "graph_create_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",),
+    "facts_quota_handler":
+        ("WYL_DAEMON_POLICY_WRITE_OWNER_FACT_QUOTA_CONFIGURE",),
     "graph_seal_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_SEAL",),
     "schema_register_handler":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_SCHEMA_REGISTER",),
@@ -91,12 +94,14 @@ TEST_ONLY_OWNER_FUNCTIONS = {
     "wyl_daemon_http_policy_write_for_test",
 }
 FACT_STORE_OWNER_FUNCTIONS = {
-    "graph_create_handler", "schema_register_handler", "facts_route_handler",
+    "graph_create_handler", "facts_quota_handler", "schema_register_handler",
+    "facts_route_handler",
     "service_credential_operation_reconcile_execute",
     "service_credential_operation_recover_execute",
 }
 FACT_STORE_DISABLED_STUBS = {
-    "graph_create_handler", "schema_register_handler", "facts_route_handler",
+    "graph_create_handler", "facts_quota_handler", "schema_register_handler",
+    "facts_route_handler",
 }
 FACT_STORE_FEATURE_MARKER = """#ifdef WYL_HAS_FACT_STORE
 enum
@@ -126,12 +131,13 @@ OWNER_TABLE = (
     ("OPERATION_RECOVER", "operation_recover"),
     ("MFA_CONFIRM", "mfa_confirm"),
     ("SELF_ARM", "self_arm"),
+    ("FACT_QUOTA_CONFIGURE", "fact_quota_configure"),
 )
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler", "tenant_recovery_attempt_before_authorization",
-    "graph_create_handler", "graph_seal_handler",
+    "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
     "schema_register_handler", "facts_route_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
@@ -147,7 +153,8 @@ ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     "tenant_create_resolve_failed_publication",
 }
 PROTECTED_HANDLERS = {
-    "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
+    "tenant_mutation_handler", "graph_create_handler", "facts_quota_handler",
+    "graph_seal_handler",
     "schema_register_handler", "facts_route_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
@@ -160,7 +167,8 @@ PROTECTED_HANDLERS = {
 }
 MUTATORS = {
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
-    "wyl_policy_store_create_fact_graph", "wyl_policy_store_seal_fact_graph",
+    "wyl_policy_store_create_fact_graph", "wyl_policy_store_set_graph_quota_limit",
+    "wyl_policy_store_seal_fact_graph",
     "wyl_policy_store_register_fact_relation_schema", "wyl_fact_store_forget",
     "wyl_fact_store_append_batch", "wyl_fact_store_retract_batch",
     # The daemon's fact append/retract path moved twice: first to the
@@ -484,7 +492,7 @@ def validate_owner_fault_matrix(root):
     invoke_values=[value for _,value in invoke[0][2]]
     required_sequences=(
         ("G_STATIC_ASSERT","(","G_N_ELEMENTS","(",
-            "policy_write_owner_fault_cases",")","==","16",")",";"),
+            "policy_write_owner_fault_cases",")","==","17",")",";"),
         ("G_STATIC_ASSERT","(","POLICY_WRITE_OWNER_FAULT_MODE_COUNT","==",
             "2",")",";"),
         ("for","(","guint","mode","=","0",";","mode","<",
@@ -498,7 +506,7 @@ def validate_owner_fault_matrix(root):
     )
     if any(not has_token_sequence(matrix_values, sequence)
             for sequence in required_sequences):
-        raise GuardError("daemon WRITE owner fault 16x2 traversal mismatch")
+        raise GuardError("daemon WRITE owner fault 17x2 traversal mismatch")
     for values,label in ((matrix_values,"matrix"),(invoke_values,"HTTP invoke")):
         for api in ("wyl_daemon_http_fail_next_policy_write_finalize_for_test",
                 "wyl_daemon_http_fail_next_policy_write_acquire_for_test"):
@@ -708,6 +716,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
         "tenant_unseal_handler": (exact,'"/tenants/unseal"'),
         "tenant_delete_handler": (exact,'"/tenants/delete"'),
         "graph_create_handler": (exact,'"/graphs/create"'),
+        "facts_quota_handler": (exact,'"/facts/quota"'),
         "graph_seal_handler": (exact,'"/graphs/seal"'),
         "schema_register_handler": (exact,'"/facts/schema/register"'),
         "facts_route_handler": (prefix,'"/facts"'),
@@ -791,8 +800,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 18:
-        raise GuardError("daemon WRITE owner inventory must contain 18 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 19:
+        raise GuardError("daemon WRITE owner inventory must contain 19 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():

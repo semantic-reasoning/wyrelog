@@ -430,6 +430,31 @@ CREATE INDEX IF NOT EXISTS idx_fact_graphs_tenant
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid
     ON fact_graphs (store_uuid) WHERE store_uuid IS NOT NULL;
 
+-- Durable tenant graph-count limits and fallback creates whose admission has
+-- committed but whose safe filesystem materialization has not completed.
+CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
+    tenant_id  TEXT NOT NULL,
+    dimension  TEXT NOT NULL CHECK (dimension = 'graph_count'),
+    hard_limit INTEGER NOT NULL CHECK (
+        typeof(hard_limit) = 'integer' AND hard_limit >= 0),
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, dimension),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_graph_create_reservations (
+    tenant_id     TEXT NOT NULL,
+    graph_id      TEXT NOT NULL,
+    operation_uuid TEXT NOT NULL UNIQUE,
+    request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),
+    fact_root     TEXT NOT NULL,
+    storage_path  TEXT NOT NULL,
+    storage_uri   TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
 CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard
 BEFORE INSERT ON tenants BEGIN
     SELECT CASE WHEN NOT (

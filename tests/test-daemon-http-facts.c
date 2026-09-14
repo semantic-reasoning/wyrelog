@@ -147,6 +147,39 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
              access_token, request_body, out_status, out_body, NULL);
 }
 
+typedef struct
+{
+  GMutex *lock;
+  GCond *changed;
+  guint ready;
+  gboolean start;
+  const gchar *base_url;
+  const gchar *access_token;
+  const gchar *graph;
+  gint rc;
+  guint status;
+  gchar *body;
+} QuotaCreateRace;
+
+static gpointer
+quota_create_race_thread (gpointer user_data)
+{
+  QuotaCreateRace *race = user_data;
+  g_mutex_lock (race->lock);
+  race->ready++;
+  g_cond_broadcast (race->changed);
+  while (!race->start)
+    g_cond_wait (race->changed, race->lock);
+  g_mutex_unlock (race->lock);
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autofree gchar *query = g_strdup_printf ("tenant=%s&graph=%s&%s",
+          WYL_TENANT_DEFAULT, race->graph, FACT_GUARD);
+  race->rc = send_raw (session, "POST", race->base_url, "/graphs/create",
+          query, race->access_token, NULL, &race->status, &race->body);
+  return NULL;
+}
+
 static gchar *
 dup_safe_api_error_code (const gchar *body)
 {
@@ -1056,6 +1089,68 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 13;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
+  /* Graph-management capability alone must not expose quota controls. */
+  guint quota_status = 0;
+  g_autofree gchar *quota_body = NULL;
+  g_autofree gchar *quota_query = g_strdup_printf ("tenant=%s&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  gint quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          quota_query, NULL, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 401 ||
+      strstr (quota_body, "\"fact_quota_auth_required\"") == NULL)
+    return 14;
+  g_clear_pointer (&quota_body, g_free);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          quota_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 403 ||
+      strstr (quota_body, "\"fact_quota_denied\"") == NULL)
+    return 15;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *unauthorized_configure_query = g_strdup_printf (
+    "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          unauthorized_configure_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 403 ||
+      strstr (quota_body, "\"fact_quota_denied\"") == NULL)
+    return 151;
+
+  /* The dedicated system-admin role is the only tested grant for quota
+   * configuration; it is added after graph-only denial is established. */
+  if (wyl_policy_store_grant_role_membership (store, "facts-admin",
+      "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK ||
+      wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 16;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *configure_query = g_strdup_printf (
+    "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          configure_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200 ||
+      strstr (quota_body, "\"dimension\":\"graph_count\"") == NULL ||
+      strstr (quota_body, "\"limit\":1000") == NULL ||
+      strstr (quota_body, "\"committed\":0") == NULL ||
+      strstr (quota_body, "\"pending\":0") == NULL)
+    return 17;
+  g_clear_pointer (&quota_body, g_free);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          quota_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200 ||
+      strstr (quota_body, "\"limit\":1000") == NULL) {
+    g_printerr ("quota GET mismatch rc=%d status=%u body=%s\n", quota_rc,
+        quota_status, quota_body != NULL ? quota_body : "(null)");
+    return 18;
+  }
+  WylClientFactQuotaStatus quota_client_status = { 0 };
+  if (wyl_client_fact_quota_status (admin_client, WYL_TENANT_DEFAULT,
+      0, "trusted", 0, &quota_client_status) != WYRELOG_E_OK ||
+      !quota_client_status.has_limit || quota_client_status.hard_limit != 1000 ||
+      quota_client_status.committed != 0 || quota_client_status.pending != 0) {
+    wyl_client_fact_quota_status_clear (&quota_client_status);
+    return 19;
+  }
+  wyl_client_fact_quota_status_clear (&quota_client_status);
+
   check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
 
   guint status = 0;
@@ -1101,8 +1196,189 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return rc;
   if (status != 200 || strstr (body, "\"created\":true") == NULL ||
       strstr (body, "storage_path") != NULL || strstr (body, "facts.duckdb")
-      != NULL)
+      != NULL) {
+    g_printerr ("quota-enabled graph create mismatch rc=%d status=%u body=%s\n",
+        rc, status, body != NULL ? body : "(null)");
     return 22;
+  }
+
+  /* The admission check and durable graph row share one SQLite write
+   * transaction. At the boundary, refusal is typed and no graph/artifact is
+   * left behind. */
+  WylPolicyGraphQuotaStatus admission_status = { 0 };
+  if (wyl_policy_store_get_graph_quota_status (store, WYL_TENANT_DEFAULT,
+      &admission_status) != WYRELOG_E_OK || !admission_status.has_limit)
+    return 220;
+  guint64 graph_count = admission_status.committed + admission_status.pending;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *boundary_limit_query = g_strdup_printf (
+    "tenant=%s&limit=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
+    graph_count, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          boundary_limit_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 2201;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *overlimit_query = g_strdup_printf (
+    "tenant=%s&graph=overlimit&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_autofree gchar *boundary_limit_json = g_strdup_printf
+        ("\"limit\":%" G_GUINT64_FORMAT, graph_count);
+  g_autofree gchar *boundary_observed_json = g_strdup_printf
+        ("\"observed\":%" G_GUINT64_FORMAT, graph_count);
+  rc = send_raw (session, "POST", base_url, "/graphs/create", overlimit_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 429 ||
+      strstr (body, "\"error\":\"fact_quota_exceeded\"") == NULL ||
+      strstr (body, "\"dimension\":\"graph_count\"") == NULL ||
+      strstr (body, boundary_limit_json) == NULL ||
+      strstr (body, boundary_observed_json) == NULL ||
+      !graph_state_matches (store, WYL_TENANT_DEFAULT, "overlimit", FALSE,
+      FALSE)) {
+    g_printerr ("quota admission mismatch rc=%d status=%u count=%" G_GUINT64_FORMAT
+        " committed=%" G_GUINT64_FORMAT " pending=%" G_GUINT64_FORMAT
+        " body=%s graph_exists=%u\n", rc, status, graph_count,
+        admission_status.committed, admission_status.pending,
+        body != NULL ? body : "(null)",
+        (guint) !graph_state_matches (store, WYL_TENANT_DEFAULT, "overlimit",
+        FALSE, FALSE));
+    return 2202;
+  }
+  if (wyl_client_graph_create (admin_client, WYL_TENANT_DEFAULT,
+      "client-overlimit", 0, "trusted", 0) != WYRELOG_E_BUSY
+      || wyl_client_get_last_http_status (admin_client) != 429)
+    return 22021;
+  g_autofree gchar *quota_client_error =
+      wyl_client_dup_last_error_code (admin_client);
+  if (g_strcmp0 (quota_client_error, "fact_quota_exceeded") != 0
+      || !graph_state_matches (store, WYL_TENANT_DEFAULT,
+      "client-overlimit", FALSE, FALSE)) {
+    g_printerr ("quota client mismatch status=%u code=%s exists=%u\n",
+        wyl_client_get_last_http_status (admin_client),
+        quota_client_error != NULL ? quota_client_error : "(null)",
+        (guint) !graph_state_matches (store, WYL_TENANT_DEFAULT,
+        "client-overlimit", FALSE, FALSE));
+    return 22022;
+  }
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *race_limit_query = g_strdup_printf (
+    "tenant=%s&limit=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
+    graph_count + 1, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          race_limit_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 2204;
+
+  QuotaCreateRace races[] = {
+    {.base_url = base_url, .access_token = admin_token,
+     .graph = "quota-race-a"},
+    {.base_url = base_url, .access_token = admin_token,
+     .graph = "quota-race-b"},
+  };
+  g_autofree gchar *race_limit_json = g_strdup_printf
+        ("\"limit\":%" G_GUINT64_FORMAT, graph_count + 1);
+  g_autofree gchar *race_observed_json = g_strdup_printf
+        ("\"observed\":%" G_GUINT64_FORMAT, graph_count + 1);
+  GThread *race_threads[G_N_ELEMENTS (races)];
+  GMutex race_lock;
+  GCond race_changed;
+  g_mutex_init (&race_lock);
+  g_cond_init (&race_changed);
+  for (gsize i = 0; i < G_N_ELEMENTS (races); i++) {
+    races[i].lock = &race_lock;
+    races[i].changed = &race_changed;
+    race_threads[i] = g_thread_new ("quota-create-race",
+            quota_create_race_thread, &races[i]);
+  }
+  g_mutex_lock (&race_lock);
+  while (races[0].ready + races[1].ready < G_N_ELEMENTS (races))
+    g_cond_wait (&race_changed, &race_lock);
+  races[0].start = TRUE;
+  races[1].start = TRUE;
+  g_cond_broadcast (&race_changed);
+  g_mutex_unlock (&race_lock);
+  for (gsize i = 0; i < G_N_ELEMENTS (races); i++)
+    g_thread_join (race_threads[i]);
+  guint admitted = 0;
+  guint refused = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (races); i++) {
+    if (races[i].rc == 0 && races[i].status == 200
+        && races[i].body != NULL
+        && strstr (races[i].body, "\"created\":true") != NULL)
+      admitted++;
+    else if (races[i].rc == 0 && races[i].status == 429
+        && races[i].body != NULL
+        && strstr (races[i].body, "\"fact_quota_exceeded\"") != NULL
+        && strstr (races[i].body, race_limit_json) != NULL
+        && strstr (races[i].body, race_observed_json) != NULL)
+      refused++;
+    g_free (races[i].body);
+  }
+  g_cond_clear (&race_changed);
+  g_mutex_clear (&race_lock);
+  if (admitted != 1 || refused != 1)
+    return 2205;
+  WylPolicyGraphQuotaStatus after_race = { 0 };
+  if (wyl_policy_store_get_graph_quota_status (store, WYL_TENANT_DEFAULT,
+      &after_race) != WYRELOG_E_OK || after_race.committed != graph_count + 1
+      || after_race.pending != 0)
+    return 2206;
+  gboolean race_a_active = graph_state_matches (store, WYL_TENANT_DEFAULT,
+          "quota-race-a", TRUE, TRUE);
+  gboolean race_b_active = graph_state_matches (store, WYL_TENANT_DEFAULT,
+          "quota-race-b", TRUE, TRUE);
+  if (race_a_active == race_b_active)
+    return 2207;
+
+  /* A configured limit cannot be lowered below durable committed+pending
+   * usage; the attempted change is typed and leaves the old limit intact. */
+  g_autofree gchar *below_usage_query = g_strdup_printf (
+    "tenant=%s&limit=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
+    graph_count, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          below_usage_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 409 ||
+      strstr (quota_body, "\"fact_quota_limit_below_usage\"") == NULL)
+    return 2208;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *preserved_limit_json = g_strdup_printf
+        ("\"limit\":%" G_GUINT64_FORMAT, graph_count + 1);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          quota_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200 ||
+      strstr (quota_body, preserved_limit_json) == NULL)
+    return 2210;
+
+  const gchar *admitted_race_graph = race_a_active
+      ? "quota-race-a" : "quota-race-b";
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *race_schema_query = g_strdup_printf (
+    "tenant=%s&graph=%s&namespace=shop&relation=probe&schema_version=1&%s",
+    WYL_TENANT_DEFAULT, admitted_race_graph, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          race_schema_query, admin_token,
+          "column_name\tcolumn_type\tnullable\tvisible\n"
+          "value\tstring\tfalse\ttrue\n", &status, &body);
+  if (rc != 0 || status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 2211;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *race_append_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&schema_version=1&batch_id=quota-race&"
+    "idempotency_key=quota-race&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_autofree gchar *race_append_path = g_strdup_printf (
+    "/facts/%s/%s/probe:append", WYL_TENANT_DEFAULT, admitted_race_graph);
+  rc = send_raw (session, "POST", base_url, race_append_path,
+          race_append_query, admin_token, "value\nquota-race\n", &status,
+          &body);
+  if (rc != 0 || status != 200)
+    return 2209;
+
+  g_autofree gchar *restore_quota_query = g_strdup_printf (
+    "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          restore_quota_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 2203;
+
   if (sqlite3_exec (wyl_policy_store_get_db (wyl_handle_get_policy_store
         (handle)),
       "UPDATE fact_graphs SET storage_path='/outside/redirect' "
@@ -1265,8 +1541,11 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
           NULL, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
+  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL) {
+    g_printerr ("fact status after quota create race mismatch status=%u body=%s\n",
+        status, body != NULL ? body : "(null)");
     return 274;
+  }
   g_clear_pointer (&body, g_free);
   g_autofree gchar *null_verify_query = g_strdup_printf
         ("tenant=%s&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
@@ -2414,8 +2693,11 @@ main (void)
   http.loop = g_main_loop_new (NULL, FALSE);
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
           &runtime, &error);
-  if (http.server == NULL)
+  if (http.server == NULL) {
+    g_printerr ("daemon HTTP server start failed: %s\n",
+        error != NULL ? error->message : "no error detail");
     return wyl_test_normalize_exit_status (6);
+  }
   GThread *thread = g_thread_new ("daemon-http-facts",
           test_http_server_thread, &http);
 
@@ -2427,6 +2709,8 @@ main (void)
 
   gint rc = check_fact_http_contract (handle, http.server, fact_root,
           base_url);
+  if (rc != 0)
+    g_printerr ("fact HTTP contract failed rc=%d\n", rc);
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
