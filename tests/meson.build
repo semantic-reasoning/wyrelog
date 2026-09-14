@@ -3463,6 +3463,18 @@ test('check-no-daemon-policy-mutation-lock',
 
 bearer_resolver_structure_guard = find_program(
   '../tools/check-daemon-bearer-resolver-structure.py')
+# A goto that skips a g_auto/g_autofree declaration leaves its cleanup armed
+# over an indeterminate slot, and -Wjump-misses-init is in neither -Wall nor
+# -Wextra.  The dangerous set is empty today, so this is enforced as an error
+# with no backlog (#1054).  It prunes to translation units that actually
+# contain a goto and a cleanup attribute, which is why it costs ~47s and not
+# an hour.
+jump_misses_init_guard = find_program('../tools/check-jump-misses-init.py')
+test('jump-misses-init', jump_misses_init_guard,
+  args : ['--build-root', meson.project_build_root()],
+  timeout : 600,
+)
+
 test('check-daemon-bearer-resolver-structure',
   bearer_resolver_structure_guard,
   args : [meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c'],
