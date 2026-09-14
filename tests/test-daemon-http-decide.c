@@ -10524,6 +10524,143 @@ permission_transition_revoke_actor_before_write (WylHandle *handle,
   return WYRELOG_E_OK;
 }
 
+/*
+ * A policy mutation must refuse a subject that is not an identifier, on every
+ * route that writes one, and must leave no durable row behind when it does
+ * (#1033).
+ *
+ * Before the validator each of these answered 200 {"ok":true} and wrote a row
+ * keyed on the malformed bytes.  Revoke is covered because it shares its
+ * handler with grant, and revoke is the direction where a false success tells
+ * an operator an access path is closed while it is open.
+ *
+ * The NUL case is deliberately expressed as what the transport actually
+ * delivers.  Percent-decoding truncates "x%00y" to "x" before any handler
+ * runs, so a 400 for an embedded NUL is unreachable here; "%00" alone decodes
+ * to empty and is refused as a missing parameter.  Asserting the truncation
+ * instead records the real behaviour rather than a contract no request can
+ * reach.
+ */
+static gint
+check_policy_subject_shape_contract (WylHandle *handle, const gchar *base_url,
+    const gchar *session_token)
+{
+  if (session_token == NULL)
+    return 2900;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  /* Examples of the classes the validator refuses, not a partition of them:
+   * a space, a path traversal, a tab, a slash, a high byte, and a bare dot. */
+  static const gchar *const malformed[] = {
+    "a b c", "..%2f..%2fetc%2fpasswd", "x%09y", "a%2Fb", "caf%C3%A9", ".",
+  };
+  static const struct
+  {
+    const gchar *path;
+    const gchar *extra;
+  } routes[] = {
+    {"/policy/permissions/grant", "perm=site.policy.read"},
+    {"/policy/permissions/revoke", "perm=site.policy.read"},
+    {"/policy/permissions/transition", "perm=site.policy.read&event=grant"},
+    {"/policy/roles/grant", "role=site.reader"},
+    {"/policy/roles/revoke", "role=site.reader"},
+  };
+
+  for (gsize r = 0; r < G_N_ELEMENTS (routes); r++) {
+    for (gsize m = 0; m < G_N_ELEMENTS (malformed); m++) {
+      guint status = 0;
+      g_autofree gchar *body = NULL;
+      g_autofree gchar *query = g_strdup_printf (
+        "subject=%s&%s&scope=tenant-a&session_token=%s"
+        "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+        malformed[m], routes[r].extra, session_token);
+      gint rc = send_raw_policy_mutation (session, "POST", base_url,
+              routes[r].path, query, &status, &body);
+      if (rc != 0)
+        return rc;
+      if (status != 400
+          || strstr (body, "\"invalid_policy_mutation\"") == NULL) {
+        /* One code covers thirty cases, so name the one that failed: the
+         * exit status truncates and could not carry it (#1062, #1066). */
+        g_printerr ("WYRELOG_TEST_DIAG subject_shape route=%s subject=%s "
+            "status=%u\n", routes[r].path, malformed[m], status);
+        return 2903;
+      }
+    }
+  }
+
+  /* No durable row survived any of those refusals.  The decoded forms are
+   * what a row would have been keyed on. */
+  if (direct_permission_exists (handle, "a b c", "site.policy.read",
+      "tenant-a"))
+    return 2904;
+  if (direct_permission_exists (handle, "../../etc/passwd",
+      "site.policy.read", "tenant-a"))
+    return 2905;
+  if (permission_state_exists (handle, "a b c", "site.policy.read",
+      "tenant-a"))
+    return 2906;
+  if (permission_state_exists (handle, "../../etc/passwd",
+      "site.policy.read", "tenant-a"))
+    return 2907;
+  if (role_membership_exists (handle, "a b c", "site.reader", "tenant-a"))
+    return 2908;
+  if (role_membership_exists (handle, "../../etc/passwd", "site.reader",
+      "tenant-a"))
+    return 2909;
+
+  /* An empty subject is still refused as a missing parameter, and "%00"
+   * decodes to empty, so it lands there rather than on the shape rule. */
+  for (gsize r = 0; r < G_N_ELEMENTS (routes); r++) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    g_autofree gchar *query = g_strdup_printf (
+      "subject=%%00&%s&scope=tenant-a&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      routes[r].extra, session_token);
+    gint rc = send_raw_policy_mutation (session, "POST", base_url,
+            routes[r].path, query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+      return 2910;
+  }
+
+  /*
+   * The control that makes the table above mean something.  By this point in
+   * the enclosing contract the session's write authority has been revoked by
+   * its own revocation cases, so a well-formed subject answers 403
+   * policy_denied here.  That is the point: the malformed subjects answered
+   * 400 invalid_policy_mutation, which they can only do if the shape gate
+   * ran *before* authorization.  Without the gate they answer 403 too, and
+   * the table above goes red.
+   *
+   * It also means the row-absence assertions cannot distinguish "the shape
+   * gate refused it" from "authorization refused it" on their own; they are
+   * kept as a guard against a future reordering that validates after writing,
+   * not as the proof that the gate exists.  The 400-versus-403 split is that
+   * proof.  The charset not having narrowed is proved by the enclosing
+   * contract's many earlier 200s, which would fail first if it had.
+   */
+  {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    g_autofree gchar *query = g_strdup_printf (
+      "subject=shape-control&perm=site.policy.read&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", session_token);
+    gint rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/grant", query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 403 || strstr (body, "\"policy_denied\"") == NULL) {
+      g_printerr ("WYRELOG_TEST_DIAG shape_control status=%u body=%s\n",
+          status, body != NULL ? body : "(null)");
+      return 2911;
+    }
+  }
+  return 0;
+}
+
 static gint
 check_policy_permission_mutation_contract (SoupServer *server,
     WylHandle *handle, WylClient *client, const gchar *base_url)
@@ -12623,6 +12760,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
       &revoked_transition_after))
     return 2698;
   g_clear_pointer (&body, g_free);
+
+  gint shape_rc = check_policy_subject_shape_contract (handle, base_url,
+          session_token);
+  if (shape_rc != 0)
+    return shape_rc;
 
   return 0;
 }
