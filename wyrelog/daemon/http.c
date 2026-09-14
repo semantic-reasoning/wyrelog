@@ -9595,6 +9595,40 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+/*
+ * Success for a policy mutation, carrying whether a durable row actually
+ * changed (#1033).
+ *
+ * "ok":true alone told an operator nothing: a revoke naming a mistyped
+ * subject answered exactly like one that removed a real grant, which is the
+ * direction where believing the wrong thing matters.  Reporting whether the
+ * subject is a known principal was the obvious alternative and does not work
+ * -- a role grant to a typo creates the very membership row that makes the
+ * subject "known", so the follow-up mistyped revoke would report it as
+ * known, and any anonymous login materialises a principal row for any name.
+ * Whether a row changed is a fact about the store, identical in meaning on
+ * every route, and not something a caller can arrange.
+ *
+ * A separate function rather than a flag on set_json_ok: that one is the
+ * terminal WRITE helper for every other handler in the daemon, and its body
+ * is frozen.
+ */
+static void
+set_policy_mutation_ok_json (SoupServerMessage *msg, gboolean changed)
+{
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 200,
+      "success") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  g_autofree gchar *body = g_strdup_printf ("{\"ok\":true,\"changed\":%s}",
+          changed ? "true" : "false");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
 static void
 set_json_ok (SoupServerMessage *msg)
 {
@@ -13257,6 +13291,14 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   if (!ensure_policy_permission_exists (msg, write.store, perm))
     return;
 
+  /* Observed either side of the mutation rather than inferred from `grant`:
+   * a grant of a permission already held changes nothing, and a revoke of
+   * one never held changes nothing, and those are exactly the cases an
+   * operator needs told apart from the ones that did something (#1033). */
+  gboolean existed_before = FALSE;
+  (void) wyl_policy_store_direct_permission_exists (write.store, subject,
+      perm, scope, &existed_before);
+
   if (grant) {
     g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
     wyl_grant_req_set_subject_id (req, subject);
@@ -13282,7 +13324,10 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  set_json_ok (msg);
+  gboolean exists_after = FALSE;
+  (void) wyl_policy_store_direct_permission_exists (write.store, subject,
+      perm, scope, &exists_after);
+  set_policy_mutation_ok_json (msg, existed_before != exists_after);
 }
 
 static void
@@ -13412,7 +13457,12 @@ policy_permission_transition_handler (SoupServer *server,
     return;
   }
 
-  set_json_ok (msg);
+  /* Unconditionally true here, and that is not a shortcut.  The state
+   * machine refuses a transition that would not move -- a second grant on an
+   * already armed state answers invalid_policy_mutation above -- so reaching
+   * this line means the state moved.  A test pins that, because the claim is
+   * about the FSM rather than about this function (#1033). */
+  set_policy_mutation_ok_json (msg, TRUE);
 }
 
 static void
@@ -13457,6 +13507,12 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   if (!ensure_policy_role_exists (msg, write.store, role))
     return;
 
+  /* Same reading as the direct-permission path: what changed, not what was
+   * asked for (#1033). */
+  gboolean existed_before = FALSE;
+  (void) wyl_policy_store_role_membership_exists (write.store, subject, role,
+      scope, &existed_before);
+
   if (grant) {
     g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
     wyl_role_grant_req_set_subject_id (req, subject);
@@ -13482,7 +13538,10 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  set_json_ok (msg);
+  gboolean exists_after = FALSE;
+  (void) wyl_policy_store_role_membership_exists (write.store, subject, role,
+      scope, &exists_after);
+  set_policy_mutation_ok_json (msg, existed_before != exists_after);
 }
 
 static void

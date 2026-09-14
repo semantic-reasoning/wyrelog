@@ -11386,6 +11386,51 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2262;
   g_clear_pointer (&body, g_free);
 
+  /*
+   * The role paths report what changed too (#1033).  Placed here, directly
+   * after the grant above proves this session holds role-grant authority,
+   * and mirroring that request's shape -- same role, same guard risk, same
+   * explicit tenant -- so a 403 cannot be mistaken for a no-op.
+   */
+  {
+    g_autofree gchar *role_changed_query =
+        g_strdup_printf ("subject=changed-role-target&role=site.creator-role"
+            "&scope=tenant-a&tenant=%s&session_token=%s&guard_timestamp=123"
+            "&guard_loc_class=public&guard_risk=29", WYL_TENANT_DEFAULT,
+            session_token);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/roles/grant", role_changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+      return 2919;
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/roles/grant", role_changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+      return 2920;
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/roles/revoke", role_changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+      return 2921;
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/roles/revoke", role_changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+      return 2922;
+    if (role_membership_exists (handle, "changed-role-target",
+        "site.creator-role", "tenant-a"))
+      return 2925;
+    g_clear_pointer (&body, g_free);
+  }
+
   g_autofree gchar *revoked_tenant_create_query = g_strdup_printf
         ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
@@ -12530,6 +12575,102 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 138;
+
+  /*
+   * What the mutation did to the store, not what it was asked to do (#1033).
+   * "ok":true alone answered a revoke that removed a real grant exactly like
+   * one naming a subject that never had it, and the second is what tells an
+   * operator an access path is closed when it is open.
+   */
+  {
+    g_autofree gchar *changed_query =
+        g_strdup_printf ("subject=changed-target&perm=site.policy.read"
+            "&scope=tenant-a&session_token=%s&guard_timestamp=123"
+            "&guard_loc_class=public&guard_risk=49", session_token);
+    /* A grant that creates the row reports a change; a repeat does not. */
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/grant", changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+      return 2913;
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/grant", changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+      return 2914;
+    g_clear_pointer (&body, g_free);
+    /* A revoke that removes it reports a change; a repeat does not.  This
+     * pair is the mistyped-revoke case: the second answer is what a typo
+     * gets, and it no longer looks like the first. */
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/revoke", changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+      return 2915;
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/revoke", changed_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+      return 2916;
+    if (direct_permission_exists (handle, "changed-target",
+        "site.policy.read", "tenant-a"))
+      return 2917;
+    g_clear_pointer (&body, g_free);
+
+    /* A revoke naming a subject that never held anything is the typo, and it
+     * reports no change rather than bare success. */
+    g_autofree gchar *typo_query =
+        g_strdup_printf ("subject=changed-targett&perm=site.policy.read"
+            "&scope=tenant-a&session_token=%s&guard_timestamp=123"
+            "&guard_loc_class=public&guard_risk=49", session_token);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/revoke", typo_query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+      return 2918;
+    g_clear_pointer (&body, g_free);
+  }
+
+  {
+    /*
+     * The transition path reports "changed":true unconditionally, and this
+     * is what licenses that: the state machine refuses a transition that
+     * would not move, so a 200 there cannot be a no-op.  If that ever stops
+     * holding, this pins it rather than letting the handler quietly lie.
+     */
+    g_autofree gchar *transition_query =
+        g_strdup_printf ("subject=changed-state-target&perm=site.policy.read"
+            "&scope=tenant-a&event=grant&session_token=%s"
+            "&guard_timestamp=123&guard_loc_class=public&guard_risk=29",
+            transition_mfa_session);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/transition", transition_query, &status,
+            &body);
+    if (rc != 0)
+      return rc;
+    if (status != 200 || strstr (body, "\"changed\":true") == NULL) {
+      g_printerr ("WYRELOG_TEST_DIAG transition_changed status=%u body=%s\n",
+          status, body != NULL ? body : "(null)");
+      return 2923;
+    }
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/transition", transition_query, &status,
+            &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400
+        || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+      return 2924;
+    g_clear_pointer (&body, g_free);
+  }
 
   g_autofree gchar *missing_perm_revoke_query =
       g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
