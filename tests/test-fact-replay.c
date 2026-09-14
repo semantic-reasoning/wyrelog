@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -4510,5 +4511,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-replay/unleased-metadata-refused",
       test_unleased_replay_rejects_metadata);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

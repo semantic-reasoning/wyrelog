@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -147,27 +148,27 @@ main (void)
   gint rc;
 
   if ((rc = check_default_username_is_null ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_set_then_get ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_caller_buffer_is_copied ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_set_replaces_prior_value ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_set_null_clears ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_get_null_request ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_free_null_is_safe ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_skip_mfa_set_then_get ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_skip_mfa_null_request ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_set_then_get ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_tenant_set_then_get ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

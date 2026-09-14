@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -30,17 +31,17 @@ begin_txn (WylHandle *handle, gboolean intent)
   Txn t = { 0 };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-          &t.lease), ==, WYRELOG_E_OK);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &t.lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
-      (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
+        (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_prepare_commit_evidence
-      (t.txn, store, &t.evidence), ==, WYRELOG_E_OK);
+        (t.txn, store, &t.evidence), ==, WYRELOG_E_OK);
   if (intent) {
     WylServiceAuthorityWriteIntentOutcome outcome = { 0 };
     g_assert_cmpint
-        (wyl_policy_store_service_authority_transaction_acquire_write_intent
-        (t.txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+          (t.txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
   }
   return t;
 }
@@ -51,12 +52,12 @@ begin_read_txn_without_evidence (WylHandle *handle)
   Txn t = { 0 };
   wyl_policy_store_t *store = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
-          &t.lease), ==, WYRELOG_E_OK);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &t.lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_write_lease_get_policy_store (t.lease,
-          handle, &store), ==, WYRELOG_E_OK);
+      handle, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
-      (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
+        (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
   return t;
 }
 
@@ -143,8 +144,8 @@ test_commit_reopen_replay (void)
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-exchange-XXXXXX", NULL);
   g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   gchar digest[65];
   {
     g_autoptr (WylHandle) handle = open_handle (path);
@@ -152,7 +153,7 @@ test_commit_reopen_replay (void)
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (t.txn, wyl_handle_get_policy_store (handle), &input, &kind, &row), ==,
+          (t.txn, wyl_handle_get_policy_store (handle), &input, &kind, &row), ==,
         WYRELOG_E_OK);
     g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
     g_strlcpy (digest, row->material.payload_digest, sizeof digest);
@@ -165,7 +166,7 @@ test_commit_reopen_replay (void)
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (t.txn, wyl_handle_get_policy_store (handle), &input, &kind, &row), ==,
+          (t.txn, wyl_handle_get_policy_store (handle), &input, &kind, &row), ==,
         WYRELOG_E_OK);
     g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
     g_assert_cmpstr (row->material.payload_digest, ==, digest);
@@ -181,21 +182,21 @@ test_fault_atomicity (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn t = begin_txn (handle, TRUE);
   wyl_policy_store_service_exchange_intention_fail_preallocation_once (t.txn);
   WylServiceExchangeIntentionClassification kind;
   WylServiceExchangeIntentionRecord *row = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_NOMEM);
+      store, &input, &kind, &row), ==, WYRELOG_E_NOMEM);
   g_assert_null (row);
   wyl_policy_store_service_exchange_intention_fail_readback_once (t.txn);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_IO);
+      store, &input, &kind, &row), ==, WYRELOG_E_IO);
   g_assert_null (row);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (t.txn), ==, WYRELOG_E_BUSY);
+        (t.txn), ==, WYRELOG_E_BUSY);
   finish_txn (&t, FALSE);
   g_assert_cmpint (sqlite3_total_changes (wyl_policy_store_get_db (store)), >,
       0);
@@ -234,11 +235,11 @@ read_invariant_capture (sqlite3 *db, WylServiceAuthorityTransaction *txn)
   g_assert_false (evidence);
   g_assert_false (intent);
   g_assert_cmpint
-      (wyl_policy_store_service_authority_transaction_get_state (txn), ==,
+    (wyl_policy_store_service_authority_transaction_get_state (txn), ==,
       WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
   return (ReadInvariant) {
-    db, txn, sqlite3_total_changes (db),
-        sql_scalar (db, "PRAGMA main.data_version;")
+           db, txn, sqlite3_total_changes (db),
+           sql_scalar (db, "PRAGMA main.data_version;")
   };
 }
 
@@ -247,12 +248,12 @@ assert_read_invariant (const ReadInvariant *invariant)
 {
   gboolean evidence = TRUE, intent = TRUE;
   wyl_policy_store_service_exchange_intention_typed_read_state_for_test
-      (invariant->txn, &evidence, &intent);
+    (invariant->txn, &evidence, &intent);
   g_assert_false (evidence);
   g_assert_false (intent);
   g_assert_cmpint
-      (wyl_policy_store_service_authority_transaction_get_state
-      (invariant->txn), ==, WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
+    (wyl_policy_store_service_authority_transaction_get_state
+        (invariant->txn), ==, WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
   g_assert_cmpint (sqlite3_total_changes (invariant->db), ==,
       invariant->total_changes);
   g_assert_cmpint (sql_scalar (invariant->db, "PRAGMA main.data_version;"), ==,
@@ -265,8 +266,8 @@ load_wrong_thread (gpointer data)
   ThreadRead *attempt = data;
   WylServiceExchangeIntentionRecord *row = (gpointer) 1;
   attempt->rc = wyl_policy_store_service_exchange_intention_load
-      (attempt->txn, attempt->store, &attempt->intention_id, attempt->digest,
-      &row);
+        (attempt->txn, attempt->store, &attempt->intention_id, attempt->digest,
+          &row);
   g_assert_null (row);
   return NULL;
 }
@@ -277,7 +278,7 @@ enumerate_wrong_thread (gpointer data)
   ThreadEnumerate *attempt = data;
   GPtrArray *rows = (gpointer) 1;
   attempt->rc = wyl_policy_store_service_exchange_intention_enumerate
-      (attempt->txn, attempt->store, &rows);
+        (attempt->txn, attempt->store, &rows);
   g_assert_null (rows);
   return NULL;
 }
@@ -289,15 +290,15 @@ test_typed_recovery_reads_without_evidence (void)
   g_autoptr (WylHandle) other = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
 
   gchar digest[65];
   Txn create = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+        (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
   g_strlcpy (digest, created->material.payload_digest, sizeof digest);
   finish_txn (&create, TRUE);
 
@@ -308,11 +309,11 @@ test_typed_recovery_reads_without_evidence (void)
   ReadInvariant invariant = read_invariant_capture (db, read.txn);
   g_autoptr (WylServiceExchangeIntentionRecord) loaded = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &input.intention_id, digest, &loaded), ==,
+        (read.txn, store, &input.intention_id, digest, &loaded), ==,
       WYRELOG_E_OK);
   g_autoptr (GPtrArray) rows = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, store, &rows), ==, WYRELOG_E_OK);
+        (read.txn, store, &rows), ==, WYRELOG_E_OK);
   g_assert_cmpuint (rows->len, ==, 1);
   g_assert_true (loaded != rows->pdata[0]);
   g_assert_cmpstr (loaded->tenant_id, ==, "tenant-a");
@@ -323,50 +324,50 @@ test_typed_recovery_reads_without_evidence (void)
 
   WylServiceExchangeIntentionRecord *denied = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &input.intention_id, digest, NULL), ==,
+        (read.txn, store, &input.intention_id, digest, NULL), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &WYL_ID_NIL, digest, &denied), ==, WYRELOG_E_INVALID);
+        (read.txn, store, &WYL_ID_NIL, digest, &denied), ==, WYRELOG_E_INVALID);
   g_assert_null (denied);
   denied = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &input.intention_id, "bad", &denied), ==,
-      WYRELOG_E_INVALID);
-  g_assert_null (denied);
-  assert_read_invariant (&invariant);
-  denied = (gpointer) 1;
-  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, NULL, &input.intention_id, digest, &denied), ==,
+        (read.txn, store, &input.intention_id, "bad", &denied), ==,
       WYRELOG_E_INVALID);
   g_assert_null (denied);
   assert_read_invariant (&invariant);
   denied = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (NULL, store, &input.intention_id, digest, &denied), !=, WYRELOG_E_OK);
+        (read.txn, NULL, &input.intention_id, digest, &denied), ==,
+      WYRELOG_E_INVALID);
   g_assert_null (denied);
   assert_read_invariant (&invariant);
   denied = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, wyl_handle_get_policy_store (other), &input.intention_id,
-          digest, &denied), ==, WYRELOG_E_INVALID);
+        (NULL, store, &input.intention_id, digest, &denied), !=, WYRELOG_E_OK);
+  g_assert_null (denied);
+  assert_read_invariant (&invariant);
+  denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+        (read.txn, wyl_handle_get_policy_store (other), &input.intention_id,
+      digest, &denied), ==, WYRELOG_E_INVALID);
   g_assert_null (denied);
   assert_read_invariant (&invariant);
 
   GPtrArray *denied_rows = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, store, NULL), ==, WYRELOG_E_INVALID);
+        (read.txn, store, NULL), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, NULL, &denied_rows), ==, WYRELOG_E_INVALID);
+        (read.txn, NULL, &denied_rows), ==, WYRELOG_E_INVALID);
   g_assert_null (denied_rows);
   assert_read_invariant (&invariant);
   denied_rows = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (NULL, store, &denied_rows), !=, WYRELOG_E_OK);
+        (NULL, store, &denied_rows), !=, WYRELOG_E_OK);
   g_assert_null (denied_rows);
   assert_read_invariant (&invariant);
   denied_rows = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, wyl_handle_get_policy_store (other), &denied_rows), ==,
+        (read.txn, wyl_handle_get_policy_store (other), &denied_rows), ==,
       WYRELOG_E_INVALID);
   g_assert_null (denied_rows);
   assert_read_invariant (&invariant);
@@ -374,32 +375,32 @@ test_typed_recovery_reads_without_evidence (void)
   ThreadRead attempt = { read.txn, store, input.intention_id, "", 0 };
   g_strlcpy (attempt.digest, digest, sizeof attempt.digest);
   g_autoptr (GThread) thread = g_thread_new ("typed-read-wrong-thread",
-      load_wrong_thread, &attempt);
+          load_wrong_thread, &attempt);
   g_thread_join (g_steal_pointer (&thread));
   g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
   assert_read_invariant (&invariant);
   ThreadEnumerate enumerate_attempt = { read.txn, store, WYRELOG_E_OK };
   thread = g_thread_new ("typed-enumerate-wrong-thread",
-      enumerate_wrong_thread, &enumerate_attempt);
+          enumerate_wrong_thread, &enumerate_attempt);
   g_thread_join (g_steal_pointer (&thread));
   g_assert_cmpint (enumerate_attempt.rc, ==, WYRELOG_E_INVALID);
   assert_read_invariant (&invariant);
 
   WylServiceExchangeIntentionRecord *append_row = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (read.txn, store, &input, &kind, &append_row), ==, WYRELOG_E_POLICY);
+        (read.txn, store, &input, &kind, &append_row), ==, WYRELOG_E_POLICY);
   g_assert_null (append_row);
   assert_read_invariant (&invariant);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (read.txn), ==, WYRELOG_E_OK);
+        (read.txn), ==, WYRELOG_E_OK);
   WylServiceExchangeIntentionRecord *terminal = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &input.intention_id, digest, &terminal), !=,
+        (read.txn, store, &input.intention_id, digest, &terminal), !=,
       WYRELOG_E_OK);
   g_assert_null (terminal);
   GPtrArray *terminal_rows = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, store, &terminal_rows), !=, WYRELOG_E_OK);
+        (read.txn, store, &terminal_rows), !=, WYRELOG_E_OK);
   g_assert_null (terminal_rows);
   wyl_policy_store_service_authority_transaction_free (read.txn);
   g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
@@ -430,14 +431,14 @@ test_typed_recovery_read_fault_cleanup (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   sqlite3 *db = wyl_policy_store_get_db (store);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   gchar digest[65];
   Txn create = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+        (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
   g_strlcpy (digest, created->material.payload_digest, sizeof digest);
   finish_txn (&create, TRUE);
 
@@ -447,28 +448,28 @@ test_typed_recovery_read_fault_cleanup (void)
     faults[i] (read.txn);
     WylServiceExchangeIntentionRecord *row = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-        (read.txn, store, &input.intention_id, digest, &row), ==,
+          (read.txn, store, &input.intention_id, digest, &row), ==,
         i == 2 ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
     g_assert_null (row);
     assert_read_invariant (&invariant);
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-        (read.txn, store, &input.intention_id, digest, &row), ==, WYRELOG_E_OK);
+          (read.txn, store, &input.intention_id, digest, &row), ==, WYRELOG_E_OK);
     g_clear_pointer (&row, wyl_service_exchange_intention_record_free);
     assert_read_invariant (&invariant);
 
     faults[i] (read.txn);
     GPtrArray *rows = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-        (read.txn, store, &rows), ==, i == 2 ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
+          (read.txn, store, &rows), ==, i == 2 ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
     g_assert_null (rows);
     assert_read_invariant (&invariant);
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-        (read.txn, store, &rows), ==, WYRELOG_E_OK);
+          (read.txn, store, &rows), ==, WYRELOG_E_OK);
     g_clear_pointer (&rows, g_ptr_array_unref);
     assert_read_invariant (&invariant);
   }
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
-      (read.txn), ==, WYRELOG_E_OK);
+        (read.txn), ==, WYRELOG_E_OK);
   wyl_policy_store_service_authority_transaction_free (read.txn);
   g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
       WYRELOG_E_OK);
@@ -482,11 +483,11 @@ test_typed_recovery_read_malformed_row (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   sqlite3 *db = wyl_policy_store_get_db (store);
   wyl_service_exchange_audit_input_t bad_input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   wyl_service_exchange_audit_input_t good_input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
-      "000000000000000000000000001", 11);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
+          "000000000000000000000000001", 11);
   gchar bad_digest[65], good_digest[65];
   for (guint i = 0; i < 2; i++) {
     wyl_service_exchange_audit_input_t *input = i == 0 ? &bad_input :
@@ -495,7 +496,7 @@ test_typed_recovery_read_malformed_row (void)
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (create.txn, store, input, &kind, &row), ==, WYRELOG_E_OK);
+          (create.txn, store, input, &kind, &row), ==, WYRELOG_E_OK);
     g_strlcpy (i == 0 ? bad_digest : good_digest,
         row->material.payload_digest, 65);
     finish_txn (&create, TRUE);
@@ -510,27 +511,27 @@ test_typed_recovery_read_malformed_row (void)
   ReadInvariant invariant = read_invariant_capture (db, read.txn);
   WylServiceExchangeIntentionRecord *bad = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &bad_input.intention_id, bad_digest, &bad), ==,
+        (read.txn, store, &bad_input.intention_id, bad_digest, &bad), ==,
       WYRELOG_E_POLICY);
   g_assert_null (bad);
   assert_read_invariant (&invariant);
   g_autoptr (WylServiceExchangeIntentionRecord) good = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
+        (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
       WYRELOG_E_OK);
   assert_read_invariant (&invariant);
   GPtrArray *rows = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (read.txn, store, &rows), ==, WYRELOG_E_POLICY);
+        (read.txn, store, &rows), ==, WYRELOG_E_POLICY);
   g_assert_null (rows);
   assert_read_invariant (&invariant);
   g_clear_pointer (&good, wyl_service_exchange_intention_record_free);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-      (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
+        (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
       WYRELOG_E_OK);
   assert_read_invariant (&invariant);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
-      (read.txn), ==, WYRELOG_E_OK);
+        (read.txn), ==, WYRELOG_E_OK);
   wyl_policy_store_service_authority_transaction_free (read.txn);
   g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
       WYRELOG_E_OK);
@@ -543,39 +544,39 @@ test_guards_order_and_corruption (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t a = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 20);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 20);
   WylServiceExchangeIntentionClassification kind;
   WylServiceExchangeIntentionRecord *row = NULL;
   Txn no_intent = begin_txn (handle, FALSE);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (no_intent.txn, store, &a, &kind, &row), ==, WYRELOG_E_POLICY);
+        (no_intent.txn, store, &a, &kind, &row), ==, WYRELOG_E_POLICY);
   g_assert_null (row);
   finish_txn (&no_intent, FALSE);
 
   Txn t = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) owned = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &a, &kind, &owned), ==, WYRELOG_E_OK);
+      store, &a, &kind, &owned), ==, WYRELOG_E_OK);
   wyl_service_exchange_audit_input_t b = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
-      "000000000000000000000000001", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
+          "000000000000000000000000001", 10);
   g_autoptr (WylServiceExchangeIntentionRecord) second = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &b, &kind, &second), ==, WYRELOG_E_POLICY);
+      store, &b, &kind, &second), ==, WYRELOG_E_POLICY);
   g_assert_null (second);
   g_autoptr (GPtrArray) rows = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-      (t.txn, store, &rows), ==, WYRELOG_E_OK);
+        (t.txn, store, &rows), ==, WYRELOG_E_OK);
   g_assert_cmpuint (rows->len, ==, 1);
   g_assert_cmpint (((WylServiceExchangeIntentionRecord *) rows->pdata[0])->
       created_at_us, ==, 20);
   a.created_at_us++;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &a, &kind, &row), ==, WYRELOG_E_POLICY);
+      store, &a, &kind, &row), ==, WYRELOG_E_POLICY);
   g_assert_null (row);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-          "DELETE FROM service_exchange_audit_intentions;", NULL, NULL, NULL),
+      "DELETE FROM service_exchange_audit_intentions;", NULL, NULL, NULL),
       !=, SQLITE_OK);
   finish_txn (&t, FALSE);
 }
@@ -611,13 +612,13 @@ test_persisted_corruption_matrix (void)
     g_autoptr (WylHandle) handle = open_handle (NULL);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     wyl_service_exchange_audit_input_t input = input_at
-        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-        "000000000000000000000000000", 10);
+          ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+            "000000000000000000000000000", 10);
     Txn create = begin_txn (handle, TRUE);
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+          (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
     gchar digest[65];
     g_strlcpy (digest, created->material.payload_digest, sizeof digest);
     finish_txn (&create, TRUE);
@@ -625,7 +626,7 @@ test_persisted_corruption_matrix (void)
     sqlite3 *db = wyl_policy_store_get_db (store);
     remove_exchange_triggers (db);
     g_autofree gchar *update = g_strdup_printf
-        ("UPDATE service_exchange_audit_intentions SET %s;", mutations[i]);
+          ("UPDATE service_exchange_audit_intentions SET %s;", mutations[i]);
     sql_ok (db, update);
     sql_ok (db, "PRAGMA ignore_check_constraints=OFF;");
     restore_exchange_triggers (db);
@@ -635,15 +636,15 @@ test_persisted_corruption_matrix (void)
     Txn read = begin_txn (handle, TRUE);
     WylServiceExchangeIntentionRecord *row = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
-        (read.txn, store, &input.intention_id, digest, &row), ==,
+          (read.txn, store, &input.intention_id, digest, &row), ==,
         WYRELOG_E_POLICY);
     g_assert_null (row);
     GPtrArray *rows = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
-        (read.txn, store, &rows), ==, WYRELOG_E_POLICY);
+          (read.txn, store, &rows), ==, WYRELOG_E_POLICY);
     g_assert_null (rows);
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (read.txn, store, &input, &kind, &row), ==, WYRELOG_E_POLICY);
+          (read.txn, store, &input, &kind, &row), ==, WYRELOG_E_POLICY);
     g_assert_null (row);
     finish_txn (&read, FALSE);
   }
@@ -651,9 +652,9 @@ test_persisted_corruption_matrix (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO service_exchange_audit_intentions VALUES(NULL,NULL,"
-          "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);",
-          NULL, NULL, NULL), !=, SQLITE_OK);
+      "INSERT INTO service_exchange_audit_intentions VALUES(NULL,NULL,"
+      "NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);",
+      NULL, NULL, NULL), !=, SQLITE_OK);
 }
 
 typedef struct
@@ -671,7 +672,7 @@ append_wrong_thread (gpointer data)
   WylServiceExchangeIntentionClassification kind;
   WylServiceExchangeIntentionRecord *row = NULL;
   attempt->rc = wyl_policy_store_service_exchange_intention_append
-      (attempt->txn, attempt->store, attempt->input, &kind, &row);
+        (attempt->txn, attempt->store, attempt->input, &kind, &row);
   g_assert_null (row);
   return NULL;
 }
@@ -683,23 +684,23 @@ test_store_thread_terminal_and_uniqueness_guards (void)
   g_autoptr (WylHandle) other = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn t = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   WylServiceExchangeIntentionRecord *row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          wyl_handle_get_policy_store (other), &input, &kind, &row), ==,
+      wyl_handle_get_policy_store (other), &input, &kind, &row), ==,
       WYRELOG_E_INVALID);
   ThreadAppend attempt = { t.txn, store, &input, WYRELOG_E_OK };
   g_autoptr (GThread) thread = g_thread_new ("exchange-wrong-owner",
-      append_wrong_thread, &attempt);
+          append_wrong_thread, &attempt);
   g_thread_join (g_steal_pointer (&thread));
   g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
-      (t.txn), ==, WYRELOG_E_OK);
+        (t.txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_INVALID);
+      store, &input, &kind, &row), ==, WYRELOG_E_INVALID);
   wyl_policy_store_service_authority_transaction_free (t.txn);
   wyl_policy_store_service_authority_commit_evidence_unref (t.evidence);
   g_assert_cmpint (wyl_service_auth_write_lease_release (t.lease), ==,
@@ -711,18 +712,18 @@ test_store_thread_terminal_and_uniqueness_guards (void)
   Txn create = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+        (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
   finish_txn (&create, TRUE);
   sqlite3 *db = wyl_policy_store_get_db (store);
   sql_ok (db, "PRAGMA ignore_check_constraints=ON;");
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO service_exchange_audit_intentions SELECT"
-          " '01890f47-3c4b-7cc2-b8c4-dc0c0c073992',payload_digest,"
-          " payload_schema_version,event_type,outcome,created_at_us,request_id,"
-          " credential_id,credential_generation,service_principal,tenant_id,"
-          " fingerprint_schema_version,session_fingerprint,jti_fingerprint,"
-          " canonical_payload FROM service_exchange_audit_intentions;",
-          NULL, NULL, NULL), !=, SQLITE_OK);
+      "INSERT INTO service_exchange_audit_intentions SELECT"
+      " '01890f47-3c4b-7cc2-b8c4-dc0c0c073992',payload_digest,"
+      " payload_schema_version,event_type,outcome,created_at_us,request_id,"
+      " credential_id,credential_generation,service_principal,tenant_id,"
+      " fingerprint_schema_version,session_fingerprint,jti_fingerprint,"
+      " canonical_payload FROM service_exchange_audit_intentions;",
+      NULL, NULL, NULL), !=, SQLITE_OK);
   sql_ok (db, "PRAGMA ignore_check_constraints=OFF;");
 }
 
@@ -755,10 +756,10 @@ static gchar *
 table_shape (sqlite3 *db, const gchar *schema)
 {
   g_autofree gchar *sql = g_strdup_printf
-      ("SELECT group_concat(cid||':'||name||':'||type||':'||\"notnull\"||':'||"
-      "coalesce(dflt_value,'')||':'||pk,'|') FROM (SELECT * FROM"
-      " pragma_table_info('service_exchange_audit_intentions','%s')"
-      " ORDER BY cid);", schema);
+        ("SELECT group_concat(cid||':'||name||':'||type||':'||\"notnull\"||':'||"
+          "coalesce(dflt_value,'')||':'||pk,'|') FROM (SELECT * FROM"
+          " pragma_table_info('service_exchange_audit_intentions','%s')"
+          " ORDER BY cid);", schema);
   return scalar_text (db, sql);
 }
 
@@ -766,9 +767,9 @@ static gchar *
 index_shape (sqlite3 *db, const gchar *schema)
 {
   g_autofree gchar *sql = g_strdup_printf
-      ("SELECT group_concat(name||':'||\"unique\"||':'||origin||':'||partial,"
-      "'|') FROM (SELECT * FROM pragma_index_list("
-      "'service_exchange_audit_intentions','%s') ORDER BY name);", schema);
+        ("SELECT group_concat(name||':'||\"unique\"||':'||origin||':'||partial,"
+          "'|') FROM (SELECT * FROM pragma_index_list("
+          "'service_exchange_audit_intentions','%s') ORDER BY name);", schema);
   return scalar_text (db, sql);
 }
 
@@ -778,13 +779,13 @@ test_hostile_trigger_canary (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t seed = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn create = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (create.txn, store, &seed, &kind, &row), ==, WYRELOG_E_OK);
+        (create.txn, store, &seed, &kind, &row), ==, WYRELOG_E_OK);
   finish_txn (&create, TRUE);
   sqlite3 *db = wyl_policy_store_get_db (store);
   sql_ok (db, "CREATE TABLE trigger_canary(value INTEGER NOT NULL);"
@@ -805,12 +806,12 @@ test_hostile_trigger_canary (void)
   g_assert_cmpint (scalar (db, "SELECT value FROM trigger_canary;"), ==, 1);
   sql_ok (db, "ROLLBACK TO hostile_probe; RELEASE hostile_probe;");
   wyl_service_exchange_audit_input_t fresh = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
-      "000000000000000000000000002", 12);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
+          "000000000000000000000000002", 12);
   Txn guarded = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionRecord *out = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
+        (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
   g_assert_null (out);
   g_assert_cmpint (scalar (db, "SELECT value FROM trigger_canary;"), ==, 0);
   finish_txn (&guarded, FALSE);
@@ -825,7 +826,7 @@ test_hostile_trigger_canary (void)
   guarded = begin_txn (handle, TRUE);
   out = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
+        (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
   g_assert_null (out);
   g_assert_cmpint (scalar (db, "SELECT value FROM trigger_canary;"), ==, 0);
   finish_txn (&guarded, FALSE);
@@ -840,32 +841,32 @@ test_temp_shadow_objects (void)
   sql_ok (db, "CREATE TEMP TABLE service_exchange_audit_intentions(value);"
       "INSERT INTO service_exchange_audit_intentions VALUES(1);");
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
       1);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       0);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn t = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   WylServiceExchangeIntentionRecord *row = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_POLICY);
+      store, &input, &kind, &row), ==, WYRELOG_E_POLICY);
   g_assert_null (row);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
       1);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       0);
   finish_txn (&t, FALSE);
   sql_ok (db, "DROP TABLE temp.service_exchange_audit_intentions;");
   t = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &created), ==, WYRELOG_E_OK);
+      store, &input, &kind, &created), ==, WYRELOG_E_OK);
   finish_txn (&t, FALSE);
 
   sql_ok (db, "CREATE TEMP TABLE shadow_canary(value INTEGER);"
@@ -886,9 +887,9 @@ test_temp_shadow_objects (void)
       "singleton,lock_word); INSERT INTO service_authority_writer_gate"
       " VALUES(1,7); UPDATE service_authority_writer_gate SET lock_word=8;");
   g_assert_cmpint (scalar (db,
-          "SELECT lock_word FROM temp.service_authority_writer_gate;"), ==, 8);
+      "SELECT lock_word FROM temp.service_authority_writer_gate;"), ==, 8);
   g_assert_cmpint (scalar (db,
-          "SELECT lock_word FROM main.service_authority_writer_gate;"), ==, 0);
+      "SELECT lock_word FROM main.service_authority_writer_gate;"), ==, 0);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
   sql_ok (db, "DROP TABLE temp.service_authority_writer_gate;"
@@ -910,27 +911,27 @@ test_exact_temp_clone (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   sqlite3 *db = wyl_policy_store_get_db (store);
   wyl_service_exchange_audit_input_t seed = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn create = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) seed_row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (create.txn, store, &seed, &kind, &seed_row), ==, WYRELOG_E_OK);
+        (create.txn, store, &seed, &kind, &seed_row), ==, WYRELOG_E_OK);
   finish_txn (&create, TRUE);
 
   g_autofree gchar *main_sql = scalar_text (db,
-      "SELECT sql FROM main.sqlite_schema WHERE type='table' AND"
-      " name='service_exchange_audit_intentions';");
+          "SELECT sql FROM main.sqlite_schema WHERE type='table' AND"
+          " name='service_exchange_audit_intentions';");
   g_assert_true (g_str_has_prefix (main_sql, "CREATE TABLE "));
   g_autofree gchar *temp_sql = g_strconcat ("CREATE TEMP TABLE ",
-      main_sql + strlen ("CREATE TABLE "), NULL);
+          main_sql + strlen ("CREATE TABLE "), NULL);
   sql_ok (db, temp_sql);
   g_autofree gchar *main_index_sql = scalar_text (db,
-      "SELECT sql FROM main.sqlite_schema WHERE type='index' AND"
-      " name='idx_service_exchange_audit_created';");
+          "SELECT sql FROM main.sqlite_schema WHERE type='index' AND"
+          " name='idx_service_exchange_audit_created';");
   g_assert_nonnull (strstr (main_index_sql,
-          "service_exchange_audit_intentions"));
+      "service_exchange_audit_intentions"));
   sql_ok (db, "CREATE INDEX temp.idx_service_exchange_audit_created ON"
       " service_exchange_audit_intentions(created_at_us,intention_id);");
 
@@ -941,44 +942,44 @@ test_exact_temp_clone (void)
   g_autofree gchar *temp_indexes = index_shape (db, "temp");
   g_assert_cmpstr (temp_indexes, ==, main_indexes);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM pragma_foreign_key_list("
-          "'service_exchange_audit_intentions','main');"), ==,
+      "SELECT count(*) FROM pragma_foreign_key_list("
+      "'service_exchange_audit_intentions','main');"), ==,
       scalar (db, "SELECT count(*) FROM pragma_foreign_key_list("
-          "'service_exchange_audit_intentions','temp');"));
+      "'service_exchange_audit_intentions','temp');"));
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM temp.sqlite_schema WHERE type='trigger' AND"
-          " tbl_name='service_exchange_audit_intentions';"), ==, 0);
+      "SELECT count(*) FROM temp.sqlite_schema WHERE type='trigger' AND"
+      " tbl_name='service_exchange_audit_intentions';"), ==, 0);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM pragma_index_xinfo("
-          "'idx_service_exchange_audit_created','main');"), ==,
+      "SELECT count(*) FROM pragma_index_xinfo("
+      "'idx_service_exchange_audit_created','main');"), ==,
       scalar (db, "SELECT count(*) FROM pragma_index_xinfo("
-          "'idx_service_exchange_audit_created','temp');"));
+      "'idx_service_exchange_audit_created','temp');"));
 
   sql_ok (db, "INSERT INTO service_exchange_audit_intentions"
       " SELECT * FROM main.service_exchange_audit_intentions;");
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
       1);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       1);
   wyl_service_exchange_audit_input_t fresh = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
-      "000000000000000000000000002", 12);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
+          "000000000000000000000000002", 12);
   Txn guarded = begin_txn (handle, TRUE);
   gint changes = sqlite3_total_changes (db);
   kind = WYL_SERVICE_EXCHANGE_INTENTION_REPLAY;
   WylServiceExchangeIntentionRecord *out = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
+        (guarded.txn, store, &fresh, &kind, &out), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
   g_assert_null (out);
   g_assert_cmpint (sqlite3_total_changes (db), ==, changes);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM temp.service_exchange_audit_intentions;"), ==,
       1);
   g_assert_cmpint (scalar (db,
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       1);
   finish_txn (&guarded, FALSE);
   sql_ok (db, "DROP INDEX temp.idx_service_exchange_audit_created;"
@@ -988,15 +989,15 @@ test_exact_temp_clone (void)
   Txn normal = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (normal.txn, store, &fresh, &kind, &created), ==, WYRELOG_E_OK);
+        (normal.txn, store, &fresh, &kind, &created), ==, WYRELOG_E_OK);
   finish_txn (&normal, TRUE);
   g_clear_object (&handle);
   handle = open_handle (path);
   Txn reopen = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) replay = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (reopen.txn, wyl_handle_get_policy_store (handle), &fresh, &kind,
-          &replay), ==, WYRELOG_E_OK);
+        (reopen.txn, wyl_handle_get_policy_store (handle), &fresh, &kind,
+      &replay), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
   finish_txn (&reopen, FALSE);
   g_clear_object (&handle);
@@ -1034,80 +1035,80 @@ test_receipt_created_take_once (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn t = begin_txn (handle, TRUE);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+      store, &input, &kind, &row), ==, WYRELOG_E_OK);
   WylServiceExchangeReceipt *receipt = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+      t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
   g_assert_null (receipt);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (t.txn), ==, WYRELOG_E_OK);
+        (t.txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
+      t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
   g_assert_nonnull (receipt);
   g_assert_cmpint (wyl_service_exchange_receipt_get_classification (receipt),
       ==, WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
   g_autoptr (WylServiceExchangeIntentionRecord) receipt_copy = NULL;
   g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
-          &receipt_copy), ==, WYRELOG_E_OK);
+      &receipt_copy), ==, WYRELOG_E_OK);
   g_assert_cmpstr (receipt_copy->tenant_id, ==, "tenant-a");
   receipt_copy->tenant_id[0] = 'X';
   g_autoptr (WylServiceExchangeIntentionRecord) independent = NULL;
   g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
-          &independent), ==, WYRELOG_E_OK);
+      &independent), ==, WYRELOG_E_OK);
   g_assert_cmpstr (independent->tenant_id, ==, "tenant-a");
   WylServiceExchangeReceipt *again = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, handle, store, &again), ==, WYRELOG_E_INVALID);
+      t.evidence, handle, store, &again), ==, WYRELOG_E_INVALID);
   g_assert_null (again);
   release_committed_txn (&t);
   g_clear_pointer (&receipt_copy, wyl_service_exchange_intention_record_free);
   g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
-          &receipt_copy), ==, WYRELOG_E_OK);
+      &receipt_copy), ==, WYRELOG_E_OK);
   g_assert_cmpstr (receipt_copy->tenant_id, ==, "tenant-a");
   wyl_service_exchange_receipt_unref (receipt);
 
   Txn replay_txn = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) replay_row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (replay_txn.txn, store, &input, &kind, &replay_row), ==, WYRELOG_E_OK);
+        (replay_txn.txn, store, &input, &kind, &replay_row), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (replay_txn.txn), ==, WYRELOG_E_OK);
+        (replay_txn.txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
-      (replay_txn.txn, replay_txn.evidence, handle, store, &receipt), ==,
+        (replay_txn.txn, replay_txn.evidence, handle, store, &receipt), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_receipt_get_classification (receipt),
       ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
   g_autoptr (WylServiceExchangeIntentionRecord) replay_copy = NULL;
   g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
-          &replay_copy), ==, WYRELOG_E_OK);
+      &replay_copy), ==, WYRELOG_E_OK);
   g_assert_cmpstr (replay_copy->material.intention_id, ==,
       replay_row->material.intention_id);
   release_committed_txn (&replay_txn);
   g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       1);
   g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_exchange_receipt_validate_handle (receipt,
-          handle, NULL), ==, WYRELOG_E_INVALID);
+      handle, NULL), ==, WYRELOG_E_INVALID);
   GThread *copy_threads[3];
   for (guint i = 0; i < G_N_ELEMENTS (copy_threads); i++) {
     WylServiceExchangeReceipt *thread_ref =
         wyl_service_exchange_receipt_ref (receipt);
     g_assert_nonnull (thread_ref);
     copy_threads[i] = g_thread_new ("receipt-copy-unref",
-        receipt_unref_thread, thread_ref);
+            receipt_unref_thread, thread_ref);
   }
   for (guint i = 0; i < G_N_ELEMENTS (copy_threads); i++)
     g_thread_join (copy_threads[i]);
   g_autoptr (GThread) unref_thread = g_thread_new ("receipt-last-unref",
-      receipt_unref_thread, receipt);
+          receipt_unref_thread, receipt);
   g_thread_join (g_steal_pointer (&unref_thread));
 }
 
@@ -1120,50 +1121,50 @@ test_receipt_allocation_faults (void)
     Txn t = begin_txn (handle, TRUE);
     wyl_policy_store_service_exchange_receipt_fail_allocation (t.txn, fail_at);
     wyl_service_exchange_audit_input_t input = input_at
-        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-        "000000000000000000000000000", 10);
+          ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+            "000000000000000000000000000", 10);
     WylServiceExchangeIntentionClassification kind =
         WYL_SERVICE_EXCHANGE_INTENTION_CREATED;
     WylServiceExchangeIntentionRecord *row = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_NOMEM);
+          (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_NOMEM);
     g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
     g_assert_null (row);
     g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
-            "SELECT count(*) FROM main.service_exchange_audit_intentions;"),
+        "SELECT count(*) FROM main.service_exchange_audit_intentions;"),
         ==, 0);
     finish_txn (&t, FALSE);
   }
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   Txn created_fail = begin_txn (handle, TRUE);
   wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
-      (created_fail.txn);
+    (created_fail.txn);
   WylServiceExchangeIntentionClassification kind =
       WYL_SERVICE_EXCHANGE_INTENTION_CREATED;
   WylServiceExchangeIntentionRecord *row = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (created_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
+        (created_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
   g_assert_null (row);
   finish_txn (&created_fail, FALSE);
   Txn seed = begin_txn (handle, TRUE);
   g_autoptr (WylServiceExchangeIntentionRecord) seeded = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (seed.txn, store, &input, &kind, &seeded), ==, WYRELOG_E_OK);
+        (seed.txn, store, &input, &kind, &seeded), ==, WYRELOG_E_OK);
   finish_txn (&seed, TRUE);
   Txn replay_fail = begin_txn (handle, TRUE);
   wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
-      (replay_fail.txn);
+    (replay_fail.txn);
   row = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (replay_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
+        (replay_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
   g_assert_null (row);
   g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
       1);
   finish_txn (&replay_fail, FALSE);
 }
@@ -1175,18 +1176,18 @@ test_receipt_generation_guard (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   Txn t = begin_txn (handle, TRUE);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+      store, &input, &kind, &row), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (t.txn), ==, WYRELOG_E_OK);
+        (t.txn), ==, WYRELOG_E_OK);
   wyl_handle_policy_store_test_advance_generation (handle);
   WylServiceExchangeReceipt *receipt = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+      t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
   g_assert_null (receipt);
   release_committed_txn (&t);
 }
@@ -1206,7 +1207,7 @@ receipt_take_wrong_thread (gpointer data)
   ReceiptTakeThread *attempt = data;
   WylServiceExchangeReceipt *receipt = (gpointer) 1;
   attempt->rc = wyl_policy_store_service_exchange_receipt_take (attempt->txn,
-      attempt->evidence, attempt->handle, attempt->store, &receipt);
+          attempt->evidence, attempt->handle, attempt->store, &receipt);
   g_assert_null (receipt);
   return NULL;
 }
@@ -1219,14 +1220,14 @@ test_receipt_identity_guards_no_detach (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   Txn t = begin_txn (handle, TRUE);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+      store, &input, &kind, &row), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (t.txn), ==, WYRELOG_E_OK);
+        (t.txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_write_lease_release (t.lease), ==,
       WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (t.lease);
@@ -1234,24 +1235,23 @@ test_receipt_identity_guards_no_detach (void)
   Txn alien = begin_txn (other, TRUE);
   WylServiceExchangeReceipt *receipt = (gpointer) 1;
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          alien.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+      alien.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
   g_assert_null (receipt);
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (alien.txn,
-          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+      t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
   g_assert_null (receipt);
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, other, wyl_handle_get_policy_store (other), &receipt),
+      t.evidence, other, wyl_handle_get_policy_store (other), &receipt),
       ==, WYRELOG_E_INVALID);
   g_assert_null (receipt);
   ReceiptTakeThread attempt = { t.txn, t.evidence, handle, store,
-    WYRELOG_E_OK
-  };
+                                WYRELOG_E_OK};
   g_autoptr (GThread) thread = g_thread_new ("receipt-wrong-owner",
-      receipt_take_wrong_thread, &attempt);
+          receipt_take_wrong_thread, &attempt);
   g_thread_join (g_steal_pointer (&thread));
   g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-          t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
+      t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
   g_assert_nonnull (receipt);
   finish_txn (&alien, FALSE);
   wyl_policy_store_service_authority_transaction_free (t.txn);
@@ -1275,17 +1275,17 @@ test_receipt_failure_withheld (void)
     wyl_policy_store_service_authority_transaction_fail_once (store, faults[i]);
     Txn t = begin_txn (handle, TRUE);
     wyl_service_exchange_audit_input_t input = input_at
-        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-        "000000000000000000000000000", 10);
+          ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+            "000000000000000000000000000", 10);
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+          (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-        (t.txn), !=, WYRELOG_E_OK);
+          (t.txn), !=, WYRELOG_E_OK);
     WylServiceExchangeReceipt *receipt = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-            t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+        t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
     g_assert_null (receipt);
     release_committed_txn (&t);
   }
@@ -1293,8 +1293,8 @@ test_receipt_failure_withheld (void)
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_service_exchange_audit_input_t input = input_at
-      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-      "000000000000000000000000000", 10);
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          "000000000000000000000000000", 10);
   for (guint attempt = 0; attempt < 2; attempt++) {
     wyl_policy_store_service_authority_transaction_fail_once (store,
         WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
@@ -1302,12 +1302,12 @@ test_receipt_failure_withheld (void)
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (failed.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+          (failed.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-        (failed.txn), !=, WYRELOG_E_OK);
+          (failed.txn), !=, WYRELOG_E_OK);
     WylServiceExchangeReceipt *withheld = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
-        (failed.txn, failed.evidence, handle, store, &withheld), ==,
+          (failed.txn, failed.evidence, handle, store, &withheld), ==,
         WYRELOG_E_INVALID);
     g_assert_null (withheld);
     release_committed_txn (&failed);
@@ -1316,13 +1316,13 @@ test_receipt_failure_withheld (void)
   WylServiceExchangeIntentionClassification kind;
   g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-      (converge.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+        (converge.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (converge.txn), ==, WYRELOG_E_OK);
+        (converge.txn), ==, WYRELOG_E_OK);
   WylServiceExchangeReceipt *receipt = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
-      (converge.txn, converge.evidence, handle, store, &receipt), ==,
+        (converge.txn, converge.evidence, handle, store, &receipt), ==,
       WYRELOG_E_OK);
   g_assert_nonnull (receipt);
   release_committed_txn (&converge);
@@ -1346,20 +1346,20 @@ test_receipt_cleanup_faults (void)
     wyl_policy_store_service_authority_transaction_fail_once (store, faults[i]);
     Txn t = begin_txn (handle, TRUE);
     wyl_service_exchange_audit_input_t input = input_at
-        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-        "000000000000000000000000000", 10);
+          ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+            "000000000000000000000000000", 10);
     WylServiceExchangeIntentionClassification kind;
     g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
     g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
-        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+          (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-        (t.txn), ==, WYRELOG_E_OK);
+          (t.txn), ==, WYRELOG_E_OK);
     g_assert_cmpint
-        (wyl_policy_store_service_authority_transaction_get_cleanup_result
-        (t.txn), !=, WYRELOG_E_OK);
+      (wyl_policy_store_service_authority_transaction_get_cleanup_result
+          (t.txn), !=, WYRELOG_E_OK);
     WylServiceExchangeReceipt *receipt = (gpointer) 1;
     g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
-            t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+        t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
     g_assert_null (receipt);
     release_committed_txn (&t);
   }
@@ -1403,5 +1403,5 @@ main (int argc, char **argv)
       test_receipt_generation_guard);
   g_test_add_func ("/service-exchange/receipt/identity-guards-no-detach",
       test_receipt_identity_guards_no_detach);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

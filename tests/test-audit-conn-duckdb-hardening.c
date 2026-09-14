@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -285,12 +286,12 @@ main (int argc, char **argv)
 {
   if (argc == 2 && g_strcmp0 (argv[1], "--duckdb-library-version") == 0) {
     g_print ("%s\n", duckdb_library_version ());
-    return 0;
+    return wyl_test_normalize_exit_status (0);
   }
   if (argc == 3 && g_strcmp0 (argv[1], "--foreign-sqlite") == 0)
-    return probe_foreign_sqlite (argv[2]);
+    return wyl_test_normalize_exit_status (probe_foreign_sqlite (argv[2]));
   if (argc == 3 && g_strcmp0 (argv[1], "--raw-sqlite-positive") == 0)
-    return raw_sqlite_positive_control (argv[2]);
+    return wyl_test_normalize_exit_status (raw_sqlite_positive_control (argv[2]));
 
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/audit/duckdb-hardening/effective-settings",
@@ -305,5 +306,5 @@ main (int argc, char **argv)
       test_failure_is_consumed_once);
   g_test_add_func ("/audit/duckdb-hardening/foreign-sqlite-rejected",
       test_foreign_sqlite_is_rejected);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

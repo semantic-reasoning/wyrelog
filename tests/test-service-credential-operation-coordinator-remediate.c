@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include "auth/service-credential-operation-coordinator-cancel-private.h"
 #include "auth/service-credential-operation-coordinator-remediate-private.h"
 #include "daemon/auth-registry-private.h"
@@ -30,17 +31,17 @@ remediation_set_permission (WylHandle *handle, const gchar *actor,
   wyl_policy_store_t *store = store_of (handle);
   wyrelog_error_t rc = granted ?
       wyl_policy_store_grant_direct_permission (store, actor,
-      "wr.service_credential.manage", session_id) :
+          "wr.service_credential.manage", session_id) :
       wyl_policy_store_revoke_direct_permission (store, actor,
-      "wr.service_credential.manage", session_id);
+          "wr.service_credential.manage", session_id);
   g_assert_cmpint (rc, ==, WYRELOG_E_OK);
   if (granted) {
     g_assert_cmpint (wyl_policy_store_set_principal_state (store, actor,
-            "authenticated"), ==, WYRELOG_E_OK);
+        "authenticated"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_session_state (store, session_id,
-            "active"), ==, WYRELOG_E_OK);
+        "active"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_permission_state (store, actor,
-            "wr.service_credential.manage", session_id, "armed"), ==,
+        "wr.service_credential.manage", session_id, "armed"), ==,
         WYRELOG_E_OK);
   }
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
@@ -63,10 +64,10 @@ static void
 remediation_attention_clear (RemediationAttention *attention)
 {
   wyl_service_credential_handoff_cancellation_result_clear
-      (&attention->cancellation);
+    (&attention->cancellation);
   wyl_service_credential_operation_record_clear (&attention->record);
   wyl_service_credential_operation_coordinator_request_clear
-      (&attention->operation);
+    (&attention->operation);
   sodium_memzero (attention, sizeof *attention);
 }
 
@@ -106,16 +107,16 @@ remediation_attention_init (WylHandle *handle,
     .decision_request_id = attention->cancellation_decision_id,
   };
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          storage, anchor, attention->original_request_id, &request, &runtime,
-          &attention->cancellation), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      storage, anchor, attention->original_request_id, &request, &runtime,
+      &attention->cancellation), ==, WYRELOG_E_OK);
   g_assert_cmpint (attention->cancellation.outcome, ==,
       WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION);
 }
 
 static void
-    remediation_request_init
-    (WylServiceCredentialOperationHandoffRemediationRequest * request,
+remediation_request_init
+  (WylServiceCredentialOperationHandoffRemediationRequest * request,
     gchar remediation_id[WYL_REQUEST_ID_STRING_BUF],
     gchar decision_id[WYL_REQUEST_ID_STRING_BUF],
     gchar audit_id[WYL_ID_STRING_BUF],
@@ -125,11 +126,12 @@ static void
   fresh_request_id (decision_id);
   remediation_fresh_uuid (audit_id);
   *request = (WylServiceCredentialOperationHandoffRemediationRequest) {
-  .remediation_request_id = remediation_id,.audit_id = audit_id,.action =
+    .remediation_request_id = remediation_id,.audit_id = audit_id,.action =
         action,.confirmation_version =
         action ==
         WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE ? 1 : 0,.confirmed =
-        action == WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE,};
+        action == WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE,
+  };
 }
 
 static WylServiceCredentialOperationHandoffRemediationRuntime
@@ -137,12 +139,13 @@ remediation_runtime (WylSession *session, const gchar *decision_id,
     guint *authorization_calls, WylServiceAuthRegistry *registry)
 {
   return (WylServiceCredentialOperationHandoffRemediationRuntime) {
-  .session = session,.authenticated_actor_subject_id =
-        "operator",.guard_timestamp = g_get_real_time (),.guard_loc_class =
-        "trusted",.guard_risk = 0,.decision_request_id =
-        decision_id,.after_authorization =
-        count_handoff_authorization,.authorization_checkpoint_data =
-        authorization_calls,.registry = registry,};
+           .session = session,.authenticated_actor_subject_id =
+               "operator",.guard_timestamp = g_get_real_time (),.guard_loc_class =
+               "trusted",.guard_risk = 0,.decision_request_id =
+               decision_id,.after_authorization =
+               count_handoff_authorization,.authorization_checkpoint_data =
+               authorization_calls,.registry = registry,
+  };
 }
 
 typedef struct
@@ -166,23 +169,24 @@ remediation_registry_seed (WylHandle *handle, WylServiceAuthRegistry *registry,
   g_assert_cmpint (wyl_id_format (&jti, token->jti, sizeof token->jti), ==,
       WYRELOG_E_OK);
   token->reservation = (WylServiceAuthReservation) {
-  .session_id = token->sid,.jti = token->jti,.credential_id =
+    .session_id = token->sid,.jti = token->jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
         (gchar *) "svc:handoff:executor",.tenant =
-        (gchar *) "tenant-a",.expires_at = expires_at,};
+        (gchar *) "tenant-a",.expires_at = expires_at,
+  };
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   g_autoptr (WylServiceAuthRegistrySessionParticipant) participant = NULL;
   g_assert_cmpint
-      (wyl_service_auth_registry_session_participant_new_for_write
-      (registry, handle, lease, &participant), ==, WYRELOG_E_OK);
+    (wyl_service_auth_registry_session_participant_new_for_write
+        (registry, handle, lease, &participant), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_session_participant_reserve
-      (participant, &token->reservation), ==, WYRELOG_E_OK);
+        (participant, &token->reservation), ==, WYRELOG_E_OK);
   gboolean changed = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_session_participant_activate
-      (participant, &token->reservation, &changed), ==, WYRELOG_E_OK);
+        (participant, &token->reservation, &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   g_clear_pointer (&participant,
       wyl_service_auth_registry_session_participant_free);
@@ -199,7 +203,7 @@ remediation_registry_assert_state (WylServiceAuthRegistry *registry,
   WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
   gboolean found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry, token->sid,
-          token->jti, &copy, &state, &found), ==, WYRELOG_E_OK);
+      token->jti, &copy, &state, &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (state, ==, expected);
   wyl_service_auth_reservation_clear (&copy);
@@ -216,15 +220,15 @@ test_authenticated_resume_replay_and_new_epoch (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "remediation-resume-operations");
+          "remediation-resume-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
@@ -243,12 +247,12 @@ test_authenticated_resume_replay_and_new_epoch (void)
   guint authorization_calls = 0;
   WylServiceCredentialOperationHandoffRemediationRuntime runtime =
       remediation_runtime (session, decision_id, &authorization_calls,
-      registry);
+          registry);
   WylServiceCredentialOperationHandoffRemediationResult result =
       WYL_SERVICE_CREDENTIAL_OPERATION_HANDOFF_REMEDIATION_RESULT_INIT;
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-          "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
+      "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_autoptr (WylSession) cross_tenant_session =
       handoff_human_session_new ("operator", "tenant-b");
@@ -259,18 +263,18 @@ test_authenticated_resume_replay_and_new_epoch (void)
   guint cross_tenant_authorizations = 0;
   WylServiceCredentialOperationHandoffRemediationRuntime cross_runtime =
       remediation_runtime (cross_tenant_session, decision_id,
-      &cross_tenant_authorizations, registry);
+          &cross_tenant_authorizations, registry);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request,
-          &cross_runtime, &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request,
+      &cross_runtime, &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (cross_tenant_authorizations, ==, 0);
   g_assert_null (result.remediation_request_id);
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 1);
   g_assert_false (result.authority_replayed);
   g_assert_false (result.journal_replayed);
@@ -288,24 +292,24 @@ test_authenticated_resume_replay_and_new_epoch (void)
 
   g_autoptr (GBytes) journal_before_denial =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
   remediation_set_permission (handle, "operator", session_id, FALSE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (authorization_calls, ==, 1);
   g_assert_null (result.remediation_request_id);
   g_autoptr (GBytes) journal_after_denial =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
   g_assert_true (g_bytes_equal (journal_before_denial, journal_after_denial));
   remediation_set_permission (handle, "operator", session_id, TRUE);
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 2);
   g_assert_true (result.authority_replayed);
   g_assert_true (result.journal_replayed);
@@ -315,9 +319,9 @@ test_authenticated_resume_replay_and_new_epoch (void)
   remediation_fresh_uuid (different_audit);
   request.audit_id = different_audit;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (authorization_calls, ==, 3);
   g_assert_null (result.remediation_request_id);
   request.audit_id = audit_id;
@@ -326,11 +330,11 @@ test_authenticated_resume_replay_and_new_epoch (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   gboolean checkpoint_replayed = TRUE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
-      (&storage, &anchor, attention.original_request_id,
-          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN,
-          g_get_real_time () + G_TIME_SPAN_SECOND,
-          &checkpoint_replayed, &oar), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+        (&storage, &anchor, attention.original_request_id,
+      WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN,
+      g_get_real_time () + G_TIME_SPAN_SECOND,
+      &checkpoint_replayed, &oar), ==, WYRELOG_E_OK);
   g_assert_false (checkpoint_replayed);
   g_assert_cmpint (oar.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
@@ -343,9 +347,9 @@ test_authenticated_resume_replay_and_new_epoch (void)
       WYL_SERVICE_HANDOFF_REMEDIATION_RESUME);
   runtime.decision_request_id = second_decision_id;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 4);
   g_assert_false (result.authority_replayed);
   g_assert_cmpint (result.source_kind, ==,
@@ -357,9 +361,9 @@ test_authenticated_resume_replay_and_new_epoch (void)
 
   request.confirmation_version = 1;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_INVALID);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_INVALID);
   g_assert_cmpuint (authorization_calls, ==, 4);
   g_assert_null (result.remediation_request_id);
 
@@ -379,15 +383,15 @@ test_revoke_replay_invalidation (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "remediation-revoke-operations");
+          "remediation-revoke-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
@@ -411,13 +415,13 @@ test_revoke_replay_invalidation (void)
   guint authorization_calls = 0;
   WylServiceCredentialOperationHandoffRemediationRuntime runtime =
       remediation_runtime (session, decision_id, &authorization_calls,
-      registry);
+          registry);
   WylServiceCredentialOperationHandoffRemediationResult result =
       WYL_SERVICE_CREDENTIAL_OPERATION_HANDOFF_REMEDIATION_RESULT_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 1);
   remediation_registry_assert_state (registry, &registry_token,
       WYL_SERVICE_AUTH_REVOKED);
@@ -429,8 +433,8 @@ test_revoke_replay_invalidation (void)
 
   wyrelog_error_t revoke_replay_rc =
       wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-      &storage, &anchor, attention.original_request_id, &request, &runtime,
-      &result);
+          &storage, &anchor, attention.original_request_id, &request, &runtime,
+          &result);
   g_assert_cmpint (revoke_replay_rc, ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 2);
   remediation_registry_assert_state (registry, &registry_token,
@@ -463,7 +467,7 @@ remediation_block_checkpoint_writes (const gchar *operation_root,
   DWORD attrs = GetFileAttributesW ((wchar_t *) target_utf16);
   g_assert_cmpuint (attrs, !=, INVALID_FILE_ATTRIBUTES);
   g_assert_true (SetFileAttributesW ((wchar_t *) target_utf16,
-          attrs | FILE_ATTRIBUTE_READONLY));
+      attrs | FILE_ATTRIBUTE_READONLY));
 #else
   (void) request_id;
   g_assert_cmpint (g_chmod (operation_root, 0500), ==, 0);
@@ -483,7 +487,7 @@ remediation_unblock_checkpoint_writes (const gchar *operation_root,
   DWORD attrs = GetFileAttributesW ((wchar_t *) target_utf16);
   g_assert_cmpuint (attrs, !=, INVALID_FILE_ATTRIBUTES);
   g_assert_true (SetFileAttributesW ((wchar_t *) target_utf16,
-          attrs & ~FILE_ATTRIBUTE_READONLY));
+      attrs & ~FILE_ATTRIBUTE_READONLY));
 #else
   (void) request_id;
   g_assert_cmpint (g_chmod (operation_root, 0700), ==, 0);
@@ -517,15 +521,15 @@ test_authority_before_checkpoint_converges (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "remediation-crash-operations");
+          "remediation-crash-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
@@ -544,7 +548,7 @@ test_authority_before_checkpoint_converges (void)
   guint authorization_calls = 0;
   WylServiceCredentialOperationHandoffRemediationRuntime runtime =
       remediation_runtime (session, decision_id, &authorization_calls,
-      registry);
+          registry);
   CrashCheckpoint checkpoint = {
     .operation_root = operation_root,
     .original_request_id = attention.original_request_id,
@@ -555,16 +559,16 @@ test_authority_before_checkpoint_converges (void)
   WylServiceCredentialOperationHandoffRemediationResult result =
       WYL_SERVICE_CREDENTIAL_OPERATION_HANDOFF_REMEDIATION_RESULT_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_null (result.remediation_request_id);
   g_assert_cmpuint (authorization_calls, ==, 1);
   remediation_unblock_checkpoint_writes (operation_root,
       attention.original_request_id);
   g_autoptr (GBytes) journal_after_crash =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
 
   gchar other_remediation_id[WYL_REQUEST_ID_STRING_BUF];
   gchar other_decision_id[WYL_REQUEST_ID_STRING_BUF];
@@ -575,18 +579,18 @@ test_authority_before_checkpoint_converges (void)
       WYL_SERVICE_HANDOFF_REMEDIATION_RESUME);
   WylServiceCredentialOperationHandoffRemediationRuntime other_runtime =
       remediation_runtime (session, other_decision_id, &authorization_calls,
-      registry);
+          registry);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &other_request,
-          &other_runtime, &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &other_request,
+      &other_runtime, &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (authorization_calls, ==, 2);
   g_assert_null (result.remediation_request_id);
   g_autoptr (GBytes) journal_after_other_request =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
   g_assert_true (g_bytes_equal (journal_after_crash,
-          journal_after_other_request));
+      journal_after_other_request));
 
   gchar tampered_audit_id[WYL_ID_STRING_BUF];
   remediation_fresh_uuid (tampered_audit_id);
@@ -596,16 +600,16 @@ test_authority_before_checkpoint_converges (void)
   runtime.after_authorization = count_handoff_authorization;
   runtime.authorization_checkpoint_data = &authorization_calls;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &tampered_request,
-          &runtime, &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &tampered_request,
+      &runtime, &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (authorization_calls, ==, 3);
   g_assert_null (result.remediation_request_id);
   g_autoptr (GBytes) journal_after_tampered_request =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
   g_assert_true (g_bytes_equal (journal_after_crash,
-          journal_after_tampered_request));
+      journal_after_tampered_request));
 
   WylServiceCredentialOperationHandoffRemediationRequest tampered_action =
       request;
@@ -613,21 +617,21 @@ test_authority_before_checkpoint_converges (void)
   tampered_action.confirmation_version = 1;
   tampered_action.confirmed = TRUE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &tampered_action,
-          &runtime, &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &tampered_action,
+      &runtime, &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (authorization_calls, ==, 4);
   g_assert_null (result.remediation_request_id);
   g_autoptr (GBytes) journal_after_tampered_action =
       read_handoff_journal_bytes (operation_root,
-      attention.original_request_id);
+          attention.original_request_id);
   g_assert_true (g_bytes_equal (journal_after_crash,
-          journal_after_tampered_action));
+      journal_after_tampered_action));
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
-          &storage, &anchor, attention.original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_remediate_handoff (handle,
+      &storage, &anchor, attention.original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (authorization_calls, ==, 5);
   g_assert_true (result.authority_replayed);
   g_assert_false (result.journal_replayed);
@@ -646,11 +650,11 @@ main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func
-      ("/service-credential-operation-remediate/resume-replay-epoch",
+    ("/service-credential-operation-remediate/resume-replay-epoch",
       test_authenticated_resume_replay_and_new_epoch);
   g_test_add_func ("/service-credential-operation-remediate/revoke-replay",
       test_revoke_replay_invalidation);
   g_test_add_func ("/service-credential-operation-remediate/crash-converges",
       test_authority_before_checkpoint_converges);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

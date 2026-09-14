@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -504,5 +505,5 @@ main (int argc, char **argv)
       test_semantic_corruption_with_valid_checksum);
   g_test_add_func ("/fact/durability-journal/frozen-maximum",
       test_frozen_maximum_rejections);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

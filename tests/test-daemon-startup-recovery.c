@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -65,7 +66,7 @@ make_input (void)
     .created_at_us = 10,
   };
   g_assert_cmpint (wyl_id_parse ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
-          &input.intention_id), ==, WYRELOG_E_OK);
+      &input.intention_id), ==, WYRELOG_E_OK);
   return input;
 }
 
@@ -74,9 +75,9 @@ projection_count (WylHandle *handle)
 {
   duckdb_result result = { 0 };
   g_assert_cmpint (duckdb_query (wyl_audit_conn_get_connection
-          (wyl_handle_get_audit_conn (handle)),
-          "SELECT count(*) FROM service_exchange_receipt_projections;",
-          &result), ==, DuckDBSuccess);
+        (wyl_handle_get_audit_conn (handle)),
+      "SELECT count(*) FROM service_exchange_receipt_projections;",
+      &result), ==, DuckDBSuccess);
   gint64 count = duckdb_value_int64 (&result, 0, 0);
   duckdb_destroy_result (&result);
   return count;
@@ -90,23 +91,23 @@ seed_response_loss (WylHandle *handle)
   WylServiceAuthorityTransaction *txn = NULL;
   WylServiceAuthorityCommitEvidence *evidence = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   wyl_policy_store_service_authority_transaction_fail_once (store,
       WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+        (store, handle, lease, &txn), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_prepare_commit_evidence
-      (txn, store, &evidence), ==, WYRELOG_E_OK);
+        (txn, store, &evidence), ==, WYRELOG_E_OK);
   WylServiceAuthorityWriteIntentOutcome outcome = { 0 };
   g_assert_cmpint
-      (wyl_policy_store_service_authority_transaction_acquire_write_intent
-      (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+    (wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
   wyl_service_exchange_audit_input_t input = make_input ();
   WylServiceExchangeIntentionClassification classification = 0;
   g_autoptr (WylServiceExchangeIntentionRecord) record = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (txn,
-          store, &input, &classification, &record), ==, WYRELOG_E_OK);
+      store, &input, &classification, &record), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit (txn),
       !=, WYRELOG_E_OK);
   g_assert_cmpint (projection_count (handle), ==, 0);
@@ -156,7 +157,7 @@ test_startup_failure_is_fail_closed (void)
   seed_response_loss (f.handle);
 
   wyl_service_exchange_recovery_fail_enumerate_for_test
-      (WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_STEP);
+    (WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_STEP);
   g_assert_cmpint (wyl_daemon_recover_service_exchange_on_startup (f.handle),
       !=, WYRELOG_E_OK);
   g_assert_cmpint (projection_count (f.handle), ==, 0);
@@ -166,9 +167,9 @@ test_startup_failure_is_fail_closed (void)
 
   duckdb_result result = { 0 };
   g_assert_cmpint (duckdb_query (wyl_audit_conn_get_connection
-          (wyl_handle_get_audit_conn (f.handle)),
-          "UPDATE service_exchange_receipt_projections "
-          "SET tenant_id='corrupt';", &result), ==, DuckDBSuccess);
+        (wyl_handle_get_audit_conn (f.handle)),
+      "UPDATE service_exchange_receipt_projections "
+      "SET tenant_id='corrupt';", &result), ==, DuckDBSuccess);
   duckdb_destroy_result (&result);
   g_assert_cmpint (wyl_daemon_recover_service_exchange_on_startup (f.handle),
       ==, WYRELOG_E_POLICY);
@@ -184,5 +185,5 @@ main (int argc, char **argv)
       test_response_loss_restart_is_synchronous_and_idempotent);
   g_test_add_func ("/daemon/startup-recovery/fail-closed",
       test_startup_failure_is_fail_closed);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

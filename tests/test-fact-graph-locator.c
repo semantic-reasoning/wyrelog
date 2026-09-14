@@ -2,6 +2,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -1673,5 +1674,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-graph-locator/posix/checkpoint-replacements",
       test_posix_resolver_checkpoint_replacements_fail_closed);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

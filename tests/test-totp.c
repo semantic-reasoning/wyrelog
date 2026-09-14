@@ -8,6 +8,7 @@
  * taken modulo 1_000_000.  The seed used by Appendix B for SHA-1 is
  * the 20-byte ASCII string "12345678901234567890".
  */
+#include "test-exit-status.h"
 
 #include "auth/totp.h"
 
@@ -51,7 +52,7 @@ check_rfc6238_vectors (void)
     guint64 step = (guint64) (v->unix_time / 30);
     guint code = 999999;
     if (wyl_totp_code_at_step (RFC6238_SEED, sizeof RFC6238_SEED, step, &code,
-            NULL) != WYRELOG_E_OK)
+        NULL) != WYRELOG_E_OK)
       return 100 + (gint) i;
     if (code != v->expected_code)
       return 200 + (gint) i;
@@ -84,7 +85,7 @@ check_matches_within_skew_window (void)
    * away and must be rejected. */
   guint code_step1 = 0;
   if (wyl_totp_code_at_step (RFC6238_SEED, sizeof RFC6238_SEED, 1, &code_step1,
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 20;
 
   /* The code at step 1 must be accepted at T=59 (step 1), T=29 (step 0)
@@ -92,19 +93,19 @@ check_matches_within_skew_window (void)
   guint64 matched_step = 0;
   GError *error = NULL;
   if (!wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 59,
-          code_step1, &matched_step, &error))
+      code_step1, &matched_step, &error))
     return 21;
   if (matched_step != 1)
     return 22;
   matched_step = 0;
   if (!wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 29,
-          code_step1, &matched_step, &error))
+      code_step1, &matched_step, &error))
     return 23;
   if (matched_step != 1)
     return 24;
   matched_step = 0;
   if (!wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 89,
-          code_step1, &matched_step, &error))
+      code_step1, &matched_step, &error))
     return 25;
   if (matched_step != 1)
     return 26;
@@ -112,16 +113,16 @@ check_matches_within_skew_window (void)
   /* T = -1 (i.e. shift one step earlier) — code_step1 must NOT
    * match because the verifier is centred on step -1, not step 1. */
   if (wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, -1,
-          code_step1, NULL, &error))
+      code_step1, NULL, &error))
     return 27;
 
   /* T=119 lands on step 3 (code_step1 is two steps away). */
   if (wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 119,
-          code_step1, NULL, &error))
+      code_step1, NULL, &error))
     return 28;
   /* T=-31 lands on step -2 (verifier centre -2: covers -3, -2, -1). */
   if (wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, -31,
-          code_step1, NULL, &error))
+      code_step1, NULL, &error))
     return 29;
   return 0;
 }
@@ -131,7 +132,7 @@ check_matches_rejects_wrong_code (void)
 {
   guint code_step1 = 0;
   if (wyl_totp_code_at_step (RFC6238_SEED, sizeof RFC6238_SEED, 1, &code_step1,
-          NULL) != WYRELOG_E_OK)
+      NULL) != WYRELOG_E_OK)
     return 30;
   /* Use a code that is mathematically off-by-one from the valid
    * 6-digit code at step 1; very unlikely to collide with the
@@ -140,12 +141,12 @@ check_matches_rejects_wrong_code (void)
    * which would be a separate (severe) bug. */
   guint bad = (code_step1 == 0) ? 1 : code_step1 - 1;
   if (wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 59, bad,
-          NULL, NULL))
+      NULL, NULL))
     return 31;
 
   /* Codes outside the 0..999999 6-digit range must be rejected. */
   if (wyl_totp_code_matches (RFC6238_SEED, sizeof RFC6238_SEED, 59, 1000000,
-          NULL, NULL))
+      NULL, NULL))
     return 32;
   return 0;
 }
@@ -291,24 +292,24 @@ int
 main (void)
 {
   if (sodium_init () < 0)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   gint rc;
   if ((rc = check_rfc6238_vectors ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_code_at_step_validates_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_matches_within_skew_window ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_matches_rejects_wrong_code ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_generate_seed_basic ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_base32_roundtrip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_base32_known_vectors ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_base32_rejects_invalid ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -197,7 +198,7 @@ exit_at_darwin_coordinator_checkpoint (
   g_assert_nonnull (op_uuid);
   if (checkpoint == (WylFactGraphDarwinCoordinatorCheckpoint)
       GPOINTER_TO_INT (user_data))
-    _Exit (0);
+    WYL_TEST__EXIT(0);
 }
 
 static void
@@ -228,7 +229,7 @@ test_darwin_encrypted_crash_checkpoints (void)
     wyl_policy_store_t *store = NULL;
     if (open_encrypted_policy_store (g_getenv (env_store), g_getenv (env_key),
         &store) != WYRELOG_E_OK)
-      _Exit (91);
+      WYL_TEST__EXIT(91);
     gint checkpoint = (gint) g_ascii_strtoll (g_getenv (env_checkpoint), NULL,
             10);
     wyl_fact_graph_darwin_coordinator_set_test_hook (
@@ -237,7 +238,7 @@ test_darwin_encrypted_crash_checkpoints (void)
             "graph-crash");
     (void) wyl_fact_graph_provisioning_run (store, &input,
         g_getenv (env_root), NULL);
-    _Exit (92);
+    WYL_TEST__EXIT(92);
   }
 
   const WylPolicyGraphProvisioningPhase expected_phases[] = {
@@ -331,14 +332,14 @@ test_darwin_reserved_publication_failure_is_pre_filesystem (void)
     wyl_policy_store_t *store = NULL;
     if (open_encrypted_policy_store (g_getenv (env_store), g_getenv (env_key),
         &store) != WYRELOG_E_OK)
-      _Exit (93);
+      WYL_TEST__EXIT(93);
     wyl_policy_store_graph_authority_migration_fail_once (store,
         WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COORDINATOR_PUBLICATION);
     WylPolicyGraphProvisioningInput input = make_input ("tenant-publish-fail",
             "graph-publish-fail");
     wyrelog_error_t rc = wyl_fact_graph_provisioning_run (store, &input,
             g_getenv (env_root), NULL);
-    _Exit (rc == WYRELOG_E_IO ? 0 : 94);
+    WYL_TEST__EXIT(rc == WYRELOG_E_IO ? 0 : 94);
   }
 
   g_autoptr (GError) error = NULL;
@@ -399,7 +400,7 @@ test_darwin_recover_publishes_prepared_reservation_before_filesystem (void)
     wyl_policy_store_t *store = NULL;
     if (open_encrypted_policy_store (g_getenv (env_store), g_getenv (env_key),
         &store) != WYRELOG_E_OK)
-      _Exit (95);
+      WYL_TEST__EXIT(95);
     WylPolicyGraphProvisioningInput input = make_input ("tenant-recover",
             "graph-recover");
     WylPolicyGraphProvisioningRecord *record = NULL;
@@ -407,14 +408,14 @@ test_darwin_recover_publishes_prepared_reservation_before_filesystem (void)
     if (wyl_policy_store_graph_provisioning_prepare (store, &input, &record,
         &mutation) != WYRELOG_E_OK
         || mutation != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
-      _Exit (96);
+      WYL_TEST__EXIT(96);
     wyl_fact_graph_darwin_coordinator_set_test_hook (
       exit_at_darwin_coordinator_checkpoint,
       GINT_TO_POINTER (
         WYL_FACT_GRAPH_DARWIN_COORDINATOR_AFTER_FINAL_CREATION));
     (void) wyl_fact_graph_provisioning_recover (store, record->op_uuid,
         g_getenv (env_root), NULL);
-    _Exit (97);
+    WYL_TEST__EXIT(97);
   }
 
   g_autoptr (GError) error = NULL;
@@ -1625,5 +1626,5 @@ main (int argc, char *argv[])
   g_test_add_func ("/fact/provisioning-run/open-for-graph-serves-active-graph",
       test_open_for_graph_serves_active_graph);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

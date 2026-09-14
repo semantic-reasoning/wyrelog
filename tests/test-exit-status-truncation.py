@@ -225,6 +225,12 @@ def _eval_integer_node(node: ast.AST,
     bindings: dict[str, set[int]]) -> set[int]:
   if isinstance(node, ast.Constant) and isinstance(node.value, int):
     return {node.value}
+  if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+      and node.func.id == "wyl_test_normalize_exit_status"
+      and len(node.args) == 1 and not node.keywords):
+    values = _eval_integer_node(node.args[0], bindings)
+    return {1 if value != 0 and value % 256 == 0 else value
+        for value in values}
   if isinstance(node, ast.Name) and node.id in bindings:
     return set(bindings[node.id])
   if isinstance(node, ast.UnaryOp) and isinstance(node.op,
@@ -403,7 +409,8 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
               function_return_types.get(target)):
         callees.setdefault(name, set()).add(target)
       direct_return = any(site_start <= absolute_call < site_end
-          and re.search(r"\breturn\s+\(*\s*$",
+          and re.search(
+              r"\breturn\s+(?:wyl_test_normalize_exit_status\s*\(\s*)?\(*\s*$",
               masked[site_start:absolute_call]) is not None
           and re.fullmatch(r"\s*\)*\s*;?\s*",
               masked[body_start + closing + 1:site_end]) is not None
@@ -688,6 +695,11 @@ def _status_flow_sites(text: str, body_start: int, body_end: int,
         if (len(first) == 1 and str(first[0]["kind"]) == "return" and
             not second):
           returned_variable = str(first[0]["expression"]).strip()
+          normalized_return = re.fullmatch(
+              r"wyl_test_normalize_exit_status\s*\(\s*([A-Za-z_]\w*)\s*\)",
+              returned_variable)
+          if normalized_return is not None:
+            returned_variable = normalized_return.group(1)
           if re.fullmatch(r"[A-Za-z_]\w*", returned_variable):
             for call in re.finditer(r"\b[A-Za-z_]\w*\s*\(", condition):
               opening = condition.find("(", call.start(), call.end())
@@ -1420,7 +1432,7 @@ def self_test(root: Path) -> list[str]:
   if clean_unsafe:
     return ["self-test requires an unmutated test-decide.c control"]
   status_anchor = ("  gint field_check = check_guard_context_field_absent (handle,\n"
-      "      \"guard_context_timestamp\", base_code + 7);")
+      "          \"guard_context_timestamp\", base_code + 7);")
   status_mutation = status_text.replace(status_anchor,
       status_anchor + "\n  field_check = 256;", 1)
   if status_mutation == status_text:

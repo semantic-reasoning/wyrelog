@@ -4,6 +4,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -53,13 +54,13 @@ make_valid_manifest (WylServicePermissionManifest *manifest)
   manifest->store_generation = 7;
   fill_digest (manifest->store_digest);
   manifest->operations = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   g_ptr_array_add (manifest->operations,
       make_removal (WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT, "svc:alpha",
-          "perm.read", "res:doc"));
+      "perm.read", "res:doc"));
   g_ptr_array_add (manifest->operations,
       make_removal (WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP, "svc:beta",
-          "role.admin", "res:proj"));
+      "role.admin", "res:proj"));
 }
 
 static gchar *
@@ -69,7 +70,7 @@ canonical_document (gsize *out_len)
   make_valid_manifest (&manifest);
   gchar *document = NULL;
   g_assert_cmpint (wyl_service_permission_manifest_encode (&manifest, &document,
-          out_len), ==, WYRELOG_E_OK);
+      out_len), ==, WYRELOG_E_OK);
   g_assert_nonnull (document);
   wyl_service_permission_manifest_clear (&manifest);
   return document;
@@ -90,7 +91,7 @@ expect_decode_error (const gchar *document, wyrelog_error_t expected)
 {
   WylServicePermissionManifest manifest;
   g_assert_cmpint (wyl_service_permission_manifest_decode (document,
-          strlen (document), &manifest), ==, expected);
+      strlen (document), &manifest), ==, expected);
 }
 
 static void
@@ -111,7 +112,7 @@ test_round_trip (void)
 
   WylServicePermissionManifest decoded;
   g_assert_cmpint (wyl_service_permission_manifest_decode (canonical, len,
-          &decoded), ==, WYRELOG_E_OK);
+      &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpuint (decoded.version, ==, 1);
   g_assert_cmpstr (decoded.request_id, ==, g_request_id);
   g_assert_cmpuint (decoded.store_generation, ==, 7);
@@ -120,7 +121,7 @@ test_round_trip (void)
   gchar *reencoded = NULL;
   gsize reencoded_len = 0;
   g_assert_cmpint (wyl_service_permission_manifest_encode (&decoded, &reencoded,
-          &reencoded_len), ==, WYRELOG_E_OK);
+      &reencoded_len), ==, WYRELOG_E_OK);
   g_assert_cmpuint (reencoded_len, ==, len);
   g_assert_cmpint (memcmp (reencoded, canonical, len), ==, 0);
   g_free (reencoded);
@@ -138,19 +139,19 @@ round_trip_single (WylPolicyPermissionClosureRemovalAction action,
   manifest.store_generation = 42;
   fill_digest (manifest.store_digest);
   manifest.operations = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   g_ptr_array_add (manifest.operations,
       make_removal (action, "svc:solo", right, "res:only"));
 
   gchar *document = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_service_permission_manifest_encode (&manifest, &document,
-          &len), ==, WYRELOG_E_OK);
+      &len), ==, WYRELOG_E_OK);
   wyl_service_permission_manifest_clear (&manifest);
 
   WylServicePermissionManifest decoded;
   g_assert_cmpint (wyl_service_permission_manifest_decode (document, len,
-          &decoded), ==, WYRELOG_E_OK);
+      &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpuint (decoded.operations->len, ==, 1);
   const WylPolicyPermissionClosureRemoval *op =
       g_ptr_array_index (decoded.operations, 0);
@@ -160,7 +161,7 @@ round_trip_single (WylPolicyPermissionClosureRemovalAction action,
   gchar *reencoded = NULL;
   gsize reencoded_len = 0;
   g_assert_cmpint (wyl_service_permission_manifest_encode (&decoded, &reencoded,
-          &reencoded_len), ==, WYRELOG_E_OK);
+      &reencoded_len), ==, WYRELOG_E_OK);
   g_assert_cmpuint (reencoded_len, ==, len);
   g_assert_cmpint (memcmp (reencoded, document, len), ==, 0);
   g_free (reencoded);
@@ -263,7 +264,7 @@ test_reject_oversize (void)
   memset (buffer, 'a', big);
   WylServicePermissionManifest manifest;
   g_assert_cmpint (wyl_service_permission_manifest_decode (buffer, big,
-          &manifest), ==, WYRELOG_E_INVALID);
+      &manifest), ==, WYRELOG_E_INVALID);
   g_free (buffer);
 
   GString *doc = g_string_new (NULL);
@@ -294,29 +295,29 @@ test_from_analysis_matches (void)
   analysis.generation = 7;
   fill_digest (analysis.digest);
   analysis.removals = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   g_ptr_array_add (analysis.removals,
       make_removal (WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT, "svc:alpha",
-          "perm.read", "res:doc"));
+      "perm.read", "res:doc"));
   g_ptr_array_add (analysis.removals,
       make_removal (WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP, "svc:beta",
-          "role.admin", "res:proj"));
+      "role.admin", "res:proj"));
 
   /* non-canonical request id is refused up front */
   WylServicePermissionManifest bad;
   g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
-          "nope", &bad), ==, WYRELOG_E_INVALID);
+      "nope", &bad), ==, WYRELOG_E_INVALID);
 
   WylServicePermissionManifest manifest;
   g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
-          g_request_id, &manifest), ==, WYRELOG_E_OK);
+      g_request_id, &manifest), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_permission_manifest_matches_analysis (&manifest,
-          &analysis), ==, WYRELOG_E_OK);
+      &analysis), ==, WYRELOG_E_OK);
 
   /* generation/digest binding mismatch */
   analysis.generation = 8;
   g_assert_cmpint (wyl_service_permission_manifest_matches_analysis (&manifest,
-          &analysis), ==, WYRELOG_E_POLICY);
+      &analysis), ==, WYRELOG_E_POLICY);
   analysis.generation = 7;
 
   /* scope mismatch: an ambiguous ("*") closure scope does not match the
@@ -327,7 +328,7 @@ test_from_analysis_matches (void)
   g_free (first->scope);
   first->scope = g_strdup ("*");
   g_assert_cmpint (wyl_service_permission_manifest_matches_analysis (&manifest,
-          &analysis), ==, WYRELOG_E_POLICY);
+      &analysis), ==, WYRELOG_E_POLICY);
 
   wyl_service_permission_manifest_clear (&manifest);
   wyl_policy_permission_closure_analysis_clear (&analysis);
@@ -345,15 +346,15 @@ test_owner_only_round_trip (void)
   WylServicePermissionManifest manifest;
   make_valid_manifest (&manifest);
   g_assert_cmpint (wyl_service_permission_manifest_write_new_owner_only (path,
-          &manifest), ==, WYRELOG_E_OK);
+      &manifest), ==, WYRELOG_E_OK);
 
   /* refuses to re-create over an existing path */
   g_assert_cmpint (wyl_service_permission_manifest_write_new_owner_only (path,
-          &manifest), ==, WYRELOG_E_POLICY);
+      &manifest), ==, WYRELOG_E_POLICY);
 
   WylServicePermissionManifest loaded;
   g_assert_cmpint (wyl_service_permission_manifest_read_owner_only (path,
-          &loaded), ==, WYRELOG_E_OK);
+      &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpuint (loaded.operations->len, ==, manifest.operations->len);
   g_assert_cmpstr (loaded.request_id, ==, manifest.request_id);
   wyl_service_permission_manifest_clear (&loaded);
@@ -379,7 +380,7 @@ test_owner_only_rejects_group_world (void)
 
   WylServicePermissionManifest loaded;
   g_assert_cmpint (wyl_service_permission_manifest_read_owner_only (path,
-          &loaded), ==, WYRELOG_E_POLICY);
+      &loaded), ==, WYRELOG_E_POLICY);
 
   g_remove (path);
   g_rmdir (dir);
@@ -397,13 +398,13 @@ test_owner_only_rejects_symlink (void)
   WylServicePermissionManifest manifest;
   make_valid_manifest (&manifest);
   g_assert_cmpint (wyl_service_permission_manifest_write_new_owner_only (path,
-          &manifest), ==, WYRELOG_E_OK);
+      &manifest), ==, WYRELOG_E_OK);
   wyl_service_permission_manifest_clear (&manifest);
 
   g_assert_cmpint (symlink (path, link), ==, 0);
   WylServicePermissionManifest loaded;
   g_assert_cmpint (wyl_service_permission_manifest_read_owner_only (link,
-          &loaded), ==, WYRELOG_E_POLICY);
+      &loaded), ==, WYRELOG_E_POLICY);
 
   g_remove (link);
   g_remove (path);
@@ -428,7 +429,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/service-permission-manifest/reject-field-defects",
       test_reject_field_defects);
   g_test_add_func
-      ("/service-permission-manifest/reject-non-canonical-request-id",
+    ("/service-permission-manifest/reject-non-canonical-request-id",
       test_reject_non_canonical_request_id);
   g_test_add_func ("/service-permission-manifest/reject-bad-version",
       test_reject_bad_version);
@@ -442,10 +443,10 @@ main (int argc, char *argv[])
   g_test_add_func ("/service-permission-manifest/owner-only-round-trip",
       test_owner_only_round_trip);
   g_test_add_func
-      ("/service-permission-manifest/owner-only-rejects-group-world",
+    ("/service-permission-manifest/owner-only-rejects-group-world",
       test_owner_only_rejects_group_world);
   g_test_add_func ("/service-permission-manifest/owner-only-rejects-symlink",
       test_owner_only_rejects_symlink);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

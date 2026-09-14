@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <duckdb.h>
 
@@ -510,23 +511,23 @@ main (void)
   gint rc;
 
   if ((rc = check_policy_audit_facts_ready_loads_read_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_unsafe_service_closure_latches_service_auth_at_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_direct_permission_grant_ready_allows_decide ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_state_transition_ready_allows_decide ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_ready_rejects_production_path ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_ready_allows_development_path ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_ready_allows_policy_path ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_ready_allows_role_policy_path ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_snapshot_reload_ready_is_idempotent ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

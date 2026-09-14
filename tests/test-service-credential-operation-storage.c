@@ -2,6 +2,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stddef.h>
@@ -1845,5 +1846,5 @@ main (int argc, char **argv)
       test_posix_exact_delete_backend);
 #endif
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

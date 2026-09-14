@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <sodium.h>
 #include <string.h>
@@ -973,5 +974,5 @@ main (int argc, char **argv)
       test_terminal_reason_shapes);
   g_test_add_func ("/operation-journal/v6-remediation-marker-roundtrip",
       test_v6_remediation_marker_roundtrip);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

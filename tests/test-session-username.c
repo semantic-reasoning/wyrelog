@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <stdio.h>
 #include <string.h>
@@ -2262,71 +2263,71 @@ main (void)
   gint rc;
 
   if ((rc = check_login_propagates_username ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_with_null_request ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_with_unset_username ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_binds_default_tenant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_accepts_registry_ready_tenant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_validates_tenant_before_skip_mfa ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_rejects_invalid_tenant_syntax ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_buffer_independent_of_session ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_dup_returns_distinct_buffers ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_dup_null_session ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_requires_mfa_before_allow ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_mfa_verify_authenticates_engine_principal ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_mfa_delta_callback_survives_state_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_mfa_verify_rejects_invalid_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_mfa_verify_with_proof_requires_validator ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_persists_mfa_required_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_mfa_verify_persists_authenticated_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_persists_active_session_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_inserts_wirelog_session_fired ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_delta_callback_survives_state_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_rejected_by_default ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_uses_deployment_mode ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_uses_policy_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_does_not_use_state_without_permission ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_policy_permission_observes_state_lifecycle ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_inserts_wirelog_principal_fired ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_does_not_bypass_guarded_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_poisoned_engine_rejects_session_mutations ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_attached_login_stays_unassured ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }
 #else /* WYL_TEST_VARIANT_LIFECYCLE */
 typedef gint (*LifecycleCheckFunc) (void);
@@ -2468,7 +2469,7 @@ main (void)
   const LifecycleGate gate = lifecycle_gate_from_env ();
   if (gate.phase == LIFECYCLE_GATE_INVALID
       || (gate.phase != LIFECYCLE_GATE_NONE && !progress))
-    return 122;
+    return wyl_test_normalize_exit_status (122);
 
   const gint64 started_us = g_get_monotonic_time ();
   for (guint i = 0; i < G_N_ELEMENTS (lifecycle_checks); i++) {
@@ -2477,26 +2478,26 @@ main (void)
     const gint64 check_started_us = g_get_monotonic_time ();
     if (progress && !lifecycle_progress_begin (check, ordinal,
         (check_started_us - started_us) / 1000))
-      return 123;
+      return wyl_test_normalize_exit_status (123);
 
     gint rc = lifecycle_gate_wait (gate, LIFECYCLE_GATE_BEGIN, ordinal);
     if (rc != 0)
-      return rc;
+      return wyl_test_normalize_exit_status (rc);
 
     rc = check->func ();
     const gint64 check_ended_us = g_get_monotonic_time ();
     if (progress && !lifecycle_progress_end (check, ordinal,
         (check_ended_us - started_us) / 1000,
         (check_ended_us - check_started_us) / 1000, rc))
-      return 124;
+      return wyl_test_normalize_exit_status (124);
 
     gint gate_rc = lifecycle_gate_wait (gate, LIFECYCLE_GATE_END, ordinal);
     if (gate_rc != 0)
-      return gate_rc;
+      return wyl_test_normalize_exit_status (gate_rc);
     if (rc != 0)
-      return rc;
+      return wyl_test_normalize_exit_status (rc);
   }
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }
 #endif /* WYL_TEST_VARIANT_LIFECYCLE */

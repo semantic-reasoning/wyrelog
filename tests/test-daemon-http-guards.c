@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <gio/gio.h>
@@ -238,5 +239,5 @@ main (int argc, char **argv)
       test_strict_json_object_parser);
   g_test_add_func ("/daemon/http/strict-json-typed-int",
       test_strict_json_typed_int);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

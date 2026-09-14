@@ -29,6 +29,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -159,7 +160,7 @@ direct_perm_exists (const gchar *store_path, const gchar *subject,
     return FALSE;
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store, subject, perm, scope,
-          &exists) != WYRELOG_E_OK)
+      &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
 }
@@ -177,7 +178,7 @@ seal_bootstrap_admin (const gchar *store_path, const gchar *subject,
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   g_assert_cmpint (wyl_policy_store_apply_bootstrap_admin (store, subject,
-          allow_skip_mfa, &applied, &existing), ==, WYRELOG_E_OK);
+      allow_skip_mfa, &applied, &existing), ==, WYRELOG_E_OK);
   g_assert_true (applied);
 }
 
@@ -210,7 +211,7 @@ run_wyctl_mfa_argv_env (const gchar *const *argv, gchar **envp,
   g_autoptr (GError) error = NULL;
   g_autoptr (GSubprocessLauncher) launcher =
       g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDIN_PIPE
-      | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+          | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
   if (envp != NULL)
     g_subprocess_launcher_set_environ (launcher, envp);
   g_autoptr (GSubprocess) sub =
@@ -224,7 +225,7 @@ run_wyctl_mfa_argv_env (const gchar *const *argv, gchar **envp,
   /* Read stdout until the `secret_base32=' line so we know wyctl has
    * printed the secret and is about to block on stdin. */
   gssize after = read_until_line_prefix (stdout_pipe, stdout_acc,
-      "secret_base32=");
+          "secret_base32=");
   if (after >= 0 && mode != WYCTL_TEST_FEED_EOF) {
     const gchar *code = NULL;
     g_autofree gchar *computed = NULL;
@@ -234,20 +235,20 @@ run_wyctl_mfa_argv_env (const gchar *const *argv, gchar **envp,
     } else {
       /* VALID and PERTURB both need the secret-derived code. */
       g_autofree gchar *secret_b32 = extract_kv (stdout_acc->str,
-          "secret_base32");
+              "secret_base32");
       g_assert_nonnull (secret_b32);
       g_autofree guint8 *seed = NULL;
       gsize seed_len = 0;
       g_autoptr (GError) dec_error = NULL;
       g_assert_cmpint (wyl_totp_base32_decode (secret_b32, &seed, &seed_len,
-              &dec_error), ==, WYRELOG_E_OK);
+          &dec_error), ==, WYRELOG_E_OK);
       g_assert_cmpuint (seed_len, ==, WYL_TOTP_SEED_BYTES);
       guint64 step = (guint64) (g_get_real_time () / G_USEC_PER_SEC)
           / WYL_TOTP_STEP_SECONDS;
       guint code_int = 0;
       g_autoptr (GError) code_error = NULL;
       g_assert_cmpint (wyl_totp_code_at_step (seed, seed_len, step, &code_int,
-              &code_error), ==, WYRELOG_E_OK);
+          &code_error), ==, WYRELOG_E_OK);
       if (mode == WYCTL_TEST_FEED_PERTURB) {
         /* Perturb the lowest digit by +1 (mod 10).  Result is the
          * same length as the valid code and is guaranteed NOT to
@@ -267,7 +268,7 @@ run_wyctl_mfa_argv_env (const gchar *const *argv, gchar **envp,
     gsize written = 0;
     g_autoptr (GError) wr_error = NULL;
     g_assert_true (g_output_stream_write_all (stdin_pipe, payload,
-            strlen (payload), &written, NULL, &wr_error));
+        strlen (payload), &written, NULL, &wr_error));
     g_assert_no_error (wr_error);
   }
   /* Close stdin: feeds EOF to wyctl whether or not we wrote a code. */
@@ -307,7 +308,7 @@ run_wyctl_mfa (const gchar *subcommand, const gchar *subject,
     NULL,
   };
   return run_wyctl_mfa_argv_env (argv, NULL, mode, override_code, stdout_acc,
-      stderr_acc);
+             stderr_acc);
 }
 
 static void
@@ -321,7 +322,7 @@ test_mfa_enroll_happy_path (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", "alice.user", store, WYCTL_TEST_FEED_VALID,
-      NULL, out, err);
+          NULL, out, err);
   if (rc != 0)
     g_printerr ("happy stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -354,7 +355,7 @@ test_mfa_enroll_abort_on_eof_writes_nothing (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", "bob.user", store, WYCTL_TEST_FEED_EOF,
-      NULL, out, err);
+          NULL, out, err);
   g_assert_cmpint (rc, !=, 0);
 
   WylTotpEnrollment enr = { 0 };
@@ -382,7 +383,7 @@ test_mfa_enroll_abort_on_wrong_code (void)
    * matching the prev / next step inside the validator's ±1 skew
    * window.  Strictly stronger than a static "000000" override. */
   gint rc = run_wyctl_mfa ("enroll", "carol.user", store,
-      WYCTL_TEST_FEED_PERTURB, NULL, out, err);
+          WYCTL_TEST_FEED_PERTURB, NULL, out, err);
   g_assert_cmpint (rc, !=, 0);
 
   WylTotpEnrollment enr = { 0 };
@@ -423,7 +424,7 @@ test_mfa_reset_happy_path (void)
     wyl_policy_store_close (g_steal_pointer (&s));
 
     gint rc = run_wyctl_mfa ("reset", "dave.user", store, WYCTL_TEST_FEED_VALID,
-        NULL, out, err);
+            NULL, out, err);
     if (rc != 0)
       g_printerr ("reset stderr: %s\n", err->str);
     g_assert_cmpint (rc, ==, 0);
@@ -466,7 +467,7 @@ test_mfa_reset_abort_leaves_subject_unenrolled (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("reset", "eve.user", store, WYCTL_TEST_FEED_EOF,
-      NULL, out, err);
+          NULL, out, err);
   g_assert_cmpint (rc, !=, 0);
 
   WylTotpEnrollment after = { 0 };
@@ -489,12 +490,12 @@ test_mfa_enroll_bootstrap_admin_auto_revokes_skip_mfa (void)
 
   /* Pre-condition: skip_mfa is granted. */
   g_assert_true (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
 
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", "admin1", store, WYCTL_TEST_FEED_VALID,
-      NULL, out, err);
+          NULL, out, err);
   if (rc != 0)
     g_printerr ("bootstrap-revoke stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -517,7 +518,7 @@ test_mfa_enroll_bootstrap_admin_auto_revokes_skip_mfa (void)
 
   /* Post-condition (b): skip_mfa is gone. */
   g_assert_false (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
 
   g_unlink (store);
   g_rmdir (tmp);
@@ -540,7 +541,7 @@ test_mfa_enroll_atomic_rollback_on_audit_failure (void)
 
   /* Pre-condition: skip_mfa is granted, no enrollment. */
   g_assert_true (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
   WylTotpEnrollment pre_enr = { 0 };
   g_assert_false (lookup_enrollment (store, "admin1", &pre_enr));
   wyl_totp_enrollment_clear (&pre_enr);
@@ -556,7 +557,7 @@ test_mfa_enroll_atomic_rollback_on_audit_failure (void)
     g_assert_nonnull (db);
     char *err_msg = NULL;
     int sqlite_rc = sqlite3_exec (db, "DROP TABLE audit_events;", NULL, NULL,
-        &err_msg);
+            &err_msg);
     if (sqlite_rc != SQLITE_OK) {
       g_printerr ("drop audit_events failed: %s\n",
           err_msg != NULL ? err_msg : "(unknown)");
@@ -568,7 +569,7 @@ test_mfa_enroll_atomic_rollback_on_audit_failure (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", "admin1", store, WYCTL_TEST_FEED_VALID,
-      NULL, out, err);
+          NULL, out, err);
   /* wyctl must exit non-zero — the audit failure is surfaced. */
   g_assert_cmpint (rc, !=, 0);
 
@@ -589,7 +590,7 @@ test_mfa_enroll_atomic_rollback_on_audit_failure (void)
   /* And skip_mfa MUST still be granted — the auto-revoke is part of
    * the same savepoint scope and must be invisible after rollback. */
   g_assert_true (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
 
   g_unlink (store);
   g_rmdir (tmp);
@@ -609,14 +610,14 @@ test_mfa_enroll_non_bootstrap_subject_does_not_revoke (void)
 
   /* Sanity: admin1 still holds skip_mfa, frank does not. */
   g_assert_true (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
   g_assert_false (direct_perm_exists (store, "frank.user",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
 
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", "frank.user", store,
-      WYCTL_TEST_FEED_VALID, NULL, out, err);
+          WYCTL_TEST_FEED_VALID, NULL, out, err);
   if (rc != 0)
     g_printerr ("non-bootstrap stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -628,7 +629,7 @@ test_mfa_enroll_non_bootstrap_subject_does_not_revoke (void)
   /* admin1's skip_mfa MUST remain — enrolling a different subject does
    * not touch the bootstrap admin's grant. */
   g_assert_true (direct_perm_exists (store, "admin1",
-          WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
+      WYL_TEST_LOGIN_SKIP_MFA_PERMISSION, WYL_TEST_LOGIN_SKIP_MFA_SCOPE));
 
   g_unlink (store);
   g_rmdir (tmp);
@@ -649,7 +650,7 @@ test_mfa_enroll_url_encodes_subject (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa ("enroll", subject, store, WYCTL_TEST_FEED_VALID,
-      NULL, out, err);
+          NULL, out, err);
   if (rc != 0)
     g_printerr ("url-encode stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -701,11 +702,11 @@ make_keyfile_xdg_dir_mfa (const gchar *const *keys, const gchar *const *values)
   g_assert_no_error (error);
 
   g_autofree gchar *settings_dir = g_build_filename (xdg, "glib-2.0",
-      "settings", NULL);
+          "settings", NULL);
   g_assert_cmpint (g_mkdir_with_parents (settings_dir, 0700), ==, 0);
 
   g_autofree gchar *keyfile_path = g_build_filename (settings_dir, "keyfile",
-      NULL);
+          NULL);
   g_autoptr (GKeyFile) keyfile = g_key_file_new ();
   for (gsize i = 0; keys != NULL && keys[i] != NULL; i++) {
     g_assert_nonnull (values[i]);
@@ -729,17 +730,17 @@ remove_dir_recursive_mfa (const gchar *path)
   g_autoptr (GError) error = NULL;
   g_autoptr (GFile) file = g_file_new_for_path (path);
   g_autoptr (GFileEnumerator) en = g_file_enumerate_children (file,
-      G_FILE_ATTRIBUTE_STANDARD_NAME ","
-      G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
-      NULL, &error);
+          G_FILE_ATTRIBUTE_STANDARD_NAME ","
+          G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+          NULL, &error);
   if (en != NULL) {
     while (TRUE) {
       g_autoptr (GFileInfo) info = g_file_enumerator_next_file (en, NULL,
-          &error);
+              &error);
       if (info == NULL)
         break;
       g_autofree gchar *child = g_build_filename (path,
-          g_file_info_get_name (info), NULL);
+              g_file_info_get_name (info), NULL);
       if (g_file_info_get_file_type (info) == G_FILE_TYPE_DIRECTORY)
         remove_dir_recursive_mfa (child);
       else
@@ -797,7 +798,7 @@ test_mfa_enroll_cli_store_wins_over_gsettings (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_VALID, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
   if (rc != 0)
     g_printerr ("cli-wins stderr: %s\n", err->str);
@@ -841,7 +842,7 @@ test_mfa_enroll_gsettings_supplies_store (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_VALID, NULL,
-      out, err);
+          out, err);
   if (rc != 0)
     g_printerr ("gs-supplies stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -877,7 +878,7 @@ test_mfa_enroll_both_unset_surfaces_missing_flag (void)
   /* Feed EOF: we never reach the secret prompt because the missing-
    * flag diagnostic fires before any store is opened. */
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
 
   g_assert_cmpint (rc, !=, 0);
@@ -910,7 +911,7 @@ test_mfa_enroll_kill_switch_disables_fallback (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
 
   g_assert_cmpint (rc, !=, 0);
@@ -963,7 +964,7 @@ test_mfa_enroll_gsettings_backing_store_has_no_secrets (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_VALID, NULL,
-      out, err);
+          out, err);
   if (rc != 0)
     g_printerr ("scan stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
@@ -983,12 +984,12 @@ test_mfa_enroll_gsettings_backing_store_has_no_secrets (void)
    * artifacts.  The keyfile is the entire GSettings backing store for
    * this test (XDG_CONFIG_HOME points only at the temp xdg dir). */
   g_autofree gchar *keyfile_path = g_build_filename (xdg, "glib-2.0",
-      "settings", "keyfile", NULL);
+          "settings", "keyfile", NULL);
   g_autofree gchar *keyfile_bytes = NULL;
   gsize keyfile_len = 0;
   g_autoptr (GError) read_error = NULL;
   g_assert_true (g_file_get_contents (keyfile_path, &keyfile_bytes,
-          &keyfile_len, &read_error));
+      &keyfile_len, &read_error));
   g_assert_no_error (read_error);
 
   /* The path the operator wrote to GSettings IS expected to be
@@ -1032,7 +1033,7 @@ test_mfa_enroll_empty_gsettings_string_is_unset (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
 
   g_assert_cmpint (rc, !=, 0);
@@ -1054,7 +1055,7 @@ test_mfa_online_enroll_validates_gsettings_daemon_url (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
   g_assert_cmpint (rc, ==, 2);
   g_assert_nonnull (g_strstr_len (err->str, -1, "invalid daemon URL"));
@@ -1101,7 +1102,7 @@ test_mfa_reset_gsettings_supplies_store (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_VALID, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
   if (rc != 0)
     g_printerr ("reset-gs stderr: %s\n", err->str);
@@ -1137,7 +1138,7 @@ test_mfa_enroll_gsettings_supplies_keyprovider (void)
    * exits non-zero with "open store failed".  We never reach the
    * stdin prompt. */
   g_autofree gchar *bogus_kp = g_build_filename (tmp, "no-such-keyprovider",
-      NULL);
+          NULL);
   g_autofree gchar *kp_spec = g_strdup_printf ("file:%s", bogus_kp);
 
   g_autofree gchar *store_lit = gvariant_literal_for_string_mfa (gs_store);
@@ -1160,7 +1161,7 @@ test_mfa_enroll_gsettings_supplies_keyprovider (void)
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
   gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
-      out, err);
+          out, err);
   remove_dir_recursive_mfa (xdg);
 
   g_assert_cmpint (rc, !=, 0);
@@ -1216,5 +1217,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/mfa/enroll-gsettings-supplies-keyprovider",
       test_mfa_enroll_gsettings_supplies_keyprovider);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

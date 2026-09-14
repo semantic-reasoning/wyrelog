@@ -19,6 +19,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -865,7 +866,7 @@ main (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   /* Install the TOTP validator on the handle so the HTTP route can
   * resolve it via wyl_handle_get_mfa_validator. The daemon init
@@ -880,20 +881,20 @@ main (void)
     .handle = handle,
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
           &runtime, &error);
   if (http.server == NULL)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
   GThread *thread = g_thread_new ("daemon-http-mfa",
           test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
@@ -941,5 +942,5 @@ out:
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }

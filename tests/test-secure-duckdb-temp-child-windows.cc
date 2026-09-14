@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.hpp>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -135,5 +136,5 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, nullptr);
   g_test_add_func ("/secure-duckdb/windows/temp-child/ownership",
       test_secure_temp_child_lifecycle);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

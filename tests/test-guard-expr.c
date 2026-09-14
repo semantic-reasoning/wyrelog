@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyl-guard-expr-private.h"
@@ -97,9 +98,9 @@ check_nested_mixed (void)
   /* and(or(cmp,cmp), not(tag)) — depth 3, 3 atoms */
   g_autoptr (wyl_guard_expr_t) g =
       wyl_guard_and (wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-              WYL_GUARD_OP_LT, "20"), wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS,
-              WYL_GUARD_OP_EQ, "trusted")),
-      wyl_guard_not (wyl_guard_tag ("break_glass")));
+          WYL_GUARD_OP_LT, "20"), wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS,
+          WYL_GUARD_OP_EQ, "trusted")),
+          wyl_guard_not (wyl_guard_tag ("break_glass")));
   if (g == NULL)
     return 40;
   if (wyl_guard_validate (g) != WYRELOG_E_OK)
@@ -120,10 +121,10 @@ check_depth_4_boundary (void)
    *   and(and(and(cmp, cmp), cmp), cmp)  — depth 4, 4 atoms */
   g_autoptr (wyl_guard_expr_t) g =
       wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_cmp
-              (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
-              wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
+            (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
           wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30")),
-      wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "40"));
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "40"));
   if (g == NULL)
     return 50;
   if (wyl_guard_validate (g) != WYRELOG_E_OK)
@@ -142,11 +143,11 @@ check_depth_5_reject (void)
 {
   g_autoptr (wyl_guard_expr_t) g =
       wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_cmp
-                  (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
-                  wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
-              wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30")),
+            (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30")),
           wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "40")),
-      wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "50"));
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "50"));
   if (g == NULL)
     return 60;
   if (wyl_guard_validate (g) != WYRELOG_E_POLICY)
@@ -168,8 +169,8 @@ check_atom_limit_accept (void)
   g_autoptr (wyl_guard_expr_t) g =
       wyl_guard_and (wyl_guard_and (wyl_guard_and (LEAF (), LEAF ()),
           wyl_guard_and (LEAF (), LEAF ())),
-      wyl_guard_and (wyl_guard_and (LEAF (), LEAF ()), wyl_guard_and (LEAF (),
-              LEAF ())));
+          wyl_guard_and (wyl_guard_and (LEAF (), LEAF ()), wyl_guard_and (LEAF (),
+          LEAF ())));
 #undef LEAF
   if (g == NULL)
     return 70;
@@ -193,19 +194,19 @@ check_atom_limit_reject (void)
    * is a policy violation. */
   g_autoptr (wyl_guard_expr_t) reject =
       wyl_guard_or (wyl_guard_or (wyl_guard_or (wyl_guard_cmp
-              (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "1"),
-              wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "2")),
+            (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "1"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "2")),
           wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
-                  "3"), wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
-                  "4"))),
-      wyl_guard_or (wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-                  WYL_GUARD_OP_LT, "5"), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-                  WYL_GUARD_OP_LT, "6")),
+          "3"), wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
+          "4"))),
+          wyl_guard_or (wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+          WYL_GUARD_OP_LT, "5"), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+          WYL_GUARD_OP_LT, "6")),
           wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
-                  "7"), wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-                      WYL_GUARD_OP_LT, "8"),
-                  wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
-                      "9")))));
+          "7"), wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+          WYL_GUARD_OP_LT, "8"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
+          "9")))));
   if (reject == NULL)
     return 81;
   /* 9 atoms — exceeds limit. depth could also exceed; either way
@@ -293,28 +294,28 @@ main (void)
 {
   gint rc;
   if ((rc = check_name_roundtrip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_build_and ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_build_or ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_build_not ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_nested_mixed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_depth_4_boundary ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_depth_5_reject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_atom_limit_accept ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_atom_limit_reject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_in_with_timestamp ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_builder_validation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_validate_oor_field ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

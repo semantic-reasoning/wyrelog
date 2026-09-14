@@ -9,6 +9,7 @@
  * regeneration and review of every event, handle-lifecycle, and fixed WAL
  * replacement grammar below.
  */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -1139,7 +1140,7 @@ public:
         && recorder_->checkpoint_fault_stage == 3) {
       recorder_->checkpoint_fault_fires++;
       write_checkpoint_trace_or_exit (*recorder_, 110);
-      _exit (109);
+      WYL_TEST_EXIT(109);
     }
   }
 
@@ -3476,7 +3477,7 @@ static int
 crash_writer_child (const gchar *sandbox)
 {
   if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
-    _exit (90);
+    WYL_TEST_EXIT(90);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
   auto recorder = std::make_shared<RecorderState> ();
@@ -3489,22 +3490,22 @@ crash_writer_child (const gchar *sandbox)
   duckdb::Connection connection (db);
   auto result = connection.Query ("INSERT INTO facts VALUES (99)");
   if (result->HasError () || !fs::exists (path_from_utf8 (path_with_suffix (database, ".wal"))))
-    _exit (91);
+    WYL_TEST_EXIT(91);
   for (const auto &event : recorder->events) {
     if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
             (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
-      _exit (92);
+      WYL_TEST_EXIT(92);
   }
   for (const auto &control : recorder->controls) {
     if (dprintf (STDOUT_FILENO, "C\t%s\t%s\n", control.operation.c_str (),
             control.path.c_str ()) < 0)
-      _exit (92);
+      WYL_TEST_EXIT(92);
   }
   if (dprintf (STDOUT_FILENO, "END\n") < 0)
-    _exit (92);
-  _exit (0);
+    WYL_TEST_EXIT(92);
+  WYL_TEST_EXIT(0);
 }
 
 static void
@@ -3515,15 +3516,15 @@ write_trace_or_exit (const RecorderState &recorder, int error_code)
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
             (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
-      _exit (error_code);
+      WYL_TEST_EXIT(error_code);
   }
   for (const auto &control : recorder.controls) {
     if (dprintf (STDOUT_FILENO, "C\t%s\t%s\n", control.operation.c_str (),
             control.path.c_str ()) < 0)
-      _exit (error_code);
+      WYL_TEST_EXIT(error_code);
   }
   if (dprintf (STDOUT_FILENO, "END\n") < 0)
-  _exit (error_code);
+  WYL_TEST_EXIT(error_code);
 }
 
 static void
@@ -3533,26 +3534,26 @@ write_checkpoint_trace_or_exit (const RecorderState &recorder, int error_code)
   for (const auto &control : recorder.controls) {
     if (dprintf (STDOUT_FILENO, "C\t%s\t%s\n", control.operation.c_str (),
             control.path.c_str ()) < 0)
-      _exit (error_code);
+      WYL_TEST_EXIT(error_code);
   }
   for (const auto &event : recorder.events) {
     if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
             (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
-      _exit (error_code);
+      WYL_TEST_EXIT(error_code);
   }
   if (dprintf (STDOUT_FILENO, "MARKER\tcheckpoint-main-sync-2\t%s\t2\n",
           recorder.checkpoint_main.c_str ()) < 0
       || dprintf (STDOUT_FILENO, "END\n") < 0)
-    _exit (error_code);
+    WYL_TEST_EXIT(error_code);
 }
 
 static int
 hold_writer_child (const gchar *sandbox)
 {
   if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
-    _exit (100);
+    WYL_TEST_EXIT(100);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
   auto recorder = std::make_shared<RecorderState> ();
@@ -3572,33 +3573,33 @@ hold_writer_child (const gchar *sandbox)
         main_write_locks++;
     }
     if (main_write_locks != 1)
-      _exit (105);
+      WYL_TEST_EXIT(105);
     if (dprintf (STDOUT_FILENO, "READY\n") < 0)
-      _exit (101);
+      WYL_TEST_EXIT(101);
     char command[16] = {};
     if (fgets (command, sizeof command, stdin) == NULL
         || strcmp (command, "RELEASE\n") != 0)
-      _exit (102);
+      WYL_TEST_EXIT(102);
     if (recorder->events.size () != ready_event_count)
-      _exit (104);
+      WYL_TEST_EXIT(104);
     for (size_t i = 0; i < ready_event_count; i++) {
       const auto &event = recorder->events[i];
       /* FileExists is the one successful probe whose concrete bool is now
        * part of the source-pinned trace contract. */
       const bool recorded_exists = event.operation == "exists" && event.outcome == 1;
       if ((!recorded_exists && event.outcome != -1) || !event.error_class.empty ())
-        _exit (104);
+        WYL_TEST_EXIT(104);
     }
   }
   write_trace_or_exit (*recorder, 103);
-  _exit (0);
+  WYL_TEST_EXIT(0);
 }
 
 static int
 contend_writer_child (const gchar *sandbox)
 {
   if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
-    _exit (106);
+    WYL_TEST_EXIT(106);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
   /* The holder created and still owns this database. Requiring it to exist
@@ -3606,7 +3607,7 @@ contend_writer_child (const gchar *sandbox)
    * unambiguous: a "Cannot open file" there can then only be the holder's
    * sharing violation, never a missing-file open failure. */
   if (!fs::exists (database))
-    _exit (109);
+    WYL_TEST_EXIT(109);
   auto recorder = std::make_shared<RecorderState> ();
   gboolean opened = FALSE;
   gboolean rejected = FALSE;
@@ -3633,9 +3634,9 @@ contend_writer_child (const gchar *sandbox)
   } catch (const duckdb::Exception &) {
   }
   if (opened || !rejected)
-    _exit (107);
+    WYL_TEST_EXIT(107);
   write_trace_or_exit (*recorder, 108);
-  _exit (0);
+  WYL_TEST_EXIT(0);
 }
 
 static int
@@ -3656,8 +3657,8 @@ checkpoint_crash_child (const gchar *sandbox)
   recorder->checkpoint_fault_armed = TRUE;
   auto result = connection.Query ("CHECKPOINT");
   if (result->HasError () || recorder->checkpoint_fault_fires != 1)
-    _exit (111);
-  _exit (112);
+    WYL_TEST_EXIT(111);
+  WYL_TEST_EXIT(112);
 }
 
 static void
@@ -5977,7 +5978,7 @@ fixed_wal_checkpoint_abort_child (const gchar *sandbox,
   duckdb::Connection writer_connection (db);
   auto insert = writer_connection.Query ("INSERT INTO facts VALUES (99)");
   if (insert->HasError ())
-    _exit (120);
+    WYL_TEST_EXIT(120);
   const auto checkpoint_error = checkpoint_with_concurrent_commit (
       checkpoint_connection, writer_connection, database, &latch);
   const char *expected_error =
@@ -5989,7 +5990,7 @@ fixed_wal_checkpoint_abort_child (const gchar *sandbox,
         "Checkpoint aborted before truncate because of PRAGMA "
         "checkpoint_abort flag";
   if (checkpoint_error != expected_error)
-    _exit (121);
+    WYL_TEST_EXIT(121);
   const fs::path wal =
       path_from_utf8 (path_with_suffix (database, ".wal"));
   const fs::path checkpoint =
@@ -5998,11 +5999,11 @@ fixed_wal_checkpoint_abort_child (const gchar *sandbox,
       path_from_utf8 (path_with_suffix (database, ".wal.recovery"));
   if (!fs::exists (wal) || !fs::exists (checkpoint)
       || fs::exists (recovery))
-    _exit (122);
+    WYL_TEST_EXIT(122);
   assert_checkpoint_abort_child_exact_grammar (recorder, database,
       g_strcmp0 (abort_setting, "BEFORE_WAL_FINISH") == 0);
   dump_handle_lifecycle_if_requested (recorder);
-  _exit (0);
+  WYL_TEST_EXIT(0);
 }
 
 static void
@@ -6420,20 +6421,20 @@ main (int argc, char **argv)
   argc = (int) g_strv_length (argv);
 #endif
   if (argc == 3 && g_strcmp0 (argv[1], "--crash-writer") == 0)
-    return crash_writer_child (argv[2]);
+    return wyl_test_normalize_exit_status (crash_writer_child (argv[2]));
   if (argc == 3 && g_strcmp0 (argv[1], "--hold-writer") == 0)
-    return hold_writer_child (argv[2]);
+    return wyl_test_normalize_exit_status (hold_writer_child (argv[2]));
   if (argc == 3 && g_strcmp0 (argv[1], "--contend-writer") == 0)
-    return contend_writer_child (argv[2]);
+    return wyl_test_normalize_exit_status (contend_writer_child (argv[2]));
   if (argc == 3 && g_strcmp0 (argv[1], "--checkpoint-crash") == 0)
-    return checkpoint_crash_child (argv[2]);
+    return wyl_test_normalize_exit_status (checkpoint_crash_child (argv[2]));
 #ifdef WYL_DUCKDB_TEST_AFTER_WAL_START
   if (argc == 3
       && g_strcmp0 (argv[1], "--fixed-wal-abort-before-wal-finish") == 0)
-    return fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_WAL_FINISH");
+    return wyl_test_normalize_exit_status (fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_WAL_FINISH"));
   if (argc == 3
       && g_strcmp0 (argv[1], "--fixed-wal-abort-before-header") == 0)
-    return fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_HEADER");
+    return wyl_test_normalize_exit_status (fixed_wal_checkpoint_abort_child (argv[2], "BEFORE_HEADER"));
 #endif
 #ifdef G_OS_WIN32
   /* self_path re-spawns the trace-writer children, so it must be an absolute
@@ -6442,9 +6443,9 @@ main (int argc, char **argv)
    * ENOENT under the CI test runner); the module filename always resolves. */
   wchar_t module_path[4096];
   unsigned long module_len = GetModuleFileNameW (NULL, module_path,
-      (unsigned long) G_N_ELEMENTS (module_path));
+          (unsigned long) G_N_ELEMENTS (module_path));
   self_path = g_utf16_to_utf8 ((const gunichar2 *) module_path, module_len,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
 #else
   self_path = argv[0];
 #endif
@@ -6495,5 +6496,5 @@ main (int argc, char **argv)
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/valid-rollback-failure",
       test_valid_rollback_failure);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

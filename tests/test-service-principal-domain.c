@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -86,7 +87,7 @@ test_create_get_list_disable (void)
   wyl_service_principal_t principal = { 0 };
 
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:jobs:worker",
-          "jobs worker", "admin.root", RETIRE_REQUEST_COLLISION, &principal),
+      "jobs worker", "admin.root", RETIRE_REQUEST_COLLISION, &principal),
       ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.subject_id, ==, "svc:jobs:worker");
   g_assert_cmpstr (principal.display_name, ==, "jobs worker");
@@ -96,76 +97,76 @@ test_create_get_list_disable (void)
   wyl_service_principal_clear (&principal);
 
   g_assert_cmpint (wyl_service_principal_get (handle, "svc:jobs:worker",
-          &principal), ==, WYRELOG_E_OK);
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.created_by, ==, "admin.root");
   wyl_service_principal_clear (&principal);
   guint count = 0;
   g_assert_cmpint (wyl_service_principal_foreach (handle, count_principal,
-          &count), ==, WYRELOG_E_OK);
+      &count), ==, WYRELOG_E_OK);
   g_assert_cmpuint (count, ==, 1);
 
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_domain_requests;"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests;"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principal_events "
-          "WHERE event='created' AND generation=1;"), ==, 1);
+      "SELECT count(*) FROM service_principal_events "
+      "WHERE event='created' AND generation=1;"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events a JOIN audit_intentions i "
-          "ON i.audit_id=a.id WHERE a.action='service.principal.create' "
-          "AND a.resource_id='svc:jobs:worker' AND a.subject_id='admin.root' "
-          "AND a.request_id='" RETIRE_REQUEST_COLLISION
-          "' AND i.state='pending';"), ==, 1);
+      "SELECT count(*) FROM audit_events a JOIN audit_intentions i "
+      "ON i.audit_id=a.id WHERE a.action='service.principal.create' "
+      "AND a.resource_id='svc:jobs:worker' AND a.subject_id='admin.root' "
+      "AND a.request_id='" RETIRE_REQUEST_COLLISION
+      "' AND i.state='pending';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events WHERE "
-          "coalesce(action,'')||coalesce(resource_id,'')||"
-          "coalesce(subject_id,'')||coalesce(request_id,'') "
-          "LIKE '%jobs worker%';"), ==, 0);
+      "SELECT count(*) FROM audit_events WHERE "
+      "coalesce(action,'')||coalesce(resource_id,'')||"
+      "coalesce(subject_id,'')||coalesce(request_id,'') "
+      "LIKE '%jobs worker%';"), ==, 0);
 
   wyl_service_principal_t failed = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:other",
-          "other", "admin.root", RETIRE_REQUEST_COLLISION, &failed), ==,
+      "other", "admin.root", RETIRE_REQUEST_COLLISION, &failed), ==,
       WYRELOG_E_POLICY);
   g_assert_null (failed.subject_id);
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:jobs:worker",
-          "admin.root", RETIRE_REQUEST_COLLISION, &failed), ==,
+      "admin.root", RETIRE_REQUEST_COLLISION, &failed), ==,
       WYRELOG_E_CONFLICT);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_domain_requests;"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests;"), ==, 1);
 
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:jobs:worker",
-          "admin.root", RETIRE_REQUEST_DISABLE, &principal), ==, WYRELOG_E_OK);
+      "admin.root", RETIRE_REQUEST_DISABLE, &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   g_assert_cmpuint (principal.generation, ==, 2);
   g_assert_cmpstr (principal.disabled_by, ==, "admin.root");
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principal_events;"), ==, 2);
+      "SELECT count(*) FROM service_principal_events;"), ==, 2);
 
   /* A fresh request against an already-disabled principal is a committed
    * no-op attempt: ledger + audit/outbox advance, lifecycle events do not. */
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:jobs:worker",
-          "admin.root", RETIRE_REQUEST_NOOP, &principal), ==, WYRELOG_E_OK);
+      "admin.root", RETIRE_REQUEST_NOOP, &principal), ==, WYRELOG_E_OK);
   g_assert_cmpuint (principal.generation, ==, 2);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principal_events;"), ==, 2);
+      "SELECT count(*) FROM service_principal_events;"), ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_domain_requests;"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests;"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
+      "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events;"), ==, 3);
+      "SELECT count(*) FROM audit_events;"), ==, 3);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_intentions WHERE state='pending';"), ==,
+      "SELECT count(*) FROM audit_intentions WHERE state='pending';"), ==,
       3);
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:jobs:worker",
-          "admin.root", RETIRE_REQUEST_NOOP, &failed), ==, WYRELOG_E_OK);
+      "admin.root", RETIRE_REQUEST_NOOP, &failed), ==, WYRELOG_E_OK);
   g_assert_cmpstr (failed.state, ==, "disabled");
   wyl_service_principal_clear (&failed);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
+      "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events;"), ==, 3);
+      "SELECT count(*) FROM audit_events;"), ==, 3);
 }
 
 static void
@@ -176,8 +177,8 @@ assert_registry_state (WylServiceAuthRegistry *registry,
   WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
   gboolean found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          reservation->session_id, reservation->jti, &snapshot, &state,
-          &found), ==, WYRELOG_E_OK);
+      reservation->session_id, reservation->jti, &snapshot, &state,
+      &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (state, ==, expected);
   wyl_service_auth_reservation_clear (&snapshot);
@@ -191,8 +192,8 @@ registry_state (WylServiceAuthRegistry *registry,
   WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
   gboolean found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          reservation->session_id, reservation->jti, &snapshot, &state,
-          &found), ==, WYRELOG_E_OK);
+      reservation->session_id, reservation->jti, &snapshot, &state,
+      &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   wyl_service_auth_reservation_clear (&snapshot);
   return state;
@@ -220,14 +221,14 @@ test_registry_expiry_index_returns_bounded_due_active_entries (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &first,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
 
   GPtrArray *due = NULL;
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 100, 1,
-          &due), ==, WYRELOG_E_OK);
+      &due), ==, WYRELOG_E_OK);
   g_assert_nonnull (due);
   g_assert_cmpuint (due->len, ==, 1);
   WylServiceAuthReservation *snapshot = g_ptr_array_index (due, 0);
@@ -237,7 +238,7 @@ test_registry_expiry_index_returns_bounded_due_active_entries (void)
 
   due = NULL;
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 199, 4,
-          &due), ==, WYRELOG_E_OK);
+      &due), ==, WYRELOG_E_OK);
   g_assert_cmpuint (due->len, ==, 1);
   g_ptr_array_unref (due);
   WylServiceAuthReservation pending = first;
@@ -248,11 +249,11 @@ test_registry_expiry_index_returns_bounded_due_active_entries (void)
       WYRELOG_E_OK);
   due = NULL;
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 100, 4,
-          &due), ==, WYRELOG_E_POLICY);
+      &due), ==, WYRELOG_E_POLICY);
   g_assert_null (due);
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 3);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -279,7 +280,7 @@ test_registry_capacity_rejects_without_partial_reservation (void)
       .expires_at = 100000,
     };
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-            &reservation), ==, WYRELOG_E_OK);
+        &reservation), ==, WYRELOG_E_OK);
   }
   WylServiceAuthReservation overflow = {
     .session_id = (gchar *) "01890c10-2e3f-7000-8000-000000000201",
@@ -293,7 +294,7 @@ test_registry_capacity_rejects_without_partial_reservation (void)
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
       WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -321,24 +322,24 @@ test_registry_expiry_churn_stays_bounded (void)
     };
     gboolean changed = FALSE;
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-            &reservation), ==, WYRELOG_E_OK);
+        &reservation), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_auth_registry_activate (registry,
-            &reservation, &changed), ==, WYRELOG_E_OK);
+        &reservation, &changed), ==, WYRELOG_E_OK);
     GPtrArray *due = NULL;
     g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, window, 4,
-            &due), ==, WYRELOG_E_OK);
+        &due), ==, WYRELOG_E_OK);
     g_assert_cmpuint (due->len, ==, 1);
     WylServiceAuthReservation *snapshot = g_ptr_array_index (due, 0);
     gboolean removed = FALSE;
     g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry,
-            snapshot, &removed), ==, WYRELOG_E_OK);
+        snapshot, &removed), ==, WYRELOG_E_OK);
     g_assert_true (removed);
     g_ptr_array_unref (due);
     g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
         0);
   }
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -351,7 +352,7 @@ test_compound_disable_zero_survivors (void)
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:jobs:worker",
-          "worker", "admin", "compound-create", &principal), ==, WYRELOG_E_OK);
+      "worker", "admin", "compound-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
 
   WylServiceAuthReservation pending = {
@@ -373,14 +374,14 @@ test_compound_disable_zero_survivors (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &unrelated,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
 
   wyl_service_principal_disable_runtime_t runtime = {
     .registry = registry,
   };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          "svc:jobs:worker", "admin", "000000000000000000000000104", &runtime,
-          &principal), ==, WYRELOG_E_OK);
+      "svc:jobs:worker", "admin", "000000000000000000000000104", &runtime,
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   assert_registry_state (registry, &pending, WYL_SERVICE_AUTH_REVOKED);
   assert_registry_state (registry, &unrelated, WYL_SERVICE_AUTH_ACTIVE);
@@ -388,8 +389,8 @@ test_compound_disable_zero_survivors (void)
 
   /* Exact replay is read-only and therefore does not re-run invalidation. */
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          "svc:jobs:worker", "admin", "000000000000000000000000104", &runtime,
-          &principal), ==, WYRELOG_E_OK);
+      "svc:jobs:worker", "admin", "000000000000000000000000104", &runtime,
+      &principal), ==, WYRELOG_E_OK);
   assert_registry_state (registry, &pending, WYL_SERVICE_AUTH_REVOKED);
   wyl_service_principal_clear (&principal);
   wyl_service_auth_registry_unref (registry);
@@ -415,26 +416,26 @@ test_write_participant_registry_rank (void)
       ==, WYRELOG_E_OK);
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   g_autoptr (WylServiceAuthRegistryWriteParticipant) participant = NULL;
   g_assert_cmpint (wyl_service_auth_registry_write_participant_new (registry,
-          handle, lease, &participant), ==, WYRELOG_E_OK);
+      handle, lease, &participant), ==, WYRELOG_E_OK);
   WylServiceAuthSelector selector = { 0 };
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-          reservation.principal), ==, WYRELOG_E_OK);
+      reservation.principal), ==, WYRELOG_E_OK);
   WylServiceAuthRevokeResult revoked = { 0 };
   g_assert_cmpint (wyl_service_auth_rank_enter (handle,
-          WYL_SERVICE_AUTH_RANK_REGISTRY), ==, WYRELOG_E_OK);
+      WYL_SERVICE_AUTH_RANK_REGISTRY), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_auth_registry_write_participant_revoke_zero_survivors
-      (participant, &selector, &revoked), ==, WYRELOG_E_INVALID);
+    (wyl_service_auth_registry_write_participant_revoke_zero_survivors
+        (participant, &selector, &revoked), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_auth_rank_leave_expected (handle,
-          WYL_SERVICE_AUTH_RANK_REGISTRY), ==, WYRELOG_E_OK);
+      WYL_SERVICE_AUTH_RANK_REGISTRY), ==, WYRELOG_E_OK);
   assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_PENDING);
   g_assert_cmpint
-      (wyl_service_auth_registry_write_participant_revoke_zero_survivors
-      (participant, &selector, &revoked), ==, WYRELOG_E_OK);
+    (wyl_service_auth_registry_write_participant_revoke_zero_survivors
+        (participant, &selector, &revoked), ==, WYRELOG_E_OK);
   g_assert_cmpuint (revoked.matched, ==, 1);
   g_assert_cmpuint (revoked.transitioned, ==, 1);
   assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_REVOKED);
@@ -461,11 +462,11 @@ test_compound_tenant_seal_zero_survivors (void)
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-      (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_create_tenant
-      (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
       WYRELOG_E_OK);
   WylServiceAuthRegistry *registry = NULL;
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
@@ -489,7 +490,7 @@ test_compound_tenant_seal_zero_survivors (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &matching,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
 
   wyl_service_credential_mutation_authorization_t authorization = {
     .authorize = tenant_seal_authorize,
@@ -500,15 +501,15 @@ test_compound_tenant_seal_zero_survivors (void)
   };
   WylServiceRetirementOutcome outcome = { 0 };
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle, "tenant-a",
-          "operator", "000000000000000000000000201", 1, &runtime,
-          &outcome), ==, WYRELOG_E_OK);
+      "operator", "000000000000000000000000201", 1, &runtime,
+      &outcome), ==, WYRELOG_E_OK);
   g_assert_true (outcome.transitioned_now);
   assert_registry_state (registry, &matching, WYL_SERVICE_AUTH_REVOKED);
   assert_registry_state (registry, &unrelated, WYL_SERVICE_AUTH_PENDING);
 
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle, "tenant-a",
-          "operator", "000000000000000000000000201", 1, &runtime,
-          &outcome), ==, WYRELOG_E_OK);
+      "operator", "000000000000000000000000201", 1, &runtime,
+      &outcome), ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
   assert_registry_state (registry, &matching, WYL_SERVICE_AUTH_REVOKED);
@@ -524,7 +525,7 @@ test_compound_corruption_latches_unavailable (void)
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:fault:worker",
-          "worker", "admin", "fault-create", &principal), ==, WYRELOG_E_OK);
+      "worker", "admin", "fault-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   WylServiceAuthReservation reservation = {
     .session_id = (gchar *) SESSION_A,
@@ -539,26 +540,26 @@ test_compound_corruption_latches_unavailable (void)
       ==, WYRELOG_E_OK);
   WylServiceAuthSelector selector = { 0 };
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-          reservation.principal), ==, WYRELOG_E_OK);
+      reservation.principal), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-      (registry, &selector));
+        (registry, &selector));
 
   wyl_service_principal_disable_runtime_t runtime = {
     .registry = registry,
   };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          reservation.principal, "admin", "000000000000000000000000105",
-          &runtime, &principal), ==, WYRELOG_E_BUSY);
+      reservation.principal, "admin", "000000000000000000000000105",
+      &runtime, &principal), ==, WYRELOG_E_BUSY);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (wyl_service_principal_get (handle, reservation.principal,
-          &principal), ==, WYRELOG_E_OK);
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   wyl_service_principal_clear (&principal);
   assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_PENDING);
 
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   wyl_service_auth_registry_unref (registry);
@@ -589,8 +590,8 @@ test_compound_terminalizes_latch_and_release_failures (void)
         WYRELOG_E_OK);
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle,
-            "svc:terminal:worker", "worker", "admin", "terminal-create",
-            &principal), ==, WYRELOG_E_OK);
+        "svc:terminal:worker", "worker", "admin", "terminal-create",
+        &principal), ==, WYRELOG_E_OK);
     wyl_service_principal_clear (&principal);
     WylServiceAuthReservation reservation = {
       .session_id = (gchar *) SESSION_A,
@@ -602,13 +603,13 @@ test_compound_terminalizes_latch_and_release_failures (void)
       .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
     };
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-            &reservation), ==, WYRELOG_E_OK);
+        &reservation), ==, WYRELOG_E_OK);
     if (fault == 0) {
       WylServiceAuthSelector selector = { 0 };
       g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-              reservation.principal), ==, WYRELOG_E_OK);
+          reservation.principal), ==, WYRELOG_E_OK);
       g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-          (registry, &selector));
+            (registry, &selector));
     }
     wyl_service_principal_disable_runtime_t runtime = {
       .registry = registry,
@@ -616,12 +617,12 @@ test_compound_terminalizes_latch_and_release_failures (void)
       .before_write_release = fault == 1 ? fail_write_release_once : NULL,
     };
     g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-            reservation.principal, "admin",
-            "000000000000000000000000106", &runtime,
-            &principal), ==, fault == 0 ? WYRELOG_E_INTERNAL : WYRELOG_E_BUSY);
+        reservation.principal, "admin",
+        "000000000000000000000000106", &runtime,
+        &principal), ==, fault == 0 ? WYRELOG_E_INTERNAL : WYRELOG_E_BUSY);
     g_assert_null (principal.subject_id);
     g_assert_cmpint (wyl_service_principal_get (handle,
-            reservation.principal, &principal), ==, WYRELOG_E_OK);
+        reservation.principal, &principal), ==, WYRELOG_E_OK);
     g_assert_cmpstr (principal.state, ==, "disabled");
     wyl_service_principal_clear (&principal);
     if (fault == 0)
@@ -630,13 +631,13 @@ test_compound_terminalizes_latch_and_release_failures (void)
       assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_REVOKED);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
     WylServiceAuthAuthoritySnapshot snapshot = { 0 };
     wyl_service_auth_authority_snapshot
-        (wyl_handle_get_service_auth_authority (handle), &snapshot);
+      (wyl_handle_get_service_auth_authority (handle), &snapshot);
     g_assert_false (snapshot.writer_active);
     wyl_service_auth_registry_unref (registry);
   }
@@ -668,8 +669,8 @@ test_compound_commit_outcomes (void)
         WYRELOG_E_OK);
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle,
-            "svc:outcome:worker", "worker", "admin", "outcome-create",
-            &principal), ==, WYRELOG_E_OK);
+        "svc:outcome:worker", "worker", "admin", "outcome-create",
+        &principal), ==, WYRELOG_E_OK);
     wyl_service_principal_clear (&principal);
     WylServiceAuthReservation reservation = {
       .session_id = (gchar *) SESSION_A,
@@ -681,24 +682,24 @@ test_compound_commit_outcomes (void)
       .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
     };
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-            &reservation), ==, WYRELOG_E_OK);
+        &reservation), ==, WYRELOG_E_OK);
     wyl_service_principal_disable_runtime_t runtime = {
       .registry = registry,
     };
     wyl_policy_store_service_authority_transaction_fail_once
-        (wyl_handle_get_policy_store (handle),
+      (wyl_handle_get_policy_store (handle),
         (WylPolicyAuthorityTransactionFailStage) stage);
     g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-            reservation.principal, "admin",
-            "000000000000000000000000107", &runtime,
-            &principal), !=, WYRELOG_E_OK);
+        reservation.principal, "admin",
+        "000000000000000000000000107", &runtime,
+        &principal), !=, WYRELOG_E_OK);
     g_assert_null (principal.subject_id);
     WylServiceAuthState auth_state = registry_state (registry, &reservation);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     wyrelog_error_t available = wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason);
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason);
     wyrelog_error_t lookup = wyl_service_principal_get (handle,
-        reservation.principal, &principal);
+            reservation.principal, &principal);
     if (lookup == WYRELOG_E_OK) {
       gboolean committed = g_str_equal (principal.state, "disabled");
       g_assert_true (committed || g_str_equal (principal.state, "active"));
@@ -707,7 +708,7 @@ test_compound_commit_outcomes (void)
             || available == WYRELOG_E_BUSY);
       else
         g_assert_true ((auth_state == WYL_SERVICE_AUTH_PENDING
-                && available == WYRELOG_E_OK)
+            && available == WYRELOG_E_OK)
             || available == WYRELOG_E_BUSY);
     } else
       g_assert_cmpint (available, ==, WYRELOG_E_BUSY);
@@ -744,18 +745,18 @@ test_compound_rollback_fault (void)
     .registry = registry,
   };
   wyl_policy_store_service_authority_transaction_fail_once
-      (wyl_handle_get_policy_store (handle),
+    (wyl_handle_get_policy_store (handle),
       WYL_POLICY_AUTHORITY_TXN_FAIL_ROLLBACK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          "svc:rollback:missing", "admin",
-          "000000000000000000000000108", &runtime,
-          &principal), !=, WYRELOG_E_OK);
+      "svc:rollback:missing", "admin",
+      "000000000000000000000000108", &runtime,
+      &principal), !=, WYRELOG_E_OK);
   g_assert_null (principal.subject_id);
   assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_PENDING);
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -785,19 +786,19 @@ test_collision_classes (void)
     sqlite3 *db = handle_db (handle);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     g_assert_cmpint (wyl_policy_store_upsert_role (store, "app.reader",
-            "reader"), ==, WYRELOG_E_OK);
+        "reader"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_upsert_permission (store, "app.read",
-            "read", "basic"), ==, WYRELOG_E_OK);
+        "read", "basic"), ==, WYRELOG_E_OK);
     exec_ok (db, fixtures[i]);
     wyl_service_principal_t principal = { 0 };
     g_autofree gchar *request = g_strdup_printf ("collision-%u", (guint) i);
     g_assert_cmpint (wyl_service_principal_create (handle, "svc:collision",
-            "collision", "admin", request, &principal), ==, WYRELOG_E_POLICY);
+        "collision", "admin", request, &principal), ==, WYRELOG_E_POLICY);
     g_assert_null (principal.subject_id);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_domain_requests;"), ==, 0);
+        "SELECT count(*) FROM service_domain_requests;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_principals;"), ==, 0);
+        "SELECT count(*) FROM service_principals;"), ==, 0);
   }
 }
 
@@ -811,16 +812,16 @@ test_owned_output_contract (void)
    * directly by a matching API without an explicit clear. */
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:output-contract", "output contract", "admin",
-          "output-contract-create", &principal), ==, WYRELOG_E_OK);
+      "svc:output-contract", "output contract", "admin",
+      "output-contract-create", &principal), ==, WYRELOG_E_OK);
   g_assert_nonnull (principal.subject_id);
   g_assert_cmpint (wyl_service_principal_get (handle,
-          "svc:output-contract", &principal), ==, WYRELOG_E_OK);
+      "svc:output-contract", &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.display_name, ==, "output contract");
 
   /* Every failure clears a previously populated output. */
   g_assert_cmpint (wyl_service_principal_get (handle, "human-subject",
-          &principal), ==, WYRELOG_E_INVALID);
+      &principal), ==, WYRELOG_E_INVALID);
   g_assert_null (principal.subject_id);
   g_assert_null (principal.display_name);
   g_assert_null (principal.state);
@@ -843,8 +844,8 @@ create_thread (gpointer data)
   CreateThread *thread = data;
   wyl_service_principal_t principal = { 0 };
   thread->rc = wyl_service_principal_create (thread->handle,
-      thread->subject_id, thread->subject_id, "admin", thread->request_id,
-      &principal);
+          thread->subject_id, thread->subject_id, "admin", thread->request_id,
+          &principal);
   wyl_service_principal_clear (&principal);
   return NULL;
 }
@@ -863,9 +864,9 @@ test_concurrent_request_claim (void)
   g_assert_true ((a.rc == WYRELOG_E_OK && b.rc == WYRELOG_E_POLICY)
       || (a.rc == WYRELOG_E_POLICY && b.rc == WYRELOG_E_OK));
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_principals;"), ==, 1);
+      "SELECT count(*) FROM service_principals;"), ==, 1);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_domain_requests;"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests;"), ==, 1);
 }
 
 typedef struct
@@ -881,7 +882,7 @@ disable_thread (gpointer data)
   DisableThread *thread = data;
   wyl_service_principal_t principal = { 0 };
   thread->rc = wyl_service_principal_disable (thread->handle,
-      "svc:concurrent:disable", "admin", thread->request_id, &principal);
+          "svc:concurrent:disable", "admin", thread->request_id, &principal);
   wyl_service_principal_clear (&principal);
   return NULL;
 }
@@ -893,8 +894,8 @@ test_concurrent_disable (void)
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:concurrent:disable", "concurrent disable", "admin",
-          "concurrent-disable-create", &principal), ==, WYRELOG_E_OK);
+      "svc:concurrent:disable", "concurrent disable", "admin",
+      "concurrent-disable-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
 
   DisableThread a = { handle, "000000000000000000000000109", -1 };
@@ -907,18 +908,18 @@ test_concurrent_disable (void)
   g_assert_cmpint (a.rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (b.rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_principal_get (handle,
-          "svc:concurrent:disable", &principal), ==, WYRELOG_E_OK);
+      "svc:concurrent:disable", &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   g_assert_cmpuint (principal.generation, ==, 2);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_principal_events;"), ==, 2);
+      "SELECT count(*) FROM service_principal_events;"), ==, 2);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_domain_requests;"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests;"), ==, 1);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
+      "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM audit_events;"), ==, 3);
+      "SELECT count(*) FROM audit_events;"), ==, 3);
 }
 
 typedef struct
@@ -942,8 +943,8 @@ tenant_seal_thread (gpointer data)
     .authorization = &authorization,
   };
   thread->rc = wyl_tenant_seal_keyed_with_runtime (thread->handle,
-      thread->tenant_id, thread->actor, thread->request_id, 1, &runtime,
-      &thread->outcome);
+          thread->tenant_id, thread->actor, thread->request_id, 1, &runtime,
+          &thread->outcome);
   return NULL;
 }
 
@@ -955,7 +956,7 @@ test_concurrent_keyed_tenant_seal (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-concurrent",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   TenantSealThread a = {
     .handle = handle,
     .tenant_id = "tenant-concurrent",
@@ -970,17 +971,17 @@ test_concurrent_keyed_tenant_seal (void)
   g_assert_cmpint (a.rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (b.rc, ==, WYRELOG_E_OK);
   g_assert_true ((a.outcome.disposition ==
-          WYL_SERVICE_RETIREMENT_FRESH_TRANSITION
-          && b.outcome.disposition == WYL_SERVICE_RETIREMENT_EXACT_REPLAY)
+      WYL_SERVICE_RETIREMENT_FRESH_TRANSITION
+      && b.outcome.disposition == WYL_SERVICE_RETIREMENT_EXACT_REPLAY)
       || (b.outcome.disposition ==
-          WYL_SERVICE_RETIREMENT_FRESH_TRANSITION
-          && a.outcome.disposition == WYL_SERVICE_RETIREMENT_EXACT_REPLAY));
+      WYL_SERVICE_RETIREMENT_FRESH_TRANSITION
+      && a.outcome.disposition == WYL_SERVICE_RETIREMENT_EXACT_REPLAY));
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "request_id='000000000000000000000000216';"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000216';"), ==, 1);
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
-          "tenant-concurrent-mismatch", &created), ==, WYRELOG_E_OK);
+      "tenant-concurrent-mismatch", &created), ==, WYRELOG_E_OK);
   TenantSealThread c = {
     .handle = handle,
     .tenant_id = "tenant-concurrent-mismatch",
@@ -999,8 +1000,8 @@ test_concurrent_keyed_tenant_seal (void)
   g_assert_cmpint (conflict->outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "request_id='000000000000000000000000217';"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000217';"), ==, 1);
 }
 
 static void
@@ -1015,23 +1016,23 @@ test_local_failure_rolls_back (void)
     sqlite3 *db = handle_db (handle);
     g_autofree gchar *trigger =
         g_strdup_printf ("CREATE TRIGGER fail_local BEFORE INSERT ON %s "
-        "BEGIN SELECT RAISE(ABORT,'fault'); END;", targets[i]);
+            "BEGIN SELECT RAISE(ABORT,'fault'); END;", targets[i]);
     exec_ok (db, trigger);
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle, "svc:fault",
-            "fault", "admin", "fault-request", &principal), !=, WYRELOG_E_OK);
+        "fault", "admin", "fault-request", &principal), !=, WYRELOG_E_OK);
     g_assert_null (principal.subject_id);
     exec_ok (db, "DROP TRIGGER fail_local;");
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_domain_requests;"), ==, 0);
+        "SELECT count(*) FROM service_domain_requests;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_principals;"), ==, 0);
+        "SELECT count(*) FROM service_principals;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_principal_events;"), ==, 0);
+        "SELECT count(*) FROM service_principal_events;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM audit_events;"), ==, 0);
+        "SELECT count(*) FROM audit_events;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM audit_intentions;"), ==, 0);
+        "SELECT count(*) FROM audit_intentions;"), ==, 0);
   }
 
   {
@@ -1040,29 +1041,29 @@ test_local_failure_rolls_back (void)
     sqlite3 *db = handle_db (handle);
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle,
-            "svc:receipt-fault", "receipt fault", "admin",
-            "receipt-fault-create", &principal), ==, WYRELOG_E_OK);
+        "svc:receipt-fault", "receipt fault", "admin",
+        "receipt-fault-create", &principal), ==, WYRELOG_E_OK);
     wyl_service_principal_clear (&principal);
     exec_ok (db,
         "CREATE TRIGGER fail_retirement_receipt BEFORE INSERT ON "
         "service_retirement_receipts BEGIN SELECT RAISE(ABORT,'fault'); END;");
     g_assert_cmpint (wyl_service_principal_disable (handle,
-            "svc:receipt-fault", "admin",
-            "000000000000000000000000113", &principal), ==, WYRELOG_E_INTERNAL);
+        "svc:receipt-fault", "admin",
+        "000000000000000000000000113", &principal), ==, WYRELOG_E_INTERNAL);
     g_assert_null (principal.subject_id);
     exec_ok (db, "DROP TRIGGER fail_retirement_receipt;");
     g_assert_cmpint (wyl_service_principal_get (handle, "svc:receipt-fault",
-            &principal), ==, WYRELOG_E_OK);
+        &principal), ==, WYRELOG_E_OK);
     g_assert_cmpstr (principal.state, ==, "active");
     wyl_service_principal_clear (&principal);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_retirement_receipts;"), ==, 0);
+        "SELECT count(*) FROM service_retirement_receipts;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_principal_events WHERE "
-            "event='disabled';"), ==, 0);
+        "SELECT count(*) FROM service_principal_events WHERE "
+        "event='disabled';"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM audit_events WHERE "
-            "action='service.principal.disable';"), ==, 0);
+        "SELECT count(*) FROM audit_events WHERE "
+        "action='service.principal.disable';"), ==, 0);
   }
 
   {
@@ -1074,13 +1075,13 @@ test_local_failure_rolls_back (void)
         "ON service_domain_requests BEGIN SELECT 1; END;");
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle,
-            "svc:validation-fault", "fault", "admin", "validation-fault",
-            &principal), ==, WYRELOG_E_POLICY);
+        "svc:validation-fault", "fault", "admin", "validation-fault",
+        &principal), ==, WYRELOG_E_POLICY);
     exec_ok (db, "DROP TRIGGER validation_fault;");
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_domain_requests;"), ==, 0);
+        "SELECT count(*) FROM service_domain_requests;"), ==, 0);
     g_assert_cmpint (scalar_int64 (db,
-            "SELECT count(*) FROM service_principals;"), ==, 0);
+        "SELECT count(*) FROM service_principals;"), ==, 0);
   }
   {
     g_autoptr (WylHandle) handle = NULL;
@@ -1089,12 +1090,12 @@ test_local_failure_rolls_back (void)
     wyl_policy_store_service_lifecycle_fail_commit_once (store);
     wyl_service_principal_t principal = { 0 };
     g_assert_cmpint (wyl_service_principal_create (handle,
-            "svc:commit-fault", "fault", "admin", "commit-fault",
-            &principal), ==, WYRELOG_E_IO);
+        "svc:commit-fault", "fault", "admin", "commit-fault",
+        &principal), ==, WYRELOG_E_IO);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM service_domain_requests;"), ==, 0);
+        "SELECT count(*) FROM service_domain_requests;"), ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM service_principals;"), ==, 0);
+        "SELECT count(*) FROM service_principals;"), ==, 0);
   }
 }
 
@@ -1109,12 +1110,12 @@ test_restart_replay_and_overflow (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   wyl_policy_service_principal_info_t principal = { 0 };
   g_assert_cmpint (wyl_policy_store_create_service_principal (store,
-          "svc:restart", "restart", "admin", "restart-request", &principal),
+      "svc:restart", "restart", "admin", "restart-request", &principal),
       ==, WYRELOG_E_OK);
   wyl_policy_service_principal_info_clear (&principal);
   g_assert_cmpint (wyl_policy_store_disable_service_principal (store,
-          "svc:restart", "admin", "00000000000000000000000010B",
-          &principal), ==, WYRELOG_E_OK);
+      "svc:restart", "admin", "00000000000000000000000010B",
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   wyl_policy_service_principal_info_clear (&principal);
   wyl_policy_store_close (store);
@@ -1123,16 +1124,16 @@ test_restart_replay_and_overflow (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_disable_service_principal (store,
-          "svc:restart", "admin", "00000000000000000000000010B",
-          &principal), ==, WYRELOG_E_OK);
+      "svc:restart", "admin", "00000000000000000000000010B",
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.subject_id, ==, "svc:restart");
   g_assert_cmpstr (principal.state, ==, "disabled");
   g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "request_id='00000000000000000000000010B';"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='00000000000000000000000010B';"), ==, 1);
   g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM service_principal_events WHERE "
-          "event='disabled';"), ==, 1);
+      "SELECT count(*) FROM service_principal_events WHERE "
+      "event='disabled';"), ==, 1);
   wyl_policy_service_principal_info_clear (&principal);
 
   exec_ok (wyl_policy_store_get_db (store),
@@ -1140,11 +1141,11 @@ test_restart_replay_and_overflow (void)
       "generation,created_by,created_at_us,updated_at_us) VALUES("
       "'svc:overflow','overflow','active',9223372036854775807,'admin',1,1);");
   g_assert_cmpint (wyl_policy_store_disable_service_principal (store,
-          "svc:overflow", "admin", "00000000000000000000000010C",
-          &principal), ==, WYRELOG_E_POLICY);
+      "svc:overflow", "admin", "00000000000000000000000010C",
+      &principal), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM service_retirement_receipts "
-          "WHERE request_id='00000000000000000000000010C';"), ==, 0);
+      "SELECT count(*) FROM service_retirement_receipts "
+      "WHERE request_id='00000000000000000000000010C';"), ==, 0);
   wyl_policy_store_close (store);
 
   remove_store_files (path);
@@ -1167,8 +1168,8 @@ test_restart_after_latch_rebuilds_empty_registry (void)
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:restart-latch:worker", "worker", "admin",
-          "restart-latch-create", &principal), ==, WYRELOG_E_OK);
+      "svc:restart-latch:worker", "worker", "admin",
+      "restart-latch-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   WylServiceAuthReservation disabled = {
     .session_id = (gchar *) SESSION_A,
@@ -1183,15 +1184,15 @@ test_restart_after_latch_rebuilds_empty_registry (void)
       ==, WYRELOG_E_OK);
   WylServiceAuthSelector selector = { 0 };
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-          disabled.principal), ==, WYRELOG_E_OK);
+      disabled.principal), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-      (registry, &selector));
+        (registry, &selector));
   wyl_service_principal_disable_runtime_t runtime = {
     .registry = registry,
   };
   g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
-          disabled.principal, "admin", "00000000000000000000000010D",
-          &runtime, &principal), ==, WYRELOG_E_BUSY);
+      disabled.principal, "admin", "00000000000000000000000010D",
+      &runtime, &principal), ==, WYRELOG_E_BUSY);
   wyl_service_principal_clear (&principal);
   wyl_service_auth_registry_unref (registry);
   registry = NULL;
@@ -1200,18 +1201,18 @@ test_restart_after_latch_rebuilds_empty_registry (void)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_principal_get (handle, disabled.principal,
-          &principal), ==, WYRELOG_E_OK);
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.state, ==, "disabled");
   wyl_service_principal_clear (&principal);
   WylServiceAuthUnavailableReason reason =
       WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:restart-latch:unrelated", "unrelated", "admin",
-          "restart-latch-unrelated", &principal), ==, WYRELOG_E_OK);
+      "svc:restart-latch:unrelated", "unrelated", "admin",
+      "restart-latch-unrelated", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
 
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
@@ -1221,17 +1222,17 @@ test_restart_after_latch_rebuilds_empty_registry (void)
   unrelated.principal = (gchar *) "svc:restart-latch:unrelated";
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   WylServiceAuthRegistrySessionParticipant *participant = NULL;
   g_assert_cmpint
-      (wyl_service_auth_registry_session_participant_new_for_write
-      (registry, handle, lease, &participant), ==, WYRELOG_E_OK);
+    (wyl_service_auth_registry_session_participant_new_for_write
+        (registry, handle, lease, &participant), ==, WYRELOG_E_OK);
   gboolean changed = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_session_participant_reserve
-      (participant, &unrelated), ==, WYRELOG_E_OK);
+        (participant, &unrelated), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_session_participant_activate
-      (participant, &unrelated, &changed), ==, WYRELOG_E_OK);
+        (participant, &unrelated, &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   wyl_service_auth_registry_session_participant_free (participant);
   g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
@@ -1251,14 +1252,14 @@ test_ledger_integrity (void)
   sqlite3 *db = handle_db (handle);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle, "svc:ledger",
-          "ledger", "admin", "ledger-request", &principal), ==, WYRELOG_E_OK);
+      "ledger", "admin", "ledger-request", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   exec_rejected (db,
       "UPDATE service_domain_requests SET resource_id='svc:other';");
   exec_rejected (db, "DELETE FROM service_domain_requests;");
   exec_ok (db, "DROP TRIGGER trg_service_domain_requests_no_delete;");
   g_assert_cmpint (wyl_policy_store_validate_service_schema
-      (wyl_handle_get_policy_store (handle)), ==, WYRELOG_E_POLICY);
+        (wyl_handle_get_policy_store (handle)), ==, WYRELOG_E_POLICY);
 }
 
 static void
@@ -1269,35 +1270,35 @@ test_authority_core_owns_single_transaction (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
       ==, WYRELOG_E_OK);
   WylServiceAuthorityTransaction *transaction = NULL;
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &transaction), ==, WYRELOG_E_OK);
+        (store, handle, lease, &transaction), ==, WYRELOG_E_OK);
 
   wyl_policy_service_principal_info_t principal = { 0 };
   g_assert_cmpint (wyl_policy_store_create_service_principal (store,
-          "svc:authority:legacy", "legacy", "admin", "authority-legacy",
-          &principal), ==, WYRELOG_E_BUSY);
+      "svc:authority:legacy", "legacy", "admin", "authority-legacy",
+      &principal), ==, WYRELOG_E_BUSY);
   g_assert_null (principal.subject_id);
   g_assert_cmpint (wyl_policy_store_create_service_principal_core
-      (transaction, store, "svc:authority:core", "core", "admin",
-          "authority-core", &principal), ==, WYRELOG_E_OK);
+        (transaction, store, "svc:authority:core", "core", "admin",
+      "authority-core", &principal), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (transaction), ==, WYRELOG_E_OK);
+        (transaction), ==, WYRELOG_E_OK);
   wyl_policy_service_principal_info_clear (&principal);
   principal.subject_id = g_strdup ("populated");
   g_assert_cmpint (wyl_policy_store_create_service_principal_core
-      (transaction, store, "svc:authority:invalid", "invalid", "admin",
-          "authority-invalid", &principal), ==, WYRELOG_E_INVALID);
+        (transaction, store, "svc:authority:invalid", "invalid", "admin",
+      "authority-invalid", &principal), ==, WYRELOG_E_INVALID);
   g_assert_null (principal.subject_id);
   wyl_policy_store_service_authority_transaction_free (transaction);
   g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
       WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (lease);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_principals WHERE subject_id LIKE "
-          "'svc:authority:%';"), ==, 1);
+      "SELECT count(*) FROM service_principals WHERE subject_id LIKE "
+      "'svc:authority:%';"), ==, 1);
 }
 
 typedef struct
@@ -1314,7 +1315,7 @@ retirement_authorize (gpointer data, const gchar *actor_subject_id)
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   probe->authorization_calls++;
   wyl_service_auth_authority_snapshot
-      (wyl_handle_get_service_auth_authority (probe->handle), &snapshot);
+    (wyl_handle_get_service_auth_authority (probe->handle), &snapshot);
   g_assert_true (snapshot.writer_active);
   g_assert_nonnull (actor_subject_id);
   return WYRELOG_E_OK;
@@ -1336,8 +1337,8 @@ test_keyed_disable_receipt_semantics (void)
   sqlite3 *db = handle_db (handle);
   wyl_service_principal_t principal = { 0 };
   g_assert_cmpint (wyl_service_principal_create (handle,
-          "svc:receipt:principal", "receipt principal", "creator",
-          "receipt-principal-create", &principal), ==, WYRELOG_E_OK);
+      "svc:receipt:principal", "receipt principal", "creator",
+      "receipt-principal-create", &principal), ==, WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
 
   WylServiceAuthRegistry *registry = NULL;
@@ -1369,8 +1370,8 @@ test_keyed_disable_receipt_semantics (void)
   const gchar *terminal_request = "000000000000000000000000111";
   WylServiceRetirementOutcome outcome = { 0 };
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-a", transition_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
+      reservation.principal, "operator-a", transition_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
   g_assert_true (outcome.transitioned_now);
@@ -1382,21 +1383,21 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   wyl_service_principal_clear (&principal);
   gint64 events = scalar_int64 (db,
-      "SELECT count(*) FROM service_principal_events;");
+          "SELECT count(*) FROM service_principal_events;");
   gint64 audits = scalar_int64 (db, "SELECT count(*) FROM audit_events;");
   gint64 intentions = scalar_int64 (db,
-      "SELECT count(*) FROM audit_intentions;");
+          "SELECT count(*) FROM audit_intentions;");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts;"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts;"), ==, 1);
 
   WylServiceAuthSelector selector = { 0 };
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-          reservation.principal), ==, WYRELOG_E_OK);
+      reservation.principal), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-      (registry, &selector));
+        (registry, &selector));
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-a", transition_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
+      reservation.principal, "operator-a", transition_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
   g_assert_false (outcome.transitioned_now);
@@ -1406,15 +1407,15 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principal_events;"), ==, events);
+      "SELECT count(*) FROM service_principal_events;"), ==, events);
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM audit_events;"), ==,
       audits);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_intentions;"), ==, intentions);
+      "SELECT count(*) FROM audit_intentions;"), ==, intentions);
 
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-a", transition_request, 2,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_CONFLICT);
+      reservation.principal, "operator-a", transition_request, 2,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
   g_assert_null (principal.subject_id);
@@ -1422,24 +1423,24 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
 
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-b", transition_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_CONFLICT);
+      reservation.principal, "operator-b", transition_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
   g_assert_cmpuint (probe.authorization_calls, ==, 4);
 
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-b",
-          "000000000000000000000000112", 2, &runtime, &outcome,
-          &principal), ==, WYRELOG_E_INVALID);
+      reservation.principal, "operator-b",
+      "000000000000000000000000112", 2, &runtime, &outcome,
+      &principal), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
   g_assert_cmpuint (probe.authorization_calls, ==, 5);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
 
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-b", terminal_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
+      reservation.principal, "operator-b", terminal_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
   g_assert_false (outcome.transitioned_now);
@@ -1449,13 +1450,13 @@ test_keyed_disable_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   wyl_service_principal_clear (&principal);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principal_events;"), ==, events);
+      "SELECT count(*) FROM service_principal_events;"), ==, events);
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM audit_events;"), ==,
       audits + 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_intentions;"), ==, intentions + 1);
+      "SELECT count(*) FROM audit_intentions;"), ==, intentions + 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
+      "SELECT count(*) FROM service_retirement_receipts;"), ==, 2);
 
   exec_ok (db,
       "DROP TRIGGER trg_service_retirement_no_update;"
@@ -1465,8 +1466,8 @@ test_keyed_disable_receipt_semantics (void)
       "UPDATE service_retirement_receipts SET input_fingerprint=zeroblob(32) "
       "WHERE request_id='000000000000000000000000111';");
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-b", terminal_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+      reservation.principal, "operator-b", terminal_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
@@ -1482,8 +1483,8 @@ test_keyed_disable_receipt_semantics (void)
       "disabled_at_us=disabled_at_us+1,updated_at_us=updated_at_us+1 WHERE "
       "subject_id='svc:receipt:principal';");
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-b", terminal_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+      reservation.principal, "operator-b", terminal_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
@@ -1499,8 +1500,8 @@ test_keyed_disable_receipt_semantics (void)
       "UPDATE audit_events SET action=action||char(0)||'corrupt' "
       "WHERE request_id=" "'000000000000000000000000110';");
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-a", transition_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+      reservation.principal, "operator-a", transition_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
   g_assert_cmpuint (probe.authorization_calls, ==, 9);
@@ -1511,8 +1512,8 @@ test_keyed_disable_receipt_semantics (void)
       "DELETE FROM service_retirement_receipts WHERE request_id="
       "'000000000000000000000000110';");
   g_assert_cmpint (wyl_service_principal_disable_keyed_with_runtime (handle,
-          reservation.principal, "operator-a", transition_request, 1,
-          &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
+      reservation.principal, "operator-a", transition_request, 1,
+      &runtime, &outcome, &principal), ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_null (principal.subject_id);
   g_assert_cmpuint (probe.authorization_calls, ==, 10);
@@ -1549,8 +1550,8 @@ tenant_retirement_before_invalidation (WylServiceAuthWriteLease *lease,
 }
 
 static wyrelog_error_t
-    tenant_retirement_retain_recovery
-    (const WylTenantSealPublicationRecovery * recovery, gpointer data)
+tenant_retirement_retain_recovery
+  (const WylTenantSealPublicationRecovery * recovery, gpointer data)
 {
   TenantRetirementProbe *probe = data;
   probe->recovery_retain_calls++;
@@ -1581,7 +1582,7 @@ assert_service_auth_latch (WylHandle *handle,
 {
   WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (reason, ==, expected);
 }
@@ -1623,12 +1624,12 @@ test_tenant_seal_publication_recovery_classification (void)
         .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
       };
       g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-              &reservation), ==, WYRELOG_E_OK);
+          &reservation), ==, WYRELOG_E_OK);
       WylServiceAuthSelector selector = { 0 };
       g_assert_cmpint (wyl_service_auth_selector_init_tenant (&selector,
-              tenant), ==, WYRELOG_E_OK);
+          tenant), ==, WYRELOG_E_OK);
       g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-          (registry, &selector));
+            (registry, &selector));
     }
     wyl_tenant_seal_runtime_t runtime = {
       .registry = registry,
@@ -1647,7 +1648,7 @@ test_tenant_seal_publication_recovery_classification (void)
           WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
     WylServiceRetirementOutcome outcome = { 0 };
     wyrelog_error_t rc = wyl_tenant_seal_keyed_with_runtime (handle, tenant,
-        "operator", request_id, 1, &runtime, &outcome);
+            "operator", request_id, 1, &runtime, &outcome);
     if (fault == 0) {
       g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
       g_assert_cmpuint (probe.recovery_retain_calls, ==, 1);
@@ -1655,7 +1656,7 @@ test_tenant_seal_publication_recovery_classification (void)
       WylServiceAuthUnavailableReason reason =
           WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
       g_assert_cmpint (wyl_service_auth_authority_validate_available
-          (wyl_handle_get_service_auth_authority (handle), handle, &reason),
+            (wyl_handle_get_service_auth_authority (handle), handle, &reason),
           ==, WYRELOG_E_OK);
     } else if (fault == 2) {
       g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
@@ -1692,7 +1693,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   sqlite3 *db = handle_db (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-receipt",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 
   WylServiceAuthRegistry *registry = NULL;
@@ -1711,7 +1712,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   WylServiceRetirementOutcome outcome = { 0 };
 
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
@@ -1723,18 +1724,18 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpuint (probe.authorization_calls, ==, 1);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "operation='tenant_seal';"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "operation='tenant_seal';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+      "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
       ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_intentions WHERE action='tenant_seal';"),
+      "SELECT count(*) FROM audit_intentions WHERE action='tenant_seal';"),
       ==, 1);
 
   memset (&outcome, 0, sizeof outcome);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
@@ -1744,22 +1745,22 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpuint (probe.authorization_calls, ==, 2);
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+      "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
       ==, 1);
 
   memset (&outcome, 0xff, sizeof outcome);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a",
-          "000000000000000000000000218", 2, &runtime, &outcome), ==,
+      "tenant-receipt", "operator-a",
+      "000000000000000000000000218", 2, &runtime, &outcome), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_cmpuint (probe.authorization_calls, ==, 3);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "operation='tenant_seal';"), ==, 1);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "operation='tenant_seal';"), ==, 1);
 
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-b", request_a, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-b", request_a, 1, &runtime, &outcome),
       ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_KEY_CONFLICT);
@@ -1767,9 +1768,9 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
 
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
-          "tenant-receipt", FALSE), ==, WYRELOG_E_OK);
+      "tenant-receipt", FALSE), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
       ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==, WYL_SERVICE_RETIREMENT_SUPERSEDED);
   g_assert_cmpuint (outcome.recorded_tenant_sealed_generation, ==, 1);
@@ -1777,33 +1778,33 @@ test_keyed_tenant_seal_receipt_semantics (void)
   g_assert_cmpuint (probe.invalidation_calls, ==, 1);
 
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_b, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_b, 1, &runtime, &outcome),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_TRANSITION);
   g_assert_cmpuint (outcome.recorded_tenant_sealed_generation, ==, 3);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_a, 1, &runtime, &outcome),
       ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==, WYL_SERVICE_RETIREMENT_SUPERSEDED);
   g_assert_cmpuint (outcome.current_tenant_sealed_generation, ==, 3);
 
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
   g_assert_false (outcome.transitioned_now);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "operation='tenant_seal';"), ==, 3);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "operation='tenant_seal';"), ==, 3);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+      "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
       ==, 3);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
@@ -1812,62 +1813,62 @@ test_keyed_tenant_seal_receipt_semantics (void)
   probe.deny = TRUE;
   memset (&outcome, 0xff, sizeof outcome);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_denied, 1, &runtime,
-          &outcome), ==, WYRELOG_E_AUTH);
+      "tenant-receipt", "operator-a", request_denied, 1, &runtime,
+      &outcome), ==, WYRELOG_E_AUTH);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "operation='tenant_seal';"), ==, 3);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "operation='tenant_seal';"), ==, 3);
   probe.deny = FALSE;
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-promoted",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   WylPolicyAuthorityMutationResult promoted_result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-          "tenant-promoted", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
-          &promoted_result), ==, WYRELOG_E_OK);
+      "tenant-promoted", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
+      &promoted_result), ==, WYRELOG_E_OK);
   g_assert_cmpint (promoted_result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-promoted", "operator-a",
-          "00000000000000000000000021E", 1, &runtime, &outcome), ==,
+      "tenant-promoted", "operator-a",
+      "00000000000000000000000021E", 1, &runtime, &outcome), ==,
       WYRELOG_E_BUSY);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED);
   g_assert_cmpuint (outcome.current_tenant_lifecycle_generation, ==, 1);
   g_assert_cmpuint (outcome.current_tenant_sealed_generation, ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT sealed FROM tenants WHERE tenant_id='tenant-promoted';"),
+      "SELECT sealed FROM tenants WHERE tenant_id='tenant-promoted';"),
       ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "request_id='00000000000000000000000021E';"), ==, 0);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='00000000000000000000000021E';"), ==, 0);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM audit_events WHERE "
-          "request_id='00000000000000000000000021E';"), ==, 0);
+      "SELECT count(*) FROM audit_events WHERE "
+      "request_id='00000000000000000000000021E';"), ==, 0);
   WylServiceAuthUnavailableReason available_reason =
       WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
   g_assert_cmpint (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority (handle), handle,
-          &available_reason), ==, WYRELOG_E_OK);
+        (wyl_handle_get_service_auth_authority (handle), handle,
+      &available_reason), ==, WYRELOG_E_OK);
   g_assert_cmpint (available_reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
 
   WylPolicyAuthorityMutationResult authority_result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-          "tenant-receipt", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0,
-          &authority_result), ==, WYRELOG_E_OK);
+      "tenant-receipt", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0,
+      &authority_result), ==, WYRELOG_E_OK);
   g_assert_cmpint (authority_result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (outcome.disposition, ==, WYL_SERVICE_RETIREMENT_SUPERSEDED);
   g_assert_cmpuint (outcome.recorded_tenant_lifecycle_generation, ==, 0);
   g_assert_cmpuint (outcome.current_tenant_lifecycle_generation, ==, 1);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a",
-          "00000000000000000000000021F", 1, &runtime, &outcome), ==,
+      "tenant-receipt", "operator-a",
+      "00000000000000000000000021F", 1, &runtime, &outcome), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_FRESH_ALREADY_TERMINAL);
@@ -1881,12 +1882,12 @@ test_keyed_tenant_seal_receipt_semantics (void)
       "WHERE request_id='000000000000000000000000212';");
   probe.deny = TRUE;
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_AUTH);
   g_assert_cmpint (outcome.disposition, ==, 0);
   probe.deny = FALSE;
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
@@ -1895,7 +1896,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
       "DELETE FROM service_retirement_receipts WHERE "
       "request_id='000000000000000000000000212';");
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
+      "tenant-receipt", "operator-a", request_c, 1, &runtime, &outcome),
       ==, WYRELOG_E_INTERNAL);
   g_assert_cmpint (outcome.disposition, ==, 0);
   g_assert_cmpuint (probe.invalidation_calls, ==, 2);
@@ -1926,70 +1927,70 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-restart",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-restart", "operator", "000000000000000000000000214", 1,
-          &runtime, &outcome), ==, WYRELOG_E_OK);
+      "tenant-restart", "operator", "000000000000000000000000214", 1,
+      &runtime, &outcome), ==, WYRELOG_E_OK);
   g_clear_object (&handle);
 
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-restart", "operator", "000000000000000000000000214", 1,
-          &runtime, &outcome), ==, WYRELOG_E_OK);
+      "tenant-restart", "operator", "000000000000000000000000214", 1,
+      &runtime, &outcome), ==, WYRELOG_E_OK);
   g_assert_cmpint (outcome.disposition, ==,
       WYL_SERVICE_RETIREMENT_EXACT_REPLAY);
   g_assert_cmpuint (probe.authorization_calls, ==, 2);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+      "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
       ==, 1);
 
   store = wyl_handle_get_policy_store (handle);
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-fault",
-          &created), ==, WYRELOG_E_OK);
+      &created), ==, WYRELOG_E_OK);
   wyl_policy_store_service_lifecycle_fail_commit_once (store);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-fault", "operator", "000000000000000000000000215", 1,
-          &runtime, &outcome), ==, WYRELOG_E_IO);
+      "tenant-fault", "operator", "000000000000000000000000215", 1,
+      &runtime, &outcome), ==, WYRELOG_E_IO);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT sealed FROM tenants WHERE tenant_id='tenant-fault';"), ==, 0);
+      "SELECT sealed FROM tenants WHERE tenant_id='tenant-fault';"), ==, 0);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM service_retirement_receipts WHERE "
-          "request_id='000000000000000000000000215';"), ==, 0);
+      "SELECT count(*) FROM service_retirement_receipts WHERE "
+      "request_id='000000000000000000000000215';"), ==, 0);
 
   exec_ok (handle_db (handle),
       "CREATE TRIGGER fail_tenant_seal_audit BEFORE INSERT ON audit_events "
       "WHEN NEW.action='tenant_seal' BEGIN SELECT RAISE(ABORT,'fault'); END;");
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-fault", "operator", "000000000000000000000000219", 1,
-          &runtime, &outcome), !=, WYRELOG_E_OK);
+      "tenant-fault", "operator", "000000000000000000000000219", 1,
+      &runtime, &outcome), !=, WYRELOG_E_OK);
   exec_ok (handle_db (handle), "DROP TRIGGER fail_tenant_seal_audit;");
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT sealed FROM tenants WHERE tenant_id='tenant-fault';"), ==, 0);
+      "SELECT sealed FROM tenants WHERE tenant_id='tenant-fault';"), ==, 0);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM audit_intentions WHERE "
-          "request_id='000000000000000000000000219';"), ==, 0);
+      "SELECT count(*) FROM audit_intentions WHERE "
+      "request_id='000000000000000000000000219';"), ==, 0);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-fault", "operator", "000000000000000000000000219", 1,
-          &runtime, &outcome), ==, WYRELOG_E_OK);
+      "tenant-fault", "operator", "000000000000000000000000219", 1,
+      &runtime, &outcome), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
-          "tenant-receipt-fault", &created), ==, WYRELOG_E_OK);
+      "tenant-receipt-fault", &created), ==, WYRELOG_E_OK);
   exec_ok (handle_db (handle),
       "CREATE TRIGGER fail_tenant_seal_receipt BEFORE INSERT ON "
       "service_retirement_receipts WHEN NEW.operation='tenant_seal' "
       "BEGIN SELECT RAISE(ABORT,'fault'); END;");
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-          "tenant-receipt-fault", "operator",
-          "00000000000000000000000021A", 1, &runtime, &outcome), ==,
+      "tenant-receipt-fault", "operator",
+      "00000000000000000000000021A", 1, &runtime, &outcome), ==,
       WYRELOG_E_INTERNAL);
   exec_ok (handle_db (handle), "DROP TRIGGER fail_tenant_seal_receipt;");
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT sealed FROM tenants WHERE "
-          "tenant_id='tenant-receipt-fault';"), ==, 0);
+      "SELECT sealed FROM tenants WHERE "
+      "tenant_id='tenant-receipt-fault';"), ==, 0);
   g_assert_cmpint (scalar_int64 (handle_db (handle),
-          "SELECT count(*) FROM audit_events WHERE "
-          "request_id='00000000000000000000000021A';"), ==, 0);
+      "SELECT count(*) FROM audit_events WHERE "
+      "request_id='00000000000000000000000021A';"), ==, 0);
   g_clear_object (&handle);
   remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -2004,9 +2005,9 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-            "tenant-no-selector", &created), ==, WYRELOG_E_OK);
+        "tenant-no-selector", &created), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
-            "tenant-no-selector", TRUE), ==, WYRELOG_E_OK);
+        "tenant-no-selector", TRUE), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
     };
@@ -2017,20 +2018,20 @@ test_retirement_postcommit_error_normalization (void)
         WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
     WylServiceRetirementOutcome outcome = { 0 };
     g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-            "tenant-no-selector", "operator",
-            "00000000000000000000000021B", 1, &runtime, &outcome), ==,
+        "tenant-no-selector", "operator",
+        "00000000000000000000000021B", 1, &runtime, &outcome), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (outcome.disposition, ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM service_retirement_receipts WHERE "
-            "request_id='00000000000000000000000021B';"), ==, 1);
+        "SELECT count(*) FROM service_retirement_receipts WHERE "
+        "request_id='00000000000000000000000021B';"), ==, 1);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM audit_events WHERE "
-            "request_id='00000000000000000000000021B' AND "
-            "action='tenant_seal';"), ==, 1);
+        "SELECT count(*) FROM audit_events WHERE "
+        "request_id='00000000000000000000000021B' AND "
+        "action='tenant_seal';"), ==, 1);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -2042,7 +2043,7 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-            "tenant-uncertain", &created), ==, WYRELOG_E_OK);
+        "tenant-uncertain", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
     };
@@ -2053,12 +2054,12 @@ test_retirement_postcommit_error_normalization (void)
         WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK);
     WylServiceRetirementOutcome outcome = { 0 };
     g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-            "tenant-uncertain", "operator",
-            "00000000000000000000000021C", 1, &runtime, &outcome), ==,
+        "tenant-uncertain", "operator",
+        "00000000000000000000000021C", 1, &runtime, &outcome), ==,
         WYRELOG_E_BUSY);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -2070,7 +2071,7 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-            "tenant-replay-cleanup", &created), ==, WYRELOG_E_OK);
+        "tenant-replay-cleanup", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
     };
@@ -2080,27 +2081,27 @@ test_retirement_postcommit_error_normalization (void)
     const gchar *request_id = "00000000000000000000000021D";
     WylServiceRetirementOutcome outcome = { 0 };
     g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-            "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
-            &outcome), ==, WYRELOG_E_OK);
+        "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
+        &outcome), ==, WYRELOG_E_OK);
     gint64 receipt_count = scalar_int64 (handle_db (handle),
-        "SELECT count(*) FROM service_retirement_receipts;");
+            "SELECT count(*) FROM service_retirement_receipts;");
     gint64 audit_count = scalar_int64 (handle_db (handle),
-        "SELECT count(*) FROM audit_events WHERE action='tenant_seal';");
+            "SELECT count(*) FROM audit_events WHERE action='tenant_seal';");
     runtime.before_write_release = fail_write_release_once;
     memset (&outcome, 0xff, sizeof outcome);
     g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-            "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
-            &outcome), ==, WYRELOG_E_BUSY);
+        "tenant-replay-cleanup", "operator", request_id, 1, &runtime,
+        &outcome), ==, WYRELOG_E_BUSY);
     g_assert_cmpint (outcome.disposition, ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM service_retirement_receipts;"), ==,
+        "SELECT count(*) FROM service_retirement_receipts;"), ==,
         receipt_count);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
+        "SELECT count(*) FROM audit_events WHERE action='tenant_seal';"),
         ==, audit_count);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -2112,12 +2113,12 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-            "tenant-coordination-cleanup", &created), ==, WYRELOG_E_OK);
+        "tenant-coordination-cleanup", &created), ==, WYRELOG_E_OK);
     WylPolicyAuthorityMutationResult promoted =
         WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
     g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
-            "tenant-coordination-cleanup", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
-            0, 0, &promoted), ==, WYRELOG_E_OK);
+        "tenant-coordination-cleanup", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+        0, 0, &promoted), ==, WYRELOG_E_OK);
     g_assert_cmpint (promoted, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
@@ -2129,22 +2130,22 @@ test_retirement_postcommit_error_normalization (void)
     WylServiceRetirementOutcome outcome;
     memset (&outcome, 0xff, sizeof outcome);
     g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
-            "tenant-coordination-cleanup", "operator",
-            "000000000000000000000000220", 1, &runtime, &outcome), ==,
+        "tenant-coordination-cleanup", "operator",
+        "000000000000000000000000220", 1, &runtime, &outcome), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (outcome.disposition, ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT sealed FROM tenants WHERE "
-            "tenant_id='tenant-coordination-cleanup';"), ==, 0);
+        "SELECT sealed FROM tenants WHERE "
+        "tenant_id='tenant-coordination-cleanup';"), ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM service_retirement_receipts WHERE "
-            "request_id='000000000000000000000000220';"), ==, 0);
+        "SELECT count(*) FROM service_retirement_receipts WHERE "
+        "request_id='000000000000000000000000220';"), ==, 0);
     g_assert_cmpint (scalar_int64 (handle_db (handle),
-            "SELECT count(*) FROM audit_events WHERE "
-            "request_id='000000000000000000000000220';"), ==, 0);
+        "SELECT count(*) FROM audit_events WHERE "
+        "request_id='000000000000000000000000220';"), ==, 0);
     WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
     g_assert_cmpint (wyl_service_auth_authority_validate_available
-        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+          (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
         WYRELOG_E_BUSY);
     g_assert_cmpint (reason, ==,
         WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -2207,5 +2208,5 @@ main (int argc, char **argv)
       test_tenant_seal_publication_recovery_classification);
   g_test_add_func ("/auth/retirement/postcommit-error-normalization",
       test_retirement_postcommit_error_normalization);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

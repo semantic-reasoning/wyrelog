@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyl-traits-private.h"
@@ -10,13 +11,13 @@ main (void)
    * The compile is the real test; the runtime checks keep the
    * compiler from optimizing the type references away. */
   if (sizeof (wyl_keyprovider_vtable_t) == 0)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
   if (sizeof (wyl_auditsink_vtable_t) == 0)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   if (sizeof (wyl_ingress_vtable_t) == 0)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
   if (sizeof (wyl_ctxprovider_vtable_t) == 0)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
 
   /* Zero-initialize one of each vtable to confirm the struct types
    * are complete (not just forward-declared). */
@@ -31,5 +32,5 @@ main (void)
   (void) is;
   (void) cp;
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

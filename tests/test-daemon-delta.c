@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <string.h>
 
 #include <glib.h>
@@ -70,7 +71,7 @@ contains_audit_event_fact (WylHandle *handle, const gchar *id,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_engine_contains (handle, "audit_event", row, 3,
-      out_contains);
+             out_contains);
 }
 
 static wyrelog_error_t
@@ -161,7 +162,7 @@ lookup_policy_audit_row (WylHandle *handle, const gchar *action,
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_foreach_audit_event (store,
-      lookup_audit_row_cb, &lookup);
+          lookup_audit_row_cb, &lookup);
   if (rc != WYRELOG_E_OK || lookup.matches != 1) {
     g_free (lookup.id);
     return FALSE;
@@ -186,7 +187,7 @@ count_policy_audit_rows (WylHandle *handle, const gchar *action,
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_foreach_audit_event (store,
-      count_audit_row_cb, &count);
+          count_audit_row_cb, &count);
   if (rc != WYRELOG_E_OK)
     return FALSE;
 
@@ -221,7 +222,7 @@ malform_audit_events_table (WylHandle *handle)
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (duckdb_query (conn,
-          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
+      "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -247,7 +248,7 @@ check_delta_callback_records_runtime_projection_failure (void)
   if (malform_audit_events_table (handle) != WYRELOG_E_OK)
     return 12;
   if (intern3 (handle, "daemon-delta-audit-user", "wr.viewer",
-          "daemon-delta-audit-scope", row) != WYRELOG_E_OK)
+      "daemon-delta-audit-scope", row) != WYRELOG_E_OK)
     return 13;
 
   if (wyl_handle_engine_insert (handle, "member_of", row, 3) != WYRELOG_E_OK)
@@ -266,27 +267,27 @@ check_delta_callback_records_runtime_projection_failure (void)
   g_autofree gchar *id = NULL;
   gint64 created_at_us = -1;
   if (!lookup_policy_audit_row (handle, "effective_member_delta",
-          "daemon-delta-audit-user", "wr.viewer", "insert",
-          "daemon-delta-audit-scope", &id, &created_at_us))
+      "daemon-delta-audit-user", "wr.viewer", "insert",
+      "daemon-delta-audit-scope", &id, &created_at_us))
     return 18;
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, &contains)
       != WYRELOG_E_OK || !contains)
     return 19;
   if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
-          "effective_member_delta", &contains) != WYRELOG_E_OK || !contains)
+      "effective_member_delta", &contains) != WYRELOG_E_OK || !contains)
     return 20;
   if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
-          "daemon-delta-audit-user", &contains) != WYRELOG_E_OK || !contains)
+      "daemon-delta-audit-user", &contains) != WYRELOG_E_OK || !contains)
     return 21;
   if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
-          "wr.viewer", &contains) != WYRELOG_E_OK || !contains)
+      "wr.viewer", &contains) != WYRELOG_E_OK || !contains)
     return 22;
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason", id,
-          "insert", &contains) != WYRELOG_E_OK || !contains)
+      "insert", &contains) != WYRELOG_E_OK || !contains)
     return 23;
   if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin", id,
-          "daemon-delta-audit-scope", &contains) != WYRELOG_E_OK || !contains)
+      "daemon-delta-audit-scope", &contains) != WYRELOG_E_OK || !contains)
     return 24;
 
   if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
@@ -310,8 +311,8 @@ check_perm_state_delta_persists_audit_rows (void)
   if (!g_atomic_int_get (&runtime.delta_session_live))
     return 64;
   if (intern_perm_event7 (handle, 701, "daemon-delta-perm-user",
-          "site.daemon-delta.perm", "daemon-delta-perm-scope", "grant",
-          "dormant", "armed", event_row) != WYRELOG_E_OK)
+      "site.daemon-delta.perm", "daemon-delta-perm-scope", "grant",
+      "dormant", "armed", event_row) != WYRELOG_E_OK)
     return 52;
 
   if (wyl_handle_engine_insert (handle, "perm_state_event", event_row, 7)
@@ -341,25 +342,25 @@ check_perm_state_delta_persists_audit_rows (void)
   g_autofree gchar *insert_id = NULL;
   gint64 insert_created_at_us = -1;
   if (!lookup_policy_audit_row (handle, "perm_state_fired_delta_insert",
-          "daemon-delta-perm-user", "site.daemon-delta.perm",
-          "dormant:grant:armed", "daemon-delta-perm-scope", &insert_id,
-          &insert_created_at_us))
+      "daemon-delta-perm-user", "site.daemon-delta.perm",
+      "dormant:grant:armed", "daemon-delta-perm-scope", &insert_id,
+      &insert_created_at_us))
     return 59;
   g_autofree gchar *remove_id = NULL;
   gint64 remove_created_at_us = -1;
   if (!lookup_policy_audit_row (handle, "perm_state_fired_delta_remove",
-          "daemon-delta-perm-user", "site.daemon-delta.perm",
-          "dormant:grant:armed", "daemon-delta-perm-scope", &remove_id,
-          &remove_created_at_us))
+      "daemon-delta-perm-user", "site.daemon-delta.perm",
+      "dormant:grant:armed", "daemon-delta-perm-scope", &remove_id,
+      &remove_created_at_us))
     return 60;
 
   gboolean contains = FALSE;
   if (contains_audit_event_attr_fact (handle, "audit_event_action", insert_id,
-          "perm_state_fired_delta_insert", &contains) != WYRELOG_E_OK
+      "perm_state_fired_delta_insert", &contains) != WYRELOG_E_OK
       || !contains)
     return 61;
   if (contains_audit_event_attr_fact (handle, "audit_event_action", remove_id,
-          "perm_state_fired_delta_remove", &contains) != WYRELOG_E_OK
+      "perm_state_fired_delta_remove", &contains) != WYRELOG_E_OK
       || !contains)
     return 62;
 
@@ -384,8 +385,8 @@ check_invalid_perm_state_delta_skips_audit_rows (void)
   if (!g_atomic_int_get (&runtime.delta_session_live))
     return 79;
   if (intern_perm_event7 (handle, 702, "daemon-delta-invalid-user",
-          "site.daemon-delta.invalid", "daemon-delta-invalid-scope", "grant",
-          "armed", "dormant", event_row) != WYRELOG_E_OK)
+      "site.daemon-delta.invalid", "daemon-delta-invalid-scope", "grant",
+      "armed", "dormant", event_row) != WYRELOG_E_OK)
     return 72;
 
   if (wyl_handle_engine_insert (handle, "perm_state_event", event_row, 7)
@@ -402,8 +403,8 @@ check_invalid_perm_state_delta_skips_audit_rows (void)
 
   guint matches = 0;
   if (!count_policy_audit_rows (handle, "perm_state_fired_delta_insert",
-          "daemon-delta-invalid-user", "site.daemon-delta.invalid",
-          "armed:grant:dormant", "daemon-delta-invalid-scope", &matches))
+      "daemon-delta-invalid-user", "site.daemon-delta.invalid",
+      "armed:grant:dormant", "daemon-delta-invalid-scope", &matches))
     return 76;
   if (matches != 0)
     return 77;
@@ -448,14 +449,14 @@ main (void)
   gint rc;
 
   if ((rc = check_delta_callback_records_runtime_projection_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_state_delta_persists_audit_rows ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_invalid_perm_state_delta_skips_audit_rows ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_delta_readiness_recovers_audit_table_loss ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_delta_readiness_fails_on_malformed_audit_projection ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

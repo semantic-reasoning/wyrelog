@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -579,18 +580,18 @@ main (void)
 {
   gint rc = check_compound_identity_binding_is_atomic ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_compound_persists_and_replays ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_compound_tenant_scope_and_append_validation ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_compound_corruption_is_local ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_nested_compound_replay ();
   if (rc != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

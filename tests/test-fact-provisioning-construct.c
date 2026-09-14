@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #ifdef G_OS_WIN32
@@ -255,5 +256,5 @@ main (int argc, char *argv[])
     "/fact/provisioning-construct/never-overwrites-published-store",
     test_construct_never_overwrites_published_store);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

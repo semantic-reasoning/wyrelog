@@ -3,6 +3,7 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -2492,8 +2493,8 @@ run_posix_backend_action (WylFactArtifactMainTransitionOp op,
   if (action->crash_after_execute) {
     if (effect == MT (EFFECT_APPLIED)
         && write_counter (action->counter_path, 1))
-      _exit (77);
-    _exit (78);
+      WYL_TEST_EXIT(77);
+    WYL_TEST_EXIT(78);
   }
   rc = wyl_fact_artifact_transition_posix_observe (action->provider,
           &action->lifecycle, &action->observation);
@@ -2653,7 +2654,7 @@ int
 main (int argc, char **argv)
 {
   if (argc == 5 && strcmp (argv[1], "--driver-crash-child") == 0)
-    return run_posix_driver_crash_child (argv[2], argv[3], argv[4]);
+    return wyl_test_normalize_exit_status (run_posix_driver_crash_child (argv[2], argv[3], argv[4]));
   driver_test_executable = g_canonicalize_filename (argv[0], NULL);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/artifact-transition-posix/triple-and-identity",
@@ -2732,5 +2733,5 @@ main (int argc, char **argv)
       test_foreign_root_authority_never_mutates);
   g_test_add_func ("/fact/artifact-transition-posix/driver/child-crash-restart",
       test_child_crash_restarts_from_fresh_capture);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

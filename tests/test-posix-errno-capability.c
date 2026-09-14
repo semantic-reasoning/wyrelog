@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <errno.h>
 
 #include <glib.h>
@@ -26,5 +27,5 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/posix/errno/operation-unsupported-pair",
       test_operation_unsupported_pair);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

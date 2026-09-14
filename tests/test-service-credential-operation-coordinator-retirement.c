@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -279,5 +280,5 @@ main (int argc, char **argv)
       test_raw_begin_requires_matching_lifecycle);
   g_test_add_func ("/coordinator/retirement/corrupt-receipt",
       test_corrupt_receipt_fails_closed_without_create);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <gio/gio.h>
 #include <glib.h>
 
@@ -32,7 +33,7 @@ static void
 test_resolve_string_nulls_propagate (void)
 {
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, NULL,
-      "daemon-url");
+          "daemon-url");
   g_assert_null (resolved);
 }
 
@@ -45,7 +46,7 @@ test_resolve_string_cli_wins_over_settings (void)
 
   g_autofree gchar *resolved =
       wyctl_resolve_string_option ("http://from-cli.example", settings,
-      "daemon-url");
+          "daemon-url");
   g_assert_cmpstr (resolved, ==, "http://from-cli.example");
 }
 
@@ -57,7 +58,7 @@ test_resolve_string_cli_absent_falls_back (void)
       "http://from-gsettings.example");
 
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "daemon-url");
+          "daemon-url");
   g_assert_cmpstr (resolved, ==, "http://from-gsettings.example");
 }
 
@@ -72,7 +73,7 @@ test_resolve_string_empty_cli_is_user_value (void)
      must NOT fall through to GSettings; downstream validation will
      reject it with the existing diagnostic. */
   g_autofree gchar *resolved = wyctl_resolve_string_option ("", settings,
-      "daemon-url");
+          "daemon-url");
   g_assert_cmpstr (resolved, ==, "");
 }
 
@@ -85,7 +86,7 @@ test_resolve_string_empty_settings_is_unset (void)
      must surface that as NULL so the missing-option diagnostic
      remains the single source of truth. */
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "daemon-url");
+          "daemon-url");
   g_assert_null (resolved);
 }
 
@@ -93,7 +94,7 @@ static void
 test_resolve_string_null_settings_returns_null (void)
 {
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, NULL,
-      "daemon-url");
+          "daemon-url");
   g_assert_null (resolved);
 }
 
@@ -104,7 +105,7 @@ test_resolve_uint_cli_wins (void)
   g_settings_set_uint (settings, "default-timeout-ms", 5000);
 
   g_autofree gchar *resolved = wyctl_resolve_uint_option_as_string ("12345",
-      settings, "default-timeout-ms");
+          settings, "default-timeout-ms");
   g_assert_cmpstr (resolved, ==, "12345");
 }
 
@@ -115,7 +116,7 @@ test_resolve_uint_renders_settings_value (void)
   g_settings_set_uint (settings, "default-timeout-ms", 5000);
 
   g_autofree gchar *resolved = wyctl_resolve_uint_option_as_string (NULL,
-      settings, "default-timeout-ms");
+          settings, "default-timeout-ms");
   g_assert_cmpstr (resolved, ==, "5000");
 }
 
@@ -123,7 +124,7 @@ static void
 test_resolve_uint_no_settings_returns_null (void)
 {
   g_autofree gchar *resolved = wyctl_resolve_uint_option_as_string (NULL,
-      NULL, "default-timeout-ms");
+          NULL, "default-timeout-ms");
   g_assert_null (resolved);
 }
 
@@ -136,7 +137,7 @@ test_resolve_string_policy_store_cli_wins (void)
 
   g_autofree gchar *resolved =
       wyctl_resolve_string_option ("/tmp/from-cli.sqlite", settings,
-      "default-policy-store");
+          "default-policy-store");
   g_assert_cmpstr (resolved, ==, "/tmp/from-cli.sqlite");
 }
 
@@ -148,7 +149,7 @@ test_resolve_string_policy_store_falls_back_to_settings (void)
       "/var/lib/wyrelog/from-gsettings.sqlite");
 
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "default-policy-store");
+          "default-policy-store");
   g_assert_cmpstr (resolved, ==, "/var/lib/wyrelog/from-gsettings.sqlite");
 }
 
@@ -160,7 +161,7 @@ test_resolve_string_policy_store_empty_settings_is_unset (void)
      no CLI value + empty-string in GSettings must surface as NULL so
      the caller's "missing --store" diagnostic fires unchanged. */
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "default-policy-store");
+          "default-policy-store");
   g_assert_null (resolved);
 }
 
@@ -173,7 +174,7 @@ test_resolve_string_keyprovider_cli_wins (void)
 
   g_autofree gchar *resolved =
       wyctl_resolve_string_option ("file:/etc/wyrelog/keyprovider.key",
-      settings, "default-keyprovider");
+          settings, "default-keyprovider");
   g_assert_cmpstr (resolved, ==, "file:/etc/wyrelog/keyprovider.key");
 }
 
@@ -185,7 +186,7 @@ test_resolve_string_keyprovider_falls_back_to_settings (void)
       "systemd-creds:wyrelog-policy");
 
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "default-keyprovider");
+          "default-keyprovider");
   g_assert_cmpstr (resolved, ==, "systemd-creds:wyrelog-policy");
 }
 
@@ -196,7 +197,7 @@ test_resolve_string_keyprovider_empty_settings_is_unset (void)
   /* Empty-string symmetry: matches the daemon-url test at line ~78
      and the policy-store equivalent above. */
   g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
-      "default-keyprovider");
+          "default-keyprovider");
   g_assert_null (resolved);
 }
 
@@ -232,7 +233,7 @@ test_open_settings_returns_null_for_missing_schema_id (void)
   g_assert_nonnull (source);
   g_autoptr (GSettingsSchema) schema =
       g_settings_schema_source_lookup (source,
-      "org.wyrelog.this-does-not-exist", FALSE);
+          "org.wyrelog.this-does-not-exist", FALSE);
   g_assert_null (schema);
 }
 
@@ -265,18 +266,18 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/config/resolve-string/policy-store-cli-wins",
       test_resolve_string_policy_store_cli_wins);
   g_test_add_func
-      ("/wyctl/config/resolve-string/policy-store-falls-back-to-settings",
+    ("/wyctl/config/resolve-string/policy-store-falls-back-to-settings",
       test_resolve_string_policy_store_falls_back_to_settings);
   g_test_add_func
-      ("/wyctl/config/resolve-string/policy-store-empty-settings-is-unset",
+    ("/wyctl/config/resolve-string/policy-store-empty-settings-is-unset",
       test_resolve_string_policy_store_empty_settings_is_unset);
   g_test_add_func ("/wyctl/config/resolve-string/keyprovider-cli-wins",
       test_resolve_string_keyprovider_cli_wins);
   g_test_add_func
-      ("/wyctl/config/resolve-string/keyprovider-falls-back-to-settings",
+    ("/wyctl/config/resolve-string/keyprovider-falls-back-to-settings",
       test_resolve_string_keyprovider_falls_back_to_settings);
   g_test_add_func
-      ("/wyctl/config/resolve-string/keyprovider-empty-settings-is-unset",
+    ("/wyctl/config/resolve-string/keyprovider-empty-settings-is-unset",
       test_resolve_string_keyprovider_empty_settings_is_unset);
   g_test_add_func ("/wyctl/config/open/respects-kill-switch",
       test_open_settings_respects_kill_switch);
@@ -284,5 +285,5 @@ main (int argc, char **argv)
       test_open_settings_returns_handle_when_schema_present);
   g_test_add_func ("/wyctl/config/open/null-for-missing-schema-id",
       test_open_settings_returns_null_for_missing_schema_id);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

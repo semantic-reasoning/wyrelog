@@ -5,6 +5,7 @@
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE 1
 #endif
+#include "test-exit-status.h"
 
 #include <duckdb.hpp>
 #include <glib.h>
@@ -1002,11 +1003,11 @@ test_wal_crash_recovery_and_locking (void)
           secure.connection->Query ("CREATE TABLE recovery(value BIGINT);"
               "INSERT INTO recovery VALUES (7)");
       if (result->HasError ())
-        _exit (91);
-      _exit (0);
+        WYL_TEST_EXIT(91);
+      WYL_TEST_EXIT(0);
     }
     catch ( ...) {
-      _exit (92);
+      WYL_TEST_EXIT(92);
     }
   }
   int
@@ -2598,7 +2599,7 @@ main (int argc, char **argv)
   argc = (int) g_strv_length (win_argv);
   argv = win_argv;
   if (argc == 3 && g_strcmp0 (argv[1], "--secure-duckdb-crash-writer") == 0)
-    return run_crash_writer_child (argv[2]);
+    return wyl_test_normalize_exit_status (run_crash_writer_child (argv[2]));
 #endif
   g_test_init (&argc, &argv, nullptr);
   g_test_add_func ("/secure-duckdb-filesystem/main-wal-lock-bridge",
@@ -2685,5 +2686,5 @@ main (int argc, char **argv)
   g_test_add_func (
     "/secure-duckdb-filesystem/pinned-identified/process-serialization",
     test_pinned_identity_process_serialization);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

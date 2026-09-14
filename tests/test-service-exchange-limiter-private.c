@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <sodium.h>
 #include <string.h>
@@ -32,8 +33,8 @@ init_limiter (WylServiceExchangeLimiter **out_limiter, FakeClock *clock,
   for (guint i = 0; i < sizeof key; i++)
     key[i] = (guint8) (key_seed + i);
   g_assert_cmpint (wyl_service_exchange_limiter_new (key, sizeof key,
-          max_credential_buckets,
-          fake_now_us, clock, out_limiter), ==, WYRELOG_E_OK);
+      max_credential_buckets,
+      fake_now_us, clock, out_limiter), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -42,7 +43,7 @@ assert_bucket_state (WylServiceExchangeLimiter *limiter, const gchar *id,
 {
   WylServiceExchangeLimiterBucketSnapshot snapshot = { 0 };
   g_assert_cmpint (wyl_service_exchange_limiter_bucket_snapshot (limiter, id,
-          &snapshot), ==, WYRELOG_E_OK);
+      &snapshot), ==, WYRELOG_E_OK);
   g_assert_true (snapshot.present);
   g_assert_cmpuint (snapshot.tokens, ==, expected_tokens);
   g_assert_cmpint (snapshot.full, ==, expected_full);
@@ -58,7 +59,7 @@ test_malformed_global_anonymous_and_refill (void)
   WylServiceExchangeLimiterDecision decision = { 0 };
   for (guint i = 0; i < 5; i++) {
     g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-            WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision),
+        WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision),
         ==, WYRELOG_E_OK);
     g_assert_true (decision.allowed);
     g_assert_true (decision.global_charged);
@@ -74,7 +75,7 @@ test_malformed_global_anonymous_and_refill (void)
   g_assert_cmpuint (snapshot.anonymous_tokens, ==, 0);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
       WYRELOG_E_OK);
   g_assert_false (decision.allowed);
   g_assert_true (decision.secondary_denied);
@@ -85,7 +86,7 @@ test_malformed_global_anonymous_and_refill (void)
 
   advance_clock (&clock, 10 * G_USEC_PER_SEC);
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   wyl_service_exchange_limiter_snapshot_for_test (limiter, &snapshot);
@@ -93,14 +94,14 @@ test_malformed_global_anonymous_and_refill (void)
 
   for (guint i = 0; i < 99; i++) {
     g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-            WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision),
+        WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision),
         ==, WYRELOG_E_OK);
   }
   wyl_service_exchange_limiter_snapshot_for_test (limiter, &snapshot);
   g_assert_cmpuint (snapshot.global_tokens, ==, 0);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
       WYRELOG_E_OK);
   g_assert_false (decision.allowed);
   g_assert_true (decision.global_denied);
@@ -112,7 +113,7 @@ test_malformed_global_anonymous_and_refill (void)
 
   advance_clock (&clock, 10 * G_USEC_PER_SEC);
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
 }
@@ -131,20 +132,20 @@ test_canonical_ids_get_distinct_buckets (void)
 
   WylServiceExchangeLimiterDecision decision = { 0 };
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   g_assert_true (decision.used_credential_bucket);
   assert_bucket_state (limiter, id1, 4, FALSE);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   assert_bucket_state (limiter, id1, 3, FALSE);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   assert_bucket_state (limiter, id2, 4, FALSE);
@@ -168,16 +169,16 @@ test_capacity_eviction_and_restart_reset (void)
 
   WylServiceExchangeLimiterDecision decision = { 0 };
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id3, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id3, &decision), ==,
       WYRELOG_E_OK);
   g_assert_false (decision.allowed);
   g_assert_true (decision.secondary_denied);
@@ -186,31 +187,31 @@ test_capacity_eviction_and_restart_reset (void)
   advance_clock (&clock, 50 * G_USEC_PER_SEC);
   WylServiceExchangeLimiterBucketSnapshot id1_snapshot = { 0 };
   g_assert_cmpint (wyl_service_exchange_limiter_bucket_snapshot (limiter, id1,
-          &id1_snapshot), ==, WYRELOG_E_OK);
+      &id1_snapshot), ==, WYRELOG_E_OK);
   g_assert_true (id1_snapshot.full);
   g_assert_cmpuint (id1_snapshot.tokens, ==, 5);
 
   advance_clock (&clock, 5 * G_USEC_PER_SEC);
   WylServiceExchangeLimiterBucketSnapshot id2_snapshot = { 0 };
   g_assert_cmpint (wyl_service_exchange_limiter_bucket_snapshot (limiter, id2,
-          &id2_snapshot), ==, WYRELOG_E_OK);
+      &id2_snapshot), ==, WYRELOG_E_OK);
   g_assert_true (id2_snapshot.full);
   g_assert_cmpuint (id2_snapshot.tokens, ==, 5);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id2, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   assert_bucket_state (limiter, id2, 4, FALSE);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id3, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id3, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   g_assert_true (decision.used_credential_bucket);
   g_assert_false (decision.secondary_denied);
   g_assert_cmpint (wyl_service_exchange_limiter_bucket_snapshot (limiter, id1,
-          &id1_snapshot), ==, WYRELOG_E_NOT_FOUND);
+      &id1_snapshot), ==, WYRELOG_E_NOT_FOUND);
   assert_bucket_state (limiter, id2, 4, FALSE);
   assert_bucket_state (limiter, id3, 4, FALSE);
 
@@ -223,7 +224,7 @@ test_capacity_eviction_and_restart_reset (void)
   for (guint i = 0; i < sizeof new_key; i++)
     new_key[i] = (guint8) (200 + i);
   g_assert_cmpint (wyl_service_exchange_limiter_reseed (limiter, new_key,
-          sizeof new_key, 4, fake_now_us, &clock), ==, WYRELOG_E_OK);
+      sizeof new_key, 4, fake_now_us, &clock), ==, WYRELOG_E_OK);
 
   wyl_service_exchange_limiter_snapshot_for_test (limiter, &snapshot);
   g_assert_cmpuint (snapshot.credential_bucket_count, ==, 0);
@@ -231,10 +232,10 @@ test_capacity_eviction_and_restart_reset (void)
   g_assert_cmpuint (snapshot.global_tokens, ==, 100);
   g_assert_cmpuint (snapshot.anonymous_tokens, ==, 5);
   g_assert_cmpint (wyl_service_exchange_limiter_bucket_snapshot (limiter, id2,
-          &id2_snapshot), ==, WYRELOG_E_NOT_FOUND);
+      &id2_snapshot), ==, WYRELOG_E_NOT_FOUND);
 
   g_assert_cmpint (wyl_service_exchange_limiter_decide (limiter,
-          WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, id1, &decision), ==,
       WYRELOG_E_OK);
   g_assert_true (decision.allowed);
   wyl_service_exchange_limiter_snapshot_for_test (limiter, &snapshot);
@@ -251,5 +252,5 @@ main (int argc, char **argv)
       test_canonical_ids_get_distinct_buckets);
   g_test_add_func ("/service-exchange-limiter-private/eviction-restart",
       test_capacity_eviction_and_restart_reset);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

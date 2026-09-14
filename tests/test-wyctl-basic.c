@@ -5,6 +5,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -2831,5 +2832,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/service-token-preflight-and-malformed-input",
       test_service_token_preflight_and_malformed_input);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

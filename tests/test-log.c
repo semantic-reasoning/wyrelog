@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <stdio.h>
 
 #include <glib.h>
@@ -157,7 +158,7 @@ static void
 test_section_name_out_of_range (void)
 {
   g_assert_null (wyl_log_section_name (WYL_LOG_SECTION_LAST_));
-  g_assert_null (wyl_log_section_name ((wyl_log_section_t) - 1));
+  g_assert_null (wyl_log_section_name ((wyl_log_section_t) -1));
   g_assert_null (wyl_log_section_name ((wyl_log_section_t) 999));
 }
 
@@ -197,7 +198,7 @@ test_file_sink_redirection (void)
   g_assert_true (ok);
   g_assert_nonnull (contents);
   g_assert_nonnull (g_strstr_len (contents, (gssize) len,
-          "redirect-test-marker 42"));
+      "redirect-test-marker 42"));
 
   remove (path);
   g_rmdir (tmpdir);
@@ -250,9 +251,9 @@ test_runtime_filter_end_to_end (void)
   g_assert_nonnull (contents);
 
   g_assert_nonnull (g_strstr_len (contents, (gssize) len,
-          "policy-debug-should-appear"));
+      "policy-debug-should-appear"));
   g_assert_null (g_strstr_len (contents, (gssize) len,
-          "general-debug-should-not-appear"));
+      "general-debug-should-not-appear"));
 
   remove (path);
   g_rmdir (tmpdir);
@@ -288,7 +289,7 @@ test_file_sink_reopen_same_path_no_crash (void)
   g_assert_true (ok);
   g_assert_nonnull (contents);
   g_assert_nonnull (g_strstr_len (contents, (gssize) len,
-          "coexistence-test-marker"));
+      "coexistence-test-marker"));
 
   remove (path);
   g_rmdir (tmpdir);
@@ -369,7 +370,7 @@ test_sink_mutex_concurrent_writes (void)
   GError *re_err = NULL;
   GRegex *record_re =
       g_regex_new ("^\\[wyrelog GENERAL\\] t7-thread-[0-9]+-record-[0-9]+$",
-      G_REGEX_OPTIMIZE, 0, &re_err);
+          G_REGEX_OPTIMIZE, 0, &re_err);
   g_assert_no_error (re_err);
   g_assert_nonnull (record_re);
 
@@ -383,7 +384,7 @@ test_sink_mutex_concurrent_writes (void)
     gboolean matched = g_regex_match (record_re, lines[i], 0, NULL);
     if (!matched) {
       g_test_message
-          ("T7: line %d does not match structured-record pattern: %s", i,
+        ("T7: line %d does not match structured-record pattern: %s", i,
           lines[i]);
     }
     g_assert_true (matched);
@@ -440,5 +441,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyl-log/runtime/sink-mutex-concurrent-writes",
       test_sink_mutex_concurrent_writes);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

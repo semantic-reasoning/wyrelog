@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -52,7 +53,7 @@ check_file_spec_roundtrip (void)
       != WYRELOG_E_OK)
     return 9;
   if (written != sizeof plaintext || memcmp (recovered, plaintext,
-          sizeof plaintext) != 0)
+      sizeof plaintext) != 0)
     return 10;
   vt->clear_sealed_blob (self, &blob);
   if (blob.bytes != NULL || blob.len != 0)
@@ -128,7 +129,7 @@ check_systemd_credentials_spec (void)
   if (self == NULL)
     return 32;
   if (g_strcmp0 (wyl_keyprovider_file_get_source_name (self),
-          "systemd-creds") != 0)
+      "systemd-creds") != 0)
     return 33;
 
   const wyl_keyprovider_vtable_t *vt = wyl_keyprovider_file_get_vtable ();
@@ -203,14 +204,14 @@ main (void)
 {
   gint rc;
   if ((rc = check_file_spec_roundtrip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_wrong_provider_state_fails_unseal ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_systemd_credentials_spec ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_unavailable_and_invalid_specs_fail_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_wipe_fails_closed ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

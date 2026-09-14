@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -87,13 +88,13 @@ write_compound_templates (const gchar *dir)
     return FALSE;
 
   return write_file_in_dir (dir, "bootstrap.dl",
-      ".decl event(id: int64, payload: scope_ctx/3 side)\n"
-      ".decl seen(id: int64)\n" "seen(ID) :- event(ID, scope_ctx(_, _, _)).\n")
-      && write_file_in_dir (dir, "fsm/principal.dl", "// principal stub\n")
-      && write_file_in_dir (dir, "fsm/session.dl", "// session stub\n")
-      && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      "// permission scope stub\n")
-      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+             ".decl event(id: int64, payload: scope_ctx/3 side)\n"
+             ".decl seen(id: int64)\n" "seen(ID) :- event(ID, scope_ctx(_, _, _)).\n")
+         && write_file_in_dir (dir, "fsm/principal.dl", "// principal stub\n")
+         && write_file_in_dir (dir, "fsm/session.dl", "// session stub\n")
+         && write_file_in_dir (dir, "fsm/permission_scope.dl",
+             "// permission scope stub\n")
+         && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
 static wyrelog_error_t
@@ -517,7 +518,7 @@ test_make_nested_compound_contract (void)
   };
   gint64 metadata = -1;
   rc = wyl_engine_make_compound (engine, "metadata", metadata_args, 3,
-      &metadata);
+          &metadata);
   if (rc != WYRELOG_E_OK || metadata <= 0) {
     wyl_engine_close (engine);
     return 92;
@@ -548,34 +549,34 @@ main (void)
   gint rc;
 
   if ((rc = test_intern_nominal ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_distinct ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_null_self ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_null_symbol ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_null_out ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_empty_symbol ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_intern_after_close ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_make_compound_invalid_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_make_compound_side_relation_contract ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_make_nested_compound_contract ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

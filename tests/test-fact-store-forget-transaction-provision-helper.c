@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -126,10 +127,10 @@ int
 main (int argc, char **argv)
 {
   if (argc != 4)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   for (gint i = 1; i < argc; i++) {
     if (argv[i] == NULL || argv[i][0] == '\0')
-      return 2;
+      return wyl_test_normalize_exit_status (2);
   }
 
   const gchar *tenant_id = argv[1];
@@ -140,7 +141,7 @@ main (int argc, char **argv)
         ("wyl-fact-store-forget-transaction-XXXXXX", &error);
   if (container == NULL || error != NULL || !g_path_is_absolute (container)) {
     g_printerr ("secure root creation failed\n");
-    return 1;
+    return wyl_test_normalize_exit_status (1);
   }
   g_autofree gchar *root = g_build_filename (container, "facts", NULL);
   g_autofree gchar *policy_path = g_build_filename (container, "policy.sqlite",
@@ -148,7 +149,7 @@ main (int argc, char **argv)
   if (g_mkdir (root, 0700) != 0) {
     g_printerr ("fact root creation failed\n");
     remove_root (container);
-    return 1;
+    return wyl_test_normalize_exit_status (1);
   }
   g_autoptr (wyl_policy_store_t) store = NULL;
   wyrelog_error_t rc = wyl_policy_store_open (policy_path, &store);
@@ -172,12 +173,12 @@ main (int argc, char **argv)
     wyl_policy_graph_provisioning_record_free (record);
     g_clear_pointer (&store, wyl_policy_store_close);
     g_print ("%s\n%s\n", root, policy_path);
-    return 0;
+    return wyl_test_normalize_exit_status (0);
   }
   report_failure (rc, root, tenant_id, graph_id,
       record != NULL ? record->stage_basename : NULL);
   wyl_policy_graph_provisioning_record_free (record);
   g_clear_pointer (&store, wyl_policy_store_close);
   remove_root (container);
-  return 1;
+  return wyl_test_normalize_exit_status (1);
 }

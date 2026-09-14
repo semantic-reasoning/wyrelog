@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
@@ -345,7 +346,7 @@ check_direct_grant_requires_permission_state (void)
     return 54;
   gint64 session_row[2];
   if (wyl_handle_intern_engine_symbol (handle, "grant-scope",
-          &session_row[0]) != WYRELOG_E_OK)
+      &session_row[0]) != WYRELOG_E_OK)
     return 55;
   session_row[1] = active_row[0];
   if (wyl_handle_engine_insert (handle, "session_state", session_row, 2)
@@ -377,13 +378,13 @@ check_direct_grant_preserves_dormant_permission_state (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_set_principal_state (store, "grant-dormant-user",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 201;
   if (wyl_policy_store_set_session_state (store, "grant-dormant-scope",
-          "active") != WYRELOG_E_OK)
+      "active") != WYRELOG_E_OK)
     return 202;
   if (wyl_policy_store_set_permission_state (store, "grant-dormant-user",
-          "site.grant-dormant", "grant-dormant-scope", "dormant")
+      "site.grant-dormant", "grant-dormant-scope", "dormant")
       != WYRELOG_E_OK)
     return 203;
 
@@ -396,8 +397,8 @@ check_direct_grant_preserves_dormant_permission_state (void)
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store,
-          "grant-dormant-user", "site.grant-dormant",
-          "grant-dormant-scope", &exists) != WYRELOG_E_OK)
+      "grant-dormant-user", "site.grant-dormant",
+      "grant-dormant-scope", &exists) != WYRELOG_E_OK)
     return 205;
   if (!exists)
     return 206;
@@ -409,7 +410,7 @@ check_direct_grant_preserves_dormant_permission_state (void)
     .state = "dormant",
   };
   if (wyl_policy_store_foreach_permission_state (store,
-          permission_state_expect_cb, &expect) != WYRELOG_E_OK)
+      permission_state_expect_cb, &expect) != WYRELOG_E_OK)
     return 207;
   if (expect.matches != 1)
     return 208;
@@ -437,7 +438,7 @@ check_role_grant_with_armed_state_allows_engine_decide (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
   if (seed_role_permission (handle, "site.role-grant-role",
-          "site.role-grant-permission") != 0)
+      "site.role-grant-permission") != 0)
     return 111;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
@@ -464,14 +465,14 @@ check_role_grant_with_armed_state_allows_engine_decide (void)
     return 116;
   gint64 session_row[2];
   if (wyl_handle_intern_engine_symbol (handle, "role-grant-scope",
-          &session_row[0]) != WYRELOG_E_OK)
+      &session_row[0]) != WYRELOG_E_OK)
     return 117;
   session_row[1] = active_row[0];
   if (wyl_handle_engine_insert (handle, "session_state", session_row, 2)
       != WYRELOG_E_OK)
     return 118;
   if (insert_perm_state (handle, "role-grant-user",
-          "site.role-grant-permission", "role-grant-scope", "armed") != 0)
+      "site.role-grant-permission", "role-grant-scope", "armed") != 0)
     return 119;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
@@ -518,8 +519,8 @@ check_grant_persists_direct_permission (void)
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
-          (handle), "store-user", "site.store-direct", "store-scope",
-          &exists) != WYRELOG_E_OK)
+        (handle), "store-user", "site.store-direct", "store-scope",
+      &exists) != WYRELOG_E_OK)
     return 72;
   if (!exists)
     return 73;
@@ -531,8 +532,8 @@ check_grant_persists_direct_permission (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_direct_permission_event
-      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
-          &expect) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+      &expect) != WYRELOG_E_OK)
     return 74;
   if (expect.matches != 1)
     return 75;
@@ -562,8 +563,8 @@ check_revoke_removes_store_grant (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
-          (handle), "store-revoke-user", "site.store-revoke",
-          "store-revoke-scope", &exists)
+        (handle), "store-revoke-user", "site.store-revoke",
+      "store-revoke-scope", &exists)
       != WYRELOG_E_OK)
     return 83;
   if (exists)
@@ -575,8 +576,8 @@ check_revoke_removes_store_grant (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_direct_permission_event
-      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
-          &grant_expect) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+      &grant_expect) != WYRELOG_E_OK)
     return 85;
   if (grant_expect.matches != 1)
     return 86;
@@ -587,8 +588,8 @@ check_revoke_removes_store_grant (void)
     .operation = "revoke",
   };
   if (wyl_policy_store_foreach_direct_permission_event
-      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
-          &revoke_expect) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+      &revoke_expect) != WYRELOG_E_OK)
     return 87;
   if (revoke_expect.matches != 1)
     return 88;
@@ -614,8 +615,8 @@ check_role_grant_persists_membership (void)
 
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (wyl_handle_get_policy_store
-          (handle), "store-role-user", "site.store-role", "store-role-scope",
-          &exists) != WYRELOG_E_OK)
+        (handle), "store-role-user", "site.store-role", "store-role-scope",
+      &exists) != WYRELOG_E_OK)
     return 124;
   if (!exists)
     return 125;
@@ -627,8 +628,8 @@ check_role_grant_persists_membership (void)
     .operation = "grant",
   };
   if (wyl_policy_store_foreach_role_membership_event
-      (wyl_handle_get_policy_store (handle), role_membership_event_expect_cb,
-          &expect) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), role_membership_event_expect_cb,
+      &expect) != WYRELOG_E_OK)
     return 126;
   if (expect.matches != 1)
     return 127;
@@ -642,7 +643,7 @@ check_role_revoke_removes_store_membership (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 128;
   if (seed_role_permission (handle, "site.store-revoke-role",
-          "site.store-revoke-role.read") != 0)
+      "site.store-revoke-role.read") != 0)
     return 129;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
@@ -661,8 +662,8 @@ check_role_revoke_removes_store_membership (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (wyl_handle_get_policy_store
-          (handle), "store-role-revoke-user", "site.store-revoke-role",
-          "store-role-revoke-scope", &exists) != WYRELOG_E_OK)
+        (handle), "store-role-revoke-user", "site.store-revoke-role",
+      "store-role-revoke-scope", &exists) != WYRELOG_E_OK)
     return 132;
   if (exists)
     return 133;
@@ -673,8 +674,8 @@ check_role_revoke_removes_store_membership (void)
     .operation = "revoke",
   };
   if (wyl_policy_store_foreach_role_membership_event
-      (wyl_handle_get_policy_store (handle), role_membership_event_expect_cb,
-          &revoke_expect) != WYRELOG_E_OK)
+        (wyl_handle_get_policy_store (handle), role_membership_event_expect_cb,
+      &revoke_expect) != WYRELOG_E_OK)
     return 134;
   if (revoke_expect.matches != 1)
     return 135;
@@ -707,7 +708,7 @@ check_revoke_removes_engine_grant (void)
       != WYRELOG_E_OK)
     return 63;
   if (wyl_handle_intern_engine_symbol (handle, "site.revoke-permission",
-          &row[1]) != WYRELOG_E_OK)
+      &row[1]) != WYRELOG_E_OK)
     return 64;
   if (wyl_handle_intern_engine_symbol (handle, "revoke-scope", &row[2])
       != WYRELOG_E_OK)
@@ -727,7 +728,7 @@ check_role_revoke_removes_engine_membership (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
   if (seed_role_permission (handle, "site.role-revoke-role",
-          "site.role-revoke-permission") != 0)
+      "site.role-revoke-permission") != 0)
     return 141;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
@@ -744,7 +745,7 @@ check_role_revoke_removes_engine_membership (void)
   if (wyl_role_revoke (handle, revoke) != WYRELOG_E_OK)
     return 143;
   if (insert_perm_state (handle, "role-revoke-user",
-          "site.role-revoke-permission", "role-revoke-scope", "armed") != 0)
+      "site.role-revoke-permission", "role-revoke-scope", "armed") != 0)
     return 149;
 
   gint64 row[3];
@@ -752,7 +753,7 @@ check_role_revoke_removes_engine_membership (void)
       != WYRELOG_E_OK)
     return 144;
   if (wyl_handle_intern_engine_symbol (handle, "site.role-revoke-permission",
-          &row[1]) != WYRELOG_E_OK)
+      &row[1]) != WYRELOG_E_OK)
     return 145;
   if (wyl_handle_intern_engine_symbol (handle, "role-revoke-scope", &row[2])
       != WYRELOG_E_OK)
@@ -774,25 +775,25 @@ check_role_grant_rolls_back_invalid_snapshot (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_role (store, "site.audit-role",
-          "site audit role") != WYRELOG_E_OK)
+      "site audit role") != WYRELOG_E_OK)
     return 151;
   if (wyl_policy_store_upsert_role (store, "site.grant-role",
-          "site grant role") != WYRELOG_E_OK)
+      "site grant role") != WYRELOG_E_OK)
     return 152;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
-          "audit read", "sensitive") != WYRELOG_E_OK)
+      "audit read", "sensitive") != WYRELOG_E_OK)
     return 153;
   if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
-          "policy role grant", "critical") != WYRELOG_E_OK)
+      "policy role grant", "critical") != WYRELOG_E_OK)
     return 154;
   if (wyl_policy_store_grant_role_permission (store, "site.audit-role",
-          "wr.audit.read") != WYRELOG_E_OK)
+      "wr.audit.read") != WYRELOG_E_OK)
     return 155;
   if (wyl_policy_store_grant_role_permission (store, "site.grant-role",
-          "wr.policy.grant_role") != WYRELOG_E_OK)
+      "wr.policy.grant_role") != WYRELOG_E_OK)
     return 156;
   if (wyl_policy_store_grant_role_membership (store, "rollback-sod-user",
-          "site.audit-role", "rollback-sod-scope") != WYRELOG_E_OK)
+      "site.audit-role", "rollback-sod-scope") != WYRELOG_E_OK)
     return 157;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 158;
@@ -806,7 +807,7 @@ check_role_grant_rolls_back_invalid_snapshot (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "rollback-sod-user",
-          "site.grant-role", "rollback-sod-scope", &exists) != WYRELOG_E_OK)
+      "site.grant-role", "rollback-sod-scope", &exists) != WYRELOG_E_OK)
     return 160;
   return exists ? 161 : 0;
 }
@@ -845,11 +846,11 @@ check_poisoned_engine_rejects_permission_mutations (void)
   gboolean exists = TRUE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_direct_permission_exists (store, "poison-perm-user",
-          "poison.permission", "poison-scope", &exists) != WYRELOG_E_OK
+      "poison.permission", "poison-scope", &exists) != WYRELOG_E_OK
       || exists)
     return 164;
   if (wyl_policy_store_role_membership_exists (store, "poison-role-user",
-          "poison-role", "poison-scope", &exists) != WYRELOG_E_OK || exists)
+      "poison-role", "poison-scope", &exists) != WYRELOG_E_OK || exists)
     return 165;
   return 0;
 }
@@ -859,50 +860,50 @@ main (void)
 {
   gint rc;
   if ((rc = check_grant_returns_ok ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_returns_ok ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_grant_rejects_null_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_grant_rejects_incomplete_req ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_rejects_null_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_rejects_incomplete_req ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_rejects_null_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_rejects_incomplete_req ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_rejects_null_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_rejects_incomplete_req ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_requires_existing_role ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_direct_grant_requires_permission_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_direct_grant_preserves_dormant_permission_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_with_armed_state_allows_engine_decide ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_gated_grant_is_rejected_by_engine_path ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_grant_persists_direct_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_persists_membership ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_removes_store_grant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_removes_store_membership ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_removes_engine_grant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_removes_engine_membership ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_rolls_back_invalid_snapshot ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_poisoned_engine_rejects_permission_mutations ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

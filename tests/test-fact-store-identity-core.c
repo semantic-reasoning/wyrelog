@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -37,7 +38,7 @@ fake_execute (gpointer context, const gchar *sql,
     return WYRELOG_E_IO;
   if (strstr (sql, "SELECT CAST(COUNT(*) AS BIGINT)") != NULL)
     return emit_count (row_func, row_data, out_rows, 0) ?
-        WYRELOG_E_OK : WYRELOG_E_IO;
+           WYRELOG_E_OK : WYRELOG_E_IO;
   if (strstr (sql, "VALUES (?,?)") != NULL) {
     g_assert_cmpuint (n_params, ==, 2);
     g_assert_nonnull (params);
@@ -68,20 +69,21 @@ test_prepared_identity_and_rollback_precedence (void)
   WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
 
   wyl_fact_store_identity_set_test_fault
-      (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_KIND);
+    (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_KIND);
   g_assert_cmpint (wyl_fact_store_identity_execute (&executor, &identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
       WYRELOG_E_INTERNAL);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
   g_assert_cmpuint (fake.inserts, ==, 1);
   g_assert_false (fake.leaked_identity);
 
   fake = (FakeExecutor) {
-  .rollback_fails = TRUE};
+    .rollback_fails = TRUE
+  };
   wyl_fact_store_identity_set_test_fault
-      (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE);
+    (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE);
   g_assert_cmpint (wyl_fact_store_identity_execute (&executor, &identity,
-          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
+      WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, &result), ==,
       WYRELOG_E_INTERNAL);
   g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL);
 }
@@ -97,7 +99,7 @@ test_mode_cross_values_do_not_execute (void)
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
     WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     g_assert_cmpint (wyl_fact_store_identity_execute (&executor, &identity,
-            (WylFactStoreIdentityOpenMode) invalid[i], &result), ==,
+        (WylFactStoreIdentityOpenMode) invalid[i], &result), ==,
         WYRELOG_E_INVALID);
     g_assert_cmpint (result, ==, WYL_FACT_STORE_IDENTITY_RESULT_NONE);
   }
@@ -111,5 +113,5 @@ main (int argc, char **argv)
       test_prepared_identity_and_rollback_precedence);
   g_test_add_func ("/fact-store-identity-core/mode-cross-values",
       test_mode_cross_values_do_not_execute);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

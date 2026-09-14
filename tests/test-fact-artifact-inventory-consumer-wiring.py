@@ -927,6 +927,7 @@ def validate_runtime_tests(inputs: dict[str, str]) -> None:
     require(
         directives
         == (
+            '#include "test-exit-status.h"',
             "#include <glib.h>",
             "#include <string.h>",
             '#include "fact/graph-artifact-inventory-private.h"',
@@ -994,14 +995,17 @@ def validate_runtime_tests(inputs: dict[str, str]) -> None:
         ),
     }
     main_body = c_function_body(active_model_test, "main")
+    terminal_return = (
+        "return wyl_test_normalize_exit_status (g_test_run ());"
+    )
     main_without_terminal_return = (
         ""
         if main_body is None
-        else strip_c_literals(main_body).replace("return g_test_run ();", "", 1)
+        else strip_c_literals(main_body).replace(terminal_return, "", 1)
     )
     require(
         main_body is not None
-        and main_body.count("return g_test_run ();") == 1
+        and main_body.count(terminal_return) == 1
         and straight_line_c_body(main_without_terminal_return)
         and no_prohibited_c_termination(main_without_terminal_return),
         "E_INVENTORY_REGRESSION_TESTS",

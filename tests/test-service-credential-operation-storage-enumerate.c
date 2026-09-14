@@ -2,6 +2,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -16,12 +17,12 @@ test_enumerate_rejects_null_arguments (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   /* NULL out_request_ids is rejected before anything is touched. */
   g_assert_cmpint
-      (wyl_service_credential_operation_storage_enumerate_request_ids (NULL,
-          &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
+    (wyl_service_credential_operation_storage_enumerate_request_ids (NULL,
+      &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
   /* NULL storage with a live out pointer must leave it untouched. */
   g_assert_cmpint
-      (wyl_service_credential_operation_storage_enumerate_request_ids (NULL,
-          &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
+    (wyl_service_credential_operation_storage_enumerate_request_ids (NULL,
+      &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
   g_assert_true (out == (GPtrArray *) 0x1);
 }
 
@@ -36,9 +37,9 @@ make_op_record (WylServiceCredentialOperationStorage *storage,
   g_autofree gchar *raw = g_strdup_printf ("op-%s", request_id);
   g_autoptr (GBytes) empty = g_bytes_new_static ("", 0);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate (raw,
-          &name), ==, WYRELOG_E_OK);
+      &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_create (storage,
-          anchor, &name, empty), ==, WYRELOG_E_OK);
+      anchor, &name, empty), ==, WYRELOG_E_OK);
   wyl_service_credential_operation_child_name_clear (&name);
 }
 
@@ -73,16 +74,16 @@ test_posix_enumerate_backend (void)
   gchar lifecycle_id[WYL_REQUEST_ID_STRING_BUF];
   g_assert_nonnull (base);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   /* (1) An empty root yields success and an empty array. */
   {
     GPtrArray *out = NULL;
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
     g_assert_nonnull (out);
     g_assert_cmpuint (out->len, ==, 0);
     g_ptr_array_unref (out);
@@ -100,8 +101,8 @@ test_posix_enumerate_backend (void)
     for (gsize i = 0; i < G_N_ELEMENTS (ids); i++)
       g_hash_table_add (expected, ids[i]);
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
     g_assert_cmpuint (out->len, ==, G_N_ELEMENTS (ids));
     for (guint i = 0; i < out->len; i++) {
       const gchar *got = g_ptr_array_index (out, i);
@@ -118,7 +119,7 @@ test_posix_enumerate_backend (void)
       WYRELOG_E_OK);
   {
     g_autofree gchar *lifecycle = g_strdup_printf ("lifecycle-%s",
-        lifecycle_id);
+            lifecycle_id);
     make_foreign_file (storage.root_path, lifecycle);
   }
   make_foreign_file (storage.root_path, ".lock-deadbeef");
@@ -127,8 +128,8 @@ test_posix_enumerate_backend (void)
   {
     GPtrArray *out = NULL;
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (&storage, &anchor, NULL, &out), ==, WYRELOG_E_OK);
     g_assert_cmpuint (out->len, ==, G_N_ELEMENTS (ids));
     g_ptr_array_unref (out);
   }
@@ -139,8 +140,8 @@ test_posix_enumerate_backend (void)
     GPtrArray *out = (GPtrArray *) 0x1;
     g_cancellable_cancel (cancellable);
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (&storage, &anchor, cancellable, &out), ==, WYRELOG_E_CANCELLED);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (&storage, &anchor, cancellable, &out), ==, WYRELOG_E_CANCELLED);
     g_assert_true (out == (GPtrArray *) 0x1);
     g_object_unref (cancellable);
   }
@@ -149,11 +150,11 @@ test_posix_enumerate_backend (void)
   {
     GPtrArray *out = NULL;
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (&storage, &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (&storage, &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
     g_assert_cmpint
-        (wyl_service_credential_operation_storage_enumerate_request_ids
-        (NULL, &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
+      (wyl_service_credential_operation_storage_enumerate_request_ids
+          (NULL, &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
     g_assert_null (out);
   }
 
@@ -175,5 +176,5 @@ main (int argc, char **argv)
   g_test_add_func ("/operation-storage/enumerate/posix-backend",
       test_posix_enumerate_backend);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

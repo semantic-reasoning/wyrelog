@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -500,21 +501,21 @@ int
 main (void)
 {
   if (template_tree_has_backup (WYL_TEST_TEMPLATE_DIR))
-    return 1;
+    return wyl_test_normalize_exit_status (1);
   gint rc = check_bootstrap_seed_consistency ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_decision_template_relation_contract ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_permission_scope_relation_contract ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_audit_schema_contracts ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_template_manifest_contract ();
   if (rc != 0)
-    return rc;
-  return check_template_migration_contract ();
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (check_template_migration_contract ());
 }

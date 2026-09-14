@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -2380,7 +2381,7 @@ main (void)
   g_autofree gchar *fact_root = wyl_test_make_secure_fact_root
         ("wyl-daemon-facts-XXXXXX", &error);
   if (fact_root == NULL)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   g_autoptr (WylHandle) handle = NULL;
   const WylHandleOpenOptions open_opts = {
@@ -2388,9 +2389,9 @@ main (void)
     .fact_root = fact_root,
   };
   if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
   if (grant_fact_http_authority (handle, "facts-admin") != WYRELOG_E_OK)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -2401,19 +2402,19 @@ main (void)
     .handle = handle,
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
-    return 5;
+    return wyl_test_normalize_exit_status (5);
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
           &runtime, &error);
   if (http.server == NULL)
-    return 6;
+    return wyl_test_normalize_exit_status (6);
   GThread *thread = g_thread_new ("daemon-http-facts",
           test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
-    return 7;
+    return wyl_test_normalize_exit_status (7);
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
@@ -2427,5 +2428,5 @@ main (void)
   g_clear_pointer (&http.loop, g_main_loop_unref);
   g_clear_object (&handle);
   remove_tree (fact_root);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }

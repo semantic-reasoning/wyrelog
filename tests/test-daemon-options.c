@@ -24,6 +24,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <errno.h>
 #include <glib.h>
@@ -61,7 +62,7 @@ make_tmp_conf (const gchar *contents, gint mode)
   g_free (dir);
 
   g_assert_true (g_file_set_contents (path, contents != NULL ? contents : "",
-          contents != NULL ? (gssize) strlen (contents) : 0, &error));
+      contents != NULL ? (gssize) strlen (contents) : 0, &error));
   g_assert_no_error (error);
 #ifndef G_OS_WIN32
   g_assert_cmpint (g_chmod (path, mode), ==, 0);
@@ -111,8 +112,8 @@ static void
 test_parser_unknown_keys (void)
 {
   gchar *path = make_tmp_conf ("[daemon]\n"
-      "policy_db=/tmp/policy.sqlite\n"
-      "unknown_future_key=does-not-exist\n", 0640);
+          "policy_db=/tmp/policy.sqlite\n"
+          "unknown_future_key=does-not-exist\n", 0640);
   WylDaemonOptions opts = {
     .config_path = g_strdup (path),
     .template_dir = "/tmp/templates",
@@ -180,18 +181,18 @@ static void
 test_parser_cli_overrides_conf (void)
 {
   gchar *path = make_tmp_conf ("[daemon]\n"
-      "profile=service\n"
-      "policy_db=/conf/policy.sqlite\n"
-      "policy_keyprovider=file:/conf/key\n"
-      "audit_db=/conf/audit.duckdb\n"
-      "fact_root=/conf/facts\n"
-      "event_spool_dir=/conf/spool\n"
-      "system_url=http://conf.example/\n"
-      "listen_port=9000\n"
-      "event_queue_limit=2048\n"
-      "production=true\n"
-      "bootstrap_admin_subject=conf-admin\n"
-      "bootstrap_admin_allow_skip_mfa=true\n", 0640);
+          "profile=service\n"
+          "policy_db=/conf/policy.sqlite\n"
+          "policy_keyprovider=file:/conf/key\n"
+          "audit_db=/conf/audit.duckdb\n"
+          "fact_root=/conf/facts\n"
+          "event_spool_dir=/conf/spool\n"
+          "system_url=http://conf.example/\n"
+          "listen_port=9000\n"
+          "event_queue_limit=2048\n"
+          "production=true\n"
+          "bootstrap_admin_subject=conf-admin\n"
+          "bootstrap_admin_allow_skip_mfa=true\n", 0640);
 
   /* CLI pre-populates every field; conf must NOT overwrite. The
    * keyfile_take_* helpers all early-return when *target != NULL. */
@@ -267,8 +268,8 @@ test_credential_roots_from_conf (void)
   /* Both roots are optional keyfile settings; when present they are
    * consumed verbatim (disjoint from every other unset path). */
   gchar *path = make_tmp_conf ("[daemon]\n"
-      "operation_root=/conf/ops\n"
-      "credential_publication_root=/conf/pub\n", 0640);
+          "operation_root=/conf/ops\n"
+          "credential_publication_root=/conf/pub\n", 0640);
   WylDaemonOptions opts = {
     .config_path = g_strdup (path),
     .template_dir = "/tmp/templates",
@@ -457,16 +458,16 @@ static void
 test_resolve_failure_keeps_config_values_clearable (void)
 {
   gchar *path = make_tmp_conf ("[daemon]\n"
-      "profile=invalid\n"
-      "policy_db=/conf/policy\n"
-      "policy_keyprovider=file:/conf/key\n"
-      "audit_db=/conf/audit\n"
-      "fact_root=/conf/facts\n"
-      "operation_root=/conf/operations\n"
-      "credential_publication_root=/conf/publication\n"
-      "event_spool_dir=/conf/spool\n"
-      "system_url=http://conf.example/\n"
-      "event_queue_limit=200\n" "bootstrap_admin_subject=conf-subject\n", 0640);
+          "profile=invalid\n"
+          "policy_db=/conf/policy\n"
+          "policy_keyprovider=file:/conf/key\n"
+          "audit_db=/conf/audit\n"
+          "fact_root=/conf/facts\n"
+          "operation_root=/conf/operations\n"
+          "credential_publication_root=/conf/publication\n"
+          "event_spool_dir=/conf/spool\n"
+          "system_url=http://conf.example/\n"
+          "event_queue_limit=200\n" "bootstrap_admin_subject=conf-subject\n", 0640);
   g_auto (WylDaemonOptions) opts = {
     .template_dir = "borrowed-template",
     .listen_port = -1,
@@ -494,13 +495,13 @@ static void
 test_config_profile_info_values_are_clearable (void)
 {
   gchar *path = make_tmp_conf ("[daemon]\n"
-      "profile=service\n"
-      "policy_db=/conf/policy\n"
-      "policy_keyprovider=file:/conf/key\n"
-      "audit_db=/conf/audit\n"
-      "fact_root=/conf/facts\n"
-      "event_spool_dir=/conf/spool\n"
-      "system_url=http://conf.example/\n" "event_queue_limit=200\n", 0640);
+          "profile=service\n"
+          "policy_db=/conf/policy\n"
+          "policy_keyprovider=file:/conf/key\n"
+          "audit_db=/conf/audit\n"
+          "fact_root=/conf/facts\n"
+          "event_spool_dir=/conf/spool\n"
+          "system_url=http://conf.example/\n" "event_queue_limit=200\n", 0640);
   g_auto (WylDaemonOptions) opts = {
     .template_dir = "borrowed-template",
     .show_profile_info = TRUE,
@@ -666,7 +667,7 @@ test_symlink_rejected (void)
 
   /* Non-production also rejects symlink: TOCTOU is a hard rule. */
   g_assert_false (conf_file_open_safely (link_path, FALSE, &data, &len,
-          &error));
+      &error));
   g_assert_nonnull (error);
   g_assert_nonnull (strstr (error->message, "wyrelogd: conf:"));
 
@@ -810,7 +811,7 @@ ref_policy_store_probe_subjects (const gchar *policy_db, gchar **out_reason)
   if (!S_ISREG (st.st_mode) || st.st_size == 0) {
     if (out_reason != NULL) {
       *out_reason = g_strdup (S_ISREG (st.st_mode) ?
-          "empty file is not a SQLite store" : "path is not a regular file");
+              "empty file is not a SQLite store" : "path is not a regular file");
     }
     return REF_PROBE_INDETERMINATE;
   }
@@ -864,7 +865,7 @@ test_warn_indeterminate_on_probe_error (void)
   g_autofree gchar *reason4 = NULL;
   RefBootstrapProbeResult r4 =
       ref_policy_store_probe_subjects ("/nonexistent/path/here.sqlite",
-      &reason4);
+          &reason4);
   g_assert_cmpint (r4, ==, REF_PROBE_INDETERMINATE);
   g_assert_nonnull (reason4);
 #endif
@@ -931,7 +932,7 @@ main (int argc, char **argv)
   g_test_add_func ("/daemon-options/credential-roots/optional-when-unset",
       test_credential_roots_optional_when_unset);
   g_test_add_func
-      ("/daemon-options/credential-roots/not-defaulted-in-production",
+    ("/daemon-options/credential-roots/not-defaulted-in-production",
       test_credential_roots_not_defaulted_in_production);
   g_test_add_func ("/daemon-options/credential-roots/disjoint-enforced",
       test_credential_roots_disjoint_enforced);
@@ -989,5 +990,5 @@ main (int argc, char **argv)
    * "indeterminate" arm that greps for
    * `wyrelogd: bootstrap_admin: indeterminate`. */
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

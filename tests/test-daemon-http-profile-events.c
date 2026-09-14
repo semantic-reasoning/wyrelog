@@ -21,6 +21,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <string.h>
 
@@ -382,7 +383,7 @@ main (void)
   gint rc = 0;
   TestServer sys = { 0 };
   if (!test_server_start (&sys, WYL_DAEMON_PROFILE_SYSTEM))
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   if ((rc = check_happy_path (sys.base_url)) != 0)
     goto out_system;
@@ -404,12 +405,12 @@ main (void)
 out_system:
   test_server_stop (&sys);
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   TestServer svc = { 0 };
   if (!test_server_start (&svc, WYL_DAEMON_PROFILE_SERVICE))
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   rc = check_non_system_profile_denied (svc.base_url);
   test_server_stop (&svc);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }

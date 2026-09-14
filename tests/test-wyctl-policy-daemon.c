@@ -13,6 +13,7 @@
  * library helpers, write its access token to a temp file, then exec
  * wyctl with the documented flags and assert ok output.
  */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -308,9 +309,9 @@ main (void)
   g_autofree gchar *fact_root = make_fact_root ("wyctl-facts-XXXXXX",
           &fact_root_error);
   if (fact_root == NULL)
-    return 101;
+    return wyl_test_normalize_exit_status (101);
   if (g_chmod (fact_root, 0700) != 0)
-    return 102;
+    return wyl_test_normalize_exit_status (102);
 #endif
 
   g_autoptr (WylHandle) handle = NULL;
@@ -321,7 +322,7 @@ main (void)
 #endif
   };
   if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -334,7 +335,7 @@ main (void)
     .handle = handle,
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
 
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
@@ -342,13 +343,13 @@ main (void)
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
           &runtime, &error);
   if (http.server == NULL)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
   GThread *thread = g_thread_new ("wyctl-policy-daemon",
           test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
@@ -358,37 +359,37 @@ main (void)
    * wr.policy.grant_role for the role grant/revoke handlers. */
   g_autoptr (WylClient) admin_client = NULL;
   if (wyl_client_new (base_url, &admin_client) != WYRELOG_E_OK)
-    return 5;
+    return wyl_test_normalize_exit_status (5);
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (admin_client, "wyctl-policy-admin")
       != WYRELOG_E_OK) {
     wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
-    return 6;
+    return wyl_test_normalize_exit_status (6);
   }
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
 
   g_autofree gchar *access_token = wyl_client_dup_access_token (admin_client);
   if (access_token == NULL)
-    return 7;
+    return wyl_test_normalize_exit_status (7);
 
   if (grant_policy_write_authority (handle, "wyctl-policy-admin", "tenant-x")
       != WYRELOG_E_OK)
-    return 8;
+    return wyl_test_normalize_exit_status (8);
   if (grant_policy_role_authority (handle, "wyctl-policy-admin", "tenant-x")
       != WYRELOG_E_OK)
-    return 9;
+    return wyl_test_normalize_exit_status (9);
 #ifdef WYL_HAS_FACT_STORE
   if (grant_fact_authority (handle, "wyctl-policy-admin") != WYRELOG_E_OK)
-    return 103;
+    return wyl_test_normalize_exit_status (103);
 #endif
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.wyctl.read",
       "site wyctl read", "basic") != WYRELOG_E_OK)
-    return 10;
+    return wyl_test_normalize_exit_status (10);
   if (wyl_policy_store_upsert_role (store, "site.wyctl.reader",
       "site wyctl reader") != WYRELOG_E_OK)
-    return 11;
+    return wyl_test_normalize_exit_status (11);
 
   g_autofree gchar *token_path = write_token_file (access_token);
 
@@ -413,7 +414,7 @@ main (void)
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store, "wyctl-target",
       "site.wyctl.read", "tenant-x", &exists) != WYRELOG_E_OK || !exists)
-    return 12;
+    return wyl_test_normalize_exit_status (12);
 
   gchar *permission_revoke_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
@@ -432,7 +433,7 @@ main (void)
   exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (store, "wyctl-target",
       "site.wyctl.read", "tenant-x", &exists) != WYRELOG_E_OK || exists)
-    return 13;
+    return wyl_test_normalize_exit_status (13);
 
   gchar *role_grant_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
@@ -451,7 +452,7 @@ main (void)
   exists = FALSE;
   if (wyl_policy_store_role_membership_exists (store, "wyctl-target",
       "site.wyctl.reader", "tenant-x", &exists) != WYRELOG_E_OK || !exists)
-    return 14;
+    return wyl_test_normalize_exit_status (14);
 
   gchar *role_revoke_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
@@ -470,7 +471,7 @@ main (void)
   exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "wyctl-target",
       "site.wyctl.reader", "tenant-x", &exists) != WYRELOG_E_OK || exists)
-    return 15;
+    return wyl_test_normalize_exit_status (15);
 
 #ifdef WYL_HAS_FACT_STORE
   gchar *graph_create_argv[] = {
@@ -538,7 +539,7 @@ main (void)
   };
   assert_wyctl_stdout (fact_put_argv, "inserted\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
-    return 104;
+    return wyl_test_normalize_exit_status (104);
   gchar *datalog_query_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -558,7 +559,7 @@ main (void)
       "\"rows\":[{\"O\":\"o-1\",\"A\":42}]");
   assert_wyctl_stdout (fact_put_argv, "duplicate\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
-    return 105;
+    return wyl_test_normalize_exit_status (105);
   g_unlink (input_path);
 #endif
 
@@ -572,5 +573,5 @@ main (void)
 #ifdef WYL_HAS_FACT_STORE
   remove_tree (fact_root);
 #endif
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

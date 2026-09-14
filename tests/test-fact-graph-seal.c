@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <errno.h>
 #include <duckdb.h>
 #include <glib.h>
@@ -3481,7 +3482,7 @@ main (int argc, char **argv)
 {
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE) && !defined(G_OS_WIN32)
   if (argc >= 2 && g_strcmp0 (argv[1], policy_seal_helper_arg) == 0)
-    return policy_seal_helper_main (argc, argv);
+    return wyl_test_normalize_exit_status (policy_seal_helper_main (argc, argv));
 #endif
   test_self_path = g_canonicalize_filename (argv[0], NULL);
   g_assert_nonnull (test_self_path);
@@ -3607,5 +3608,5 @@ main (int argc, char **argv)
       GINT_TO_POINTER (FALSE), test_unseal_commit_failure_remains_retryable);
   g_test_add_data_func ("/fact-graph-seal/unseal-commit-veto-retry",
       GINT_TO_POINTER (TRUE), test_unseal_commit_failure_remains_retryable);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

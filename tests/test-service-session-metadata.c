@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -31,7 +32,7 @@ make_descriptor (wyl_service_session_descriptor_t *descriptor,
       || wyl_id_new (&jti_id) != WYRELOG_E_OK
       || wyl_id_format (&jti_id, jti, WYL_ID_STRING_BUF) != WYRELOG_E_OK
       || wyl_service_credential_id_new (credential_id,
-          WYL_SERVICE_CREDENTIAL_ID_BUF) != WYRELOG_E_OK)
+      WYL_SERVICE_CREDENTIAL_ID_BUF) != WYRELOG_E_OK)
     return 1;
   descriptor->jti = jti;
   descriptor->subject_id = "svc:metadata-test";
@@ -113,7 +114,7 @@ expect_invalid_descriptor (const wyl_service_session_descriptor_t *descriptor)
 {
   WylSession *out = (WylSession *) 0x1;
   return wyl_session_new_service_detached (descriptor, &out)
-      == WYRELOG_E_INVALID && out == NULL ? 0 : 1;
+         == WYRELOG_E_INVALID && out == NULL ? 0 : 1;
 }
 
 static gint
@@ -133,9 +134,9 @@ check_invalid_and_overflow (void)
     return 21;
 
 #define EXPECT_INVALID(mut) G_STMT_START { \
-  wyl_service_session_descriptor_t bad = descriptor; \
-  mut; \
-  if (expect_invalid_descriptor (&bad) != 0) return 22; \
+    wyl_service_session_descriptor_t bad = descriptor; \
+    mut; \
+    if (expect_invalid_descriptor (&bad) != 0) return 22; \
 } G_STMT_END
   EXPECT_INVALID (bad.session_id = WYL_ID_NIL);
   EXPECT_INVALID (bad.session_id.bytes[6] = 0);
@@ -169,7 +170,7 @@ check_human_transition_gates (void)
   validator_calls = 0;
   if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_POLICY
       || wyl_session_mfa_verify_with_proof (handle, session, "123456",
-          unexpected_validator, NULL) != WYRELOG_E_POLICY
+      unexpected_validator, NULL) != WYRELOG_E_POLICY
       || validator_calls != 0
       || wyl_session_elevate (handle, session) != WYRELOG_E_POLICY
       || wyl_session_drop_elevation (handle, session) != WYRELOG_E_POLICY
@@ -189,10 +190,10 @@ main (void)
 {
   gint rc;
   if ((rc = check_exact_copy_and_accessors ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_invalid_and_overflow ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_human_transition_gates ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

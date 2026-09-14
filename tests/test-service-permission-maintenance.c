@@ -4,6 +4,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -39,7 +40,7 @@ store_env_init (StoreEnv *env)
   for (gsize i = 0; i < sizeof key; i++)
     key[i] = (guint8) (0x40 + i);
   g_assert_true (g_file_set_contents (env->key_path, (const gchar *) key,
-          sizeof key, NULL));
+      sizeof key, NULL));
 }
 
 static void
@@ -83,13 +84,13 @@ seed_unsafe_closure (wyl_policy_store_t *store)
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_nonnull (db);
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO permissions(perm_id,perm_name,class) VALUES"
-          " ('wr.stream.write','stream write','basic'),"
-          " ('wr.stream.admin','stream admin','basic');"
-          "INSERT INTO direct_permissions(subject_id,perm_id,scope) VALUES"
-          " ('svc:tenant-a:worker','wr.stream.write','*'),"
-          " ('svc:tenant-a:worker','wr.stream.admin','*');", NULL, NULL,
-          NULL), ==, SQLITE_OK);
+      "INSERT INTO permissions(perm_id,perm_name,class) VALUES"
+      " ('wr.stream.write','stream write','basic'),"
+      " ('wr.stream.admin','stream admin','basic');"
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope) VALUES"
+      " ('svc:tenant-a:worker','wr.stream.write','*'),"
+      " ('svc:tenant-a:worker','wr.stream.admin','*');", NULL, NULL,
+      NULL), ==, SQLITE_OK);
 }
 
 static void
@@ -98,11 +99,11 @@ add_extra_unsafe_grant (wyl_policy_store_t *store)
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_nonnull (db);
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO permissions(perm_id,perm_name,class) VALUES"
-          " ('wr.stream.exec','stream exec','basic');"
-          "INSERT INTO direct_permissions(subject_id,perm_id,scope) VALUES"
-          " ('svc:tenant-a:worker','wr.stream.exec','*');", NULL, NULL,
-          NULL), ==, SQLITE_OK);
+      "INSERT INTO permissions(perm_id,perm_name,class) VALUES"
+      " ('wr.stream.exec','stream exec','basic');"
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope) VALUES"
+      " ('svc:tenant-a:worker','wr.stream.exec','*');", NULL, NULL,
+      NULL), ==, SQLITE_OK);
 }
 
 static guint
@@ -110,7 +111,7 @@ removal_count (wyl_policy_store_t *store)
 {
   WylPolicyPermissionClosureAnalysis analysis = { 0 };
   g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure (store,
-          &analysis), ==, WYRELOG_E_OK);
+      &analysis), ==, WYRELOG_E_OK);
   guint n = analysis.removals->len;
   wyl_policy_permission_closure_analysis_clear (&analysis);
   return n;
@@ -122,8 +123,8 @@ count_receipts (wyl_policy_store_t *store)
   sqlite3 *db = wyl_policy_store_get_db (store);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM service_permission_remediation_receipts;", -1,
-          &stmt, NULL), ==, SQLITE_OK);
+      "SELECT count(*) FROM service_permission_remediation_receipts;", -1,
+      &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 n = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -135,7 +136,7 @@ remediation_generation (wyl_policy_store_t *store)
 {
   guint64 generation = 0;
   g_assert_cmpint (wyl_policy_store_service_permission_remediation_generation
-      (store, &generation), ==, WYRELOG_E_OK);
+        (store, &generation), ==, WYRELOG_E_OK);
   return generation;
 }
 
@@ -154,9 +155,9 @@ seed_and_build_manifest (const StoreEnv *env, const gchar *request_id,
 
   WylPolicyPermissionClosureAnalysis analysis = { 0 };
   g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure (store,
-          &analysis), ==, WYRELOG_E_OK);
+      &analysis), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
-          request_id, out_manifest), ==, WYRELOG_E_OK);
+      request_id, out_manifest), ==, WYRELOG_E_OK);
   wyl_policy_permission_closure_analysis_clear (&analysis);
   wyl_policy_store_close (store);
 }
@@ -173,7 +174,7 @@ build_single_op_manifest (const WylServicePermissionManifest *full,
   out->store_generation = full->store_generation;
   memcpy (out->store_digest, full->store_digest, 32);
   out->operations = g_ptr_array_new_with_free_func
-      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
   const WylPolicyPermissionClosureRemoval *src =
       g_ptr_array_index (full->operations, 0);
   WylPolicyPermissionClosureRemoval *copy =
@@ -208,7 +209,7 @@ test_dry_run_is_read_only (void)
   wyl_policy_store_t *store = open_store (&env, TRUE);
   g_assert_cmpuint (removal_count (store), ==, 2);
   g_assert_cmpint (wyl_service_permission_maintenance_dry_run (store,
-          &manifest), ==, WYRELOG_E_OK);
+      &manifest), ==, WYRELOG_E_OK);
   /* dry_run consumed and closed the store; reopen to confirm no change. */
 
   store = open_store (&env, TRUE);
@@ -238,7 +239,7 @@ test_apply_cleans_closure (void)
   g_assert_cmpuint (removal_count (store), ==, 2);
   wyl_policy_service_permission_receipt_t receipt = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &manifest,
-          &receipt), ==, WYRELOG_E_OK);
+      &receipt), ==, WYRELOG_E_OK);
   g_assert_cmpstr (receipt.request_id, ==, request_id);
   g_assert_cmpuint (receipt.operation_count, ==, 2);
   g_assert_nonnull (receipt.audit_id);
@@ -256,7 +257,7 @@ test_apply_cleans_closure (void)
   gboolean found = FALSE;
   wyl_policy_service_permission_receipt_t stored = { 0 };
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          request_id, &found, &stored), ==, WYRELOG_E_OK);
+      request_id, &found, &stored), ==, WYRELOG_E_OK);
   g_assert_true (found);
   wyl_policy_service_permission_receipt_clear (&stored);
   wyl_policy_store_close (store);
@@ -285,12 +286,12 @@ test_stale_manifest_rejected (void)
 
   store = open_store (&env, TRUE);
   g_assert_cmpint (wyl_service_permission_maintenance_dry_run (store,
-          &manifest), ==, WYRELOG_E_POLICY);
+      &manifest), ==, WYRELOG_E_POLICY);
 
   store = open_store (&env, TRUE);
   wyl_policy_service_permission_receipt_t receipt = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &manifest,
-          &receipt), ==, WYRELOG_E_POLICY);
+      &receipt), ==, WYRELOG_E_POLICY);
   g_assert_null (receipt.request_id);
   wyl_policy_service_permission_receipt_clear (&receipt);
 
@@ -319,14 +320,14 @@ test_idempotent_replay (void)
   wyl_policy_store_t *store = open_store (&env, TRUE);
   wyl_policy_service_permission_receipt_t first = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &manifest,
-          &first), ==, WYRELOG_E_OK);
+      &first), ==, WYRELOG_E_OK);
 
   store = open_store (&env, TRUE);
   g_assert_cmpint (count_receipts (store), ==, 1);
   g_assert_cmpuint (remediation_generation (store), ==, 1);
   wyl_policy_service_permission_receipt_t replay = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &manifest,
-          &replay), ==, WYRELOG_E_OK);
+      &replay), ==, WYRELOG_E_OK);
   g_assert_cmpstr (replay.request_id, ==, first.request_id);
   g_assert_cmpstr (replay.manifest_fingerprint, ==, first.manifest_fingerprint);
   g_assert_cmpstr (replay.audit_id, ==, first.audit_id);
@@ -362,7 +363,7 @@ test_idempotent_conflict (void)
   wyl_policy_store_t *store = open_store (&env, TRUE);
   wyl_policy_service_permission_receipt_t first = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &manifest,
-          &first), ==, WYRELOG_E_OK);
+      &first), ==, WYRELOG_E_OK);
   wyl_policy_service_permission_receipt_clear (&first);
 
   /* Same request id, different (single-op) manifest -> hard conflict. */
@@ -372,7 +373,7 @@ test_idempotent_conflict (void)
   store = open_store (&env, TRUE);
   wyl_policy_service_permission_receipt_t receipt = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store,
-          &conflicting, &receipt), ==, WYRELOG_E_POLICY);
+      &conflicting, &receipt), ==, WYRELOG_E_POLICY);
   g_assert_null (receipt.request_id);
   wyl_policy_service_permission_receipt_clear (&receipt);
 
@@ -412,7 +413,7 @@ test_partial_manifest_rolls_back (void)
   wyl_policy_store_t *store = open_store (&env, TRUE);
   wyl_policy_service_permission_receipt_t receipt = { 0 };
   g_assert_cmpint (wyl_service_permission_maintenance_apply (store, &partial,
-          &receipt), ==, WYRELOG_E_POLICY);
+      &receipt), ==, WYRELOG_E_POLICY);
   g_assert_null (receipt.request_id);
   wyl_policy_service_permission_receipt_clear (&receipt);
 
@@ -445,5 +446,5 @@ main (int argc, char **argv)
       test_idempotent_conflict);
   g_test_add_func ("/service-permission-maintenance/partial-rolls-back",
       test_partial_manifest_rolls_back);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

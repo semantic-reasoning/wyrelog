@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyl-boot-private.h"
@@ -26,20 +27,20 @@ main (void)
 {
   /* Empty sequence returns OK. */
   if (wyl_boot_run (NULL, 0, NULL) != WYRELOG_E_OK)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   /* Non-zero count with NULL seq is an invalid argument. */
   if (wyl_boot_run (NULL, 1, NULL) != WYRELOG_E_INVALID)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_01_TPM_PROBE),
-          "boot_tpm_probe_failed") != 0)
-    return 9;
+      "boot_tpm_probe_failed") != 0)
+    return wyl_test_normalize_exit_status (9);
   if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_02_DEK_UNSEAL),
-          "boot_dek_unseal_failed") != 0)
-    return 10;
+      "boot_dek_unseal_failed") != 0)
+    return wyl_test_normalize_exit_status (10);
   if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_LAST),
-          "boot_phase_failed") != 0)
-    return 11;
+      "boot_phase_failed") != 0)
+    return wyl_test_normalize_exit_status (11);
 
   /* All-success sequence runs every phase and returns OK. */
   call_count = 0;
@@ -48,9 +49,9 @@ main (void)
     {BOOT_02_DEK_UNSEAL, "unseal", phase_ok, TRUE},
   };
   if (wyl_boot_run (happy, 2, NULL) != WYRELOG_E_OK)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
   if (call_count != 2)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
 
   /* Fail-closed failure short-circuits with the phase's return code. */
   call_count = 0;
@@ -59,9 +60,9 @@ main (void)
     {BOOT_02_DEK_UNSEAL, "unseal", phase_ok, TRUE},
   };
   if (wyl_boot_run (closed, 2, NULL) != WYRELOG_E_IO)
-    return 5;
+    return wyl_test_normalize_exit_status (5);
   if (call_count != 1)
-    return 6;
+    return wyl_test_normalize_exit_status (6);
 
   /* Non-fail-closed failure is logged and the run continues. */
   call_count = 0;
@@ -70,9 +71,9 @@ main (void)
     {BOOT_02_DEK_UNSEAL, "unseal", phase_ok, TRUE},
   };
   if (wyl_boot_run (open, 2, NULL) != WYRELOG_E_OK)
-    return 7;
+    return wyl_test_normalize_exit_status (7);
   if (call_count != 2)
-    return 8;
+    return wyl_test_normalize_exit_status (8);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

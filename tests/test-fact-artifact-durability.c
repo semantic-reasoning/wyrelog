@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -608,5 +609,5 @@ main (int argc, char **argv)
       test_artifact_substitution_matrix);
   g_test_add_func ("/fact-artifact-durability/output-initialization",
       test_invalid_inputs_initialize_output);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

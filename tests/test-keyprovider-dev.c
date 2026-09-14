@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -38,7 +39,7 @@ roundtrip_for (const guint8 *plaintext, gsize plaintext_len)
   recovered[plaintext_len] = 0xCC;      /* canary */
   gsize written = 0;
   if (vt->unseal (self, &blob, recovered, plaintext_len,
-          &written) != WYRELOG_E_OK)
+      &written) != WYRELOG_E_OK)
     return 14;
   if (written != plaintext_len)
     return 15;
@@ -207,18 +208,18 @@ main (void)
 {
   gint rc;
   if ((rc = check_probe_ok_on_fresh ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_roundtrip_basic ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_roundtrip_binary ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_unseal_capacity_too_small ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_derive_determinism ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_wipe_fail_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_argument_validation ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

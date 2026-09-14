@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "fact/tenant-admission-private.h"
@@ -375,5 +376,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/tenant-admission/invalid", invalid_inputs);
   g_test_add_func ("/fact/tenant-admission/canonical-graph-order", canonical_graph_order);
   g_test_add_func ("/fact/tenant-admission/ordered-lock-set", ordered_lock_set);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/error.h"
@@ -25,27 +26,27 @@ main (void)
   const gchar *msg = wyrelog_error_string (WYRELOG_E_OK);
 
   if (msg == NULL || msg[0] == '\0')
-    return 1;
+    return wyl_test_normalize_exit_status (1);
   if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_BUSY),
-          "resource is busy") != 0)
-    return 6;
+      "resource is busy") != 0)
+    return wyl_test_normalize_exit_status (6);
   if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_CONFLICT), "conflict") != 0)
-    return 7;
+    return wyl_test_normalize_exit_status (7);
 
   const gchar *version = wyrelog_version_string ();
   if (version == NULL || version[0] == '\0')
-    return 2;
+    return wyl_test_normalize_exit_status (2);
 
   /* Input validation: NULL out_handle must be rejected. */
   if (wyl_init ("ignored", NULL) != WYRELOG_E_INVALID)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
 
   /* Successful path returns a non-NULL WylHandle. */
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
   if (handle == NULL)
-    return 5;
+    return wyl_test_normalize_exit_status (5);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

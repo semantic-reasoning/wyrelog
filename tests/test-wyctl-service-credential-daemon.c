@@ -34,6 +34,7 @@
  * passed, service unavailable) and exit 4 (denied) is what proves the token
  * was accepted and authorization actually gates the call.
  */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -95,7 +96,7 @@ seed_service_operator (WylHandle *handle, const gchar *subject,
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_set_principal_state (store, subject,
-      "authenticated");
+          "authenticated");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, session_scope, "active");
@@ -103,11 +104,11 @@ seed_service_operator (WylHandle *handle, const gchar *subject,
     return rc;
   if (grant_manage) {
     rc = wyl_policy_store_grant_direct_permission (store, subject,
-        "wr.service_credential.manage", session_scope);
+            "wr.service_credential.manage", session_scope);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_policy_store_set_permission_state (store, subject,
-        "wr.service_credential.manage", session_scope, "armed");
+            "wr.service_credential.manage", session_scope, "armed");
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -120,7 +121,7 @@ write_token_file (const gchar *token)
   g_autoptr (GError) error = NULL;
   gchar *token_path = NULL;
   gint fd = g_file_open_tmp ("wyctl-svc-cred-daemon-token-XXXXXX", &token_path,
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
@@ -142,13 +143,13 @@ seed_bearer_operator (SoupServer *server, WylHandle *handle,
   gchar session_text[WYL_ID_STRING_BUF];
   g_assert_cmpint (wyl_id_new (&session_id), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_format (&session_id, session_text,
-          sizeof session_text), ==, WYRELOG_E_OK);
+      sizeof session_text), ==, WYRELOG_E_OK);
 
   g_assert_true (wyl_daemon_http_seed_mfa_human_session_for_test (server,
-          session_text, subject, WYL_TENANT_DEFAULT));
+      session_text, subject, WYL_TENANT_DEFAULT));
 
   g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
-      session_text);
+          session_text);
   g_assert_nonnull (session);
 
   /* Seed the policy facts first: issuing a human access token requires the
@@ -156,12 +157,12 @@ seed_bearer_operator (SoupServer *server, WylHandle *handle,
    * human_session_matches gate), so the grant/state seeding must precede the
    * token mint. */
   g_assert_cmpint (seed_service_operator (handle, subject, session_text,
-          grant_manage), ==, WYRELOG_E_OK);
+      grant_manage), ==, WYRELOG_E_OK);
 
   g_autofree gchar *access = NULL;
   g_autofree gchar *refresh = NULL;
   g_assert_cmpint (wyl_daemon_http_issue_human_tokens_for_test (server, session,
-          session_text, subject, WYL_TENANT_DEFAULT, &access, &refresh),
+      session_text, subject, WYL_TENANT_DEFAULT, &access, &refresh),
       ==, WYRELOG_E_OK);
   g_assert_nonnull (access);
 
@@ -180,7 +181,7 @@ assert_wyctl_exit_no_secret (gchar **argv, const int *ok_exits, gsize n_ok)
   g_autoptr (GError) error = NULL;
 
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          &stdout_buf, &stderr_buf, &wait_status, &error));
+      &stdout_buf, &stderr_buf, &wait_status, &error));
   g_assert_no_error (error);
   g_assert_true (WIFEXITED (wait_status));
 
@@ -208,13 +209,13 @@ main (void)
     .template_dir = WYL_TEST_TEMPLATE_DIR,
   };
   if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   gboolean tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-          WYL_TEST_SERVICE_TENANT, &tenant_created) != WYRELOG_E_OK
+      WYL_TEST_SERVICE_TENANT, &tenant_created) != WYRELOG_E_OK
       || !tenant_created)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
 
   /* No operation_root / credential_publication_root: the escrow handoff fails
    * closed with 503 service_credential_unavailable AFTER authorization, which
@@ -227,38 +228,38 @@ main (void)
     .handle = handle,
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
 
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
-      &runtime, &error);
+          &runtime, &error);
   if (http.server == NULL)
-    return 4;
+    return wyl_test_normalize_exit_status (4);
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (http.server);
   GThread *thread = g_thread_new ("wyctl-svc-cred-daemon",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
 
   GSList *uris = soup_server_get_uris (http.server);
   if (uris == NULL)
-    return 5;
+    return wyl_test_normalize_exit_status (5);
   /* Build a canonical literal-loopback base URL: the client's secret-transport
    * gate on issue requires exactly 127.0.0.1 (or an IPv6 loopback literal), so
    * pin the host and take only the bound port from the server. */
   gint port = g_uri_get_port ((GUri *) uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
   if (port <= 0)
-    return 6;
+    return wyl_test_normalize_exit_status (6);
   g_autofree gchar *base_url = g_strdup_printf ("http://127.0.0.1:%d", port);
 
   /* (a) Authorized operator: authenticated + active session + the manage
    * grant. (b) Control operator: authenticated + active session but no
    * grant. */
   g_autofree gchar *authorized_token_path = seed_bearer_operator (http.server,
-      handle, "human-svc-admin", TRUE);
+          handle, "human-svc-admin", TRUE);
   g_autofree gchar *denied_token_path = seed_bearer_operator (http.server,
-      handle, "human-svc-denied", FALSE);
+          handle, "human-svc-denied", FALSE);
 
   /* (a) Auth passes, but no escrow roots -> 503 -> wyctl exit 5. Exit 5 (and
    * not 4/6) proves the bearer token was accepted and authorization PASSED. */
@@ -364,7 +365,7 @@ main (void)
    * lookup, where the unknown id produces 404 -> NOT_FOUND -> exit 5. */
   gchar recover_request_id[WYL_REQUEST_ID_STRING_BUF];
   g_assert_cmpint (wyl_request_id_new (recover_request_id,
-          sizeof recover_request_id), ==, WYRELOG_E_OK);
+      sizeof recover_request_id), ==, WYRELOG_E_OK);
 
   gchar *recover_authorized_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
@@ -389,5 +390,5 @@ main (void)
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

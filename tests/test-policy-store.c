@@ -2,6 +2,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -6627,190 +6628,190 @@ main (void)
   gint rc;
 
   if ((rc = check_store_creates_authority_schema ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_template_schema_creates_state_tables ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_invalid_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_gets_default_deployment_mode ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_manages_tenant_registry ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_manages_fact_graph_registry ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_provisions_fact_graph ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_seals_fact_graph_registry ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_unseals_only_the_reversible_population ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_unseal_loses_a_race_without_writing ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_fact_graph_registry_escapes ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_fact_graph_reserved_metadata ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_fact_graph_metadata_only ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_pins_fact_root_identity ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_sets_deployment_mode ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_handle_owns_policy_store ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_encrypted_policy_store_hardening_and_rotation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_seeds_builtin_catalog ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_builtin_catalog_drift ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_builtin_catalog_upsert_drift ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_grants_role_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_catalog_existence_probes ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_grants_role_inheritance ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_grants_role_membership ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_grants_direct_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_reports_permission_planes ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_enforces_service_permission_planes ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_validates_service_permission_closure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_analyzes_service_permission_closure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_membership_mutation_rolls_back_on_event_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_membership_revoke_rolls_back_on_event_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_appends_direct_permission_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_direct_permission_mutation_rolls_back_on_event_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_direct_permission_revoke_rolls_back_on_event_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_sets_permission_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_appends_permission_state_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_applies_permission_state_transition ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_permission_state_transition_rejects_invalid_edge ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_permission_state_transition_rolls_back_event_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_permission_state_transition_appends_audit ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_permission_state_transition_rolls_back_audit_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_permission_state_transition_rejects_invalid_audit ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_store_permission_state_transition_rolls_back_audit_conflict ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_sets_principal_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_get_principal_state_round_trip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_increments_counter ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_transitions_to_locked ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_survives_reopen ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_reset_principal_failure_counter ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_sequential_race ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_unlock ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_refuses_already_locked ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_failure_requires_mfa_required ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_transition_legal_edges ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_principal_failures_survive_logout_and_login ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_transition_illegal_noop ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_transition_lock_invariant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_principal_authn_epoch_monotonic ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_login_precedence ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_apply_principal_login_folded_unlock ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_validate_principal_domain ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_validate_principal_domain_legacy_roundtrip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_validate_principal_domain_open_time_reject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_sets_session_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_appends_principal_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_appends_session_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_distinguishes_duplicate_events ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_appends_audit_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_iterates_audit_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_append_audit_event_is_idempotent ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_records_audit_intention ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_audit_intention_is_idempotent ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_marks_audit_intention_states ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_bad_audit_intentions ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_corrupt_audit_events ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_rejects_bad_role_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_applies_on_fresh_store ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_same_subject_is_idempotent ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_different_subject_is_refused ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_rejects_empty_subject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_rejects_whitespace_subject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_rejects_overlong_subject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_seal_survives_reopen ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_legacy_skip_migration ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_allow_skip_mfa_flag ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

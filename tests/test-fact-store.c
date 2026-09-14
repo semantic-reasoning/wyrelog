@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -80,7 +81,8 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  * the whole file.  Ranges are inclusive of what is used, not reserved.
  *
  *   100-130      check_fact_store_retracts_idempotently
- *   131-201      check_fact_store_appends_idempotently
+ *   131-203      check_fact_store_appends_idempotently
+ *   92-94        check_fact_store_projection_validation
  *   800-806      check_fact_store_thread_budget
  *   900-909      check_fact_store_reports_commit_delta
  *   960-973      check_fact_store_batch_commit_fault
@@ -413,7 +415,7 @@ check_fact_store_appends_idempotently (void)
   if (!count_i64 (conn,
       "SELECT COUNT(*) FROM pragma_table_info('fact_event_log') "
       "WHERE lower(type) LIKE '%json%';", &count) || count != 0)
-    return 20;
+    return 202;
   g_autofree gchar *scope_sql = g_strdup_printf
         ("SELECT COUNT(*) FROM %s WHERE __wyl_tenant_id = 'tenant-a' "
           "AND __wyl_graph_id = 'orders';", table);
@@ -434,7 +436,7 @@ check_fact_store_appends_idempotently (void)
   conflict.n_rows = G_N_ELEMENTS (bad_rows);
   if (wyl_fact_store_append_batch (store, &schema, &conflict, NULL)
       != WYRELOG_E_POLICY)
-    return 21;
+    return 203;
 
   for (gsize i = 0; i < n_rows; i++) {
     g_free (order_ids[i]);
@@ -1513,7 +1515,7 @@ check_fact_store_projection_validation (void)
   nullable_batch.rows = null_row;
   if (wyl_fact_store_append_batch (store, &nullable_schema, &nullable_batch,
       NULL) != WYRELOG_E_POLICY)
-    return 80;
+    return 92;
   g_autofree gchar *nullable_table =
       wyl_fact_store_projection_table_name (&nullable_schema);
   g_autofree gchar *nullable_count_sql = g_strdup_printf
@@ -1523,12 +1525,12 @@ check_fact_store_projection_validation (void)
       || nullable_count != 1
       || !count_i64 (store, "SELECT COUNT(*) FROM fact_batches;",
       &nullable_count) || nullable_count != 1)
-    return 81;
+    return 93;
   if (!count_i64 (store,
       "SELECT COUNT(*) FROM fact_event_log "
       "WHERE batch_id = 'nullable-null';", &nullable_count)
       || nullable_count != 0)
-    return 82;
+    return 94;
   return 0;
 }
 
@@ -4589,144 +4591,144 @@ main (void)
 {
   gint rc = check_fact_store_thread_budget ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_survey_io_failure_keeps_its_rc ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_abandoned_outranks_refused ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_failure_rc_survives_a_refusal ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_loop_scope_failure_is_not_a_refusal ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_forget_survives_a_missing_projection ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_quarantines_a_foreign_intent ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_does_not_quarantine_a_transient_failure ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_quarantine_survives_a_restart ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_intent_state_check_migrates_an_old_store ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_counts_executed ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_counts_refused_without_abandoning ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_counts_a_store_scope_refusal ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_zeroes_outcome_on_invalid ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_read_only_open_replays_the_wal ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_identity_basic ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_identity_rejects_foreign_catalogs ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_identity_rolls_back ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_identity_concurrency ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_identity_validation_snapshot ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_audit_table_exists ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_forget ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_crash_convergence ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_attribution_migration_and_recovery ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_rejects_identifier_reuse ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_refuses_wrong_scope ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_skips_out_of_scope_intent ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_reconcile_ignores_schema_only_store ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_pending_count_reports_without_executing ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_pending_count_ignores_schema_only_store ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_forget_pending_count_refuses_wrong_scope ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_retract_by_batch_id ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_appends_idempotently ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_retracts_idempotently ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_reports_commit_delta ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_batch_commit_fault ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_persists_logical_bytes ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_migrates_pre_logical_bytes_store ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_projection_batch_count_validates_scope ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_rejects_schema_drift ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_projection_validation ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_rejects_nullable_null_after_reopen ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_retract_by_batch_id_preserves_legacy_nullable_null ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_retract_by_batch_id_keeps_empty_selection_behavior ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_rejects_audit_shape ();
   if (rc != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   rc = check_fact_corruption_does_not_block_policy_open ();
   if (rc != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

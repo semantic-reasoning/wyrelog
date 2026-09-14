@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include "wyrelog/daemon/http-body-limit-private.h"
 
 typedef struct
@@ -119,5 +120,5 @@ main (int argc, char **argv)
   g_test_add_func ("/body-limit/partial-writes", check_partial_writes);
   g_test_add_func ("/body-limit/failed-writes", check_failed_writes);
   g_test_add_func ("/body-limit/no-progress", check_zero_and_nonpollable);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

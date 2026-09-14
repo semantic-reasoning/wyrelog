@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/fact/runtime-private.h"
@@ -3145,5 +3146,5 @@ main (int argc, char **argv)
       GUINT_TO_POINTER (4), test_nested_build);
   g_test_add_data_func ("/fact-runtime/nested/publication-inner-failure",
       GUINT_TO_POINTER (5), test_nested_build);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

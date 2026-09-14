@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -303,5 +304,5 @@ main (int argc, char **argv)
   ADD_TEST ("/fact-store/forget-transaction/rollback-failure",
       test_rollback_failure_is_reported);
 #undef ADD_TEST
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

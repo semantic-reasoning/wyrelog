@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <duckdb.h>
@@ -3947,94 +3948,94 @@ main (void)
   gint rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if ((rc = check_audit_replay_uses_engine_session ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #endif
   if ((rc = check_service_lifecycle_audit_reconciliation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_inserts_a_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_persists_event_fields ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_query_events_json_filters_rows ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_mirrors_policy_store_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_replay_loads_runtime_query ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_intention_reconciles_runtime_query ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_poisoned_engine_rejects_audit_replay ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_replays_runtime_query_after_table_loss ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_audit_conn_insert_event_idempotence ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_duplicate_emit_keeps_runtime_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_replay_rolls_back_corrupt_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_projects_wirelog_facts_immediately ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_projects_sparse_wirelog_facts_immediately ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_audit_projection_classification_is_read_only ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_general_publication_rejects_nested_engine_sessions ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_reports_live_projection_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_failed_duplicate_emit_keeps_durable_rows ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_rolls_back_partial_live_projection_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_allows_when_runtime_audit_projection_fails ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_grant_rolls_back_on_store_audit_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_rolls_back_on_store_audit_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_grant_survives_runtime_audit_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_survives_runtime_audit_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_transition_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_session_state_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_principal_transition_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_principal_state_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_emits_canonical_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_denied_login_skip_mfa_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_denied_login_skip_mfa_reports_audit_failure ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_session_state_rolls_back_on_store_audit_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_denied_login_skip_mfa_projects_audit_fact ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_grant_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_grant_actor_emits_audit_subject ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_permission_revoke_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_grant_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_emits_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_rows_load_wirelog_facts ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_rejects_null_args ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

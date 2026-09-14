@@ -4,6 +4,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <fcntl.h>
 #include <glib.h>
@@ -59,7 +60,7 @@ test_not_found (void)
 {
   g_autofree gchar *token = NULL;
   g_assert_cmpint (wyctl_token_file_read ("/nonexistent/path/wyctl-token-test",
-          &token), ==, WYCTL_TOKEN_FILE_NOT_FOUND);
+      &token), ==, WYCTL_TOKEN_FILE_NOT_FOUND);
   g_assert_null (token);
 }
 
@@ -263,9 +264,9 @@ static void
 test_windows_attrs_accept_readonly (void)
 {
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs
-      (WYCTL_WIN_ATTR_READONLY), ==, WYCTL_TOKEN_FILE_OK);
+        (WYCTL_WIN_ATTR_READONLY), ==, WYCTL_TOKEN_FILE_OK);
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs
-      (WYCTL_WIN_ATTR_READONLY | WYCTL_WIN_ATTR_NORMAL), ==,
+        (WYCTL_WIN_ATTR_READONLY | WYCTL_WIN_ATTR_NORMAL), ==,
       WYCTL_TOKEN_FILE_OK);
 }
 
@@ -274,7 +275,7 @@ test_windows_attrs_reject_not_readonly (void)
 {
   /* Plain file with no read-only bit. */
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs
-      (WYCTL_WIN_ATTR_NORMAL), ==, WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY);
+        (WYCTL_WIN_ATTR_NORMAL), ==, WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY);
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs (0), ==,
       WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY);
 }
@@ -284,10 +285,10 @@ test_windows_attrs_reject_reparse_point (void)
 {
   /* Reparse-point set even if read-only is also set: refuse. */
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs
-      (WYCTL_WIN_ATTR_REPARSE_POINT | WYCTL_WIN_ATTR_READONLY), ==,
+        (WYCTL_WIN_ATTR_REPARSE_POINT | WYCTL_WIN_ATTR_READONLY), ==,
       WYCTL_TOKEN_FILE_SYMLINK);
   g_assert_cmpint (wyctl_token_file_classify_windows_attrs
-      (WYCTL_WIN_ATTR_REPARSE_POINT), ==, WYCTL_TOKEN_FILE_SYMLINK);
+        (WYCTL_WIN_ATTR_REPARSE_POINT), ==, WYCTL_TOKEN_FILE_SYMLINK);
 }
 
 static void
@@ -300,7 +301,7 @@ test_status_message_table_has_no_token_placeholder (void)
   for (int s = WYCTL_TOKEN_FILE_OK;
       s <= WYCTL_TOKEN_FILE_WINDOWS_ACL_UNAVAILABLE; s++) {
     const gchar *msg = wyctl_token_file_status_message (
-        (WyctlTokenFileStatus) s);
+      (WyctlTokenFileStatus) s);
     if (msg == NULL)
       continue;
     int placeholders = 0;
@@ -355,22 +356,22 @@ static gboolean
 create_windows_directory_symlink (const gchar *target, const gchar *link)
 {
   g_autofree wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   g_autofree wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (link, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   return wtarget != NULL && wlink != NULL
-      && CreateSymbolicLinkW (wlink, wtarget, SYMBOLIC_LINK_FLAG_DIRECTORY);
+         && CreateSymbolicLinkW (wlink, wtarget, SYMBOLIC_LINK_FLAG_DIRECTORY);
 }
 
 static gboolean
 create_windows_file_symlink (const gchar *target, const gchar *link)
 {
   g_autofree wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   g_autofree wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (link, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   return wtarget != NULL && wlink != NULL
-      && CreateSymbolicLinkW (wlink, wtarget, 0);
+         && CreateSymbolicLinkW (wlink, wtarget, 0);
 }
 
 static void
@@ -388,7 +389,7 @@ test_windows_parent_reparse_is_rejected (void)
   g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
       !=, WYCTL_TOKEN_FILE_OK);
   g_assert_false (g_file_test (g_build_filename (real_dir, "token", NULL),
-          G_FILE_TEST_EXISTS));
+      G_FILE_TEST_EXISTS));
   g_remove (link_dir);
   g_rmdir (real_dir);
 }
@@ -397,7 +398,7 @@ static void
 test_windows_ancestor_reparse_is_rejected (void)
 {
   g_autofree gchar *real_root = g_dir_make_tmp ("wyctl-ancestor-XXXXXX",
-      NULL);
+          NULL);
   g_assert_nonnull (real_root);
   g_autofree gchar *real_parent = g_build_filename (real_root, "inner", NULL);
   g_assert_cmpint (g_mkdir (real_parent, 0700), ==, 0);
@@ -409,7 +410,7 @@ test_windows_ancestor_reparse_is_rejected (void)
     return;
   }
   g_autofree gchar *path = g_build_filename (alias_root, "inner", "token",
-      NULL);
+          NULL);
   g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
       !=, WYCTL_TOKEN_FILE_OK);
   g_autofree gchar *token = NULL;
@@ -417,7 +418,7 @@ test_windows_ancestor_reparse_is_rejected (void)
       WYCTL_TOKEN_FILE_OK);
   g_assert_null (token);
   g_assert_false (g_file_test (g_build_filename (real_parent, "token", NULL),
-          G_FILE_TEST_EXISTS));
+      G_FILE_TEST_EXISTS));
   g_remove (alias_root);
   g_rmdir (real_parent);
   g_rmdir (real_root);
@@ -432,7 +433,7 @@ test_windows_final_reparse_is_rejected (void)
   g_autofree gchar *link = g_build_filename (dir, "token", NULL);
   g_assert_true (g_file_set_contents (real, "access-1", -1, NULL));
   g_autofree wchar_t *wreal = (wchar_t *) g_utf8_to_utf16 (real, -1,
-      NULL, NULL, NULL);
+          NULL, NULL, NULL);
   g_assert_nonnull (wreal);
   SetFileAttributesW (wreal, FILE_ATTRIBUTE_READONLY);
   if (!create_windows_file_symlink (real, link)) {
@@ -494,5 +495,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/token-file/windows-final-reparse-rejected",
       test_windows_final_reparse_is_rejected);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
