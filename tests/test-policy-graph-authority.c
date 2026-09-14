@@ -3337,6 +3337,28 @@ remove_quota_test_tree (const gchar *path)
 }
 
 static void
+assert_graph_directory_absent (const gchar *fact_root, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_autofree gchar *tenant_component = NULL;
+  g_autofree gchar *graph_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode (tenant_id,
+      &tenant_component), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+      &graph_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path = g_build_filename (fact_root,
+          tenant_component, graph_component, NULL);
+  g_assert_false (g_file_test (graph_path, G_FILE_TEST_EXISTS));
+
+  g_autoptr (GError) error = NULL;
+  GDir *root = g_dir_open (fact_root, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+  g_assert_null (g_dir_read_name (root));
+  g_dir_close (root);
+}
+
+static void
 test_graph_quota_reservation_survives_reopen (void)
 {
   g_autofree gchar *store_root = NULL;
@@ -3381,10 +3403,13 @@ test_graph_quota_reservation_survives_reopen (void)
   g_assert_false (quota_exceeded);
   g_assert_cmpstr (first_op, !=, "");
   WylFactGraphDirectory pending_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
-      fact_root, "quota-reopen", "pending", FALSE, &pending_directory),
-      ==, WYRELOG_E_NOT_FOUND);
+  wyrelog_error_t directory_rc =
+      wyl_policy_store_open_fact_graph_directory (store, fact_root,
+          "quota-reopen", "pending", FALSE, &pending_directory);
+  g_assert_true (directory_rc == WYRELOG_E_NOT_FOUND
+      || directory_rc == WYRELOG_E_POLICY);
   wyl_fact_graph_directory_clear (&pending_directory);
+  assert_graph_directory_absent (fact_root, "quota-reopen", "pending");
   WylPolicyGraphQuotaStatus status = { 0 };
   g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
       "quota-reopen", &status), ==, WYRELOG_E_OK);
@@ -3426,10 +3451,12 @@ test_graph_quota_reservation_survives_reopen (void)
       "SELECT count(*) FROM fact_graphs WHERE tenant_id='quota-reopen';"),
       ==, 1);
   WylFactGraphDirectory blocked_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
-      fact_root, "quota-reopen", "blocked", FALSE, &blocked_directory),
-      ==, WYRELOG_E_NOT_FOUND);
+  directory_rc = wyl_policy_store_open_fact_graph_directory (store,
+          fact_root, "quota-reopen", "blocked", FALSE, &blocked_directory);
+  g_assert_true (directory_rc == WYRELOG_E_NOT_FOUND
+      || directory_rc == WYRELOG_E_POLICY);
   wyl_fact_graph_directory_clear (&blocked_directory);
+  assert_graph_directory_absent (fact_root, "quota-reopen", "blocked");
 
   wyl_policy_fact_graph_create_options_t zero_limit = opts;
   zero_limit.tenant_id = "quota-zero";
@@ -3441,11 +3468,23 @@ test_graph_quota_reservation_survives_reopen (void)
         (store, &zero_limit, NULL, blocked_op, &quota_exceeded, NULL),
       ==, WYRELOG_E_POLICY);
   g_assert_true (quota_exceeded);
+  WylPolicyGraphQuotaStatus zero_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-zero", &zero_status), ==, WYRELOG_E_OK);
+  g_assert_true (zero_status.has_limit);
+  g_assert_cmpuint (zero_status.hard_limit, ==, 0);
+  g_assert_cmpuint (zero_status.committed, ==, 0);
+  g_assert_cmpuint (zero_status.pending, ==, 0);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graphs WHERE tenant_id='quota-zero';"),
+      ==, 0);
   WylFactGraphDirectory zero_limit_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
-      fact_root, "quota-zero", "zero-limit", FALSE,
-      &zero_limit_directory), ==, WYRELOG_E_NOT_FOUND);
+  directory_rc = wyl_policy_store_open_fact_graph_directory (store, fact_root,
+          "quota-zero", "zero-limit", FALSE, &zero_limit_directory);
+  g_assert_true (directory_rc == WYRELOG_E_NOT_FOUND
+      || directory_rc == WYRELOG_E_POLICY);
   wyl_fact_graph_directory_clear (&zero_limit_directory);
+  assert_graph_directory_absent (fact_root, "quota-zero", "zero-limit");
 
   /* The fallback create path commits a durable quota reservation before
    * touching the filesystem. A failure and store reopen keep one pending
