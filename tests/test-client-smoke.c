@@ -1727,6 +1727,30 @@ main (void)
   wyl_client_service_credential_operation_reconcile_result_clear
     (&reconcile_result);
 
+  /*
+   * #1073: reconcile had no 404 or 503 arm, so both fell through to
+   * WYRELOG_E_IO.  503 is the one status the daemon emits to mean "retry
+   * later" -- wyl_daemon_policy_write_acquire answers it on WYRELOG_E_BUSY --
+   * and WYRELOG_E_IO is its documented opposite, so a caller that should back
+   * off was told it had hit a permanent transport fault.  Both siblings on
+   * this route family already map these.
+   */
+  http.status = 503;
+  http.body = "{\"error\":\"service_credential_operation_reconcile_unavailable\"}";
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_BUSY)
+    return 318;
+  http.status = 404;
+  http.body = "{\"error\":\"service_credential_not_found\"}";
+  if (wyl_client_service_credential_operation_reconcile_for_tenant
+        (local_client, "tenant-a", &reconcile_request, 123, "public", 49,
+      &reconcile_result) != WYRELOG_E_NOT_FOUND)
+    return 319;
+  http.status = 0;
+  wyl_client_service_credential_operation_reconcile_result_clear
+    (&reconcile_result);
+
   http.body = "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
       "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
       "\"tenant\":\"tenant-a\",\"extra\":\"x\"}}";
