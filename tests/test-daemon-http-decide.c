@@ -6736,7 +6736,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
-    return 512;
+    return 514;
 
   return 0;
 }
@@ -20880,7 +20880,7 @@ check_service_management_logout_liveness_barrier (void)
   store = wyl_handle_get_policy_store (logout_env.handle);
   if (wyl_policy_store_foreach_service_principal (store,
       count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
-    rc = 2560;
+    rc = 2577;
     goto out;
   }
   wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
@@ -21005,7 +21005,7 @@ check_service_management_loopback_forwarded_matrix (void)
       != WYRELOG_E_OK
       || wyl_request_id_new (revoke_request_id, sizeof revoke_request_id)
       != WYRELOG_E_OK) {
-    rc = 2560;
+    rc = 2578;
     goto out;
   }
 

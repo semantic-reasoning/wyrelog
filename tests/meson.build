@@ -3624,6 +3624,19 @@ test('fact-store-failure-codes-self-test', python3,
     meson.project_source_root(),
   ])
 
+# A failure code that is a multiple of 256 reaches the shell as exit status 0,
+# so meson records a failing assertion as Ok.  Eleven files carried one.
+test('exit-status-truncation', python3,
+  args : [files('test-exit-status-truncation.py'),
+    meson.project_source_root()])
+
+test('exit-status-truncation-self-test', python3,
+  args : [
+    files('test-exit-status-truncation.py'),
+    '--self-test',
+    meson.project_source_root(),
+  ])
+
 test('windows-ci-timeout-boundary', python3,
   args : [files('test-windows-ci-timeout-boundary.py'),
     meson.project_source_root()])

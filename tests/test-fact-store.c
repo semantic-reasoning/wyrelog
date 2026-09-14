@@ -3806,7 +3806,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
       || !identified_open_is (noncanonical, &test_identity,
       WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
       WYL_FACT_STORE_IDENTITY_RESULT_FORMAT))
-    return 2304;
+    return 2335;
 
   if (!identified_open_is (mixed, &test_identity,
       WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,

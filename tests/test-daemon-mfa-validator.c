@@ -574,7 +574,7 @@ check_validator_auto_unlocks_after_window (void)
       &pre_count, &pre_locked_at) != 0)
     return 255;
   if (g_strcmp0 (pre_state, "locked") != 0)
-    return 256;
+    return 263;
 
   guint correct = 0;
   gint64 now = 0;
