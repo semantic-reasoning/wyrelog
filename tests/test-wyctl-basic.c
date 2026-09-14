@@ -1145,20 +1145,42 @@ static gpointer
 policy_check_server_thread (gpointer data)
 {
   PolicyCheckServer *server = data;
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
-  if (conn == NULL)
-    return NULL;
-
+  /*
+   * The response below is written whether or not a request was captured, so
+   * a connection that delivers nothing still lets the child succeed with
+   * server->request left NULL -- which is how this raced in CI while every
+   * earlier assertion in run_policy_decision_case passed. Keep accepting
+   * until one connection actually delivers a request, and accumulate until
+   * the header terminator arrives rather than trusting a single read to
+   * return the whole thing.
+   */
   gchar buffer[4096];
-  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
-  GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
-  gssize n = g_input_stream_read (input, buffer, sizeof buffer - 1, NULL, NULL);
-  if (n > 0) {
-    buffer[n] = '\0';
-    server->request = g_strdup (buffer);
+  gsize filled = 0;
+  g_autoptr (GSocketConnection) conn = NULL;
+  GInputStream *input = NULL;
+  GOutputStream *output = NULL;
+  while (filled == 0) {
+    g_autoptr (GError) error = NULL;
+    g_clear_object (&conn);
+    conn = g_socket_listener_accept (server->listener, NULL, server->cancel,
+            &error);
+    if (conn == NULL)
+      return NULL;
+    input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
+    output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
+    while (filled < sizeof buffer - 1) {
+      gssize n = g_input_stream_read (input, buffer + filled,
+              sizeof buffer - 1 - filled, NULL, NULL);
+      if (n <= 0)
+        break;
+      filled += (gsize) n;
+      buffer[filled] = '\0';
+      if (strstr (buffer, "\r\n\r\n") != NULL)
+        break;
+    }
   }
+  buffer[filled] = '\0';
+  server->request = g_strdup (buffer);
   if (server->delay_us > 0)
     g_usleep (server->delay_us);
 
