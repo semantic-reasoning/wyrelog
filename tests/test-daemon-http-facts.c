@@ -1263,6 +1263,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *race_limit_query = g_strdup_printf (
     "tenant=%s&limit=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
     graph_count + 1, FACT_GUARD);
+  g_clear_pointer (&quota_body, g_free);
   quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
           race_limit_query, admin_token, NULL, &quota_status, &quota_body);
   if (quota_rc != 0 || quota_status != 200)
@@ -1334,6 +1335,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *below_usage_query = g_strdup_printf (
     "tenant=%s&limit=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
     graph_count, FACT_GUARD);
+  g_clear_pointer (&quota_body, g_free);
   quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
           below_usage_query, admin_token, NULL, &quota_status, &quota_body);
   if (quota_rc != 0 || quota_status != 409 ||
@@ -1374,6 +1376,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
 
   g_autofree gchar *restore_quota_query = g_strdup_printf (
     "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  g_clear_pointer (&quota_body, g_free);
   quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
           restore_quota_query, admin_token, NULL, &quota_status, &quota_body);
   if (quota_rc != 0 || quota_status != 200)
