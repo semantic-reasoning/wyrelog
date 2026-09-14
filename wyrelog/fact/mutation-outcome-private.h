@@ -42,6 +42,15 @@ G_BEGIN_DECLS;
  *
  * On an idempotent no-op (a byte-identical batch replayed under the same
  * idempotency key) inserted is FALSE and both deltas are zero.
+ *
+ * inserted does not mean a row was removed.  A retract whose values never
+ * matched anything still appends its tombstone, so inserted is TRUE and the
+ * deltas are charged from the rows supplied, exactly as for a retract that
+ * shadowed a live row --
+ * the write path never reads the relation, so it cannot know which happened
+ * (#1027).
+ * Reading inserted == TRUE as "something was retracted" is therefore wrong;
+ * it means "a row was written".
  */
 typedef struct
 {

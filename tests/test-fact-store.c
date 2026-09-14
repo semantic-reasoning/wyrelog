@@ -119,6 +119,8 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   2800-2806    check_fact_forget_pending_count_reports_without_executing
  *   2810-2815    check_fact_forget_pending_count_ignores_schema_only_store
  *   3000-3014    check_legacy_identity_binding_is_atomic_and_recoverable
+ *   3020-3027
+ *       check_retract_of_never_appended_row_reports_success
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -831,6 +833,100 @@ check_retract_by_id_second_retract_same_trigger (void)
   return 0;
 }
 
+/*
+ * #1027: a retract whose values never matched anything is reported exactly
+ * like one that shadowed a live row.  That is intended -- retract is an
+ * append of a tombstone, and the write path never reads the relation, so it
+ * cannot know which happened -- but nothing pinned it, so the contract was
+ * incidental rather than chosen.
+ *
+ * Note the contrast with check_retract_by_id_not_found directly below, which
+ * answers WYRELOG_E_NOT_FOUND.  That path resolves a stored fact_batches row
+ * through lookup_batch_scope_unlocked and reports the miss; retract by value
+ * never queries the relation at all, so it has no miss to report.
+ *
+ * The replay arm is the load-bearing part.  Success and positive deltas
+ * cannot by themselves detect a store that persisted nothing, because both
+ * deltas are computed from the request (store.c:1972-1973) rather than read
+ * back; only the second call answering inserted = FALSE proves the first one
+ * wrote a fact_batches row.  What is deliberately not asserted here is the
+ * observable effect -- that a query afterwards returns unchanged rows --
+ * which belongs to the engine rather than the store.
+ */
+static gint
+check_retract_of_never_appended_row_reports_success (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 3020;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3026;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 3027;
+
+  /* "ghost" is never appended: the relation stays empty throughout. */
+  wyl_fact_value_t ghost_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "ghost"},
+  };
+  const wyl_fact_row_t ghost_rows[] = {
+    {ghost_values, 1},
+  };
+  const wyl_fact_store_batch_t ghost_batch = {
+    .batch_id = "ghost-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = "ghost:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,     /* overridden by the retract API. */
+    .rows = ghost_rows,
+    .n_rows = G_N_ELEMENTS (ghost_rows),
+  };
+
+  gboolean inserted = FALSE;
+  wyl_fact_commit_delta_t delta = { 0 };
+  if (wyl_fact_store_retract_batch_delta (store, &schema, &ghost_batch,
+      &inserted, &delta) != WYRELOG_E_OK)
+    return 3021;
+  if (!inserted)
+    return 3022;
+  /*
+   * Exact values, not merely positive: the contract is that a blind
+   * retract is charged *the same* as a matching one, so a change that
+   * kept the deltas positive while pricing this case differently would
+   * break the documented claim and must fail here.  One row; "ghost" is
+   * a symbol, so it charges its five UTF-8 bytes.
+   */
+  if (delta.committed_row_delta != 1 || delta.logical_byte_delta != 5)
+    return 3023;
+
+  /*
+   * The other no-op answers differently, and this arm is what makes the
+   * distinction checkable rather than merely described: replaying the same
+   * batch under the same idempotency key yields inserted = FALSE and zero
+   * deltas, where the non-matching retract above yielded TRUE and positive.
+   */
+  gboolean replay_inserted = TRUE;
+  wyl_fact_commit_delta_t replay_delta = { 0 };
+  if (wyl_fact_store_retract_batch_delta (store, &schema, &ghost_batch,
+      &replay_inserted, &replay_delta) != WYRELOG_E_OK)
+    return 3024;
+  if (replay_inserted || replay_delta.committed_row_delta != 0
+      || replay_delta.logical_byte_delta != 0)
+    return 3025;
+  return 0;
+}
+
 static gint
 check_retract_by_id_not_found (void)
 {
@@ -1184,6 +1280,10 @@ check_fact_store_retract_by_batch_id (void)
   if (rc != 0)
     return rc;
   rc = check_retract_by_id_not_found ();
+  if (rc != 0)
+    return rc;
+
+  rc = check_retract_of_never_appended_row_reports_success ();
   if (rc != 0)
     return rc;
   rc = check_retract_by_id_trigger_is_retract_batch ();
