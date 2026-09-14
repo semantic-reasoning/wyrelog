@@ -3492,6 +3492,20 @@ test('check-daemon-bearer-resolver-structure-self-test', python3,
   timeout : 300,
 )
 
+# The guard finds every definition it pins with function_span, and nothing
+# else in the suite would notice if that lexer started answering differently:
+# the self-test above asserts verdicts, which survive a span that is off by a
+# few characters, and the run against the real http.c only notices a
+# disagreement that lands on one of the 28 names it pins.  This holds it to
+# the single pattern it replaced (#1080).  It runs both formulations over
+# short generated sources only, so its cost does not track http.c: 2.0s
+# locally, which meson's 30s default clears by 15x, so it carries no override.
+test('daemon-bearer-resolver-span-equivalence', python3,
+  args : [
+    meson.current_source_dir() / 'test-daemon-bearer-resolver-span-equivalence.py',
+  ],
+)
+
 service_auth_write_terminal_owners_guard = find_program(
   '../tools/check-service-auth-write-terminal-owners.py')
 test('check-service-auth-write-terminal-owners',

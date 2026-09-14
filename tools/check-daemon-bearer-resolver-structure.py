@@ -11,13 +11,61 @@ def masked(text: str) -> str:
     return pattern.sub(lambda match: " " * len(match.group(0)), text)
 
 
+# Everything the prefix subpattern can match is drawn from this set, so the
+# text a prefix could occupy in front of a name ends at the nearest character
+# outside it.
+PREFIX_CHAR = re.compile(r"[\w\s*]")
+
+
 def function_span(source: str, name: str, static_only: bool = False) -> tuple[int, int]:
-    prefix = r"static\s+wyrelog_error_t\s+" if static_only else r"(?:static\s+)?\w[\w\s\*]*?\s+"
-    matches = list(re.finditer(prefix + re.escape(name) + r"\s*\([^;]*?\)\s*\{", source, re.S))
-    if len(matches) != 1:
-        raise ValueError(f"expected exactly one definition of {name}, found {len(matches)}")
-    start = matches[0].start()
-    brace = source.find("{", matches[0].start(), matches[0].end())
+    # Anchored on the name, which is a literal, rather than searching the whole
+    # file with a pattern that opens on a variable-length class.  The latter
+    # gave re nothing to scan for, so it retried the lazy prefix at every
+    # offset of a 500KB http.c: 0.45s per lookup, 38 lookups, and a cost that
+    # grew with the file until this guard and its self-test both ran past
+    # meson's 30s default on the Windows job (#1080).  The prefix and the
+    # signature are still the same two subpatterns, now applied to a bounded
+    # window.  tests/test-daemon-bearer-resolver-span-equivalence.py holds the
+    # two formulations to the same answers.
+    prefix = re.compile(
+        (r"static\s+wyrelog_error_t\s+" if static_only
+         else r"(?:static\s+)?\w[\w\s\*]*?\s+") + r"\Z", re.S)
+    signature = re.compile(re.escape(name) + r"\s*\([^;]*?\)\s*\{", re.S)
+    spans: list[tuple[int, int]] = []
+    consumed = 0
+    for hit in re.finditer(re.escape(name), source):
+        # finditer never restarts inside a match it already made, and the
+        # signature's [^;]*? can run through a later definition of the same
+        # name when the parameter text carries an unclosed paren and no
+        # semicolon.  Visiting every occurrence would count that definition
+        # separately and report a second one the old pattern never saw.
+        if hit.start() < consumed:
+            continue
+        head_end = hit.start()
+        head_start = head_end
+        # Bounded by the run in front of the name, not by the file: 15 to 541
+        # characters per pinned name in http.c, where the longest run of these
+        # characters anywhere is 1801.  The bound is on C-shaped input, not on
+        # any input -- a name preceded by a very long masked comment costs a
+        # scan of that whole comment.  Do not "simplify" this to
+        # re.compile(r"[\w\s*]*\Z").search(source, 0, head_end): it answers
+        # the same and is slower still on exactly that input.
+        while head_start > 0 and PREFIX_CHAR.match(source[head_start - 1]):
+            head_start -= 1
+        head = prefix.search(source, head_start, head_end)
+        if head is None:
+            continue
+        tail = signature.match(source, head_end)
+        if tail is None:
+            continue
+        spans.append((head.start(), tail.end()))
+        consumed = tail.end()
+    if len(spans) != 1:
+        raise ValueError(f"expected exactly one definition of {name}, found {len(spans)}")
+    start, end = spans[0]
+    # The signature can swallow a brace inside the parameter text, so the body
+    # opens at the first brace in the match rather than at its last byte.
+    brace = source.find("{", start, end)
     depth = 0
     for pos in range(brace, len(source)):
         if source[pos] == "{":
