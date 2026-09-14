@@ -55,7 +55,7 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
   substitute = g_new (wchar_t, wcslen ((wchar_t *) wtarget) + 5);
   if (substitute == NULL
       || swprintf (substitute, wcslen ((wchar_t *) wtarget) + 5,
-          L"\\??\\%ls", (wchar_t *) wtarget) < 0)
+      L"\\??\\%ls", (wchar_t *) wtarget) < 0)
     return WYL_TEST_JUNCTION_FAILED;
   gsize substitute_bytes = wcslen (substitute) * sizeof (wchar_t);
   gsize target_bytes = wcslen ((wchar_t *) wtarget) * sizeof (wchar_t);
@@ -67,8 +67,8 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
       || !CreateDirectoryW ((LPCWSTR) wjunction, NULL))
     return WYL_TEST_JUNCTION_FAILED;
   handle = CreateFileW ((LPCWSTR) wjunction, GENERIC_WRITE, 0, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      NULL);
+          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+          NULL);
   if (handle == INVALID_HANDLE_VALUE) {
     RemoveDirectoryW ((LPCWSTR) wjunction);
     return WYL_TEST_JUNCTION_FAILED;
@@ -88,7 +88,7 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
   memcpy ((guint8 *) data->path_buffer + data->print_offset,
       wtarget, target_bytes);
   result = DeviceIoControl (handle, FSCTL_SET_REPARSE_POINT, data,
-      (DWORD) total, NULL, 0, &returned, NULL);
+          (DWORD) total, NULL, 0, &returned, NULL);
   DWORD error = result ? ERROR_SUCCESS : GetLastError ();
   CloseHandle (handle);
   if (!result)
@@ -105,12 +105,12 @@ static gboolean
 require_windows_junction_capability (const gchar *base)
 {
   g_autofree gchar *target = g_build_filename (base, "junction-probe-target",
-      NULL);
+          NULL);
   g_autofree gchar *junction = g_build_filename (base,
-      "junction-probe-link", NULL);
+          "junction-probe-link", NULL);
   g_assert_cmpint (g_mkdir (target, 0700), ==, 0);
   WylTestJunctionResult result = create_windows_directory_junction (junction,
-      target);
+          target);
   if (result == WYL_TEST_JUNCTION_CREATED)
     g_assert_cmpint (g_rmdir (junction), ==, 0);
   g_assert_cmpint (g_rmdir (target), ==, 0);
@@ -167,10 +167,10 @@ mutate_exact_delete_child_for_test (gpointer user_data)
 {
   WylTestExactDeleteRace *race = user_data;
   g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
-      NULL, NULL);
+          NULL, NULL);
   HANDLE handle = record != NULL ? CreateFileW ((LPCWSTR) record,
-      GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+          GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
   DWORD written = 0;
   if (handle == INVALID_HANDLE_VALUE) {
     race->error = record != NULL ? GetLastError () : ERROR_INVALID_NAME;
@@ -189,9 +189,9 @@ rebind_exact_delete_child_for_test (gpointer user_data)
 {
   WylTestExactDeleteRace *race = user_data;
   g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
-      NULL, NULL);
+          NULL, NULL);
   g_autofree gunichar2 *aside = g_utf8_to_utf16 (race->aside, -1, NULL, NULL,
-      NULL);
+          NULL);
   gboolean moved = record != NULL && aside != NULL
       && MoveFileExW ((LPCWSTR) record, (LPCWSTR) aside, 0);
   race->error = moved ? ERROR_SUCCESS
@@ -203,7 +203,7 @@ static void
 rearm_exact_delete_hook_for_test (gpointer user_data)
 {
   wyl_win_child_set_before_exact_delete_hook_for_test
-      (rearm_exact_delete_hook_for_test, user_data);
+    (rearm_exact_delete_hook_for_test, user_data);
 }
 
 static void
@@ -211,9 +211,9 @@ replace_destination_with_junction_for_test (gpointer user_data)
 {
   WylTestReplaceReparseRace *race = user_data;
   g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
-      NULL, NULL);
+          NULL, NULL);
   g_autofree gunichar2 *aside = g_utf8_to_utf16 (race->aside, -1, NULL, NULL,
-      NULL);
+          NULL);
   race->moved = record != NULL && aside != NULL
       && MoveFileExW ((LPCWSTR) record, (LPCWSTR) aside, 0);
   race->move_error = race->moved ? ERROR_SUCCESS : GetLastError ();
@@ -233,7 +233,7 @@ assert_child_contents (WylServiceCredentialOperationStorage *storage,
   gsize length = 0;
   gconstpointer data;
   g_assert_cmpint (wyl_service_credential_operation_child_read (storage,
-          anchor, name, &bytes), ==, WYRELOG_E_OK);
+      anchor, name, &bytes), ==, WYRELOG_E_OK);
   data = g_bytes_get_data (bytes, &length);
   g_assert_cmpuint (length, ==, strlen (expected));
   g_assert_true (memcmp (data, expected, length) == 0);
@@ -285,7 +285,7 @@ posix_lock_release_race_thread (gpointer data)
   g_mutex_unlock (&race->mutex);
 
   race->rc = wyl_service_credential_operation_child_lock (race->storage,
-      race->anchor, race->name, &race->fd);
+          race->anchor, race->name, &race->fd);
   if (race->rc == WYRELOG_E_OK)
     g_assert_cmpint (fstat (race->fd, &race->identity), ==, 0);
 
@@ -315,29 +315,29 @@ test_posix_child_backend (void)
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_autoptr (GBytes) oversized = g_bytes_new_take (g_malloc0
-      (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
-      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
+            (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
+          WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
   gint lock_fd = -1;
   gint second_lock_fd = -1;
 
   g_assert_nonnull (base);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
+          NULL);
   g_remove (record);
 
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_OK);
+      &anchor, &name, one), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_POLICY);
+      &anchor, &name, one), ==, WYRELOG_E_POLICY);
   assert_child_contents (&storage, &anchor, &name, "one");
   g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
-          &anchor, &name, two), ==, WYRELOG_E_OK);
+      &anchor, &name, two), ==, WYRELOG_E_OK);
   assert_child_contents (&storage, &anchor, &name, "two");
   g_autofree gchar *long_component = g_malloc (256);
   memset (long_component, 'x', 255);
@@ -345,32 +345,32 @@ test_posix_child_backend (void)
   WylServiceCredentialOperationChildName long_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (long_component, &long_name), ==, WYRELOG_E_OK);
+        (long_component, &long_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
-          &anchor, &long_name, one), ==, WYRELOG_E_OK);
+      &anchor, &long_name, one), ==, WYRELOG_E_OK);
   assert_child_contents (&storage, &anchor, &long_name, "one");
   g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
-          &anchor, &long_name), ==, WYRELOG_E_OK);
+      &anchor, &long_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
-          &anchor, &name), ==, WYRELOG_E_OK);
+      &anchor, &name), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) missing = NULL;
   g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
-          &anchor, &name, &missing), ==, WYRELOG_E_NOT_FOUND);
+      &anchor, &name, &missing), ==, WYRELOG_E_NOT_FOUND);
 
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
+      &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
-          &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
+      &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
 
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
-          &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
+      &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
-          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
+      &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
   wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
       lock_fd);
   lock_fd = -1;
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
-          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
+      &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
   wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
       second_lock_fd);
   second_lock_fd = -1;
@@ -382,7 +382,7 @@ test_posix_child_backend (void)
    * create and lock a different inode. */
   struct stat first_identity = { 0 };
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
-          &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
+      &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (fstat (lock_fd, &first_identity), ==, 0);
   PosixLockReleaseRace race = {
     .storage = &storage,
@@ -393,7 +393,7 @@ test_posix_child_backend (void)
   g_mutex_init (&race.mutex);
   g_cond_init (&race.cond);
   g_autoptr (GThread) waiter = g_thread_new ("lock-release-race",
-      posix_lock_release_race_thread, &race);
+          posix_lock_release_race_thread, &race);
   g_mutex_lock (&race.mutex);
   while (!race.ready)
     g_cond_wait (&race.cond, &race.mutex);
@@ -410,7 +410,7 @@ test_posix_child_backend (void)
       lock_fd);
   lock_fd = -1;
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
-          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
+      &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
   g_mutex_lock (&race.mutex);
   race.release = TRUE;
   g_cond_broadcast (&race.cond);
@@ -419,35 +419,35 @@ test_posix_child_backend (void)
   g_cond_clear (&race.cond);
   g_mutex_clear (&race.mutex);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_OK);
+      &anchor, &name, one), ==, WYRELOG_E_OK);
 
   WylServiceCredentialOperationRootAnchor mismatch = anchor;
   mismatch.identity_a++;
   g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
-          &mismatch, &name, &missing), ==, WYRELOG_E_POLICY);
+      &mismatch, &name, &missing), ==, WYRELOG_E_POLICY);
 
   g_autofree gchar *link = g_build_filename (storage.root_path, "link", NULL);
   g_assert_cmpint (symlink ("record", link), ==, 0);
   WylServiceCredentialOperationChildName link_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("link", &link_name), ==, WYRELOG_E_OK);
+        ("link", &link_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
-          &anchor, &link_name, &missing), ==, WYRELOG_E_POLICY);
+      &anchor, &link_name, &missing), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (link), ==, 0);
 
   g_autofree gchar *directory = g_build_filename (storage.root_path,
-      "directory", NULL);
+          "directory", NULL);
   g_assert_cmpint (g_mkdir (directory, 0700), ==, 0);
   WylServiceCredentialOperationChildName directory_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("directory", &directory_name), ==, WYRELOG_E_OK);
+        ("directory", &directory_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
-          &anchor, &directory_name, &missing), ==, WYRELOG_E_POLICY);
+      &anchor, &directory_name, &missing), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_rmdir (directory), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
-          &anchor, &name), ==, WYRELOG_E_OK);
+      &anchor, &name), ==, WYRELOG_E_OK);
 
   g_autoptr (GDir) entries = g_dir_open (storage.root_path, 0, NULL);
   const gchar *entry;
@@ -481,38 +481,38 @@ test_posix_exact_delete_backend (void)
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_assert_nonnull (base);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (root, "record", NULL);
   g_autofree gchar *aside = g_build_filename (root, "record-aside", NULL);
   g_autofree gchar *hardlink = g_build_filename (root, "record-hardlink",
-      NULL);
+          NULL);
 
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_OK);
+      &anchor, &name, one), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, two), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &name, two), ==, WYRELOG_E_POLICY);
   assert_child_contents (&storage, &anchor, &name, "one");
 
   g_assert_cmpint (g_chmod (record, 0644), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_chmod (record, 0600), ==, 0);
   g_assert_cmpint (link (record, hardlink), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (hardlink), ==, 0);
 
   PosixExactDeleteRace race = {.record = record,.aside = aside };
   wyl_service_credential_operation_child_set_before_exact_delete_hook_for_test
-      (replace_exact_delete_child_for_test, &race);
+    (replace_exact_delete_child_for_test, &race);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
   g_assert_true (race.moved);
   g_autofree gchar *decoy = NULL;
   gsize decoy_size = 0;
@@ -523,36 +523,36 @@ test_posix_exact_delete_backend (void)
 
   wyl_service_credential_operation_child_fail_next_root_sync_for_test ();
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_IO);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_IO);
   g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_OK);
+      &anchor, &name, one), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &name, one), ==, WYRELOG_E_OK);
+        (&storage, &anchor, &name, one), ==, WYRELOG_E_OK);
   g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
   g_autoptr (GBytes) empty = g_bytes_new_static ("", 0);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, empty), ==, WYRELOG_E_OK);
+      &anchor, &name, empty), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
-      (&storage, &anchor, &name), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &name), ==, WYRELOG_E_POLICY);
   g_assert_true (g_file_test (record, G_FILE_TEST_EXISTS));
   g_assert_cmpint (g_remove (record), ==, 0);
   wyl_service_credential_operation_child_fail_next_root_sync_for_test ();
   g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
-      (&storage, &anchor, &name), ==, WYRELOG_E_IO);
+        (&storage, &anchor, &name), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
-      (&storage, &anchor, &name), ==, WYRELOG_E_NOT_FOUND);
+        (&storage, &anchor, &name), ==, WYRELOG_E_NOT_FOUND);
 
   g_autofree gchar *link_path = g_build_filename (root, "link", NULL);
   g_assert_cmpint (symlink ("missing", link_path), ==, 0);
   WylServiceCredentialOperationChildName link_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("link", &link_name), ==, WYRELOG_E_OK);
+        ("link", &link_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &link_name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &link_name, one), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (link_path), ==, 0);
 
   g_autofree gchar *directory = g_build_filename (root, "directory", NULL);
@@ -560,9 +560,9 @@ test_posix_exact_delete_backend (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (g_mkdir (directory, 0700), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("directory", &directory_name), ==, WYRELOG_E_OK);
+        ("directory", &directory_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &directory_name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &directory_name, one), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_rmdir (directory), ==, 0);
 
   g_autofree gchar *fifo = g_build_filename (root, "fifo", NULL);
@@ -570,15 +570,15 @@ test_posix_exact_delete_backend (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (mkfifo (fifo, 0600), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("fifo", &fifo_name), ==, WYRELOG_E_OK);
+        ("fifo", &fifo_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &anchor, &fifo_name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &anchor, &fifo_name, one), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (fifo), ==, 0);
 
   WylServiceCredentialOperationRootAnchor mismatch = anchor;
   mismatch.identity_a++;
   g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
-      (&storage, &mismatch, &name, one), ==, WYRELOG_E_POLICY);
+        (&storage, &mismatch, &name, one), ==, WYRELOG_E_POLICY);
 
   wyl_service_credential_operation_child_name_clear (&fifo_name);
   wyl_service_credential_operation_child_name_clear (&directory_name);
@@ -598,7 +598,7 @@ test_resolves_and_rejects_symlink (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s%cwyrelog-operation-root-%lu",
-      local, G_DIR_SEPARATOR, (gulong) GetCurrentProcessId ());
+          local, G_DIR_SEPARATOR, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   /* A killed prior run may leave these deterministic test directories. */
   g_rmdir (root);
@@ -614,31 +614,31 @@ test_resolves_and_rejects_symlink (void)
    * safe to clear before it has ever held a root. */
   wyl_service_credential_operation_storage_clear (&storage);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_true (g_file_test (storage.root_path, G_FILE_TEST_IS_DIR));
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
   anchor.identity_a++;
   g_assert_false (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   g_assert_false (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
 #ifndef G_OS_WIN32
   g_assert_cmpint (g_chmod (storage.root_path, 0777), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
 #endif
   wyl_service_credential_operation_storage_clear (&storage);
 #ifndef G_OS_WIN32
   g_autofree gchar *link = g_build_filename (base, "link", NULL);
   g_assert_cmpint (symlink (root, link), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (link,
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (link), ==, 0);
 #endif
   g_assert_cmpint (g_rmdir (root), ==, 0);
@@ -655,7 +655,7 @@ test_rejects_file_root (void)
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (file,
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
   wyl_service_credential_operation_storage_clear (&storage);
   g_assert_cmpint (g_remove (file), ==, 0);
   g_assert_cmpint (g_rmdir (base), ==, 0);
@@ -682,22 +682,22 @@ test_child_name_and_anchor_contract (void)
   memset (too_long, 'a', 255);
   for (gsize i = 0; invalid[i] != NULL; i++)
     g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-        (invalid[i], &name), ==, WYRELOG_E_POLICY);
+          (invalid[i], &name), ==, WYRELOG_E_POLICY);
   for (gsize i = 0; reserved[i] != NULL; i++)
     g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-        (reserved[i], &name), ==, WYRELOG_E_POLICY);
+          (reserved[i], &name), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (invalid_utf8, &name), ==, WYRELOG_E_POLICY);
+        (invalid_utf8, &name), ==, WYRELOG_E_POLICY);
   too_long[255] = 'a';
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (too_long, &name), ==, WYRELOG_E_POLICY);
+        (too_long, &name), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record-01", &name), ==, WYRELOG_E_OK);
+        ("record-01", &name), ==, WYRELOG_E_OK);
   g_assert_cmpstr (name.component, ==, "record-01");
   wyl_service_credential_operation_child_name_clear (&name);
   g_assert_null (name.component);
   g_assert_false (wyl_service_credential_operation_storage_anchor_matches
-      (NULL, &anchor));
+        (NULL, &anchor));
 }
 
 #ifdef G_OS_WIN32
@@ -710,7 +710,7 @@ test_windows_child_read_validation (void)
   g_assert_cmpint (wyl_win_child_read (NULL, NULL, NULL, &bytes), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("missing", &name), ==, WYRELOG_E_OK);
+        ("missing", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_read (NULL, NULL, &name, &bytes), ==,
       WYRELOG_E_POLICY);
   wyl_service_credential_operation_child_name_clear (&name);
@@ -733,11 +733,11 @@ test_windows_reparse_status_mapping (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (reparse_statuses); i++)
     g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
-        ((LONG) reparse_statuses[i]), ==, WYRELOG_E_POLICY);
+          ((LONG) reparse_statuses[i]), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
-      ((LONG) 0xC0000034UL), ==, WYRELOG_E_NOT_FOUND);
+        ((LONG) 0xC0000034UL), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
-      ((LONG) 0xC000007FUL), ==, WYRELOG_E_IO);
+        ((LONG) 0xC000007FUL), ==, WYRELOG_E_IO);
 }
 
 static void
@@ -746,7 +746,7 @@ test_windows_live_root_validation (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-live-root-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -755,25 +755,25 @@ test_windows_live_root_validation (void)
   WylServiceCredentialOperationRootAnchor probe =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   DWORD saved_index = storage.root_file_index_low;
   storage.root_file_index_low ^= 1u;
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &probe), ==, WYRELOG_E_POLICY);
+        (&storage, &probe), ==, WYRELOG_E_POLICY);
   storage.root_file_index_low = saved_index;
   g_assert_true (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
 
   HANDLE saved_handle = storage.root_handle;
   storage.root_handle = INVALID_HANDLE_VALUE;
   g_assert_false (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
   storage.root_handle = saved_handle;
   g_assert_true (wyl_service_credential_operation_storage_anchor_matches
-      (&storage, &anchor));
+        (&storage, &anchor));
 
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
@@ -787,7 +787,7 @@ test_windows_child_read_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-read-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -800,19 +800,19 @@ test_windows_child_read_fixture (void)
   WylWinChildIdentity identity;
   wyrelog_error_t error;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
+          NULL);
   g_remove (record);
   g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
       WYRELOG_E_NOT_FOUND);
   if (!wyl_win_nt_create_relative (storage.root_handle, &name, GENERIC_WRITE,
-          WYL_WIN_CHILD_CREATE, FILE_SHARE_READ | FILE_SHARE_WRITE
-          | FILE_SHARE_DELETE, &handle, &identity, &error)) {
+      WYL_WIN_CHILD_CREATE, FILE_SHARE_READ | FILE_SHARE_WRITE
+      | FILE_SHARE_DELETE, &handle, &identity, &error)) {
     g_test_message ("NtCreateFile child create error=%d", error);
     g_assert_not_reached ();
   }
@@ -838,7 +838,7 @@ test_windows_child_create_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-create-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -847,36 +847,36 @@ test_windows_child_create_fixture (void)
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("empty", &name), ==, WYRELOG_E_OK);
+        ("empty", &name), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) empty = g_bytes_new_static ("", 0);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, empty), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, empty), ==,
       WYRELOG_E_POLICY);
   g_autoptr (GBytes) boundary = g_bytes_new_take (g_malloc0 (64u * 1024u),
-      64u * 1024u);
+          64u * 1024u);
   WylServiceCredentialOperationChildName boundary_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("boundary", &boundary_name), ==, WYRELOG_E_OK);
+        ("boundary", &boundary_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &boundary_name,
-          boundary), ==, WYRELOG_E_OK);
+      boundary), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) roundtrip = NULL;
   g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &boundary_name,
-          &roundtrip), ==, WYRELOG_E_OK);
+      &roundtrip), ==, WYRELOG_E_OK);
   g_assert_cmpuint (g_bytes_get_size (roundtrip), ==, 64u * 1024u);
   g_autoptr (GBytes) oversized = g_bytes_new_take (g_malloc0
-      (64u * 1024u + 1), 64u * 1024u + 1);
+            (64u * 1024u + 1), 64u * 1024u + 1);
   WylServiceCredentialOperationChildName oversized_name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("oversized", &oversized_name), ==, WYRELOG_E_OK);
+        ("oversized", &oversized_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &oversized_name,
-          oversized), ==, WYRELOG_E_POLICY);
+      oversized), ==, WYRELOG_E_POLICY);
   g_autofree gchar *empty_path =
       g_build_filename (storage.root_path, "empty", NULL);
   g_autofree gchar *boundary_path =
@@ -896,7 +896,7 @@ test_windows_directory_flush_failures (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-flush-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -907,13 +907,13 @@ test_windows_directory_flush_failures (void)
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
+          NULL);
   g_remove (record);
 
   /* Unsupported directory flushes retain the platform's best-effort
@@ -963,7 +963,7 @@ test_windows_child_replace_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-replace-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -972,13 +972,13 @@ test_windows_child_replace_fixture (void)
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
+          NULL);
   g_remove (record);
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
@@ -999,8 +999,8 @@ test_windows_child_replace_fixture (void)
   g_assert_cmpmem (g_bytes_get_data (second, &size), size, "two", 3);
   /* Oversized payload fails closed. */
   g_autoptr (GBytes) oversized = g_bytes_new_take (g_malloc0
-      (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
-      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
+            (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
+          WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
   g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, oversized),
       ==, WYRELOG_E_POLICY);
   /* Anchor mismatch fails closed. */
@@ -1025,7 +1025,7 @@ test_windows_replace_ignores_stale_temp_after_reopen (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-stale-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -1039,28 +1039,28 @@ test_windows_replace_ignores_stale_temp_after_reopen (void)
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_autoptr (GBytes) residue = g_bytes_new_static ("stale", 5);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
       WYRELOG_E_OK);
   g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
-      name.component, -1);
+          name.component, -1);
   g_autofree gchar *stale_component = g_strdup_printf (".replace-%s",
-      digest);
+          digest);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (stale_component, &stale), ==, WYRELOG_E_OK);
+        (stale_component, &stale), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &stale, residue),
       ==, WYRELOG_E_OK);
 
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
       WYRELOG_E_OK);
   g_autoptr (GBytes) roundtrip = NULL;
@@ -1087,7 +1087,7 @@ test_windows_replace_survives_root_substitution (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-subst-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   g_autofree gchar *aside = g_build_filename (base, "state-aside", NULL);
   WylServiceCredentialOperationStorage storage =
@@ -1099,11 +1099,11 @@ test_windows_replace_survives_root_substitution (void)
   gsize size = 0;
   g_rmdir (aside);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
@@ -1139,8 +1139,8 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf
-      ("%s\\wyrelog-ancestor-subst-test-%lu", local,
-      (gulong) GetCurrentProcessId ());
+        ("%s\\wyrelog-ancestor-subst-test-%lu", local,
+          (gulong) GetCurrentProcessId ());
   g_autofree gchar *ancestor = g_build_filename (base, "ancestor", NULL);
   g_autofree gchar *root = g_build_filename (ancestor, "state", NULL);
   g_autofree gchar *aside = g_build_filename (base, "ancestor-aside", NULL);
@@ -1160,9 +1160,9 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
   g_rmdir (decoy_root);
   g_rmdir (decoy);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   if (!require_windows_junction_capability (base)) {
     wyl_service_credential_operation_root_anchor_clear (&anchor);
     wyl_service_credential_operation_storage_clear (&storage);
@@ -1172,16 +1172,16 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
     return;
   }
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
       WYRELOG_E_OK);
 
   /* Replace an ancestor of the captured root with a junction into a decoy
    * tree.  All path-based child operations would now resolve through decoy. */
   g_autofree gunichar2 *wancestor = g_utf8_to_utf16 (ancestor, -1, NULL, NULL,
-      NULL);
+          NULL);
   g_autofree gunichar2 *waside = g_utf8_to_utf16 (aside, -1, NULL, NULL,
-      NULL);
+          NULL);
   gboolean moved = MoveFileExW ((LPCWSTR) wancestor, (LPCWSTR) waside, 0);
   DWORD move_error = moved ? ERROR_SUCCESS : GetLastError ();
   if (!moved) {
@@ -1196,7 +1196,7 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
     g_autoptr (GBytes) roundtrip = NULL;
     gsize size = 0;
     g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name,
-            &roundtrip), ==, WYRELOG_E_OK);
+        &roundtrip), ==, WYRELOG_E_OK);
     g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
     wyl_service_credential_operation_child_name_clear (&name);
     wyl_service_credential_operation_root_anchor_clear (&anchor);
@@ -1210,7 +1210,7 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
   }
   g_assert_cmpint (g_mkdir_with_parents (decoy_root, 0700), ==, 0);
   g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
-      NULL);
+          NULL);
   g_assert_true (g_file_set_contents (decoy_record, "sentinel", 8, NULL));
   g_assert_cmpint (create_windows_directory_junction (ancestor, decoy), ==,
       WYL_TEST_JUNCTION_CREATED);
@@ -1221,14 +1221,14 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
     g_autoptr (GBytes) roundtrip = NULL;
     gsize size = 0;
     g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name,
-            &roundtrip), ==, WYRELOG_E_OK);
+        &roundtrip), ==, WYRELOG_E_OK);
     g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
   }
   /* A path-following implementation would replace this sentinel. */
   g_autofree gchar *decoy_contents = NULL;
   gsize decoy_size = 0;
   g_assert_true (g_file_get_contents (decoy_record, &decoy_contents,
-          &decoy_size, NULL));
+      &decoy_size, NULL));
   g_assert_cmpmem (decoy_contents, decoy_size, "sentinel", 8);
 
   /* Remove the junction and release every pinned handle before resolving the
@@ -1239,11 +1239,11 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
   g_autofree gchar *aside_record = g_build_filename (aside_root, "record",
-      NULL);
+          NULL);
   g_autofree gchar *aside_contents = NULL;
   gsize aside_size = 0;
   g_assert_true (g_file_get_contents (aside_record, &aside_contents,
-          &aside_size, NULL));
+      &aside_size, NULL));
   if (rc == WYRELOG_E_OK)
     g_assert_cmpmem (aside_contents, aside_size, "two", 3);
   else
@@ -1263,7 +1263,7 @@ test_windows_final_reparse_is_policy (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-reparse-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   g_autofree gchar *decoy = g_build_filename (base, "decoy", NULL);
   WylServiceCredentialOperationStorage storage =
@@ -1275,9 +1275,9 @@ test_windows_final_reparse_is_policy (void)
   g_autoptr (GBytes) original = g_bytes_new_static ("original", 8);
   g_autoptr (GBytes) replacement = g_bytes_new_static ("replacement", 11);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   if (!require_windows_junction_capability (base)) {
     wyl_service_credential_operation_root_anchor_clear (&anchor);
     wyl_service_credential_operation_storage_clear (&storage);
@@ -1289,7 +1289,7 @@ test_windows_final_reparse_is_policy (void)
   g_autofree gchar *marker = g_build_filename (decoy, "marker", NULL);
   g_assert_true (g_file_set_contents (marker, "safe", 4, NULL));
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (root, "record", NULL);
   g_assert_cmpint (create_windows_directory_junction (record, decoy), ==,
       WYL_TEST_JUNCTION_CREATED);
@@ -1299,9 +1299,9 @@ test_windows_final_reparse_is_policy (void)
   g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &name), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name,
-          replacement), ==, WYRELOG_E_POLICY);
+      replacement), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name,
-          replacement), ==, WYRELOG_E_POLICY);
+      replacement), ==, WYRELOG_E_POLICY);
   {
     g_autoptr (GDir) entries = g_dir_open (root, 0, NULL);
     const gchar *entry;
@@ -1315,16 +1315,16 @@ test_windows_final_reparse_is_policy (void)
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, original),
       ==, WYRELOG_E_OK);
   g_autofree gchar *aside_record = g_build_filename (root, "record-aside",
-      NULL);
+          NULL);
   WylTestReplaceReparseRace *race = g_new0 (WylTestReplaceReparseRace, 1);
   race->record = g_strdup (record);
   race->aside = g_strdup (aside_record);
   race->decoy = g_strdup (decoy);
   race->junction_result = WYL_TEST_JUNCTION_FAILED;
   wyl_win_child_set_before_rename_hook_for_test
-      (replace_destination_with_junction_for_test, race);
+    (replace_destination_with_junction_for_test, race);
   wyrelog_error_t replace_rc = wyl_win_child_replace (&storage, &anchor,
-      &name, replacement);
+          &name, replacement);
   assert_rename_hook_consumed ();
   g_assert_true (race->moved);
   g_assert_cmpuint (race->move_error, ==, ERROR_SUCCESS);
@@ -1344,12 +1344,12 @@ test_windows_final_reparse_is_policy (void)
   g_autofree gchar *aside_contents = NULL;
   gsize aside_size = 0;
   g_assert_true (g_file_get_contents (aside_record, &aside_contents,
-          &aside_size, NULL));
+      &aside_size, NULL));
   g_assert_cmpmem (aside_contents, aside_size, "original", 8);
   g_assert_cmpint (g_remove (aside_record), ==, 0);
 
   g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
-      name.component, -1);
+          name.component, -1);
   g_autofree gchar *lock_component = g_strdup_printf (".lock-%s", digest);
   g_autofree gchar *lock_path = g_build_filename (root, lock_component, NULL);
   g_assert_cmpint (create_windows_directory_junction (lock_path, decoy), ==,
@@ -1363,7 +1363,7 @@ test_windows_final_reparse_is_policy (void)
   g_autofree gchar *marker_contents = NULL;
   gsize marker_size = 0;
   g_assert_true (g_file_get_contents (marker, &marker_contents, &marker_size,
-          NULL));
+      NULL));
   g_assert_cmpmem (marker_contents, marker_size, "safe", 4);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
@@ -1380,7 +1380,7 @@ test_windows_child_delete_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-delete-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -1389,13 +1389,13 @@ test_windows_child_delete_fixture (void)
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
+          NULL);
   g_remove (record);
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   /* Deleting a missing record reports NOT_FOUND. */
@@ -1429,7 +1429,7 @@ test_windows_child_exact_delete_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-exact-delete-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -1440,14 +1440,14 @@ test_windows_child_exact_delete_fixture (void)
   g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
   g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_autofree gchar *record = g_build_filename (root, "record", NULL);
   g_autofree gchar *hardlink = g_build_filename (root, "record-hardlink",
-      NULL);
+          NULL);
   g_remove (record);
   g_remove (hardlink);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
@@ -1464,7 +1464,7 @@ test_windows_child_exact_delete_fixture (void)
   WylTestExactDeleteRace *mutation = g_new0 (WylTestExactDeleteRace, 1);
   mutation->record = g_strdup (record);
   wyl_win_child_set_before_exact_delete_hook_for_test
-      (mutate_exact_delete_child_for_test, mutation);
+    (mutate_exact_delete_child_for_test, mutation);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   assert_exact_delete_hook_consumed ();
@@ -1483,7 +1483,7 @@ test_windows_child_exact_delete_fixture (void)
   rebind->record = g_strdup (record);
   rebind->aside = g_strdup (aside);
   wyl_win_child_set_before_exact_delete_hook_for_test
-      (rebind_exact_delete_child_for_test, rebind);
+    (rebind_exact_delete_child_for_test, rebind);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   assert_exact_delete_hook_consumed ();
@@ -1500,7 +1500,7 @@ test_windows_child_exact_delete_fixture (void)
       WYRELOG_E_OK);
 
   wyl_win_child_set_before_exact_delete_hook_for_test
-      (rearm_exact_delete_hook_for_test, &leaked_hook_data);
+    (rearm_exact_delete_hook_for_test, &leaked_hook_data);
   g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
       ==, WYRELOG_E_OK);
   {
@@ -1515,14 +1515,14 @@ test_windows_child_exact_delete_fixture (void)
       WYRELOG_E_OK);
 
   g_autofree gunichar2 *wrecord = g_utf8_to_utf16 (record, -1, NULL, NULL,
-      NULL);
+          NULL);
   g_autofree gunichar2 *whardlink = g_utf8_to_utf16 (hardlink, -1, NULL, NULL,
-      NULL);
+          NULL);
   g_assert_nonnull (wrecord);
   g_assert_nonnull (whardlink);
   if (CreateHardLinkW ((LPCWSTR) whardlink, (LPCWSTR) wrecord, NULL)) {
     g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name,
-            one), ==, WYRELOG_E_POLICY);
+        one), ==, WYRELOG_E_POLICY);
     g_assert_cmpint (g_remove (hardlink), ==, 0);
   } else {
     DWORD error = GetLastError ();
@@ -1556,7 +1556,7 @@ test_windows_child_lock_fixture (void)
   const gchar *local = g_getenv ("LOCALAPPDATA");
   g_assert_nonnull (local);
   g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-lock-test-%lu",
-      local, (gulong) GetCurrentProcessId ());
+          local, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
@@ -1570,11 +1570,11 @@ test_windows_child_lock_fixture (void)
   BY_HANDLE_FILE_INFORMATION first_identity;
   BY_HANDLE_FILE_INFORMATION second_identity;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      ("record", &name), ==, WYRELOG_E_OK);
+        ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &first), ==,
       WYRELOG_E_OK);
   g_assert_true (GetFileInformationByHandle (first, &first_identity));
@@ -1631,13 +1631,13 @@ test_rejects_relative_override (void)
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (short_path,
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_storage_open ("state\\ops",
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_storage_open ("C:state",
-          &storage), ==, WYRELOG_E_POLICY);
+      &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      ("\\\\server\\share", &storage), ==, WYRELOG_E_POLICY);
+        ("\\\\server\\share", &storage), ==, WYRELOG_E_POLICY);
   wyl_service_credential_operation_storage_clear (&storage);
 }
 
@@ -1653,7 +1653,7 @@ typedef struct
   DWORD expected_flush_error;
   WylWinChildBeforeRenameHookForTest expected_rename_hook;
   gpointer expected_rename_data;
-    WylServiceCredentialOperationBeforeExactDeleteHookForTest
+  WylServiceCredentialOperationBeforeExactDeleteHookForTest
       expected_exact_delete_hook;
   gpointer expected_exact_delete_data;
 } WinGuardedOperationStorageCase;
@@ -1677,7 +1677,7 @@ test_windows_deliberately_leaked_operation_hooks (void)
   wyl_win_child_set_before_rename_hook_for_test (leaked_rename_hook_for_test,
       &leaked_hook_data);
   wyl_win_child_set_before_exact_delete_hook_for_test
-      (leaked_exact_delete_hook_for_test, &leaked_hook_data);
+    (leaked_exact_delete_hook_for_test, &leaked_hook_data);
 }
 
 static void
@@ -1782,39 +1782,39 @@ static const WinGuardedOperationStorageCase win_guarded_cases[] = {
   {"/operation-storage/file-root", test_rejects_file_root},
   {"/operation-storage/child-contract", test_child_name_and_anchor_contract},
   {"/operation-storage/windows/child-read-validation",
-      test_windows_child_read_validation},
+   test_windows_child_read_validation},
   {"/operation-storage/windows/reparse-status-mapping",
-      test_windows_reparse_status_mapping},
+   test_windows_reparse_status_mapping},
   {"/operation-storage/windows/live-root-validation",
-      test_windows_live_root_validation},
+   test_windows_live_root_validation},
   {"/operation-storage/windows/child-read-fixture",
-      test_windows_child_read_fixture},
+   test_windows_child_read_fixture},
   {"/operation-storage/windows/child-create-fixture",
-      test_windows_child_create_fixture},
+   test_windows_child_create_fixture},
   {"/operation-storage/windows/directory-flush-failures",
-      test_windows_directory_flush_failures},
+   test_windows_directory_flush_failures},
   {"/operation-storage/windows/child-replace-fixture",
-      test_windows_child_replace_fixture},
+   test_windows_child_replace_fixture},
   {"/operation-storage/windows/replace-stale-temp-reopen",
-      test_windows_replace_ignores_stale_temp_after_reopen},
+   test_windows_replace_ignores_stale_temp_after_reopen},
   {"/operation-storage/windows/replace-root-substitution",
-      test_windows_replace_survives_root_substitution},
+   test_windows_replace_survives_root_substitution},
   {"/operation-storage/windows/replace-ancestor-junction-substitution",
-      test_windows_replace_survives_ancestor_junction_substitution},
+   test_windows_replace_survives_ancestor_junction_substitution},
   {"/operation-storage/windows/final-reparse-policy",
-      test_windows_final_reparse_is_policy},
+   test_windows_final_reparse_is_policy},
   {"/operation-storage/windows/child-delete-fixture",
-      test_windows_child_delete_fixture},
+   test_windows_child_delete_fixture},
   {"/operation-storage/windows/child-exact-delete-fixture",
-      test_windows_child_exact_delete_fixture},
+   test_windows_child_exact_delete_fixture},
   {"/operation-storage/windows/child-lock-fixture",
-      test_windows_child_lock_fixture},
+   test_windows_child_lock_fixture},
   {"/operation-storage/windows/relative-override",
-      test_rejects_relative_override},
+   test_rejects_relative_override},
   {"/operation-storage/windows/deliberately-leaked-hooks",
-        test_windows_deliberately_leaked_operation_hooks, ERROR_WRITE_FAULT,
-        leaked_rename_hook_for_test, &leaked_hook_data,
-      leaked_exact_delete_hook_for_test, &leaked_hook_data},
+   test_windows_deliberately_leaked_operation_hooks, ERROR_WRITE_FAULT,
+   leaked_rename_hook_for_test, &leaked_hook_data,
+   leaked_exact_delete_hook_for_test, &leaked_hook_data},
 };
 #endif
 

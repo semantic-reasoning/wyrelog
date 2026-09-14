@@ -110,7 +110,7 @@ fuzz_template_loading (guint32 seed)
     gsize dl_src_len = 0;
     if (ok) {
       wyrelog_error_t rc = wyl_engine_load_templates (tmp, &dl_src,
-          &dl_src_len);
+              &dl_src_len);
       if (rc == WYRELOG_E_OK && dl_src_len == 0) {
         g_free (dl_src);
         g_remove (tmp);
@@ -123,15 +123,15 @@ fuzz_template_loading (guint32 seed)
     }
 
     g_autofree gchar *bootstrap_path = g_build_filename (tmp, "bootstrap.dl",
-        NULL);
+            NULL);
     g_autofree gchar *principal_path = g_build_filename (tmp, "fsm",
-        "principal.dl", NULL);
+            "principal.dl", NULL);
     g_autofree gchar *session_path = g_build_filename (tmp, "fsm",
-        "session.dl", NULL);
+            "session.dl", NULL);
     g_autofree gchar *perm_path = g_build_filename (tmp, "fsm",
-        "permission_scope.dl", NULL);
+            "permission_scope.dl", NULL);
     g_autofree gchar *decision_path = g_build_filename (tmp, "lobac",
-        "decision.dl", NULL);
+            "decision.dl", NULL);
     g_unlink (bootstrap_path);
     g_unlink (principal_path);
     g_unlink (session_path);
