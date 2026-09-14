@@ -13163,6 +13163,58 @@ ensure_policy_role_exists (SoupServerMessage *msg, wyl_policy_store_t *store,
   return TRUE;
 }
 
+/*
+ * Shape of a policy-mutation subject.
+ *
+ * The permission, role and transition event each get checked against their
+ * catalogue before a mutation lands; the subject never was, so any nonempty
+ * byte string wrote a durable row -- spaces, path separators, high bytes and
+ * all (#1033).  That is not an identifier under any reading, and the rows are
+ * keyed on it forever.
+ *
+ * This is the whole rule, not a sample: 1 to 128 bytes, each one ASCII
+ * alphanumeric or exactly one of . _ : - and nothing else.  Every byte at or
+ * above 0x80 is refused, as is every control byte, space and slash.  "." and
+ * ".." are refused outright because a store key that reads as a path
+ * traversal helps nobody.  A svc: subject must additionally satisfy the
+ * service-subject grammar the service paths already enforce.
+ *
+ * Deliberately not wyl_policy_store_tenant_id_is_valid: that one is a
+ * denylist with no length cap and admits quotes, backslashes and high bytes.
+ * This is bootstrap_admin_subject_is_valid's rule with the minimum length
+ * relaxed from 3, which is a bootstrap-flag floor with no bearing here.
+ *
+ * An embedded NUL cannot reach this function: percent-decoding truncates
+ * "x%00y" to "x" before the handler runs, so the daemon acts on a different
+ * subject than the operator named.  That is a seam defect, not a shape one,
+ * and it is recorded on #1033 rather than papered over with a check here
+ * that could never fire.
+ */
+static gboolean
+policy_subject_id_is_valid (const gchar *subject)
+{
+  if (subject == NULL)
+    return FALSE;
+  gsize len = strlen (subject);
+  if (len < 1 || len > 128)
+    return FALSE;
+  if (g_strcmp0 (subject, ".") == 0 || g_strcmp0 (subject, "..") == 0)
+    return FALSE;
+  for (const gchar *p = subject; *p != '\0'; p++) {
+    guchar c = (guchar) *p;
+    if (g_ascii_isalnum (c))
+      continue;
+    if (c == '.' || c == '_' || c == ':' || c == '-')
+      continue;
+    return FALSE;
+  }
+  if (g_str_has_prefix (subject, "svc:")
+      && !wyl_policy_service_subject_is_valid (subject, len))
+    return FALSE;
+  return TRUE;
+}
+
+
 static void
 direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data, gboolean grant)
@@ -13177,7 +13229,8 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *subject = lookup_required_query_string (query, "subject");
   const gchar *perm = lookup_required_query_string (query, "perm");
   const gchar *scope = lookup_required_query_string (query, "scope");
-  if (subject == NULL || perm == NULL || scope == NULL) {
+  if (subject == NULL || perm == NULL || scope == NULL
+      || !policy_subject_id_is_valid (subject)) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return;
   }
@@ -13264,7 +13317,8 @@ policy_permission_transition_handler (SoupServer *server,
   const gchar *perm = lookup_required_query_string (query, "perm");
   const gchar *scope = lookup_required_query_string (query, "scope");
   const gchar *event = lookup_required_query_string (query, "event");
-  if (subject == NULL || perm == NULL || scope == NULL || event == NULL) {
+  if (subject == NULL || perm == NULL || scope == NULL || event == NULL
+      || !policy_subject_id_is_valid (subject)) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return;
   }
@@ -13375,7 +13429,8 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *subject = lookup_required_query_string (query, "subject");
   const gchar *role = lookup_required_query_string (query, "role");
   const gchar *scope = lookup_required_query_string (query, "scope");
-  if (subject == NULL || role == NULL || scope == NULL) {
+  if (subject == NULL || role == NULL || scope == NULL
+      || !policy_subject_id_is_valid (subject)) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return;
   }
