@@ -4485,6 +4485,7 @@ check_store_principal_failures_survive_logout_and_login (void)
     result = 1757;
     goto cleanup;
   }
+  g_clear_pointer (&state, g_free);
   if (wyl_policy_store_get_principal_lock_info (store, "mfa.logout.victim",
       &state, &count, &locked_at, &found) != WYRELOG_E_OK || !found
       || g_strcmp0 (state, "mfa_required") != 0 || count != 4) {

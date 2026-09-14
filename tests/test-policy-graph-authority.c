@@ -422,6 +422,8 @@ test_recovery_mac_handle_contract (void)
   wyl_fact_recovery_mac_handle_close (unavailable_handle);
   g_assert_true (unavailable.wiped);
   g_assert_true (unavailable.freed);
+  /* fail_compute returns early, but only after recording last_label. */
+  g_clear_pointer (&unavailable.last_label, g_bytes_unref);
 }
 
 static void
@@ -4380,9 +4382,11 @@ test_graph_provisioning_prepare_rolls_back_reservation (void)
   g_assert_null (record);
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM "
       "fact_graph_provisioning;"), ==, 0);
-  g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
-      "WHERE tenant_id='tenant-provision-fault' AND graph_id='graph-provision-fault';"),
-      ==, "legacy_unclassified");
+  g_autofree gchar *fault_state = scalar_text (db,
+          "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-provision-fault' "
+          "AND graph_id='graph-provision-fault';");
+  g_assert_cmpstr (fault_state, ==, "legacy_unclassified");
 }
 
 static void
@@ -4422,9 +4426,11 @@ test_graph_provisioning_terminal_rolls_back (void)
       op_uuid, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
       WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
       WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_IO);
-  g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
-      "WHERE tenant_id='tenant-provision-terminal' AND graph_id='graph-provision-terminal';"),
-      ==, "provisioning");
+  g_autofree gchar *terminal_state = scalar_text (db,
+          "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-provision-terminal' "
+          "AND graph_id='graph-provision-terminal';");
+  g_assert_cmpstr (terminal_state, ==, "provisioning");
   g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
       &record), ==, WYRELOG_E_OK);
   g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED);

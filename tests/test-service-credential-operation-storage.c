@@ -453,8 +453,11 @@ test_posix_child_backend (void)
   const gchar *entry;
   while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
     if (g_str_has_prefix (entry, ".lock-")
-        || g_str_has_prefix (entry, ".replace-"))
-      g_remove (g_build_filename (storage.root_path, entry, NULL));
+        || g_str_has_prefix (entry, ".replace-")){
+      g_autofree gchar *stale =
+          g_build_filename (storage.root_path, entry, NULL);
+      g_remove (stale);
+    }
 
   wyl_service_credential_operation_child_name_clear (&directory_name);
   wyl_service_credential_operation_child_name_clear (&link_name);
@@ -677,9 +680,12 @@ test_child_name_and_anchor_contract (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
-  g_autofree gchar *too_long = g_malloc0 (256);
+  /* 257: 256 name bytes plus the NUL that g_utf8_validate (raw, -1)
+   * requires.  At 256 the terminator was overwritten below and the
+   * validator read one byte past the allocation. */
+  g_autofree gchar *too_long = g_malloc0 (257);
   const gchar invalid_utf8[] = "bad\xff";
-  memset (too_long, 'a', 255);
+  memset (too_long, 'a', 256);
   for (gsize i = 0; invalid[i] != NULL; i++)
     g_assert_cmpint (wyl_service_credential_operation_child_name_validate
           (invalid[i], &name), ==, WYRELOG_E_POLICY);
@@ -688,7 +694,6 @@ test_child_name_and_anchor_contract (void)
           (reserved[i], &name), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
         (invalid_utf8, &name), ==, WYRELOG_E_POLICY);
-  too_long[255] = 'a';
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
         (too_long, &name), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
