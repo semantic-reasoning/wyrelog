@@ -783,13 +783,14 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
    * POLICY so callers can report a conflict without misclassifying authority
    * failures.  A sealed tenant is an authority state.
    *
-   * The service ladder below maps 409 to CONFLICT, which is right for the
-   * existence and idempotency conflicts its routes mostly answer with -- but
-   * not for a sealed tenant, which reaches it too, because
+   * The service ladder below reaches the same conclusion by a different
+   * route: a sealed tenant reaches it too, because
    * service_management_front_door resolves its bearer through the same
-   * set_auth_failure_error.  That ladder therefore still misclassifies the
-   * condition this arm exists to classify.  Fixing it is out of scope here
-   * and tracked separately; do not read the mapping below as settled.
+   * set_auth_failure_error, but its routes also answer 409 for genuine
+   * existence and idempotency conflicts.  A single mapping cannot serve
+   * both, so that ladder parses the body's error code and answers POLICY
+   * only for tenant_sealed (#1061).  Here the status alone is sufficient,
+   * because tenant_sealed is the only 409 these policy routes produce.
    */
   if (status == 409)
     return WYRELOG_E_POLICY;
@@ -988,8 +989,38 @@ client_service_management_request_for_tenant (WylClient *client,
       return WYRELOG_E_AUTH;
     if (status == 403)
       return WYRELOG_E_POLICY;
-    if (status == 409)
+    if (status == 409) {
+      /*
+       * #1061: unlike the policy ladder, these routes answer 409 from two
+       * unrelated sources.  service_principal_exists,
+       * service_principal_conflict and service_credential_conflict are
+       * genuine conflicts.  The daemon also answers 409 tenant_sealed here,
+       * because service_management_front_door resolves its bearer through
+       * the shared set_auth_failure_error, and error.h scopes CONFLICT to an
+       * idempotency key already bound to a different mutation -- whose
+       * recovery, regenerate the key and resubmit, cannot succeed against a
+       * sealed tenant.
+       *
+       * That second case is NOT reachable through this function today, and
+       * the arm is deliberate rather than observed: the liveness check is on
+       * the bearer's own tenant, this function refuses any client whose
+       * tenant is not WYL_TENANT_DEFAULT (above), and sealing the default
+       * tenant is refused by wyl_policy_store_set_tenant_sealed_full and
+       * pinned by tests/test-policy-store.c.  A sealed *target* answers 404
+       * through management_target_is_active, not 409.  The arm exists so the
+       * mapping is already correct for a direct HTTP caller and if that
+       * tenant restriction is ever lifted; do not cite it as a bug a client
+       * can hit today.
+       */
+      gsize size = 0;
+      const gchar *data = response != NULL
+          ? g_bytes_get_data (response, &size) : NULL;
+      g_autofree gchar *code =
+          parse_service_management_error_code (data, size);
+      if (g_strcmp0 (code, "tenant_sealed") == 0)
+        return WYRELOG_E_POLICY;
       return WYRELOG_E_CONFLICT;
+    }
     if (status == 404)
       return WYRELOG_E_NOT_FOUND;
     return WYRELOG_E_IO;
