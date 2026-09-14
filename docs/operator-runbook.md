@@ -1354,7 +1354,12 @@ keys together, not on either one alone:
   tombstone: `"inserted":true` and positive deltas, exactly as above;
 - reusing **both**, with every other recorded field and the row content
   unchanged, is the idempotent replay: HTTP 200 with `"inserted":false` and
-  both deltas `0`;
+  the deltas the original commit charged, restated from the batch's durable
+  row rather than reported as `0` (#1013). A client that sums deltas across
+  retries must therefore key on `"inserted"`, or it charges the same batch
+  once per attempt. A `logical_byte_delta` of `-1` means the batch was
+  committed before the cost was stored and cannot be recovered; it is an
+  explicit unknown, never a credit and never a charge of zero;
 - reusing only one of the two, or reusing both while anything else recorded
   for the batch differs, fails to match the stored batch and answers
   `409 fact_batch_conflict`.

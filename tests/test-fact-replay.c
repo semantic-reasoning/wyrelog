@@ -3230,8 +3230,12 @@ test_commit_fact_mutation_idempotent_retry (void)
 
   g_assert_false (retry_inserted);
   g_assert_false (retry.delta.inserted);
-  g_assert_cmpint (retry.delta.committed_row_delta, ==, 0);
-  g_assert_cmpint (retry.delta.logical_byte_delta, ==, 0);
+  /* The retry restates what the batch consumed rather than reporting zero,
+   * so a caller that crashed after the first commit can still settle it
+   * (#1013).  inserted = FALSE above is what says the write already
+   * happened. */
+  g_assert_cmpint (retry.delta.committed_row_delta, ==, 1);
+  g_assert_cmpint (retry.delta.logical_byte_delta, ==, 16);
   g_assert_cmpint (retry.mutation_class, ==,
       WYL_FACT_MUTATION_COMMITTED_READY);
 

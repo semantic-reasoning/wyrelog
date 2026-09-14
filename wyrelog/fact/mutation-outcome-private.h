@@ -40,8 +40,20 @@ G_BEGIN_DECLS;
  * to append_batch_delta, so the tombstone batch charges positive row and
  * logical-byte deltas.  No producer currently emits a negative delta.
  *
- * On an idempotent no-op (a byte-identical batch replayed under the same
- * idempotency key) inserted is FALSE and both deltas are zero.
+ * The deltas report what the BATCH consumed, not what this CALL did, and
+ * inserted is the field that separates the two.  On an idempotent no-op (a
+ * byte-identical batch replayed under the same idempotency key) inserted is
+ * FALSE and the deltas restate the original commit's charge, read back from
+ * the batch's durable fact_batches row.  That is what lets a settle be
+ * exactly-once across a restart: a process that committed the batch and died
+ * before accounting for it sees the real cost on retry instead of zero
+ * (#1013).  The corollary is that a consumer accumulating these across
+ * retries must key on inserted, or it charges one batch once per attempt.
+ *
+ * One exception to the signed-delta rule above: logical_byte_delta is -1 on
+ * a replay of a batch committed before fact_batches stored the cost.  It
+ * means unrecoverable-unknown, not a credit.  Zero cannot carry that meaning
+ * because zero is a charge a batch of empty-valued rows really has.
  *
  * inserted does not mean a row was removed.  A retract whose values never
  * matched anything still appends its tombstone, so inserted is TRUE and the

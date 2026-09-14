@@ -1609,7 +1609,7 @@ wyl_fact_store_validate_projection (wyl_fact_store_t *store,
 static wyrelog_error_t
 existing_batch_matches_unlocked (wyl_fact_store_t *store,
     const wyl_fact_store_batch_t *batch, const gchar *content_hash,
-    gboolean *out_exists)
+    gboolean *out_exists, gint64 *out_row_count, gint64 *out_logical_bytes)
 {
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
@@ -1617,7 +1617,7 @@ existing_batch_matches_unlocked (wyl_fact_store_t *store,
   static const gchar *sql =
       "SELECT batch_id, tenant_id, graph_id, namespace_id, relation_name, "
       "schema_version, source, request_id, idempotency_key, op, row_count, "
-      "content_hash FROM fact_batches "
+      "content_hash, logical_bytes FROM fact_batches "
       "WHERE batch_id = ? OR idempotency_key = ?;";
   if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
     /* duckdb_prepare allocates the statement even when it fails: the
@@ -1671,6 +1671,21 @@ existing_batch_matches_unlocked (wyl_fact_store_t *store,
       && g_strcmp0 (op, expected_op) == 0
       && duckdb_value_int64 (&result, 10, 0) == (gint64) batch->n_rows
       && g_strcmp0 (stored_hash, content_hash) == 0;
+  if (matches) {
+    /* Read back rather than recompute.  The content hash matched, so
+     * batch_logical_bytes over the supplied batch would agree today -- but a
+     * change to how a value is priced would then reprice every historical
+     * batch on replay while the durable row still holds the original charge,
+     * and a settle that must be exactly-once across a restart must not
+     * silently reprice.  The stored value is also the only one a reconciler
+     * holding a batch_id rather than a payload can reach, and it is the only
+     * one that can carry the -1 of a batch committed before the column
+     * existed. */
+    if (out_row_count != NULL)
+      *out_row_count = duckdb_value_int64 (&result, 10, 0);
+    if (out_logical_bytes != NULL)
+      *out_logical_bytes = duckdb_value_int64 (&result, 12, 0);
+  }
   duckdb_free (batch_id);
   duckdb_free (tenant);
   duckdb_free (graph);
@@ -1917,11 +1932,23 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, batch->tenant_id,
             batch->graph_id, FALSE);
+  gint64 stored_rows = 0;
+  gint64 stored_bytes = 0;
   if (rc == WYRELOG_E_OK)
-    rc = existing_batch_matches_unlocked (store, batch, content_hash, &exists);
+    rc = existing_batch_matches_unlocked (store, batch, content_hash, &exists,
+            &stored_rows, &stored_bytes);
   if (rc == WYRELOG_E_OK && exists) {
     if (out_inserted != NULL)
       *out_inserted = FALSE;
+    /* Report what the batch consumed, not what this call did.  A caller that
+     * crashed after the original commit and retried sees the real cost here
+     * and can settle it; inserted stays FALSE, which is what tells it the
+     * work was already durable (#1013). */
+    if (out_delta != NULL) {
+      out_delta->inserted = FALSE;
+      out_delta->committed_row_delta = stored_rows;
+      out_delta->logical_byte_delta = stored_bytes;
+    }
     wyl_fact_store_connection_session_end (&session);
     return WYRELOG_E_OK;
   }
@@ -2392,7 +2419,7 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
   }
 
   rc = existing_batch_matches_unlocked (store, &batch_meta, content_hash,
-          &existing);
+          &existing, NULL, NULL);
   if (rc != WYRELOG_E_OK)
     goto unlock_return;
   if (existing) {
