@@ -121,6 +121,8 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   3000-3014    check_legacy_identity_binding_is_atomic_and_recoverable
  *   3020-3027
  *       check_retract_of_never_appended_row_reports_success
+ *   3500-3510    check_fact_store_persists_logical_bytes
+ *   3520-3528    check_fact_store_migrates_pre_logical_bytes_store
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -229,7 +231,7 @@ check_legacy_identity_binding_is_atomic_and_recoverable (void)
         || !exec_ok (store,
         "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-a');"
         "INSERT INTO fact_batches VALUES ('existing','tenant-a','orders',"
-        "'shop','order',1,NULL,NULL,'existing:1','assert',0,'hash',1);")
+        "'shop','order',1,NULL,NULL,'existing:1','assert',0,0,'hash',1);")
         || wyl_fact_store_ensure_projection (store, &schema, NULL)
         != WYRELOG_E_INTERNAL)
       return 3011;
@@ -1636,10 +1638,10 @@ check_retract_by_batch_id_preserves_legacy_nullable_null (void)
       "INSERT INTO fact_batches "
       "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
       " schema_version, source, request_id, idempotency_key, op, row_count, "
-      " content_hash, created_at_us) "
+      " logical_bytes, content_hash, created_at_us) "
       "VALUES ('legacy-null', 'tenant-a', 'orders', 'shop', "
       "'nullable_values', 1, 'unit-test', 'request-legacy', "
-      "'legacy-null-key', 'assert', 1, 'legacy-hash', 1);")
+      "'legacy-null-key', 'assert', 1, 8, 'legacy-hash', 1);")
       || !exec_ok (fix.store,
       "INSERT INTO fact_event_log "
       "(seq, batch_id, tenant_id, graph_id, namespace_id, relation_name, "
@@ -1738,6 +1740,212 @@ check_retract_by_batch_id_keeps_empty_selection_behavior (void)
     return 3404;
   }
   retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+/*
+ * A committed batch's logical byte cost must be recoverable from durable
+ * state, not only from the return value of the call that committed it
+ * (#1013).  Three things have to hold together for that: the stored value
+ * equals what the call reported, it survives a close and reopen, and it is
+ * written inside the same transaction as the rows so a crash leaves neither.
+ *
+ * The tier-2 retract path writes a fact_batches row of its own through the
+ * same helper, and nothing else asserts its cost -- check_retract_by_id_empty
+ * checks only row_count -- so it is covered here too.
+ */
+static gint
+check_fact_store_persists_logical_bytes (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-logical-bytes-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3500;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "bytes-batch-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .request_id = "req-bytes-1",
+    .idempotency_key = "bytes:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = 1,
+  };
+  /* 4 for the symbol's four characters, 8 for the int64. */
+  const gint64 expected_bytes = 12;
+  gint64 reported_bytes = -1;
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3501;
+    gboolean inserted = FALSE;
+    wyl_fact_commit_delta_t delta = {TRUE, 7, 7};
+    if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
+        &delta) != WYRELOG_E_OK || !inserted)
+      return 3502;
+    if (delta.logical_byte_delta != expected_bytes)
+      return 3503;
+    reported_bytes = delta.logical_byte_delta;
+
+    /* A rolled-back commit leaves neither the row nor its cost. */
+    wyl_fact_store_batch_t doomed = batch;
+    doomed.batch_id = "bytes-doomed-1";
+    doomed.idempotency_key = "bytes:doomed:1";
+    wyl_fact_store_set_batch_fault_once_for_test (store,
+        WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT);
+    if (wyl_fact_store_append_batch_delta (store, &schema, &doomed, &inserted,
+        NULL) == WYRELOG_E_OK)
+      return 3504;
+    gint64 doomed_rows = -1;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'bytes-doomed-1';",
+        &doomed_rows) || doomed_rows != 0)
+      return 3505;
+
+    /* Tier-2 retract writes its own batch row through the same helper. */
+    gboolean retract_inserted = FALSE;
+    gint64 retract_rows = -1;
+    if (wyl_fact_store_retract_by_batch_id (store, &schema, "bytes-batch-1",
+        "bytes-retract-1", "unit-test", "req-bytes-retract",
+        "bytes:retract:1", &retract_inserted, &retract_rows)
+        != WYRELOG_E_OK || !retract_inserted || retract_rows != 1)
+      return 3506;
+    gint64 retract_bytes = -1;
+    if (!count_i64 (store,
+        "SELECT logical_bytes FROM fact_batches "
+        "WHERE batch_id = 'bytes-retract-1';", &retract_bytes)
+        || retract_bytes != expected_bytes)
+      return 3507;
+  }
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3508;
+    gint64 stored_bytes = -1;
+    if (!count_i64 (store,
+        "SELECT logical_bytes FROM fact_batches "
+        "WHERE batch_id = 'bytes-batch-1';", &stored_bytes))
+      return 3509;
+    if (stored_bytes != reported_bytes)
+      return 3510;
+  }
+  return 0;
+}
+
+/*
+ * A store written before fact_batches carried logical_bytes must still open,
+ * and its existing batches must read back as "cost unknown" rather than as a
+ * cost of zero -- zero is a charge a batch of empty values really can have,
+ * so it cannot also mean "we do not know" (#1013).
+ *
+ * The fixture drops the column to get back to the old shape, which DuckDB
+ * 1.5.5 only permits once fact_event_log's foreign key is gone.  Nothing is
+ * appended afterwards: create_schema recreates that table empty, so the
+ * sequence counter would restart at 1 and collide with the projection rows
+ * the seeded batch already holds.  This checks the migration, not a write.
+ */
+static gint
+check_fact_store_migrates_pre_logical_bytes_store (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-migrate-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3520;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "legacy-bytes-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .request_id = "req-legacy-bytes",
+    .idempotency_key = "legacy:bytes:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = 1,
+  };
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    gboolean inserted = FALSE;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3521;
+    if (wyl_fact_store_append_batch (store, &schema, &batch, &inserted)
+        != WYRELOG_E_OK || !inserted)
+      return 3522;
+    if (!exec_ok (store, "DROP TABLE fact_event_log;"))
+      return 3523;
+    if (!exec_ok (store,
+        "ALTER TABLE fact_batches DROP COLUMN logical_bytes;"))
+      return 3524;
+  }
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3525;
+    gint64 stored_bytes = 0;
+    if (!count_i64 (store,
+        "SELECT logical_bytes FROM fact_batches "
+        "WHERE batch_id = 'legacy-bytes-1';", &stored_bytes))
+      return 3526;
+    if (stored_bytes != -1)
+      return 3527;
+    /* The backfill default must not linger: a later insert that forgot to
+     * bind the column has to fail loudly rather than be handed the sentinel.
+     */
+    if (exec_ok (store,
+        "INSERT INTO fact_batches "
+        "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+        " schema_version, idempotency_key, op, row_count, content_hash, "
+        " created_at_us) VALUES ('no-bind', 'tenant-a', 'orders', 'shop', "
+        "'order', 1, 'no-bind-key', 'assert', 1, 'h', 1);")) {
+      gint64 unbound = 0;
+      if (!count_i64 (store,
+          "SELECT COUNT(*) FROM fact_batches "
+          "WHERE batch_id = 'no-bind' AND logical_bytes IS NULL;", &unbound)
+          || unbound != 1)
+        return 3528;
+    }
+  }
   return 0;
 }
 
@@ -4456,6 +4664,12 @@ main (void)
   if (rc != 0)
     return rc;
   rc = check_fact_store_batch_commit_fault ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_persists_logical_bytes ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_migrates_pre_logical_bytes_store ();
   if (rc != 0)
     return rc;
   rc = check_projection_batch_count_validates_scope ();
