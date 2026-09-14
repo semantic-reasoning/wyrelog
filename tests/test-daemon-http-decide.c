@@ -15777,6 +15777,48 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       strstr (body, "\"error\":\"service_token_rate_limited\"") == NULL)
     return 1981;
 
+  /* A validly parsed request can fail only after credential authentication.
+   * Observe the request-scoped cleanup and preserve the existing 401 response.
+   * This uses a separate credential bucket from the limiter sequence above. */
+  gchar rejected_issue_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (rejected_issue_request_id,
+      sizeof rejected_issue_request_id) != WYRELOG_E_OK)
+    return 195801;
+  wyl_service_credential_issue_result_t rejected_issued = { 0 };
+  issue_service_token_credential (handle, "svc:exchange:worker", "tenant-a",
+      rejected_issue_request_id,
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rejected_issued);
+  const gchar *rejected_expected_secret = "not-the-issued-secret";
+  g_autofree gchar *rejected_body = g_strdup_printf
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+          rejected_issued.credential.credential_id,
+          rejected_expected_secret);
+  gboolean rejected_secret_matched = FALSE;
+  gboolean rejected_secret_zeroed = FALSE;
+  WylDaemonServiceTokenRequest rejected_request = {
+    .transport_ok = TRUE,
+    .body_json = rejected_body,
+    .body_len = strlen (rejected_body),
+    .secret_cleanup_expected = rejected_expected_secret,
+    .secret_cleanup_matched = &rejected_secret_matched,
+    .secret_cleanup_zeroed = &rejected_secret_zeroed,
+  };
+  guint rejected_status = 0;
+  guint rejected_retry_after = 0;
+  g_autofree gchar *rejected_response = NULL;
+  wyrelog_error_t rejected_rc =
+      wyl_daemon_http_service_token_exchange_for_test (server,
+          &rejected_request, &rejected_status, &rejected_response,
+          &rejected_retry_after);
+  gboolean rejected_contract_ok = rejected_rc == WYRELOG_E_OK
+      && rejected_status == 401 && rejected_response != NULL
+      && strstr (rejected_response,
+          "\"error\":\"service_token_auth_required\"") != NULL
+      && rejected_secret_matched && rejected_secret_zeroed;
+  wyl_service_credential_issue_result_clear (&rejected_issued);
+  if (!rejected_contract_ok)
+    return 195802;
+
   /* The exchange authority takes microseconds.  A seconds value beyond the
    * exact conversion bound must fail before it can reserve or expose a token;
    * no new live companion may appear before the deliberate retirement below. */
