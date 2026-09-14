@@ -946,6 +946,19 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
       strlen (padding), 200, "\"logical_byte_delta\":12");
   tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
 
+  /*
+   * Replaying the same batch reports the cost it committed, not zero, so a
+   * client that lost its accounting to a crash can settle from the retry
+   * response (#1013).  "inserted":false is what still marks it a replay, and
+   * is what a client summing these must key on.  The store is unchanged: one
+   * row, one batch.
+   */
+  tsv_post (session, base_url, token, append, batch, padding,
+      strlen (padding), 200, "\"logical_byte_delta\":12");
+  tsv_post (session, base_url, token, append, batch, padding,
+      strlen (padding), 200, "\"inserted\":false");
+  tsv_check_store (root, "pair", "pad   ", "pad   ", 1, 1);
+
   const gchar *bad_rows[] = { "a\tb\nok\tok\n\nbad\tbad\n",
                               "a\tb\nok\tok\n\n", "a\tb\r\nok\tok\r\n\r\n",
                               "a\tb\nok\tok\nwrong\twidth\textra\n" };

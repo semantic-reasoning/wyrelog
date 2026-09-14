@@ -12521,9 +12521,13 @@ set_fact_audit_failed_json (SoupServerMessage *msg, const gchar *batch_id,
     append_json_string (body,
         wyl_fact_graph_replay_class_name (outcome->degraded_class));
   }
-  /* The deltas too: the retry reports the zero delta by contract, so a batch
-   * that really did consume rows and bytes would otherwise have its
-   * accounting reported nowhere at all. */
+  /* The deltas too.  A retry no longer reports zero: it restates what the
+   * replayed batch consumed, read back from its durable row, so a client
+   * that lost its accounting to a crash can settle from this response
+   * (#1013).  "inserted" is what distinguishes the replay, so a client that
+   * sums these across retries must key on it or it will charge twice.  A
+   * logical_byte_delta of -1 means the batch predates the stored cost and it
+   * is unrecoverable, never a credit. */
   g_string_append_printf (body,
       ",\"committed_row_delta\":%" G_GINT64_FORMAT
       ",\"logical_byte_delta\":%" G_GINT64_FORMAT

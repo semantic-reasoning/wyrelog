@@ -15,7 +15,7 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (45, 363, 4, 3),
+    "wyrelog/fact/store.c": (45, 365, 4, 3),
     "wyrelog/fact/compound.c": (0, 123, 14, 0),
     "wyrelog/fact/replay.c": (0, 32, 2, 0),
 }
@@ -80,7 +80,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "create_hardened_duckdb_config": 2,
         "duckdb_type_for_column": 1,
         "exec_sql": 3,
-        "existing_batch_matches_unlocked": 36,
+        "existing_batch_matches_unlocked": 38,
         "fact_identity_bind_param": 3,
         "fact_identity_execute": 25,
         "fact_store_duckdb_set_config": 1,

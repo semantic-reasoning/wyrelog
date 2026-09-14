@@ -122,7 +122,7 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   3020-3027
  *       check_retract_of_never_appended_row_reports_success
  *   3500-3510    check_fact_store_persists_logical_bytes
- *   3520-3528    check_fact_store_migrates_pre_logical_bytes_store
+ *   3520-3532    check_fact_store_migrates_pre_logical_bytes_store
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -915,16 +915,22 @@ check_retract_of_never_appended_row_reports_success (void)
   /*
    * The other no-op answers differently, and this arm is what makes the
    * distinction checkable rather than merely described: replaying the same
-   * batch under the same idempotency key yields inserted = FALSE and zero
-   * deltas, where the non-matching retract above yielded TRUE and positive.
+   * batch under the same idempotency key yields inserted = FALSE, where the
+   * non-matching retract above yielded TRUE.  The deltas do not distinguish
+   * them -- both restate what the tombstone batch consumed, because a caller
+   * that crashed after the first commit has to be able to settle it (#1013).
+   * inserted is the field that says which happened.
+   *
+   * Pre-poisoned with values that are neither zero nor the expected answer,
+   * so a store that wrote nothing at all fails here too.
    */
   gboolean replay_inserted = TRUE;
-  wyl_fact_commit_delta_t replay_delta = { 0 };
+  wyl_fact_commit_delta_t replay_delta = {TRUE, 7, 7};
   if (wyl_fact_store_retract_batch_delta (store, &schema, &ghost_batch,
       &replay_inserted, &replay_delta) != WYRELOG_E_OK)
     return 3024;
-  if (replay_inserted || replay_delta.committed_row_delta != 0
-      || replay_delta.logical_byte_delta != 0)
+  if (replay_inserted || replay_delta.committed_row_delta != 1
+      || replay_delta.logical_byte_delta != 5)
     return 3025;
   return 0;
 }
@@ -1945,6 +1951,26 @@ check_fact_store_migrates_pre_logical_bytes_store (void)
           || unbound != 1)
         return 3528;
     }
+
+    /*
+     * Replaying the legacy batch restates what it consumed.  The row count
+     * is exact -- fact_batches always stored it -- and the byte cost is the
+     * -1 that says it cannot be recovered.  Pre-poisoned with 7 rather than
+     * -1, so "the store returned the sentinel" cannot be confused with "the
+     * store wrote nothing".
+     */
+    if (wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3529;
+    gboolean replayed = TRUE;
+    wyl_fact_commit_delta_t legacy_delta = {TRUE, 7, 7};
+    if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &replayed,
+        &legacy_delta) != WYRELOG_E_OK || replayed)
+      return 3530;
+    if (legacy_delta.inserted || legacy_delta.committed_row_delta != 1)
+      return 3531;
+    if (legacy_delta.logical_byte_delta != -1)
+      return 3532;
   }
   return 0;
 }
@@ -4488,13 +4514,19 @@ check_fact_store_reports_commit_delta (void)
       || delta.logical_byte_delta != 20)
     return 904;
 
-  /* Idempotent replay of the same batch: no-op with the zero delta. */
+  /*
+   * Idempotent replay of the same batch: no insert, but the deltas restate
+   * what that batch consumed, read back from its durable fact_batches row
+   * rather than recomputed (#1013).  A settle that lost its accounting to a
+   * crash recovers the cost here; inserted = FALSE is what tells it the
+   * write itself already happened.
+   */
   wyl_fact_commit_delta_t replay_delta = {TRUE, 7, 7};
   if (wyl_fact_store_append_batch_delta (store, &schema, &batch, &inserted,
       &replay_delta) != WYRELOG_E_OK || inserted)
     return 905;
-  if (replay_delta.inserted || replay_delta.committed_row_delta != 0
-      || replay_delta.logical_byte_delta != 0)
+  if (replay_delta.inserted || replay_delta.committed_row_delta != 2
+      || replay_delta.logical_byte_delta != 20)
     return 906;
 
   /* Retract reports its tombstone batch's committed delta. */
