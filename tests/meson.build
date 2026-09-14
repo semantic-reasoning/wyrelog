@@ -3638,16 +3638,29 @@ test('fact-store-failure-codes-self-test', python3,
 
 # A failure code that is a multiple of 256 reaches the shell as exit status 0,
 # so meson records a failing assertion as Ok.  Eleven files carried one.
+#
+# Both carry an explicit deadline because both were measured within a second
+# of meson's 30s default on the Windows fact job, where the self-test timed
+# out at 30.23s and the guard survived at 28.78s -- a margin, not a pass.
+# They walk every C and Python unit in the tree following returned integer
+# flows, so the cost tracks the tree's size and was always going to cross.
+# Measured: 17.2-17.8s and 18.5-19.1s on a fast Linux box, 28.78s and past
+# 30s on Windows.  120s is roughly 4x the Windows figure; the Windows job
+# forbids a timeout multiplier, so the deadline has to be stated here.
 test('exit-status-truncation', python3,
   args : [files('test-exit-status-truncation.py'),
-    meson.project_source_root()])
+    meson.project_source_root()],
+  timeout : 120,
+)
 
 test('exit-status-truncation-self-test', python3,
   args : [
     files('test-exit-status-truncation.py'),
     '--self-test',
     meson.project_source_root(),
-  ])
+  ],
+  timeout : 120,
+)
 
 # Each variant main of test-daemon-http-decide.c must be able to name the check
 # that failed.  The exit status is 8 bits and that file carries codes well
