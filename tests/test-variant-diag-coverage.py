@@ -61,10 +61,26 @@ def self_test(root: Path) -> list[str]:
   if validate_repository(root):
     return ["self-test requires a clean repository"]
 
-  # A main that reports nothing must be caught.
-  stripped = DIAG.sub('g_printerr ("nothing useful', text, count=1)
-  if not validate_repository(root, {SOURCE: stripped}):
-    errors.append("mutation survived: a variant main with no diag line")
+  # Strip the diag line from each variant main in turn, inside that main's own
+  # body.  Substituting the first DIAG match in the whole file is a different
+  # test than it looks like: #1089 added a helper that prints one 18 lines
+  # above the first main, so a file-wide count=1 substitution stopped touching
+  # any main at all.  The detector kept working and the self-test reported the
+  # mutation as survived, which is the one thing it must never say when it is
+  # in fact the mutation that missed.  A substitution that changes nothing is
+  # therefore an error here, not a survival.
+  for index, match in enumerate(MAIN.finditer(text)):
+    start, end = match.span(1)
+    body = text[start:end]
+    mutated = DIAG.sub('g_printerr ("nothing useful', body, count=1)
+    if mutated == body:
+      errors.append(f"self-test could not strip a diag line from variant main "
+                    f"#{index}, so its mutation tests nothing")
+      continue
+    if not validate_repository(root,
+        {SOURCE: text[:start] + mutated + text[end:]}):
+      errors.append(f"mutation survived: variant main #{index} with no "
+                    f"diag line")
 
   # A detector that matches nothing would pass everything.
   if not validate_repository(root, {SOURCE: "/* no mains here */\n"}):
