@@ -2268,6 +2268,81 @@ access_token_jti (SoupServer *server, const gchar *access_token)
   return extract_json_string (json, "jti");
 }
 
+/*
+ * A replayed /auth/refresh must return the same body it replays (#1050).
+ *
+ * The grace arm does not store the original response; it rebuilds it.  Two
+ * build_login_json call sites about 140 lines apart have to keep passing
+ * identical arguments forever, and nothing enforced that -- a future edit at
+ * the replay site passing the live session's tenant, or a re-derived session
+ * token, would diverge in silence.  What is shared between the two sites is
+ * the builder, not its arguments, so sharing it proves nothing.
+ *
+ * check_human_refresh_response_loss cannot carry this: it reaches the replay
+ * arm by dropping the original response, so no original body exists there to
+ * compare against.
+ *
+ * Nor can the sibling single-flight arm, which asserts this exact shape over
+ * its eight concurrent bodies at :2273.  That assertion never runs: its only
+ * caller is check_raw_login_contract, which nothing calls, in any of the four
+ * variants -- filed separately.  So this is the first live assertion of its
+ * kind rather than the consistency fix the issue expected, and it lives in
+ * the refresh variant's own main, which is the one that runs it.
+ *
+ * Body only, deliberately.  attach_request_id_header stamps a per-request
+ * X-Wyrelog-Request-Id on both arms and Date differs too, so equality over
+ * the whole response is false and asserting it would encode a contract the
+ * daemon does not offer.
+ */
+static gint
+check_human_refresh_replay_body_matches (WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *login_body = NULL;
+  /* The fixture keeps skip-MFA closed between checks, so open it for this
+   * login and close it again, exactly as the neighbouring checks do. */
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint login_rc = send_raw_login (session, "POST", base_url,
+          "username=replay-body-user&skip_mfa=true", &status, &login_body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != 0 || status != 200)
+    return 2930;
+  g_autofree gchar *first_token = extract_json_string (login_body,
+          "refresh_token");
+  if (first_token == NULL)
+    return 2931;
+
+  /* A real mint, not a seeded successor: the seeding path never produced an
+   * original response, so a replay of it would compare against nothing. */
+  g_autofree gchar *minted = NULL;
+  if (send_raw_refresh_body (session, base_url, first_token, NULL, &status,
+      &minted) != 0)
+    return 2932;
+  if (status != 200 || minted == NULL)
+    return 2933;
+
+  /* Re-present the same token.  The predecessor is consumed and has a
+   * successor, and WYL_DAEMON_REFRESH_GRACE_SECONDS is 30, so this lands on
+   * the committed-grace arm without a latch, a thread or a fault seam. */
+  g_autofree gchar *replayed = NULL;
+  if (send_raw_refresh_body (session, base_url, first_token, NULL, &status,
+      &replayed) != 0)
+    return 2934;
+  if (status != 200 || replayed == NULL)
+    return 2935;
+
+  if (g_strcmp0 (minted, replayed) != 0) {
+    /* One code cannot say which field drifted, and the exit status truncates
+     * anyway, so print both bodies (#1062). */
+    g_printerr ("WYRELOG_TEST_DIAG refresh_replay_body minted=%s replayed=%s\n",
+        minted, replayed);
+    return 2936;
+  }
+  return 0;
+}
+
 static gint
 check_concurrent_human_refresh_single_flight (SoupServer *server,
     const gchar *base_url)
@@ -23286,6 +23361,10 @@ refresh_variant_checks (void)
         client_refresh_rc);
     return client_refresh_rc;
   }
+  gint replay_body_rc = check_human_refresh_replay_body_matches (handle,
+          base_url);
+  if (replay_body_rc != 0)
+    return replay_body_rc;
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
         (http.server, base_url);
   if (refresh_shutdown_rc != 0)
