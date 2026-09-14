@@ -3478,18 +3478,24 @@ test('jump-misses-init', jump_misses_init_guard,
 test('check-daemon-bearer-resolver-structure',
   bearer_resolver_structure_guard,
   args : [meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c'],
-  # Lexes all of http.c, so its cost tracks that file's size: 19s on a fast
-  # Linux box at 16833 lines, and past meson's 30s default on Windows.
-  timeout : 180,
+  # 0.85s on the Windows fact job under the normal parallel suite, 0.70s on
+  # Linux.  The deadline is set from the cost this test used to have, not the
+  # cost it has: before #1080's fix it measured 27.01s to 31.26s on that same
+  # job, so 15s is the largest value a reversion cannot pass.  It still
+  # leaves 17x headroom over what the test costs today.
+  timeout : 15,
 )
 test('check-daemon-bearer-resolver-structure-self-test', python3,
   args : [
     meson.current_source_dir() / 'test-daemon-bearer-resolver-structure.py',
     bearer_resolver_structure_guard.full_path(),
   ],
-  # Runs the guard repeatedly over mutated copies, so it costs a multiple of
-  # the guard itself: 23s locally.
-  timeout : 300,
+  # 5.01s on the Windows fact job under the normal parallel suite, 3.31s on
+  # Linux; 45 of its 46 guard invocations are process startup over a small
+  # source.  Set the same way as the deadline above: it measured 30.11s to
+  # 34.29s on that job before the fix, so 20s cannot be reached by a
+  # reversion, and still leaves 4x headroom.
+  timeout : 20,
 )
 
 # The guard finds every definition it pins with function_span, and nothing
@@ -3498,8 +3504,10 @@ test('check-daemon-bearer-resolver-structure-self-test', python3,
 # few characters, and the run against the real http.c only notices a
 # disagreement that lands on one of the 28 names it pins.  This holds it to
 # the single pattern it replaced (#1080).  It runs both formulations over
-# short generated sources only, so its cost does not track http.c: 2.0s
-# locally, which meson's 30s default clears by 15x, so it carries no override.
+# short generated sources only, so its cost does not track http.c: 0.36s on
+# Linux, and under 1s on the Windows job, where meson's 30s default is hard
+# because that job forbids a timeout multiplier.  No override, and no cost
+# this deadline could usefully be set against.
 test('daemon-bearer-resolver-span-equivalence', python3,
   args : [
     meson.current_source_dir() / 'test-daemon-bearer-resolver-span-equivalence.py',
