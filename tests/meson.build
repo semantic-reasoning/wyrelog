@@ -3702,6 +3702,14 @@ if host_machine.system() != 'windows'
     '../tools/run-valgrind-gate.sh',
   )
 
+  # This gate exits 77 when valgrind is absent, which meson records as SKIP.
+  # No workflow installs valgrind, so it has never actually run, and its
+  # summary line is byte-indistinguishable from a legitimate opt-in skip --
+  # which is how the repo reported the absence of leak checking as success
+  # (#1059).  Leak detection now lives in the leak-detection CI job, which
+  # runs client-smoke and daemon-http-decide-refresh under ASan and fails if
+  # the sanitizer is missing rather than skipping.  Do not read a SKIP here as
+  # evidence that leaks were checked; it only ever meant valgrind was absent.
   test('valgrind-smoke', valgrind_gate,
     args : [test_smoke.full_path()],
     depends : test_smoke,

@@ -878,6 +878,119 @@ jobs:
           path: build-policy-write-sanitizer/meson-logs/
           if-no-files-found: ignore
 
+  leak-detection:
+    name: leak-detection-ubuntu
+    runs-on: ubuntu-latest
+    # client-smoke is sub-second and daemon-http-decide-refresh a few seconds
+    # uninstrumented; under ASan they measured 0.9s and 4.2s locally. The
+    # budget is dominated by the two library builds, not the tests, which is
+    # why it sits well under the fact-mutation job's 60.
+    timeout-minutes: 40
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
+      # detect_leaks is deliberately left at its default (on). #1059 forbids
+      # reaching green by turning it off or by a blanket suppression file, and
+      # the guard step below fails the job if either is attempted.
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1
+      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1
+    steps:
+      - name: Verify GitHub-hosted runner contract
+        shell: bash
+        run: |
+          if [ "${{ runner.environment }}" != 'github-hosted' ]; then
+            echo '::error::this job requires a GitHub-hosted runner'
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev
+
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: subprojects/packagecache
+          key: Linux-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            Linux-packagecache-
+
+      - name: Set up sccache
+        id: sccache
+        continue-on-error: true
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
+
+      - name: Select compiler cache
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache.outcome }}" = success ] \
+            && command -v sccache >/dev/null 2>&1 \
+            && sccache --version >/dev/null 2>&1; then
+            echo 'CC=sccache cc' >> "$GITHUB_ENV"
+            echo 'CXX=sccache c++' >> "$GITHUB_ENV"
+          else
+            echo 'CC=cc' >> "$GITHUB_ENV"
+            echo 'CXX=c++' >> "$GITHUB_ENV"
+            echo 'sccache unavailable; using native compiler'
+          fi
+
+      - name: Configure leak detection build
+        run: |
+          meson setup build-leak-detection \
+            -Ddefault_library=shared \
+            -Denable_tpm=disabled \
+            -Denable_client=enabled \
+            -Denable_audit=enabled \
+            -Dduckdb_source=prebuilt \
+            -Db_sanitize=address,undefined
+
+      - name: Compile leak detection targets
+        run: |
+          meson compile -C build-leak-detection \
+            test-client-smoke \
+            test-daemon-http-decide-refresh
+
+      # The half that keeps this job honest. Without it, removing the
+      # sanitizer leaves the tests passing and the job green while detecting
+      # nothing -- which is exactly how the previous valgrind gate reported
+      # its own absence as success (#1059).
+      - name: Verify leak detection is active
+        run: |
+          sh tools/check-leak-detection-active.sh \
+            build-leak-detection/tests/test-client-smoke \
+            build-leak-detection/tests/test-daemon-http-decide-refresh
+
+      - name: Run leak detection
+        run: |
+          meson test -C build-leak-detection --no-rebuild \
+            client-smoke \
+            daemon-http-decide-refresh \
+            --timeout-multiplier 3 \
+            --print-errorlogs
+
+      - name: Show sccache statistics
+        if: ${{ runner.environment == 'github-hosted' && (always()) }}
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo 'sccache statistics unavailable'
+          else
+            echo 'sccache unavailable; no statistics to show'
+          fi
+
+      - name: Upload leak detection logs on failure
+        if: ${{ runner.environment == 'github-hosted' && (failure()) }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: leak-detection-logs-ubuntu
+          path: build-leak-detection/meson-logs/
+          if-no-files-found: ignore
+
   fact-mutation-focused-sanitizer:
     name: fact-mutation-focused-sanitizer-ubuntu
     runs-on: ubuntu-latest

@@ -1569,6 +1569,13 @@ def validate_workflow(path: str, workflow: str) -> None:
     sanitizer = section(
         workflow,
         "  policy-write-focused-sanitizer:",
+        "  leak-detection:",
+    )
+    # #1059 put the leak job between the two sanitizer jobs, so the slice above
+    # would otherwise span both and its key profile would read as drift.
+    leak_sanitizer = section(
+        workflow,
+        "  leak-detection:",
         "  fact-mutation-focused-sanitizer:",
     )
     fact_sanitizer = section(
@@ -1584,6 +1591,11 @@ def validate_workflow(path: str, workflow: str) -> None:
     )
     validate_job_profile(
         sanitizer,
+        "E_INVENTORY_CI_SANITIZER",
+        ("name", "runs-on", "timeout-minutes", "env", "steps"),
+    )
+    validate_job_profile(
+        leak_sanitizer,
         "E_INVENTORY_CI_SANITIZER",
         ("name", "runs-on", "timeout-minutes", "env", "steps"),
     )
