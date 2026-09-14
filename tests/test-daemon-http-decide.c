@@ -24,6 +24,7 @@
 #include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/client.h"
+#include "wyrelog/wyl-client-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -22321,6 +22322,131 @@ check_refresh_body_form_contract (const gchar *base_url)
   return 0;
 }
 
+typedef struct
+{
+  guint refresh_requests;
+  guint refresh_responses;
+  guint response_statuses[2];
+  gboolean unexpected_request_shape;
+} ClientRefreshRequestProbe;
+
+static void
+client_refresh_request_queued (SoupSession *session, SoupMessage *message,
+    gpointer user_data)
+{
+  (void) session;
+  ClientRefreshRequestProbe *probe = user_data;
+  GUri *uri = soup_message_get_uri (message);
+  if (uri == NULL || g_strcmp0 (g_uri_get_path (uri), "/auth/refresh") != 0)
+    return;
+
+  probe->refresh_requests++;
+  if (g_strcmp0 (soup_message_get_method (message), "POST") != 0
+      || g_uri_get_query (uri) != NULL)
+    probe->unexpected_request_shape = TRUE;
+}
+
+static void
+client_refresh_request_unqueued (SoupSession *session, SoupMessage *message,
+    gpointer user_data)
+{
+  (void) session;
+  ClientRefreshRequestProbe *probe = user_data;
+  GUri *uri = soup_message_get_uri (message);
+  if (uri == NULL || g_strcmp0 (g_uri_get_path (uri), "/auth/refresh") != 0)
+    return;
+
+  if (probe->refresh_responses < G_N_ELEMENTS (probe->response_statuses))
+    probe->response_statuses[probe->refresh_responses] =
+        soup_message_get_status (message);
+  else
+    probe->unexpected_request_shape = TRUE;
+  probe->refresh_responses++;
+}
+
+/*
+ * #1057: exercise the stateful refresh contract through the client against a
+ * real daemon.  A successful refresh with no query proves the token arrived
+ * through the body; a second, distinct access token proves the client stored
+ * and used the rotated refresh token rather than replaying the predecessor.
+ */
+static gint
+check_client_refresh_against_real_daemon (WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (WylClient) client = NULL;
+  g_autofree gchar *access_before = NULL;
+  g_autofree gchar *access_after_first = NULL;
+  g_autofree gchar *access_after_second = NULL;
+  ClientRefreshRequestProbe probe = { 0 };
+  SoupSession *session = NULL;
+  gulong request_queued_handler = 0;
+  gulong request_unqueued_handler = 0;
+  gint result = 0;
+  wyrelog_error_t login_rc = WYRELOG_E_OK;
+
+  if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
+    return 2941;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  login_rc = wyl_client_login_skip_mfa (client, "login-user");
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != WYRELOG_E_OK) {
+    g_printerr ("WYRELOG_TEST_DIAG client_refresh stage=login rc=%d\n",
+        login_rc);
+    return 2942;
+  }
+
+  access_before = wyl_client_dup_access_token (client);
+  if (access_before == NULL)
+    return 2943;
+  session = wyl_client_get_soup_session (client);
+  if (session == NULL)
+    return 2944;
+  request_queued_handler = g_signal_connect (session, "request-queued",
+          G_CALLBACK (client_refresh_request_queued), &probe);
+  request_unqueued_handler = g_signal_connect (session, "request-unqueued",
+          G_CALLBACK (client_refresh_request_unqueued), &probe);
+
+  wyrelog_error_t first_refresh_rc = wyl_client_token_refresh (client);
+  if (first_refresh_rc != WYRELOG_E_OK || probe.refresh_responses != 1
+      || probe.response_statuses[0] != 200) {
+    g_printerr ("WYRELOG_TEST_DIAG client_refresh stage=first rc=%d "
+        "status=%u requests=%u responses=%u query=%d\n", first_refresh_rc,
+        probe.response_statuses[0], probe.refresh_requests,
+        probe.refresh_responses, probe.unexpected_request_shape);
+    result = 2945;
+    goto cleanup;
+  }
+  access_after_first = wyl_client_dup_access_token (client);
+  if (access_after_first == NULL
+      || g_strcmp0 (access_before, access_after_first) == 0) {
+    result = 2946;
+    goto cleanup;
+  }
+
+  wyrelog_error_t second_refresh_rc = wyl_client_token_refresh (client);
+  if (second_refresh_rc != WYRELOG_E_OK || probe.refresh_responses != 2
+      || probe.response_statuses[1] != 200) {
+    result = 2947;
+    goto cleanup;
+  }
+  access_after_second = wyl_client_dup_access_token (client);
+  if (access_after_second == NULL
+      || g_strcmp0 (access_after_first, access_after_second) == 0
+      || probe.refresh_requests != 2 || probe.refresh_responses != 2
+      || probe.unexpected_request_shape) {
+    result = 2948;
+    goto cleanup;
+  }
+
+cleanup:
+  if (request_queued_handler != 0)
+    g_signal_handler_disconnect (session, request_queued_handler);
+  if (request_unqueued_handler != 0)
+    g_signal_handler_disconnect (session, request_unqueued_handler);
+  return result;
+}
+
 /*
  * #1041: /facts/status delegates its tenant refusal to the shared gate, and
  * nothing asserted that this route answers in the same vocabulary as its
@@ -22859,6 +22985,13 @@ main (void)
   gint body_form_rc = check_refresh_body_form_contract (base_url);
   if (body_form_rc != 0)
     return body_form_rc;
+  gint client_refresh_rc =
+      check_client_refresh_against_real_daemon (handle, base_url);
+  if (client_refresh_rc != 0) {
+    g_printerr ("WYRELOG_TEST_DIAG client_refresh result=%d\n",
+        client_refresh_rc);
+    return client_refresh_rc;
+  }
   gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
         (http.server, base_url);
   if (refresh_shutdown_rc != 0)
