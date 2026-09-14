@@ -75,7 +75,7 @@ create_file_symlink (const gchar *target, const gchar *linkpath)
     return -1;
   }
   BOOL ok = CreateSymbolicLinkW (wlink, wtarget,
-      SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
   if (!ok)
     ok = CreateSymbolicLinkW (wlink, wtarget, 0);
   g_free (wtarget);
@@ -98,8 +98,8 @@ create_dir_symlink (const gchar *target, const gchar *linkpath)
     return -1;
   }
   BOOL ok = CreateSymbolicLinkW (wlink, wtarget,
-      SYMBOLIC_LINK_FLAG_DIRECTORY
-      | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+          SYMBOLIC_LINK_FLAG_DIRECTORY
+          | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
   if (!ok)
     ok = CreateSymbolicLinkW (wlink, wtarget, SYMBOLIC_LINK_FLAG_DIRECTORY);
   g_free (wtarget);
@@ -414,7 +414,7 @@ test_maintenance_acquire_pins_clean_store (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (rc != WYRELOG_E_OK || lease == NULL) {
     if (lease != NULL)
       wyl_policy_store_lease_release (lease);
@@ -455,7 +455,7 @@ test_maintenance_symlink_rejected (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (lease != NULL) {
     wyl_policy_store_lease_release (lease);
     rmrf (dir);
@@ -488,7 +488,7 @@ test_maintenance_hardlink_rejected (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (lease != NULL) {
     wyl_policy_store_lease_release (lease);
     rmrf (dir);
@@ -517,7 +517,7 @@ test_maintenance_loose_mode_rejected (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (lease != NULL) {
     wyl_policy_store_lease_release (lease);
     rmrf (dir);
@@ -555,7 +555,7 @@ test_maintenance_wrong_owner_rejected (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (lease != NULL) {
     wyl_policy_store_lease_release (lease);
     rmrf (dir);
@@ -584,7 +584,7 @@ test_maintenance_verify_detects_swap (void)
   }
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (rc != WYRELOG_E_OK || lease == NULL) {
     if (lease != NULL)
       wyl_policy_store_lease_release (lease);
@@ -636,7 +636,7 @@ test_maintenance_second_acquire_busy (void)
   }
   wyl_policy_store_lease_t *second = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &second);
+          &second);
   if (second != NULL) {
     wyl_policy_store_lease_release (second);
     wyl_policy_store_lease_release (first);
@@ -663,7 +663,7 @@ test_maintenance_absent_store_not_found (void)
   g_autofree gchar *store = g_build_filename (dir, "policy.sqlite", NULL);
   wyl_policy_store_lease_t *lease = NULL;
   wyrelog_error_t rc = wyl_policy_store_lease_acquire_maintenance (store,
-      &lease);
+          &lease);
   if (lease != NULL) {
     wyl_policy_store_lease_release (lease);
     rmrf (dir);

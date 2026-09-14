@@ -58,8 +58,10 @@ tests/test-fact-store-poison.c
 tests/test-fact-store-provisioned.c
 tests/test-fact-store.c
 tests/test-fact-tenant-admission.c
+tests/test-fsm-permission-scope.c
 tests/test-fsm-principal.c
 tests/test-grant-req.c
+tests/test-handle-engine-pair.c
 tests/test-handle-id.c
 tests/test-hardening-fuzz.c
 tests/test-jwt.c
@@ -67,6 +69,7 @@ tests/test-lobac-partial-delta.c
 tests/test-login-req.c
 tests/test-policy-graph-authority.c
 tests/test-policy-store-lease.c
+tests/test-policy-store-toctou.c
 tests/test-policy-store-totp.c
 tests/test-policy-store.c
 tests/test-posix-errno-capability.c
