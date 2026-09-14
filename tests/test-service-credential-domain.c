@@ -6932,6 +6932,30 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   g_assert_true (purged.receipt_replayed);
   g_assert_false (purged.snapshot_deleted);
   wyl_service_credential_operation_retirement_result_clear (&purged);
+  gint64 credentials_before_foreign_retirement_replay = scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials;");
+  gint64 events_before_foreign_retirement_replay = scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events;");
+  WylServiceCredentialOperationCoordinatorRequest foreign_replay_request =
+      coordinator_request;
+  foreign_replay_request.actor_subject_id = "mallory";
+  WylServiceCredentialOperationGuardedBeginResult foreign_replay =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  g_assert_cmpint
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (handle, &operation_storage, &operation_anchor, &foreign_replay_request,
+      NULL, &foreign_replay), ==, WYRELOG_E_AUTH);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credentials;"), ==,
+      credentials_before_foreign_retirement_replay);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_events;"), ==,
+      events_before_foreign_retirement_replay);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+        (&operation_storage, &operation_anchor, original_id,
+      &terminal_snapshot), ==, WYRELOG_E_NOT_FOUND);
+  wyl_service_credential_operation_guarded_begin_result_clear
+    (&foreign_replay);
   input.remediation_request_fingerprint[0] ^= 0xff;
   classifier_transaction_begin (handle, &transaction);
   g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
@@ -7169,7 +7193,7 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   (
     wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
       (handle, &operation_storage, &operation_anchor, &coordinator_request,
-    NULL, &begin), ==, WYRELOG_E_POLICY);
+    NULL, &begin), ==, WYRELOG_E_CONFLICT);
   g_assert_null (begin.record.request_id);
   g_free (coordinator_request.destination);
   coordinator_request.destination = g_strdup ("different.json");
@@ -7177,7 +7201,7 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   (
     wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
       (handle, &operation_storage, &operation_anchor, &coordinator_request,
-    NULL, &begin), ==, WYRELOG_E_POLICY);
+    NULL, &begin), ==, WYRELOG_E_CONFLICT);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load
         (&operation_storage, &operation_anchor, original_request_id, &loaded),
       ==, WYRELOG_E_NOT_FOUND);

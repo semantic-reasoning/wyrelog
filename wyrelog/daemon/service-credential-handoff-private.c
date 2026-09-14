@@ -6,6 +6,7 @@
 #include "auth/service-credential-operation-destination-private.h"
 #include "auth/service-credential-operation-storage-private.h"
 #include "wyctl/wyctl-publication-backend-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #include <string.h>
 
@@ -182,27 +183,46 @@ wyl_daemon_service_credential_handoff (const
   /* Opt-in surface: an unconfigured deployment reports unavailable rather than
    * touching any state. */
   if (!root_is_configured (ctx->operation_root)
-      || !root_is_configured (ctx->credential_publication_root))
+      || !root_is_configured (ctx->credential_publication_root)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: handoff-roots-unavailable");
     return WYRELOG_E_NOT_FOUND;
+  }
 
   if (inputs->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE
-      && inputs->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
+      && inputs->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: supported-operation-kind");
     return WYRELOG_E_INVALID;
+  }
   if (!wyl_service_credential_operation_coordinator_request_id_is_valid
-        (inputs->request_id)
-      || !wyl_service_credential_operation_destination_is_valid
-        (inputs->destination))
+        (inputs->request_id)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: request-id-format");
     return WYRELOG_E_INVALID;
+  }
+  if (!wyl_service_credential_operation_destination_is_valid
+        (inputs->destination)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: destination-name");
+    return WYRELOG_E_INVALID;
+  }
 
   rc = wyl_service_credential_operation_storage_open (ctx->operation_root,
           &storage);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: operation-root-open");
     goto out;
+  }
   storage_opened = TRUE;
   rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
           &anchor);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: operation-root-anchor");
     goto out;
+  }
 
   const WyctlPublicationBackendVTable *publication;
   gpointer publication_data;
@@ -215,8 +235,11 @@ wyl_daemon_service_credential_handoff (const
   {
     rc = wyctl_publication_backend_open (&backend,
             ctx->credential_publication_root);
-    if (rc != WYRELOG_E_OK)
+    if (rc != WYRELOG_E_OK) {
+      WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+          "service-credential handoff refused: publication-root-open");
       goto out;
+    }
     backend_opened = TRUE;
     publication = wyctl_publication_backend_vtable ();
     publication_data = wyctl_publication_backend_self (&backend);
@@ -225,9 +248,13 @@ wyl_daemon_service_credential_handoff (const
   /* Derive the publication parent_identity from the daemon's own owner root via
    * the backend accessor.  It is byte-identical to what plan() stamps, so the
    * executor's plan/record parent_identity assertion holds.  A missing or
-   * non-private root fails closed exactly as plan does; propagate that rc
-   * verbatim (NOT_FOUND -> unavailable, POLICY -> conflict). */
+   * non-private root fails closed exactly as plan does. */
   rc = publication->root_identity (publication_data, &parent_identity);
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: publication-root-identity");
+    goto out;
+  }
   if (rc != WYRELOG_E_OK)
     goto out;
 

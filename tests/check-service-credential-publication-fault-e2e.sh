@@ -42,12 +42,9 @@
 #   5. RESTART the daemon WITHOUT the fault flag (still WITH --production);
 #   6. the orphan SURVIVED restart: recover --request-id R still reports
 #      state=server_committed with the SAME successor id ($PUBROOT still empty);
-#   7. REVOCABLE via the public workflow: revoke the orphan's successor
-#      credential id -> state=revoked; $PUBROOT still empty (no secret ever
-#      landed);
-#   8. NEGATIVE CONTROL: a SECOND issue with a FRESH request id on the restarted
-#      (unarmed) daemon COMPLETES normally (delivered, escrow written) -- proving
-#      the single-shot seam did not wedge the daemon.
+#   7. retry the original request R: it delivers that same credential exactly
+#      once, proving recovery resumes rather than duplicates it;
+#   8. revoke that credential and issue a fresh request as a negative control.
 
 set -eu
 
@@ -323,9 +320,33 @@ REC2_SUCC=$("$PY" "$SC_E2E_PY" receipt-field --field successor_credential_id \
     "$TMPDIR/recover2.out"
 assert_pubroot_empty "after restart + recover"
 
-# --- 7. REVOCABLE via the public workflow (revoke the orphan's successor). ----
-# The orphan is a durable SERVER_COMMITTED credential whose id the operator
-# learns from `recover`; it is revoked through the ordinary public revoke path.
+# --- 7. retry the same request after restart; no duplicate credential. --------
+"$WYCTL" --daemon-url "$URL" service-credential issue \
+  --request-id "$REQ_ID" --subject svc:svc-app --tenant tenant-a \
+  --destination credF --expires-at-us "$EXPIRES" \
+  --access-token-file "$ADMIN2_TOKEN2" \
+  --guard-timestamp "$(now_us)" --guard-loc-class trusted --guard-risk 0 \
+  >"$TMPDIR/retry.out" 2>"$TMPDIR/retry.err" \
+  || fail "same-ID issue retry failed after restart" \
+    "$TMPDIR/retry.err" "$LOG.err"
+RETRY_STATE=$("$PY" "$SC_E2E_PY" receipt-field --field state <"$TMPDIR/retry.out") \
+  || fail "same-ID retry receipt missing state" "$TMPDIR/retry.out"
+RETRY_DELIVERED=$("$PY" "$SC_E2E_PY" receipt-field --field delivered \
+  <"$TMPDIR/retry.out") \
+  || fail "same-ID retry receipt missing delivered" "$TMPDIR/retry.out"
+RETRY_CRED=$("$PY" "$SC_E2E_PY" receipt-field --field credential_id \
+  <"$TMPDIR/retry.out") \
+  || fail "same-ID retry receipt missing credential_id" "$TMPDIR/retry.out"
+[ "$RETRY_STATE" = "terminal" ] \
+  || fail "same-ID retry state=$RETRY_STATE (expected terminal)" "$TMPDIR/retry.out"
+[ "$RETRY_DELIVERED" = "yes" ] \
+  || fail "same-ID retry delivered=$RETRY_DELIVERED (expected yes)" "$TMPDIR/retry.out"
+[ "$RETRY_CRED" = "$REC1_SUCC" ] \
+  || fail "same-ID retry credential changed ($REC1_SUCC -> $RETRY_CRED)" "$TMPDIR/retry.out"
+test -s "$PUBROOT/credF" \
+  || fail "restored provider retry did not publish $PUBROOT/credF"
+
+# --- 8. revoke through public workflow; fresh issue is a negative control. ----
 REVOKE_RID=$("$PY" "$SC_E2E_PY" mint-request-id) \
   || fail "unable to mint revoke request id"
 "$WYCTL" --daemon-url "$URL" service-credential revoke \
@@ -336,8 +357,9 @@ REVOKE_RID=$("$PY" "$SC_E2E_PY" mint-request-id) \
   || fail "revoking the orphan credential failed" "$TMPDIR/revoke.err" "$LOG.err"
 grep -q "state=revoked" "$TMPDIR/revoke.out" \
   || fail "orphan revoke did not report state=revoked" "$TMPDIR/revoke.out"
-# A revoked orphan still never delivered a secret.
-assert_pubroot_empty "after revoke"
+# Revocation must not remove the already delivered escrow document.
+test -s "$PUBROOT/credF" \
+  || fail "revocation unexpectedly removed the delivered escrow document"
 
 # --- 8. NEGATIVE CONTROL: a fresh issue on the restarted daemon completes. -----
 FRESH_RID=$("$PY" "$SC_E2E_PY" mint-request-id) \
@@ -368,7 +390,8 @@ echo "  2 issue failed (armed) : non-zero wyctl exit (post-commit fault)"
 echo "  3 no secret on disk     : \$PUBROOT empty after failed issue"
 echo "  4 orphan recover        : state=$REC1_STATE recovery=$REC1_RECOVERY succ=$REC1_SUCC"
 echo "  6 survived restart      : state=$REC2_STATE succ=$REC2_SUCC"
-echo "  7 revoked (public wf)   : $(cat "$TMPDIR/revoke.out")"
-echo "  8 fresh issue completes : state=$FRESH_STATE delivered=$FRESH_DELIVERED"
+echo "  7 same-ID retry         : state=$RETRY_STATE delivered=$RETRY_DELIVERED credential=$RETRY_CRED"
+echo "  8 revoked (public wf)   : $(cat "$TMPDIR/revoke.out")"
+echo "  9 fresh issue completes : state=$FRESH_STATE delivered=$FRESH_DELIVERED"
 echo "check-service-credential-publication-fault-e2e: PASS"
 exit 0

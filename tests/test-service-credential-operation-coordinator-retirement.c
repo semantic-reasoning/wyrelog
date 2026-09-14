@@ -6,6 +6,7 @@
 
 #include "auth/service-credential-operation-coordinator-retirement-private.h"
 #include "wyl-handle-private.h"
+#include "wyl-log-private.h"
 #include "wyl-request-id-private.h"
 #include "test-service-credential-operation-root.h"
 
@@ -16,6 +17,7 @@ typedef struct
   gchar *db_path;
   gchar *key_path;
   gchar *key_spec;
+  gchar *log_path;
   WylHandle *handle;
   WylServiceCredentialOperationStorage storage;
   WylServiceCredentialOperationRootAnchor anchor;
@@ -49,6 +51,7 @@ fixture_clear (Fixture *fixture)
   g_free (fixture->key_spec);
   g_free (fixture->key_path);
   g_free (fixture->db_path);
+  g_free (fixture->log_path);
   g_free (fixture->operation_root);
   g_free (fixture->root);
   memset (fixture, 0, sizeof *fixture);
@@ -60,20 +63,25 @@ static void
 fixture_init (Fixture *fixture)
 {
   *fixture = (Fixture) {
-  .storage = WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT,.anchor =
-        WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT,};
+    .storage = WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT,.anchor =
+        WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT,
+  };
   fixture->root = g_dir_make_tmp ("wyl-retirement-coordinator-XXXXXX", NULL);
   g_assert_nonnull (fixture->root);
   fixture->operation_root = service_credential_operation_root_for_test
-      (fixture->root, "retirement-coordinator-operations");
+        (fixture->root, "retirement-coordinator-operations");
   g_assert_nonnull (fixture->operation_root);
   fixture->db_path = g_build_filename (fixture->root, "policy.db", NULL);
   fixture->key_path = g_build_filename (fixture->root, "policy.key", NULL);
+  fixture->log_path = g_build_filename (fixture->root, "test.log", NULL);
+  g_setenv ("WYL_LOG", "policy:debug", TRUE);
+  g_setenv ("WYL_LOG_FILE", fixture->log_path, TRUE);
+  wyl_log_internal_reconfigure ();
   guint8 key[32];
   for (guint i = 0; i < sizeof key; i++)
     key[i] = (guint8) (i + 1);
   g_assert_true (g_file_set_contents (fixture->key_path,
-          (const gchar *) key, sizeof key, NULL));
+      (const gchar *) key, sizeof key, NULL));
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
   WylHandleOpenOptions options = {
     .policy_store_path = fixture->db_path,
@@ -83,9 +91,9 @@ fixture_init (Fixture *fixture)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture->handle),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (fixture->operation_root, &fixture->storage), ==, WYRELOG_E_OK);
+        (fixture->operation_root, &fixture->storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
+        (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
 }
 
 static WylServiceCredentialOperationCoordinatorRequest
@@ -116,7 +124,7 @@ assert_missing (Fixture *fixture, const gchar *request_id)
   WylServiceCredentialOperationRecord record =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load
-      (&fixture->storage, &fixture->anchor, request_id, &record), ==,
+        (&fixture->storage, &fixture->anchor, request_id, &record), ==,
       WYRELOG_E_NOT_FOUND);
   wyl_service_credential_operation_record_clear (&record);
 }
@@ -131,25 +139,25 @@ test_guarded_begin_fresh_replay_and_collision (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-      (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
+      &result), ==, WYRELOG_E_OK);
   g_assert_false (result.replayed);
   g_assert_cmpstr (result.record.request_id, ==, request.request_id);
   wyl_service_credential_operation_guarded_begin_result_clear (&result);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-      (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result.replayed);
   wyl_service_credential_operation_guarded_begin_result_clear (&result);
 
   g_autofree gchar *original_destination = request.destination;
   request.destination = g_strdup ("different.json");
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-      (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
+      &result), ==, WYRELOG_E_CONFLICT);
   request.destination = g_steal_pointer (&original_destination);
   wyl_service_credential_operation_guarded_begin_result_clear (&result);
   wyl_service_credential_operation_coordinator_request_clear (&request);
@@ -167,19 +175,19 @@ test_missing_and_cancelled_have_no_effects (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
 
   g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
-      (fixture.handle, &fixture.storage, &fixture.anchor, request.request_id,
-          NULL, &retirement), ==, WYRELOG_E_NOT_FOUND);
+        (fixture.handle, &fixture.storage, &fixture.anchor, request.request_id,
+      NULL, &retirement), ==, WYRELOG_E_NOT_FOUND);
   assert_missing (&fixture, request.request_id);
   g_autoptr (GCancellable) cancelled = g_cancellable_new ();
   g_cancellable_cancel (cancelled);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-      (fixture.handle, &fixture.storage, &fixture.anchor, &request, cancelled,
-          &begin), ==, WYRELOG_E_BUSY);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (fixture.handle, &fixture.storage, &fixture.anchor, &request, cancelled,
+      &begin), ==, WYRELOG_E_BUSY);
   assert_missing (&fixture, request.request_id);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
-      (fixture.handle, &fixture.storage, &fixture.anchor, request.request_id,
-          cancelled, &retirement), ==, WYRELOG_E_BUSY);
+        (fixture.handle, &fixture.storage, &fixture.anchor, request.request_id,
+      cancelled, &retirement), ==, WYRELOG_E_BUSY);
   assert_missing (&fixture, request.request_id);
   wyl_service_credential_operation_guarded_begin_result_clear (&begin);
   wyl_service_credential_operation_retirement_result_clear (&retirement);
@@ -200,12 +208,12 @@ test_raw_begin_requires_matching_lifecycle (void)
   gboolean replayed = FALSE;
 
   g_assert_cmpint (wyl_service_credential_operation_coordinator_lock_acquire
-      (&fixture.storage, &fixture.anchor, first.request_id, &first_lock), ==,
+        (&fixture.storage, &fixture.anchor, first.request_id, &first_lock), ==,
       WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_locked_for_test
-      (&fixture.storage, &fixture.anchor, &first_lock, &second,
-          g_get_real_time (), &replayed, &record), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_locked_for_test
+        (&fixture.storage, &fixture.anchor, &first_lock, &second,
+      g_get_real_time (), &replayed, &record), ==, WYRELOG_E_POLICY);
   wyl_service_credential_operation_coordinator_lock_release (&fixture.storage,
       &fixture.anchor, &first_lock);
   assert_missing (&fixture, second.request_id);
@@ -224,28 +232,35 @@ test_corrupt_receipt_fails_closed_without_create (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
   g_autofree gchar *sql =
       g_strdup_printf
-      ("INSERT INTO service_credential_handoff_retirement_receipts("
-      "original_request_id,terminal_kind,raw_journal_snapshot_digest,"
-      "delivery_disposition_id,delivery_audit_id,delivery_proof_digest,"
-      "revoke_remediation_request_id,revoke_audit_id,revoke_event_id,"
-      "resume_remediation_request_id,resume_audit_id,"
-      "remediation_source_snapshot_digest,remediation_request_fingerprint,"
-      "retention_basis_at_us,retired_at_us) VALUES("
-      "'%s','file_published',randomblob(32),"
-      "'01890f47-3c4b-7cc2-b8c4-dc0c0c073991',"
-      "'01890f47-3c4b-7cc2-b8c4-dc0c0c073992',randomblob(32),"
-      "NULL,NULL,NULL,NULL,NULL,NULL,NULL,1,2592000000001);",
-      request.request_id);
+        ("INSERT INTO service_credential_handoff_retirement_receipts("
+          "original_request_id,terminal_kind,raw_journal_snapshot_digest,"
+          "delivery_disposition_id,delivery_audit_id,delivery_proof_digest,"
+          "revoke_remediation_request_id,revoke_audit_id,revoke_event_id,"
+          "resume_remediation_request_id,resume_audit_id,"
+          "remediation_source_snapshot_digest,remediation_request_fingerprint,"
+          "retention_basis_at_us,retired_at_us) VALUES("
+          "'%s','file_published',randomblob(32),"
+          "'01890f47-3c4b-7cc2-b8c4-dc0c0c073991',"
+          "'01890f47-3c4b-7cc2-b8c4-dc0c0c073992',randomblob(32),"
+          "NULL,NULL,NULL,NULL,NULL,NULL,NULL,1,2592000000001);",
+          request.request_id);
   gchar *message = NULL;
   sqlite3 *db = wyl_policy_store_get_db
-      (wyl_handle_get_policy_store (fixture.handle));
+        (wyl_handle_get_policy_store (fixture.handle));
   g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, &message), ==, SQLITE_OK);
   sqlite3_free (message);
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-      (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
+      &result), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *log_contents = NULL;
+  gsize log_length = 0;
+  g_assert_true (g_file_get_contents (fixture.log_path, &log_contents,
+      &log_length, NULL));
+  g_assert_cmpuint (log_length, >, 0);
+  g_assert_nonnull (strstr (log_contents,
+      "service-credential handoff refused: retirement-receipt-validation"));
   assert_missing (&fixture, request.request_id);
   wyl_service_credential_operation_guarded_begin_result_clear (&result);
   wyl_service_credential_operation_coordinator_request_clear (&request);

@@ -6,6 +6,7 @@
 #include "auth/service-credential-operation-coordinator-proof-private.h"
 #include "policy/store-private.h"
 #include "wyl-handle-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #include <sodium.h>
 #include <string.h>
@@ -38,6 +39,9 @@ authority_transaction_finish (wyl_policy_store_t *store,
 
   if (terminal != WYRELOG_E_OK)
     result = terminal;
+  if (terminal == WYRELOG_E_POLICY)
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: retirement-authority-transaction-finish");
   if (wyl_policy_store_service_authority_transaction_is_poisoned (store)) {
     wyrelog_error_t abort_rc =
         wyl_policy_store_service_authority_transaction_abort (transaction);
@@ -56,12 +60,19 @@ retirement_lookup_authority (WylHandle *handle,
   WylServiceAuthorityTransaction *transaction = NULL;
   wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
         (store, handle, lease, &transaction);
+  if (rc == WYRELOG_E_POLICY)
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: retirement-authority-transaction-begin");
 
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
     rc = wyl_policy_store_handoff_retirement_lookup_core (transaction, store,
             request_id, out);
-  if (rc == WYRELOG_E_INVALID)
-    rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_INVALID)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_POLICY)
+      WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+          "service-credential handoff refused: retirement-receipt-validation");
+  }
   if (transaction != NULL)
     rc = authority_transaction_finish (store, transaction, rc,
             rc == WYRELOG_E_OK);
@@ -273,8 +284,11 @@ wyl_service_credential_operation_coordinator_purge_retired
           &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_write_lease_get_policy_store (lease, handle, &store);
-  if (rc == WYRELOG_E_OK && store != wyl_handle_get_policy_store (handle))
+  if (rc == WYRELOG_E_OK && store != wyl_handle_get_policy_store (handle)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: authority-store-identity");
     rc = WYRELOG_E_POLICY;
+  }
   if (rc != WYRELOG_E_OK)
     goto out;
 
@@ -360,13 +374,15 @@ out:
 }
 
 wyrelog_error_t
-wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
   (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     GCancellable * cancellable,
-    WylServiceCredentialOperationGuardedBeginResult * out_result)
+    WylServiceCredentialOperationGuardedBeginResult * out_result,
+    WylServiceCredentialOperationFreshBeginCheck fresh_begin_check,
+    gpointer fresh_begin_check_data)
 {
   WylServiceCredentialOperationCoordinatorLock lifecycle_lock =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
@@ -410,7 +426,20 @@ wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
   rc = retirement_lookup_authority (handle, lease, store,
           request->request_id, &receipt);
   if (rc == WYRELOG_E_OK) {
-    rc = WYRELOG_E_POLICY;
+    if (receipt.original_actor_subject_id == NULL) {
+      WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+          "service-credential handoff refused: retirement-owner-integrity");
+      rc = WYRELOG_E_INTERNAL;
+    } else if (g_strcmp0 (receipt.original_actor_subject_id,
+        request->actor_subject_id) != 0) {
+      WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+          "service-credential handoff refused: retirement-owner-mismatch");
+      rc = WYRELOG_E_AUTH;
+    } else {
+      WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+          "service-credential handoff refused: request-id-retirement-receipt");
+      rc = WYRELOG_E_CONFLICT;
+    }
     goto out;
   }
   if (rc != WYRELOG_E_NOT_FOUND)
@@ -421,12 +450,14 @@ wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
   }
   gint64 now_us = g_get_real_time ();
   if (now_us <= 0) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: positive-operation-clock");
     rc = WYRELOG_E_POLICY;
     goto out;
   }
-  rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked
+  rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked_with_check
         (storage, anchor, &lifecycle_lock, request, now_us, &replayed,
-          &out_result->record);
+          &out_result->record, fresh_begin_check, fresh_begin_check_data);
   if (rc == WYRELOG_E_OK)
     out_result->replayed = replayed;
 out:
@@ -443,4 +474,17 @@ out:
   if (rc != WYRELOG_E_OK)
     wyl_service_credential_operation_guarded_begin_result_clear (out_result);
   return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+  (WylHandle * handle,
+    const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    GCancellable * cancellable,
+    WylServiceCredentialOperationGuardedBeginResult * out_result)
+{
+  return wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
+           (handle, storage, anchor, request, cancellable, out_result, NULL, NULL);
 }

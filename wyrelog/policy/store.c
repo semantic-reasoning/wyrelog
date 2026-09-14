@@ -23045,6 +23045,13 @@ out:
   return rc;
 }
 
+gboolean
+wyl_policy_store_has_service_credential_provider (const wyl_policy_store_t *store)
+{
+  /* Provider ownership is fixed for a live store handle. */
+  return store != NULL && store->keyprovider.owned;
+}
+
 static wyrelog_error_t
 service_cvk_materialize (wyl_policy_store_t *store, gboolean allow_create,
     const guint8 **out_cvk, gsize *out_len)
@@ -23053,8 +23060,11 @@ service_cvk_materialize (wyl_policy_store_t *store, gboolean allow_create,
   *out_len = 0;
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  if (!store->keyprovider.owned)
+  if (!store->keyprovider.owned) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: effective-provider-unavailable");
     return WYRELOG_E_POLICY;
+  }
   g_mutex_lock (&store->service_cvk_mutex);
   wyrelog_error_t rc = WYRELOG_E_OK;
   rc = service_cvk_begin (store);
@@ -24595,6 +24605,7 @@ void wyl_policy_service_handoff_retirement_result_clear
   if (result == NULL)
     return;
   g_free (result->original_request_id);
+  g_free (result->original_actor_subject_id);
   g_free (result->delivery_disposition_id);
   g_free (result->delivery_audit_id);
   g_free (result->revoke_remediation_request_id);
@@ -24949,7 +24960,7 @@ service_handoff_retirement_load_by_request (wyl_policy_store_t *store,
 static wyrelog_error_t
 service_handoff_retirement_validate_receipt_authority
   (wyl_policy_store_t * store,
-    const WylPolicyServiceHandoffRetirementResult * receipt)
+    WylPolicyServiceHandoffRetirementResult * receipt)
 {
   wyrelog_error_t rc = WYRELOG_E_OK;
   gint64 basis = 0;
@@ -24958,6 +24969,7 @@ service_handoff_retirement_validate_receipt_authority
   const WylPolicyServiceHandoffExactTuple *tuple = NULL;
   ServiceHandoffRetirementDelivery delivery = { 0 };
   WylPolicyServiceHandoffRemediationResult remediation = { 0 };
+  g_clear_pointer (&receipt->original_actor_subject_id, g_free);
   if (receipt->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED) {
     gint64 delivery_created = 0;
     rc = service_handoff_retirement_load_delivery (store, receipt, &delivery,
@@ -24976,6 +24988,12 @@ service_handoff_retirement_validate_receipt_authority
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK)
       basis = delivery_created;
+    if (rc == WYRELOG_E_OK) {
+      receipt->original_actor_subject_id = service_handoff_try_strdup
+            (delivery.actor_subject_id);
+      if (receipt->original_actor_subject_id == NULL)
+        rc = WYRELOG_E_NOMEM;
+    }
     wyl_policy_service_handoff_disposition_result_clear (&disposition);
     tuple = &delivery.tuple;
     if (rc == WYRELOG_E_OK && receipt->resume_remediation_request_id != NULL) {
@@ -25027,6 +25045,12 @@ service_handoff_retirement_validate_receipt_authority
         != WYRELOG_E_OK))
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK) {
+      receipt->original_actor_subject_id = service_handoff_try_strdup
+            (remediation.original_actor_subject_id);
+      if (receipt->original_actor_subject_id == NULL)
+        rc = WYRELOG_E_NOMEM;
+    }
+    if (rc == WYRELOG_E_OK) {
       remediation_tuple.original_request_id = remediation.original_request_id;
       remediation_tuple.escrow_id = &escrow_id;
       memcpy (remediation_tuple.binding_digest, remediation.binding_digest, 32);
@@ -25066,7 +25090,12 @@ service_handoff_retirement_build_expected (wyl_policy_store_t *store,
 {
   out->original_request_id = service_handoff_try_strdup
         (input->tuple.original_request_id);
-  if (out->original_request_id == NULL)
+  out->original_actor_subject_id = service_handoff_try_strdup
+        (input->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED ?
+          input->delivery_actor_subject_id :
+          input->tuple.original_actor_subject_id);
+  if (out->original_request_id == NULL
+      || out->original_actor_subject_id == NULL)
     return WYRELOG_E_NOMEM;
   out->terminal_kind = input->terminal_kind;
   memcpy (out->raw_journal_snapshot_digest,
@@ -25177,6 +25206,8 @@ service_handoff_retirement_result_exact
 {
   return g_strcmp0 (stored->original_request_id,
              expected->original_request_id) == 0
+         && g_strcmp0 (stored->original_actor_subject_id,
+             expected->original_actor_subject_id) == 0
          && stored->terminal_kind == expected->terminal_kind
          && sodium_memcmp (stored->raw_journal_snapshot_digest,
              expected->raw_journal_snapshot_digest, 32) == 0

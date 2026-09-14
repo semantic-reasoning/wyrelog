@@ -27,6 +27,7 @@ FORBIDDEN_EXPORT_PREFIXES = (
 
 FORBIDDEN_EXPORT_EXACT = {
     "wyl_service_credential_operation_coordinator_begin_or_replay_locked",
+    "wyl_service_credential_operation_coordinator_begin_or_replay_locked_with_check",
     "wyl_service_credential_operation_handoff_target_digest",
 }
 
@@ -52,6 +53,10 @@ FRIEND_HEADER_INCLUDES = {
 
 FRIEND_SYMBOL_REFERENCES = {
     "wyl_service_credential_operation_coordinator_begin_or_replay_locked": {
+        "wyrelog/auth/service-credential-operation-coordinator-storage-private.c",
+        "wyrelog/auth/service-credential-operation-coordinator-storage-private.h",
+    },
+    "wyl_service_credential_operation_coordinator_begin_or_replay_locked_with_check": {
         "wyrelog/auth/service-credential-operation-coordinator-storage-private.c",
         "wyrelog/auth/service-credential-operation-coordinator-storage-private.h",
         "wyrelog/auth/service-credential-operation-coordinator-retirement-private.c",

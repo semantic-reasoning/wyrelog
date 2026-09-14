@@ -13,6 +13,7 @@
 #include "wyl-common-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
+#include "wyl-log-private.h"
 #include "wyl-permission-scope-private.h"
 #include "wyl-session-layout-private.h"
 
@@ -20,6 +21,38 @@
 #include <string.h>
 
 #define HANDOFF_MANAGE_ACTION "wr.service_credential.manage"
+
+static wyrelog_error_t
+handoff_invariant_refused (const gchar *check)
+{
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: %s", check);
+  return WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+handoff_authority_denied (const gchar *check)
+{
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: %s", check);
+  return WYRELOG_E_AUTH;
+}
+
+static wyrelog_error_t
+handoff_request_conflict (const gchar *check)
+{
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: %s", check);
+  return WYRELOG_E_CONFLICT;
+}
+
+static wyrelog_error_t
+handoff_policy_refused (const gchar *check)
+{
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: %s", check);
+  return WYRELOG_E_POLICY;
+}
 
 #ifdef WYL_ENABLE_FAULT_INJECTION
 /* Single-shot local-publication fault-injection seam (#754).  Compiled in ONLY
@@ -214,16 +247,20 @@ handoff_authorize (gpointer data, const gchar *actor_subject_id)
       || g_strcmp0 (actor_subject_id,
       authorization->record->actor_subject_id) != 0
       || !handoff_session_matches (authorization))
-    return WYRELOG_E_POLICY;
+    return handoff_authority_denied ("caller-authorization-binding");
 
   gboolean target_active = FALSE;
   wyrelog_error_t rc = wyl_policy_store_tenant_is_active
         (wyl_handle_get_policy_store (authorization->handle),
           authorization->runtime->target_tenant, &target_active);
   if (rc != WYRELOG_E_OK)
-    return rc;
-  if (!target_active)
+    return rc == WYRELOG_E_POLICY ?
+           handoff_invariant_refused ("authorization-tenant-state") : rc;
+  if (!target_active) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: target-tenant-inactive");
     return WYRELOG_E_NOT_FOUND;
+  }
 
   g_autoptr (wyl_decide_req_t) request = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) response = wyl_decide_resp_new ();
@@ -242,7 +279,9 @@ handoff_authorize (gpointer data, const gchar *actor_subject_id)
   rc = wyl_decide (authorization->handle, request, response);
   if (rc == WYRELOG_E_OK
       && wyl_decide_resp_get_decision (response) != WYL_DECISION_ALLOW)
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_authority_denied ("service-credential-management-permission");
+  else if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("authorization-decision-evaluation");
   if (rc == WYRELOG_E_OK && authorization->runtime->after_authorization != NULL)
     authorization->runtime->after_authorization
       (authorization->runtime->authorization_checkpoint_data);
@@ -258,7 +297,7 @@ handoff_front_authorize (WylHandle *handle,
       || !wyl_policy_store_tenant_id_is_valid (runtime->target_tenant)
       || !handoff_session_is_active_human (runtime->session)
       || !handoff_session_is_mfa_assured (runtime->session))
-    return WYRELOG_E_POLICY;
+    return handoff_authority_denied ("live-mfa-human-session");
   g_autofree gchar *session_actor = wyl_session_dup_username (runtime->session);
   g_autofree gchar *session_tenant = wyl_session_dup_tenant (runtime->session);
   g_autofree gchar *session_resource =
@@ -269,23 +308,29 @@ handoff_front_authorize (WylHandle *handle,
       runtime->authenticated_actor_subject_id) != 0
       || g_strcmp0 (session_actor, request->actor_subject_id) != 0
       || g_strcmp0 (session_tenant, WYL_TENANT_DEFAULT) != 0)
-    return WYRELOG_E_POLICY;
+    return handoff_authority_denied ("caller-identity-and-management-tenant");
 
   gboolean target_active = FALSE;
   wyrelog_error_t rc = wyl_policy_store_tenant_is_active
         (wyl_handle_get_policy_store (handle), runtime->target_tenant,
           &target_active);
   if (rc != WYRELOG_E_OK)
-    return rc;
-  if (!target_active)
+    return rc == WYRELOG_E_POLICY ?
+           handoff_invariant_refused ("target-tenant-state") : rc;
+  if (!target_active) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: target-tenant-inactive");
     return WYRELOG_E_NOT_FOUND;
+  }
   if (request->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
     if (g_strcmp0 (request->tenant_id, runtime->target_tenant) != 0)
-      return WYRELOG_E_POLICY;
+      return handoff_authority_denied ("issue-target-tenant-binding");
   } else if (request->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
     wyl_service_credential_t old = { 0 };
     rc = wyl_service_credential_operation_coordinator_get_credential_pinned
           (handle, runtime->cancellable, request->old_credential_id, &old);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("rotation-credential-lookup");
     if (rc == WYRELOG_E_OK
         && g_strcmp0 (old.tenant_id, runtime->target_tenant) != 0)
       rc = WYRELOG_E_NOT_FOUND;
@@ -293,7 +338,7 @@ handoff_front_authorize (WylHandle *handle,
     if (rc != WYRELOG_E_OK)
       return rc;
   } else {
-    return WYRELOG_E_POLICY;
+    return handoff_invariant_refused ("supported-operation-kind");
   }
 
   g_autoptr (wyl_decide_req_t) decision = wyl_decide_req_new ();
@@ -309,7 +354,9 @@ handoff_front_authorize (WylHandle *handle,
   rc = wyl_decide (handle, decision, response);
   if (rc == WYRELOG_E_OK
       && wyl_decide_resp_get_decision (response) != WYL_DECISION_ALLOW)
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_authority_denied ("service-credential-management-permission");
+  else if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("authorization-decision-evaluation");
   return rc;
 }
 
@@ -347,6 +394,8 @@ handoff_escrow_load_exact (wyl_policy_store_t *store,
           escrow_id, out);
   if (rc == WYRELOG_E_OK
       && !handoff_escrow_matches (out, record, escrow_id, target_digest)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: escrow-record-binding");
     wyl_policy_service_handoff_escrow_info_clear (out);
     rc = WYRELOG_E_POLICY;
   }
@@ -360,8 +409,11 @@ handoff_secret_encode (wyl_policy_service_handoff_secret_t *secret,
   gsize raw_len = 0;
   const guint8 *raw = wyl_policy_service_handoff_secret_peek (secret,
           &raw_len);
-  if (raw == NULL || raw_len != WYL_SERVICE_CREDENTIAL_SECRET_BYTES)
+  if (raw == NULL || raw_len != WYL_SERVICE_CREDENTIAL_SECRET_BYTES) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: publication-secret-shape");
     return WYRELOG_E_POLICY;
+  }
   out->text = g_malloc0 (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN + 1);
   if (out->text == NULL)
     return WYRELOG_E_NOMEM;
@@ -400,8 +452,11 @@ handoff_plan_from_record (const WylServiceCredentialOperationRecord *record,
     handoff_plan_clear (out);
     return WYRELOG_E_NOMEM;
   }
-  return handoff_plan_matches_record (out, record) ? WYRELOG_E_OK :
-         WYRELOG_E_POLICY;
+  if (handoff_plan_matches_record (out, record))
+    return WYRELOG_E_OK;
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: publication-plan-record-binding");
+  return WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
@@ -423,9 +478,13 @@ handoff_receipt_from_record
     handoff_receipt_clear (out);
     return WYRELOG_E_NOMEM;
   }
-  return handoff_receipt_is_valid (out)
-         && g_strcmp0 (record->publication_receipt_id,
-             record->reservation_id) == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (handoff_receipt_is_valid (out)
+      && g_strcmp0 (record->publication_receipt_id,
+      record->reservation_id) == 0)
+    return WYRELOG_E_OK;
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: publication-receipt-record-binding");
+  return WYRELOG_E_POLICY;
 }
 
 static gboolean
@@ -750,7 +809,7 @@ resume_committed_handoff (WylHandle *handle,
                 &plan);
       handoff_plan_clear (&request);
       if (rc == WYRELOG_E_OK && !handoff_plan_matches_record (&plan, record))
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-plan-record-binding");
       if (rc == WYRELOG_E_OK)
         rc =
             wyl_service_credential_operation_coordinator_checkpoint_publication_planned
@@ -784,9 +843,10 @@ resume_committed_handoff (WylHandle *handle,
                 &plan, record->successor_credential_id, &secret, &receipt,
                 &result,
                 &stage_replayed);
-      if (rc == WYRELOG_E_OK && (!publication_is_exact_durable (&result)
-          || !receipt_matches_plan (&receipt, &plan)))
-        rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK && !publication_is_exact_durable (&result))
+        rc = handoff_invariant_refused ("publication-stage-result");
+      if (rc == WYRELOG_E_OK && !receipt_matches_plan (&receipt, &plan))
+        rc = handoff_invariant_refused ("publication-stage-receipt-binding");
       if (rc == WYRELOG_E_OK)
         rc =
             wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
@@ -807,9 +867,9 @@ resume_committed_handoff (WylHandle *handle,
       if (rc == WYRELOG_E_OK && target_kind !=
           WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE
           && target_kind != WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION)
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-receipt-target-kind");
       if (rc == WYRELOG_E_OK && target_lease == NULL)
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-receipt-target-lease");
       if (rc == WYRELOG_E_OK)
         rc = handoff_escrow_load_exact (store, record, escrow_id,
                 target_digest, &escrow);
@@ -850,7 +910,7 @@ resume_committed_handoff (WylHandle *handle,
           || (target_kind ==
           WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION
           && !publication_is_exact_durable (&result))))
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-target-inspection");
       if (rc == WYRELOG_E_OK && publication_is_exact_precommit (&result)) {
         handoff_publication_result_clear (&result);
         rc = handoff_require_active_or_checkpoint (handle, lease, store,
@@ -863,7 +923,7 @@ resume_committed_handoff (WylHandle *handle,
           break;
         if (rc == WYRELOG_E_OK
             && publication_is_foreign_or_nonexact_commit (&result))
-          rc = WYRELOG_E_POLICY;
+          rc = handoff_invariant_refused ("publication-target-commit");
         if (rc == WYRELOG_E_OK) {
           handoff_publication_result_clear (&result);
           rc = handoff_require_active_or_checkpoint (handle, lease, store,
@@ -878,7 +938,7 @@ resume_committed_handoff (WylHandle *handle,
         }
       }
       if (rc == WYRELOG_E_OK && !publication_is_exact_durable (&result))
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-target-durable-receipt");
       if (rc == WYRELOG_E_OK)
         rc =
             wyl_service_credential_operation_coordinator_checkpoint_file_published
@@ -979,7 +1039,7 @@ resume_committed_handoff (WylHandle *handle,
       if (rc == WYRELOG_E_OK
           && (target_kind != WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION
           || target_lease == NULL))
-        rc = WYRELOG_E_POLICY;
+        rc = handoff_invariant_refused ("publication-destination-target");
       if (rc == WYRELOG_E_OK)
         rc = handoff_require_active_or_checkpoint (handle, lease, store,
                 storage, anchor, request_id, runtime, &tuple, record, &active);
@@ -1086,7 +1146,7 @@ resume_committed_handoff (WylHandle *handle,
       }
       break;
     } else {
-      rc = WYRELOG_E_POLICY;
+      rc = handoff_invariant_refused ("recoverable-state-dispatch");
     }
 
     if (rc == WYRELOG_E_OK) {
@@ -1118,6 +1178,8 @@ resume_committed_handoff (WylHandle *handle,
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       rc = release_rc;
   }
+  if (rc == WYRELOG_E_AUTH)
+    rc = handoff_invariant_refused ("post-commit-authorization-recheck");
   return rc;
 }
 
@@ -1138,7 +1200,7 @@ handoff_maintenance_stops_execution
     return WYRELOG_E_OK;
   }
   if (outcome != WYL_SERVICE_CREDENTIAL_OPERATION_MAINTENANCE_UNCHANGED)
-    return WYRELOG_E_POLICY;
+    return handoff_invariant_refused ("maintenance-outcome-integrity");
   if (record->state ==
       WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
     *out_stop = TRUE;
@@ -1160,7 +1222,7 @@ handoff_maintenance_stops_execution
       WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
       || record->last_remediation_action !=
       WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)))
-    return WYRELOG_E_POLICY;
+    return handoff_invariant_refused ("terminal-maintenance-proof");
   *out_stop = TRUE;
   return WYRELOG_E_OK;
 }
@@ -1197,6 +1259,18 @@ handoff_intent_matches (const WylServiceCredentialOperationCoordinatorRequest *r
 }
 
 static wyrelog_error_t
+handoff_require_effective_keyprovider (gpointer user_data)
+{
+  WylHandle *handle = user_data;
+  if (wyl_policy_store_has_service_credential_provider
+        (wyl_handle_get_policy_store (handle)))
+    return WYRELOG_E_OK;
+  WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+      "service-credential handoff refused: effective-provider-unavailable");
+  return WYRELOG_E_NOT_FOUND;
+}
+
+static wyrelog_error_t
 execute_handoff_with_intent
   (WylHandle * handle,
     const WylServiceCredentialOperationStorage * storage,
@@ -1224,6 +1298,7 @@ execute_handoff_with_intent
   gboolean maintenance_stop = FALSE;
   gboolean locked = FALSE;
   gint64 now_us;
+  const gchar *policy_check = "operation-handoff-invariant";
   wyrelog_error_t rc;
 
   if (handle == NULL || storage == NULL || anchor == NULL || runtime == NULL
@@ -1259,47 +1334,57 @@ execute_handoff_with_intent
       || g_strcmp0 (session_actor,
       runtime->authenticated_actor_subject_id) != 0
       || g_strcmp0 (session_tenant, WYL_TENANT_DEFAULT) != 0)
-    return WYRELOG_E_POLICY;
+    return handoff_authority_denied ("live-session-actor-and-tenant-binding");
 
   rc = wyl_service_credential_operation_coordinator_lock_acquire (storage,
           anchor, request_id, &lifecycle_lock);
+  if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("operation-lifecycle-lock");
   if (rc != WYRELOG_E_OK)
     goto out;
   locked = TRUE;
   rc = wyl_service_credential_operation_coordinator_load (storage, anchor,
           request_id, &record);
+  if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("operation-journal-load");
   if (rc != WYRELOG_E_OK)
     goto out;
   if (g_strcmp0 (record.actor_subject_id, session_actor) != 0) {
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_authority_denied ("existing-operation-owner-mismatch");
     goto out;
   }
   if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
     if (g_strcmp0 (record.tenant_id, runtime->target_tenant) != 0) {
-      rc = WYRELOG_E_POLICY;
+      rc = handoff_request_conflict
+            ("existing-operation-input-binding-conflict");
       goto out;
     }
   } else if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
     rc = wyl_service_credential_operation_coordinator_get_credential_pinned
           (handle, runtime->cancellable, record.old_credential_id,
             &old_credential);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("rotation-operation-credential-lookup");
     if (rc != WYRELOG_E_OK)
       goto out;
     if (g_strcmp0 (old_credential.tenant_id, runtime->target_tenant) != 0) {
-      rc = WYRELOG_E_POLICY;
+      rc = handoff_request_conflict
+            ("existing-operation-input-binding-conflict");
       goto out;
     }
   } else {
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_invariant_refused ("operation-kind-is-issue-or-rotate");
     goto out;
   }
 
   if (expected_request != NULL && !handoff_intent_matches (expected_request,
       &record, runtime)) {
-    rc = WYRELOG_E_CONFLICT;
+    rc = handoff_request_conflict
+          ("existing-operation-input-binding-conflict");
     goto out;
   }
 
+  policy_check = "operation-maintenance-state";
   rc = wyl_service_credential_operation_coordinator_maintain_expired_locked
         (handle, storage, anchor, request_id, runtime->cancellable,
           &maintenance_outcome, &recovered);
@@ -1334,16 +1419,18 @@ execute_handoff_with_intent
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_invariant_refused ("recoverable-operation-state");
     goto out;
   }
   rc = wyl_id_parse (record.escrow_id, &escrow_id);
   if (rc != WYRELOG_E_OK) {
-    rc = WYRELOG_E_POLICY;
+    rc = handoff_invariant_refused ("canonical-escrow-identity");
     goto out;
   }
   rc = wyl_service_credential_operation_handoff_target_digest (&record,
           target_digest);
+  if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("canonical-target-digest");
   if (rc != WYRELOG_E_OK)
     goto out;
 
@@ -1354,13 +1441,16 @@ execute_handoff_with_intent
     .session_resource_id = session_resource_id,
   };
   if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED) {
+    policy_check = "credential-commit-and-cvk-binding";
     rc = execute_prepared_handoff (handle, &record, runtime, &authorization,
             &escrow_id, target_digest, &mutation);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("credential-commit-and-cvk-binding");
     if (rc != WYRELOG_E_OK)
       goto out;
     if (!handoff_result_matches_prepared (&mutation, &record, &escrow_id,
         target_digest)) {
-      rc = WYRELOG_E_POLICY;
+      rc = handoff_invariant_refused ("committed-credential-binding");
       goto out;
     }
     rc =
@@ -1369,6 +1459,8 @@ execute_handoff_with_intent
             mutation.handoff.credential_generation,
             mutation.handoff.binding_digest, handoff_now_us (runtime),
             &checkpoint_replayed, &recovered);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("committed-operation-journal-checkpoint");
     if (rc != WYRELOG_E_OK)
       goto out;
     wyl_service_credential_operation_record_clear (&record);
@@ -1379,9 +1471,12 @@ execute_handoff_with_intent
 
     maintenance_outcome = 0;
     maintenance_stop = FALSE;
+    policy_check = "post-commit-recovery-state";
     rc = wyl_service_credential_operation_coordinator_maintain_expired_locked
           (handle, storage, anchor, request_id, runtime->cancellable,
             &maintenance_outcome, &recovered);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("post-commit-maintenance-state");
     if (rc != WYRELOG_E_OK)
       goto out;
     wyl_service_credential_operation_record_clear (&record);
@@ -1410,8 +1505,11 @@ execute_handoff_with_intent
   }
 #endif /* WYL_ENABLE_FAULT_INJECTION */
 
+  policy_check = "publication-recovery-proof";
   rc = resume_committed_handoff (handle, storage, anchor, request_id, runtime,
           &authorization, &escrow_id, target_digest, &record);
+  if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("publication-recovery-proof");
   if (rc == WYRELOG_E_OK) {
     wyl_service_credential_operation_record_clear (out_record);
     *out_record = record;
@@ -1420,6 +1518,9 @@ execute_handoff_with_intent
   }
 
 out:
+  if (rc == WYRELOG_E_POLICY)
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: %s", policy_check);
   sodium_memzero (target_digest, sizeof target_digest);
   wyl_service_credential_clear (&old_credential);
   wyl_service_credential_handoff_result_clear (&mutation);
@@ -1469,16 +1570,16 @@ wyl_service_credential_operation_coordinator_authorize_and_execute
       && runtime->rotate_runtime == NULL)
     return WYRELOG_E_INVALID;
   if (record->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
-    return WYRELOG_E_POLICY;
+    return handoff_policy_refused ("prepared-operation-state");
   if (g_strcmp0 (authenticated_actor_subject_id, record->actor_subject_id) != 0)
-    return WYRELOG_E_POLICY;
+    return handoff_policy_refused ("prepared-operation-owner-integrity");
   /* Generation-binding gate: the CAS runtime must bind exactly the generation
    * the durable intent authorized. A mismatched intent can never execute, so
    * deny before the authority callback and its audit side effect. */
   if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
       && runtime->rotate_runtime->old_credential_generation
       != record->expected_generation)
-    return WYRELOG_E_POLICY;
+    return handoff_policy_refused ("rotation-generation-binding");
   wyl_service_credential_mutation_authorization_t authorization = {
     .authorize = runtime->revalidate,
     .data = runtime->revalidate_data,
@@ -1504,7 +1605,7 @@ wyl_service_credential_operation_coordinator_authorize_and_execute
                  out);
     }
     default:
-      return WYRELOG_E_POLICY;
+      return handoff_policy_refused ("prepared-operation-kind");
   }
 }
 
@@ -1605,33 +1706,47 @@ handoff_classify_guarded_policy (WylHandle *handle,
   wyrelog_error_t rc = WYRELOG_E_POLICY;
   if (wyl_service_credential_operation_coordinator_lock_acquire (storage,
       anchor, request->request_id, &lock) != WYRELOG_E_OK)
-    return rc;
+    return handoff_invariant_refused ("request-id-race-reclassification-lock");
   rc = handoff_front_authorize (handle, request, runtime);
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = WYRELOG_E_POLICY;
   if (wyl_service_credential_operation_coordinator_load (storage, anchor,
-      request->request_id, &record) != WYRELOG_E_OK)
+      request->request_id, &record) != WYRELOG_E_OK) {
+    rc = handoff_invariant_refused ("request-id-reclassification-journal");
     goto out;
+  }
   if (g_strcmp0 (record.actor_subject_id,
-      runtime->authenticated_actor_subject_id) != 0)
+      runtime->authenticated_actor_subject_id) != 0) {
+    rc = handoff_authority_denied ("initial-miss-owner-mismatch");
     goto out;
+  }
   if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
-    if (g_strcmp0 (record.tenant_id, runtime->target_tenant) != 0)
+    if (g_strcmp0 (record.tenant_id, runtime->target_tenant) != 0) {
+      rc = handoff_request_conflict
+            ("initial-miss-input-binding-conflict");
       goto out;
+    }
   } else if (record.kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
     rc = wyl_service_credential_operation_coordinator_get_credential_pinned
           (handle, runtime->cancellable, record.old_credential_id, &old);
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("request-id-reclassification-credential");
     if (rc != WYRELOG_E_OK)
       goto out;
-    rc = WYRELOG_E_POLICY;
-    if (g_strcmp0 (old.tenant_id, runtime->target_tenant) != 0)
+    if (g_strcmp0 (old.tenant_id, runtime->target_tenant) != 0) {
+      rc = handoff_request_conflict
+            ("initial-miss-input-binding-conflict");
       goto out;
+    }
   } else {
+    rc = handoff_invariant_refused ("request-id-reclassification-operation-kind");
     goto out;
   }
   if (!handoff_intent_matches (request, &record, runtime))
-    rc = WYRELOG_E_CONFLICT;
+    rc = handoff_request_conflict ("initial-miss-input-binding-conflict");
+  else
+    rc = handoff_invariant_refused ("request-id-reclassification-unexplained-policy");
 out:
   wyl_service_credential_clear (&old);
   wyl_service_credential_operation_record_clear (&record);
@@ -1674,9 +1789,13 @@ wyl_service_credential_operation_coordinator_handoff
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = handoff_derive_escrow (&local);
+  if (rc == WYRELOG_E_POLICY)
+    rc = handoff_invariant_refused ("escrow-identity-derivation");
   if (rc != WYRELOG_E_OK)
     goto out;
   if (!wyl_service_credential_operation_coordinator_request_is_valid (&local)) {
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: coordinator-request-fields");
     rc = WYRELOG_E_INVALID;
     goto out;
   }
@@ -1687,12 +1806,19 @@ wyl_service_credential_operation_coordinator_handoff
     if (runtime->after_missing_lookup != NULL)
       runtime->after_missing_lookup (runtime->missing_lookup_data);
     rc =
-        wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
-          (handle, storage, anchor, &local, runtime->cancellable, &guarded);
+        wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded_with_check
+          (handle, storage, anchor, &local, runtime->cancellable, &guarded,
+            handoff_require_effective_keyprovider, handle);
     wyl_service_credential_operation_guarded_begin_result_clear (&guarded);
     if (rc == WYRELOG_E_POLICY) {
       rc = handoff_classify_guarded_policy (handle, storage, anchor, &local,
               runtime);
+      goto out;
+    }
+    if (rc == WYRELOG_E_CONFLICT) {
+      rc = handoff_front_authorize (handle, &local, runtime);
+      if (rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_CONFLICT;
       goto out;
     }
     if (rc != WYRELOG_E_OK)
@@ -1700,6 +1826,8 @@ wyl_service_credential_operation_coordinator_handoff
   } else if (rc == WYRELOG_E_OK) {
     wyl_service_credential_operation_record_clear (&existing);
   } else {
+    if (rc == WYRELOG_E_POLICY)
+      rc = handoff_invariant_refused ("initial-operation-journal-load");
     goto out;
   }
 

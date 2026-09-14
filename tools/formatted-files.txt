@@ -72,7 +72,10 @@ tests/test-posix-errno-capability.c
 tests/test-revoke-req.c
 tests/test-secure-duckdb-bridge.c
 tests/test-service-credential-domain.c
+tests/test-service-credential-operation-coordinator-execute.c
 tests/test-service-credential-operation-coordinator-handoff.c
+tests/test-service-credential-operation-coordinator-journal.c
+tests/test-service-credential-operation-coordinator-retirement.c
 tests/test-service-credential-operation-root.h
 tests/test-service-decision-authority.c
 tests/test-service-exchange-private.c
@@ -104,11 +107,15 @@ wyrelog/auth/mfa-validator.c
 wyrelog/auth/mfa-validator.h
 wyrelog/auth/service-auth-coordination.c
 wyrelog/auth/service-credential-domain.c
+wyrelog/auth/service-credential-handoff-delivery-private.c
 wyrelog/auth/service-credential-operation-coordinator-execute-private.c
 wyrelog/auth/service-credential-operation-coordinator-execute-private.h
 wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c
 wyrelog/auth/service-credential-operation-coordinator-remediate-private.c
 wyrelog/auth/service-credential-operation-coordinator-retirement-private.c
+wyrelog/auth/service-credential-operation-coordinator-retirement-private.h
+wyrelog/auth/service-credential-operation-coordinator-storage-private.c
+wyrelog/auth/service-credential-operation-coordinator-storage-private.h
 wyrelog/auth/service-exchange-private.c
 wyrelog/auth/service-exchange-projector-private.c
 wyrelog/auth/service-session-private.c
@@ -206,6 +213,7 @@ wyrelog/fact/tenant-admission-private.h
 wyrelog/handle.h
 wyrelog/perm.h
 wyrelog/policy/service-permission-maintenance-private.c
+wyrelog/policy/store-handoff-retirement-private.h
 wyrelog/policy/store-lease-private.h
 wyrelog/policy/store-lease.c
 wyrelog/policy/store-private.h
