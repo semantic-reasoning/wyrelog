@@ -7868,6 +7868,15 @@ append_service_principal_json_object (GString *json,
   g_string_append_c (json, '}');
 }
 
+static void
+service_credential_handoff_log_refusal (const gchar *action,
+    const gchar *check)
+{
+  if (g_strcmp0 (action, "wr.service_credential.manage") == 0)
+    WYL_LOG_DEBUG (WYL_LOG_SECTION_POLICY,
+        "service-credential handoff refused: %s", check);
+}
+
 static wyrelog_error_t
 append_service_principal_json (const wyl_service_principal_t *info,
     gpointer user_data)
@@ -7920,10 +7929,12 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
 {
   if (ctx == NULL || ctx->profile != WYL_DAEMON_PROFILE_SYSTEM
       || action == NULL || action[0] == '\0') {
+    service_credential_handoff_log_refusal (action, "system-profile-requirement");
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }
   if (!wyl_daemon_http_message_has_actual_loopback_transport (msg)) {
+    service_credential_handoff_log_refusal (action, "loopback-transport-requirement");
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }
@@ -7942,15 +7953,20 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
       && session_token[0] != '\0';
   gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
   if (!has_bearer_token) {
+    service_credential_handoff_log_refusal (action, "bearer-required");
     set_json_error (msg, 401, auth_required_code);
     attach_bearer_challenge (msg, NULL);
     return FALSE;
   }
   if (has_session_token && has_bearer_token) {
+    service_credential_handoff_log_refusal (action,
+        "ambiguous-auth-credentials");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
   if (guard_timestamp == NULL || guard_loc_class == NULL || guard_risk == NULL) {
+    service_credential_handoff_log_refusal (action,
+        "guard-context-required");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
@@ -7961,6 +7977,8 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
       !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
       risk < 0 || risk > 100 ||
       !wyl_guard_loc_class_is_valid (guard_loc_class)) {
+    service_credential_handoff_log_refusal (action,
+        "guard-context-invalid");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
@@ -7970,11 +7988,16 @@ service_management_front_door (SoupServer *server, SoupServerMessage *msg,
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
           bearer_token, &auth, &auth_tenant_error, FALSE);
   if (auth_rc != WYRELOG_E_OK) {
+    service_credential_handoff_log_refusal (action,
+        auth_tenant_error != NULL ? "bearer-session-tenant-resolution" :
+        "bearer-session-authentication");
     set_auth_failure_error (msg, auth_tenant_error, auth_required_code);
     attach_bearer_challenge (msg, "invalid_token");
     return FALSE;
   }
   if (!auth.bearer || g_strcmp0 (auth.tenant, WYL_TENANT_DEFAULT) != 0) {
+    service_credential_handoff_log_refusal (action,
+        "management-tenant-binding");
     set_json_error (msg, 403, denied_code);
     return FALSE;
   }
@@ -8017,6 +8040,8 @@ service_principal_management_authorize_session (SoupServer *server,
       && g_hash_table_contains (query, "tenant")
       && g_strcmp0 (g_hash_table_lookup (query, "tenant"),
       WYL_TENANT_DEFAULT) != 0) {
+    service_credential_handoff_log_refusal (action,
+        "management-target-tenant-binding");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
@@ -8031,16 +8056,22 @@ service_principal_management_authorize_session (SoupServer *server,
             ctx->handle, &store);
   if (decision_rc == WYRELOG_E_OK)
     decision_rc = management_target_is_active (store, target_tenant);
+  if (decision_rc == WYRELOG_E_POLICY)
+    service_credential_handoff_log_refusal (action, "target-tenant-state");
   if (decision_rc == WYRELOG_E_INVALID) {
     if (lease != NULL) {
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
       }
     }
+    service_credential_handoff_log_refusal (action,
+        "management-target-tenant-invalid");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
@@ -8049,11 +8080,15 @@ service_principal_management_authorize_session (SoupServer *server,
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
       }
     }
+    service_credential_handoff_log_refusal (action,
+        "management-target-tenant-not-found");
     set_json_error (msg, 404,
         principal_management ? WYL_DAEMON_ERR_SERVICE_PRINCIPAL_NOT_FOUND :
         WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
@@ -8064,11 +8099,15 @@ service_principal_management_authorize_session (SoupServer *server,
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
       }
     }
+    service_credential_handoff_log_refusal (action,
+        "management-read-authority");
     set_json_error (msg, decision_rc == WYRELOG_E_BUSY ? 503 : 500,
         failed_code);
     return FALSE;
@@ -8078,10 +8117,14 @@ service_principal_management_authorize_session (SoupServer *server,
           auth.session_id);
   if (!management_session_matches_live (session, auth.session_id, auth.actor,
       WYL_TENANT_DEFAULT, TRUE)) {
+    service_credential_handoff_log_refusal (action,
+        "live-mfa-human-session");
     if (lease != NULL) {
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
@@ -8106,16 +8149,23 @@ service_principal_management_authorize_session (SoupServer *server,
    * further down -- which the coordination authority refuses if the
    * resolver still holds one on this thread. */
   decision_rc = wyl_decide (ctx->handle, req, resp);
+  if (decision_rc == WYRELOG_E_POLICY)
+    service_credential_handoff_log_refusal (action,
+        "authorization-decision-evaluation");
   if (decision_rc == WYRELOG_E_INVALID) {
     if (lease != NULL) {
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
       }
     }
+    service_credential_handoff_log_refusal (action,
+        "authorization-decision-request-invalid");
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
@@ -8124,19 +8174,28 @@ service_principal_management_authorize_session (SoupServer *server,
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
       }
     }
+    if (decision_rc != WYRELOG_E_POLICY)
+      service_credential_handoff_log_refusal (action,
+          "management-authorization-decision");
     set_json_error (msg, 500, failed_code);
     return FALSE;
   }
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
+    service_credential_handoff_log_refusal (action,
+        "service-credential-management-permission");
     if (lease != NULL) {
       wyrelog_error_t release_rc =
           wyl_service_auth_read_lease_release_terminal (&lease);
       if (release_rc != WYRELOG_E_OK) {
+        service_credential_handoff_log_refusal (action,
+            "management-read-lease-release");
         set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
             failed_code);
         return FALSE;
@@ -8149,6 +8208,8 @@ service_principal_management_authorize_session (SoupServer *server,
     wyrelog_error_t release_rc =
         wyl_service_auth_read_lease_release_terminal (&lease);
     if (release_rc != WYRELOG_E_OK) {
+      service_credential_handoff_log_refusal (action,
+          "management-read-lease-release");
       set_json_error (msg, release_rc == WYRELOG_E_BUSY ? 503 : 500,
           failed_code);
       return FALSE;
@@ -8371,7 +8432,6 @@ service_credential_handoff_emit (SoupServerMessage *msg,
       set_json_error (msg, 503, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_UNAVAILABLE);
       return;
     case WYRELOG_E_CONFLICT:
-    case WYRELOG_E_POLICY:
       set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
       return;
     case WYRELOG_E_INVALID:
@@ -8391,12 +8451,16 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-http-method");
     set_json_error (msg, 405, "method_not_allowed");
     return;
   }
   /* The escrow handoff writes the secret to an owner-only publication file on
    * the daemon host; only a loopback caller can own that outcome. */
   if (!wyl_daemon_http_message_has_actual_loopback_transport (msg)) {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-loopback-transport");
     set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED);
     return;
   }
@@ -8416,17 +8480,23 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   const gchar *decision_request_id = ensure_request_id_header (msg);
   if (path == NULL || path[0] != '/') {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-subject-path");
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
   const gchar *tail = strchr (path + 1, '/');
   if (tail == NULL || g_strcmp0 (tail, "/credentials") != 0 || tail == path + 1) {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-subject-path");
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
   g_autofree gchar *subject = g_strndup (path + 1,
           (gsize) (tail - (path + 1)));
   if (subject == NULL || subject[0] == '\0') {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-subject-path");
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
@@ -8447,12 +8517,16 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
   if (!parsed || g_strcmp0 (values[0], "1") != 0
       || g_strcmp0 (values[1], lookup_request_tenant (query)) != 0
       || !service_credential_request_id_is_valid (values[2])) {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-payload-shape-and-binding");
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
   gint64 expires_at_us = 0;
   if (!service_credential_parse_expiry (values[4], &expires_at_us)
       || expires_at_us <= 0) {
+    service_credential_handoff_log_refusal ("wr.service_credential.manage",
+        "issue-expiry");
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }

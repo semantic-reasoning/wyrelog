@@ -7,9 +7,12 @@
 
 #include "auth/service-credential-operation-coordinator-execute-private.h"
 #include "auth/service-credential-operation-coordinator-private.h"
+#include "auth/service-credential-operation-coordinator-retirement-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "auth/service-credential-domain-private.h"
 #include "auth/service-credential-private.h"
+#include "policy/store-handoff-maintenance-private.h"
+#include "policy/store-handoff-retirement-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-session-layout-private.h"
@@ -184,7 +187,7 @@ fixture_clear (Fixture *fixture)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (Fixture, fixture_clear);
 
 static void
-fixture_init (Fixture *fixture)
+fixture_init_mode (Fixture *fixture, gboolean production_mode)
 {
   *fixture = (Fixture) {
     .storage = WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT,.anchor =
@@ -208,7 +211,7 @@ fixture_init (Fixture *fixture)
     .policy_store_path = fixture->db_path,
     .policy_keyprovider_path = fixture->key_spec,
     .audit_store_path = fixture->audit_path,
-    .production_mode = TRUE,
+    .production_mode = production_mode,
   };
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture->handle),
       ==, WYRELOG_E_OK);
@@ -216,6 +219,12 @@ fixture_init (Fixture *fixture)
         (fixture->operation_root, &fixture->storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
         (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
+}
+
+static void
+fixture_init (Fixture *fixture)
+{
+  fixture_init_mode (fixture, TRUE);
 }
 
 /* Mock owner publication backend; the non-failure subset drives a fresh ISSUE
@@ -727,7 +736,7 @@ test_begin_layer_determinism_and_no_hijack (void)
   g_assert_cmpint
     (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
         (&fixture.storage, &fixture.anchor, &hijack, now, &replayed, &record), ==,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_CONFLICT);
   wyl_service_credential_operation_record_clear (&record);
 
   WylServiceCredentialOperationRecord surviving =
@@ -814,7 +823,7 @@ test_frontdoor_malformed_is_invalid (void)
 /* A request_id with a durable retirement receipt fails closed with POLICY and
  * creates no operation record. */
 static void
-test_frontdoor_retired_is_policy (void)
+test_frontdoor_malformed_retirement_receipt_is_internal (void)
 {
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
@@ -864,7 +873,7 @@ test_frontdoor_retired_is_policy (void)
 
   g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
       &fixture.storage, &fixture.anchor, &request, &runtime, &outcome), ==,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_INTERNAL);
   g_assert_cmpuint (publication.plan_calls, ==, 0);
   g_assert_cmpint (count_credentials (db_of (handle)), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load
@@ -874,10 +883,83 @@ test_frontdoor_retired_is_policy (void)
   wyl_service_credential_operation_coordinator_request_clear (&request);
 }
 
-/* A foreign but valid human session cannot drive an existing operation bound to
- * a different actor: execution fails closed with POLICY and changes nothing. */
 static void
-test_frontdoor_actor_mismatch_is_policy (void)
+test_frontdoor_missing_effective_provider_is_unavailable (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  /* The provider path is set, but nonproduction mode does not initialize it. */
+  fixture_init_mode (&fixture, FALSE);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:executor");
+  g_autoptr (WylSession) session = handoff_human_session_new ("admin",
+          "tenant-a");
+  authorize_session (handle, "admin", session);
+
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  gint64 now = g_get_real_time ();
+  WylServiceCredentialOperationCoordinatorRequest request =
+      issue_request_new (request_id, "svc:handoff:executor", now);
+  HandoffPublication publication = { .store = store_of (handle) };
+  WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
+    .session = session,
+    .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
+    .guard_timestamp = now,
+    .guard_loc_class = "trusted",
+    .decision_request_id = request_id,
+    .publication = &handoff_test_vtable,
+    .publication_data = &publication,
+  };
+  WylServiceCredentialOperationRecord outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+
+  /* Authorization takes precedence over disclosing provider configuration. */
+  g_atomic_int_set (&session->mfa_assured, 0);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
+      &fixture.storage, &fixture.anchor, &request, &runtime, &outcome), ==,
+      WYRELOG_E_AUTH);
+  g_assert_null (outcome.request_id);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==, 0);
+  g_assert_cmpint (count_events (db_of (handle)), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_cvk;"), ==, 0);
+  g_assert_cmpuint (publication.plan_calls, ==, 0);
+  g_assert_cmpuint (publication.stage_calls, ==, 0);
+  g_assert_cmpuint (publication.commit_calls, ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+        (&fixture.storage, &fixture.anchor, request_id, &outcome), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_atomic_int_set (&session->mfa_assured, 1);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
+      &fixture.storage, &fixture.anchor, &request, &runtime, &outcome), ==,
+      WYRELOG_E_NOT_FOUND);
+
+  g_assert_null (outcome.request_id);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==, 0);
+  g_assert_cmpint (count_events (db_of (handle)), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_cvk;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_handoff_escrows;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_handoff_dispositions;"), ==, 0);
+  g_assert_cmpuint (publication.plan_calls, ==, 0);
+  g_assert_cmpuint (publication.stage_calls, ==, 0);
+  g_assert_cmpuint (publication.commit_calls, ==, 0);
+  g_assert_false (publication.published);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+        (&fixture.storage, &fixture.anchor, request_id, &outcome), ==,
+      WYRELOG_E_NOT_FOUND);
+
+  wyl_service_credential_operation_record_clear (&outcome);
+  wyl_service_credential_operation_coordinator_request_clear (&request);
+}
+
+/* A foreign but valid human session cannot learn whether another actor's
+ * request ID exists: caller authorization denies before conflict disclosure. */
+static void
+test_frontdoor_actor_mismatch_is_auth_denial (void)
 {
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
@@ -914,8 +996,11 @@ test_frontdoor_actor_mismatch_is_policy (void)
   /* A different active human session (mallory) submits the same request_id. */
   g_autoptr (WylSession) intruder_session =
       handoff_human_session_new ("mallory", "tenant-a");
+  authorize_session (handle, "mallory", intruder_session);
   WylServiceCredentialOperationCoordinatorRequest replay_request =
       issue_request_new (request_id, "svc:handoff:executor", now);
+  g_free (replay_request.actor_subject_id);
+  replay_request.actor_subject_id = g_strdup ("mallory");
   WylServiceCredentialOperationHandoffExecuteRuntime intruder_runtime = {
     .session = intruder_session,
     .authenticated_actor_subject_id = "mallory",
@@ -931,7 +1016,7 @@ test_frontdoor_actor_mismatch_is_policy (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff (handle,
       &fixture.storage, &fixture.anchor, &replay_request, &intruder_runtime,
-      &intruder_outcome), ==, WYRELOG_E_POLICY);
+      &intruder_outcome), ==, WYRELOG_E_AUTH);
   g_assert_cmpint (count_credentials (db_of (handle)), ==,
       credentials_after_issue);
 
@@ -981,7 +1066,7 @@ complete_missing_lookup_winner (gpointer data)
 static void
 test_frontdoor_initial_miss_race (void)
 {
-  for (guint variant = 0; variant < 3; variant++) {
+  for (guint variant = 0; variant < 4; variant++) {
     g_auto (Fixture) fixture = { 0 };
     fixture_init (&fixture);
     prepare_authority (fixture.handle, "svc:handoff:executor");
@@ -1012,13 +1097,24 @@ test_frontdoor_initial_miss_race (void)
     runtime.after_missing_lookup = complete_missing_lookup_winner;
     runtime.missing_lookup_data = &winner;
     WylServiceCredentialOperationCoordinatorRequest loser = request;
-    if (variant != 1)
+    WylServiceCredentialOperationHandoffExecuteRuntime loser_runtime = runtime;
+    g_autoptr (WylSession) mallory_session = NULL;
+    if (variant == 3) {
+      mallory_session = handoff_human_session_new ("mallory", "tenant-a");
+      authorize_session (fixture.handle, "mallory", mallory_session);
+      loser.actor_subject_id = (gchar *) "mallory";
+      loser_runtime.session = mallory_session;
+      loser_runtime.authenticated_actor_subject_id = "mallory";
+    }
+    if (variant != 1 && variant != 3)
       loser.destination = "loser.json";
+    g_test_message ("initial-miss race variant=%u", variant);
     WylServiceCredentialOperationRecord rejected =
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff
-          (fixture.handle, &fixture.storage, &fixture.anchor, &loser, &runtime,
-        &rejected), ==, variant == 0 ? WYRELOG_E_CONFLICT : WYRELOG_E_POLICY);
+          (fixture.handle, &fixture.storage, &fixture.anchor, &loser,
+        &loser_runtime, &rejected), ==, variant == 0 ? WYRELOG_E_CONFLICT :
+        ((variant == 2 || variant == 3) ? WYRELOG_E_AUTH : WYRELOG_E_INTERNAL));
     g_assert_null (rejected.request_id);
     g_assert_cmpuint (winner.calls, ==, 1);
     g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
@@ -1044,6 +1140,94 @@ test_frontdoor_initial_miss_race (void)
   }
 }
 
+static gint64
+handoff_retirement_test_clock (gpointer data)
+{
+  return *(const gint64 *) data;
+}
+
+static void
+test_retired_request_id_is_private_to_owner (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:executor");
+  g_autoptr (WylSession) admin_session = handoff_human_session_new ("admin",
+          "tenant-a");
+  authorize_session (handle, "admin", admin_session);
+
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  gint64 now = g_get_real_time ();
+  WylServiceCredentialOperationCoordinatorRequest request =
+      issue_request_new (request_id, "svc:handoff:executor", now);
+  HandoffPublication publication = {.store = store_of (handle) };
+  WylServiceCredentialOperationHandoffExecuteRuntime admin_runtime = {
+    .session = admin_session,
+    .authenticated_actor_subject_id = "admin",
+    .target_tenant = "tenant-a",
+    .guard_timestamp = now,
+    .guard_loc_class = "trusted",
+    .guard_risk = 0,
+    .decision_request_id = request_id,
+    .publication = &handoff_test_vtable,
+    .publication_data = &publication,
+  };
+  WylServiceCredentialOperationRecord outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff
+        (handle, &fixture.storage, &fixture.anchor, &request, &admin_runtime,
+      &outcome), ==, WYRELOG_E_OK);
+  gchar escrow_id[WYL_ID_STRING_BUF];
+  derive_escrow_id_for_test (request_id, escrow_id);
+  request.escrow_id = g_strdup (escrow_id);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==, 1);
+  gint64 events_after_issue = count_events (db_of (handle));
+  guint publications_after_issue = publication.commit_calls;
+
+  gint64 retirement_time = g_get_real_time ()
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US + 1;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test
+    (store_of (handle), handoff_retirement_test_clock, &retirement_time);
+  WylServiceCredentialOperationRetirementResult retired =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RETIREMENT_RESULT_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+        (handle, &fixture.storage, &fixture.anchor, request_id, NULL, &retired),
+      ==, WYRELOG_E_OK);
+  wyl_policy_store_handoff_maintenance_set_clock_for_test
+    (store_of (handle), NULL, NULL);
+
+  WylServiceCredentialOperationGuardedBeginResult replay =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  g_assert_cmpint
+    (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+        (handle, &fixture.storage, &fixture.anchor, &request, NULL, &replay),
+      ==, WYRELOG_E_CONFLICT);
+  wyl_service_credential_operation_guarded_begin_result_clear (&replay);
+
+  g_autoptr (WylSession) mallory_session = handoff_human_session_new
+        ("mallory", "tenant-a");
+  authorize_session (handle, "mallory", mallory_session);
+  WylServiceCredentialOperationCoordinatorRequest mallory_request = request;
+  mallory_request.actor_subject_id = (gchar *) "mallory";
+  WylServiceCredentialOperationHandoffExecuteRuntime mallory_runtime =
+      admin_runtime;
+  mallory_runtime.session = mallory_session;
+  mallory_runtime.authenticated_actor_subject_id = "mallory";
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_handoff
+        (handle, &fixture.storage, &fixture.anchor, &mallory_request,
+      &mallory_runtime, &replay.record), ==, WYRELOG_E_AUTH);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==, 1);
+  g_assert_cmpint (count_events (db_of (handle)), ==, events_after_issue);
+  g_assert_cmpuint (publication.commit_calls, ==, publications_after_issue);
+
+  wyl_service_credential_operation_guarded_begin_result_clear (&replay);
+  wyl_service_credential_operation_retirement_result_clear (&retired);
+  wyl_service_credential_operation_record_clear (&outcome);
+  wyl_service_credential_operation_coordinator_request_clear (&request);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1059,10 +1243,16 @@ main (int argc, char *argv[])
       test_begin_layer_determinism_and_no_hijack);
   g_test_add_func ("/service-credential-operation-handoff/malformed-invalid",
       test_frontdoor_malformed_is_invalid);
-  g_test_add_func ("/service-credential-operation-handoff/retired-policy",
-      test_frontdoor_retired_is_policy);
+  g_test_add_func ("/service-credential-operation-handoff/malformed-retirement-receipt",
+      test_frontdoor_malformed_retirement_receipt_is_internal);
   g_test_add_func
-    ("/service-credential-operation-handoff/actor-mismatch-policy",
-      test_frontdoor_actor_mismatch_is_policy);
+    ("/service-credential-operation-handoff/missing-effective-provider",
+      test_frontdoor_missing_effective_provider_is_unavailable);
+  g_test_add_func
+    ("/service-credential-operation-handoff/actor-mismatch-auth",
+      test_frontdoor_actor_mismatch_is_auth_denial);
+  g_test_add_func
+    ("/service-credential-operation-handoff/retirement-owner",
+      test_retired_request_id_is_private_to_owner);
   return g_test_run ();
 }

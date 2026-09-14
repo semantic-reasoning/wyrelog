@@ -607,6 +607,17 @@ and require a live, MFA-assured human bearer session that holds
 management resolver tenant `__wr_default`; `--tenant` independently selects
 the credential target.
 
+Credential issue and rotation require the daemon to be running with
+`--production` and an initialized policy key provider configured with
+`--policy-keyprovider`; passing a provider path without `--production` does
+not activate it. The daemon also needs both `--operation-root` and
+`--credential-publication-root` configured. Without an effective provider, a
+fresh handoff is refused with HTTP 503 `service_credential_unavailable` before
+it creates an operation journal or credential state. `WYL_LOG=policy:debug`
+records the static reason `effective-provider-unavailable`. The requesting
+human must have a live MFA-assured session and the armed
+`wr.service_credential.manage` permission described below.
+
 ### Arming the service-management authority (prerequisite)
 
 Before `service-principal create`, `service-credential issue`, or any other
@@ -725,6 +736,18 @@ retry: the daemon
 returns the same operation, credential, and receipt and never mints a
 second secret. Supply a stable `--request-id` when a previous invocation
 may have succeeded without you observing its reply.
+
+For service-credential issue and rotation, HTTP 403
+`service_credential_denied` means the live caller/session/management authority
+was refused; it is not a request-id conflict. HTTP 409
+`service_credential_conflict` means the request id is already bound to different
+immutable operation inputs, or its operation has been retired and the id remains
+reserved. Do not mint a replacement id to get around either response. HTTP
+500/503 can occur after the credential mutation has committed
+but before escrow publication or delivery finishes; keep the original request
+id, inspect `service-credential status`/`recover`, and retry only with that id.
+The daemon emits a static, secret-free policy diagnostic naming the refusal
+check when `WYL_LOG=policy:debug` is enabled.
 
 ### Secret Secrecy
 

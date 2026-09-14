@@ -24,8 +24,8 @@
 #  11. /decide ZERO-ROLE DENY for the fresh service token (proves the token is
 #      live BEFORE the grant -- a non-200/expired token is a hard failure, never
 #      a silent deny);
-#  12. grant wr.viewer@tenant-a to svc:svc-app (carries the data-plane perm
-#      wr.svc.read_decision; admin2 holds grant authority at tenant-a via #744);
+#  12. grant wr.viewer@tenant-a to svc:svc-app (carries the approved data-plane
+#      permission wr.svc.read_decision; admin2 holds grant authority at tenant-a);
 #  13. /decide ALLOW -- the deny->allow proof.
 #
 # Unit 1b completes the live authorization matrix with the SAME unchanged
@@ -59,6 +59,12 @@ STORE_INSPECT=$3
 TEMPLATE_DIR=$4
 PY=$5
 SC_E2E_PY=$6
+MODE=${7:-production}
+case "$MODE" in
+  production) PRODUCTION_FLAG=--production ;;
+  missing-provider) PRODUCTION_FLAG= ;;
+  *) echo "invalid lifecycle mode" >&2; exit 2 ;;
+esac
 
 : "${STORE_INSPECT:?store-inspect helper path required}"
 
@@ -123,7 +129,9 @@ chmod 700 "$FACT_ROOT" "$PUBROOT" "$OPROOT"
 PORT=$("$PY" "$SC_E2E_PY" pick-port)
 URL="http://127.0.0.1:$PORT"
 
-"$WYRELOGD" --production --profile system --template-dir "$TEMPLATE_DIR" \
+export WYL_LOG=policy:debug
+
+"$WYRELOGD" ${PRODUCTION_FLAG:+--production} --profile system --template-dir "$TEMPLATE_DIR" \
   --policy-db "$POLICY_DB" --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" --fact-root "$FACT_ROOT" \
   --credential-publication-root "$PUBROOT" --operation-root "$OPROOT" \
@@ -216,6 +224,47 @@ grep -q "subject_id=svc:svc-app" "$TMPDIR/principal.out" \
   || fail "service-principal create did not report subject_id=svc:svc-app" \
     "$TMPDIR/principal.out"
 
+# The provider option is ignored outside production mode. Prove a fresh issue
+# is refused before journal, CVK, credential, escrow, or publication mutation.
+if [ "$MODE" = missing-provider ]; then
+  PREFLIGHT_PY=$(dirname "$SC_E2E_PY")/check-service-credential-provider-preflight.py
+  preflight_check() {
+    "$PY" "$PREFLIGHT_PY" "$1" --url "$URL" --policy "$POLICY_DB" \
+      --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+      --token-file "$ADMIN2_TOKEN" --state "$TMPDIR/preflight-state.json" \
+      --log "$LOG.out" --log "$LOG.err"
+  }
+  preflight_check request || fail "provider preflight request regression"
+  kill -TERM "$PID"
+  wait "$PID" || fail "provider preflight daemon shutdown failed"
+  PID=
+  preflight_check verify-stopped || fail "provider preflight durable regression"
+  exit 0
+fi
+
+# A live-MFA session without an armed management permission must be refused as
+# an authorization denial, not a request-id conflict; diagnostics stay private.
+UNARMED_ADMIN2_TOKEN="$TMPDIR/admin2-unarmed.token"
+"$PY" "$SC_E2E_PY" login-totp --base-url "$URL" --username admin2 \
+  --secret-file "$ADMIN2_SECRET" >"$UNARMED_ADMIN2_TOKEN" \
+  2>"$TMPDIR/admin2-unarmed.err" \
+  || fail "unarmed MFA login failed" "$TMPDIR/admin2-unarmed.err" "$LOG.err"
+chmod 600 "$UNARMED_ADMIN2_TOKEN"
+POLICY_REFUSAL_PY=$(dirname "$SC_E2E_PY")/check-service-credential-policy-refusal.py
+"$PY" "$POLICY_REFUSAL_PY" --url "$URL" \
+  --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+  --token-file "$UNARMED_ADMIN2_TOKEN" --log "$LOG.out" --log "$LOG.err" \
+  || fail "policy refusal status/diagnostic regression" "$LOG.err"
+"$PY" "$POLICY_REFUSAL_PY" --mode invalid-destination --url "$URL" \
+  --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+  --token-file "$ADMIN2_TOKEN" --log "$LOG.out" --log "$LOG.err" \
+  || fail "invalid destination status/diagnostic/redaction regression" \
+    "$LOG.err"
+"$PY" "$POLICY_REFUSAL_PY" --mode insecure-operation-root --url "$URL" \
+  --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+  --token-file "$ADMIN2_TOKEN" --log "$LOG.out" --log "$LOG.err" \
+  || fail "operation-root refusal diagnostic/redaction regression" "$LOG.err"
+
 # --- 9. issue credential A (escrowed to $PUBROOT/credA). ----------------------
 EXPIRES=$(( $(now_us) + 315360000000000 ))     # ~10 years out
 "$WYCTL" --daemon-url "$URL" service-credential issue \
@@ -248,17 +297,12 @@ test -s "$PUBROOT/credA" || fail "escrow doc not written to \$PUBROOT/credA"
 ISSUE_REQUEST_ID=$("$PY" "$SC_E2E_PY" receipt-field --field request_id \
   <"$TMPDIR/issue.out") \
   || fail "issue receipt missing request_id" "$TMPDIR/issue.out"
-"$PY" "$SC_E2E_PY" assert-http-status --base-url "$URL" \
-  --path /service-principals/svc:svc-app/credentials \
-  --token-file "$ADMIN2_TOKEN" \
-  --query tenant=tenant-a \
-  --query "guard_timestamp=$(now_us)" --query guard_loc_class=trusted \
-  --query guard_risk=0 --json-field version=1 --json-field tenant=tenant-a \
-  --json-field "request_id=$ISSUE_REQUEST_ID" \
-  --json-field destination=changed.json --json-field "expires_at_us=$EXPIRES" \
-  --expect-status 409 --expect-error service_credential_conflict \
-  >"$TMPDIR/conflict.out" 2>"$TMPDIR/conflict.err" \
-  || fail "changed-intent retry was not a conflict" "$TMPDIR/conflict.err"
+CONFLICT_CHECK_PY=$(dirname "$SC_E2E_PY")/check-service-credential-policy-refusal.py
+"$PY" "$CONFLICT_CHECK_PY" --mode conflict --url "$URL" \
+  --key "$KEY" --operation-root "$OPROOT" --publication-root "$PUBROOT" \
+  --token-file "$ADMIN2_TOKEN" --request-id "$ISSUE_REQUEST_ID" \
+  --log "$LOG.out" --log "$LOG.err" \
+  || fail "changed-intent retry status/diagnostic/redaction regression" "$LOG.err"
 test ! -e "$PUBROOT/changed.json" \
   || fail "changed-intent retry published another document"
 "$WYCTL" --daemon-url "$URL" service-credential issue \

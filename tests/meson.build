@@ -1148,6 +1148,24 @@ if host_machine.system() != 'windows' and build_client
     # tests/check-service-credential-platform-matrix.py -- do not broaden it (for
     # example back to != 'windows') without updating the frozen matrix doc.
     if host_machine.system() == 'linux' and get_option('enable_audit').allowed()
+      test('service-credential-provider-preflight-e2e', sh,
+        args : [
+          meson.current_source_dir() / 'check-service-credential-lifecycle-e2e.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          check_service_credential_store_inspect.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+          meson.current_source_dir() / 'wyrelog_sc_e2e.py',
+          'missing-provider',
+        ],
+        depends : [
+          wyrelogd_exe, wyctl_exe, check_service_credential_store_inspect,
+        ],
+        is_parallel : false,
+        timeout : 300,
+      )
+
       test('service-credential-lifecycle-e2e', sh,
         args : [
           meson.current_source_dir() / 'check-service-credential-lifecycle-e2e.sh',
