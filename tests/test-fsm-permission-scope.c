@@ -97,7 +97,7 @@ insert_permission_grant (WylHandle *handle, const gchar *user,
     const gchar *role, const gchar *perm, const gchar *scope)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission", role,
-      perm);
+          perm);
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row3 (handle, "member_of", user, role, scope);
@@ -127,7 +127,7 @@ insert_guard_eval (WylHandle *handle, const gchar *user, const gchar *perm,
 
   gint64 context_id = -1;
   rc = wyl_handle_make_guard_context_compound (handle, timestamp, loc_id,
-      risk, scope_id, &context_id);
+          risk, scope_id, &context_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -145,12 +145,12 @@ insert_guard_eval (WylHandle *handle, const gchar *user, const gchar *perm,
 
   gint64 field_row[3] = { user_id, scope_id, timestamp };
   rc = wyl_handle_engine_insert (handle, "guard_context_timestamp",
-      field_row, 3);
+          field_row, 3);
   if (rc != WYRELOG_E_OK)
     return rc;
   field_row[2] = loc_id;
   rc = wyl_handle_engine_insert (handle, "guard_context_loc_class",
-      field_row, 3);
+          field_row, 3);
   if (rc != WYRELOG_E_OK)
     return rc;
   field_row[2] = risk;
@@ -165,7 +165,7 @@ insert_guard_eval (WylHandle *handle, const gchar *user, const gchar *perm,
       return rc;
     gint64 in_window[4] = { user_id, scope_id, timestamp, window_id };
     rc = wyl_handle_engine_insert (handle, "guard_context_in_window",
-        in_window, 4);
+            in_window, 4);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -251,19 +251,19 @@ check_stratification (void)
   };
   wyl_dl_rule_t rules[] = {
     {.head = "perm_window_guard",.body = window_direct_body,.body_len =
-          G_N_ELEMENTS (window_direct_body)},
+         G_N_ELEMENTS (window_direct_body)},
     {.head = "perm_window_guard",.body = window_and_body,.body_len =
-          G_N_ELEMENTS (window_and_body)},
+         G_N_ELEMENTS (window_and_body)},
     {.head = "perm_window_guard",.body = window_and_body,.body_len =
-          G_N_ELEMENTS (window_and_body)},
+         G_N_ELEMENTS (window_and_body)},
     {.head = "perm_window_guard_observed",.body = window_observed_body,
-        .body_len = G_N_ELEMENTS (window_observed_body)},
+     .body_len = G_N_ELEMENTS (window_observed_body)},
     {.head = "perm_state_step",.body = perm_state_step_body,.body_len =
-          G_N_ELEMENTS (perm_state_step_body)},
+         G_N_ELEMENTS (perm_state_step_body)},
     {.head = "perm_state_observed",.body = perm_state_observed_body,
-        .body_len = G_N_ELEMENTS (perm_state_observed_body)},
+     .body_len = G_N_ELEMENTS (perm_state_observed_body)},
     {.head = "perm_state_fired",.body = perm_state_fired_body,.body_len =
-          G_N_ELEMENTS (perm_state_fired_body)},
+         G_N_ELEMENTS (perm_state_fired_body)},
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},
     {.head = "armed",.body = rule3_body,.body_len = G_N_ELEMENTS (rule3_body)},
     {.head = "armed",.body = rule4_body,.body_len = G_N_ELEMENTS (rule4_body)},
@@ -288,17 +288,17 @@ check_catalogue_invariants (void)
   if (wyl_perm_arm_rule_lookup ("wr.sys.admin") == NULL)
     return 14;
   if (g_strcmp0 (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
-              ("wr.stream.write_reserved")), "off_hours") != 0)
+        ("wr.stream.write_reserved")), "off_hours") != 0)
     return 15;
   if (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
-          ("wr.audit.read")) != NULL)
+        ("wr.audit.read")) != NULL)
     return 16;
   /* The self-arm eligibility permission is a strict non-window guard, so it
    * arms via rule-3 (perm_state) and exposes no timestamp window. */
   if (wyl_perm_arm_rule_lookup ("wr.service.self_authorize") == NULL)
     return 100;
   if (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
-          ("wr.service.self_authorize")) != NULL)
+        ("wr.service.self_authorize")) != NULL)
     return 101;
   /* The accessor view of the catalogue must agree with the lookup
    * view on every row. */
@@ -437,7 +437,7 @@ check_synthetic_fixtures (void)
    * 20; right leg accepts a trusted location. */
   g_autoptr (wyl_guard_expr_t) f_or =
       wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20"),
-      wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS, WYL_GUARD_OP_EQ, "trusted"));
+          wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS, WYL_GUARD_OP_EQ, "trusted"));
   if (f_or == NULL)
     return 83;
   /* risk=90 fails left, loc_class=trusted satisfies right. */
@@ -468,10 +468,10 @@ check_synthetic_fixtures (void)
   /* Nested mixed (depth 3). */
   g_autoptr (wyl_guard_expr_t) f_nested =
       wyl_guard_and (wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-              WYL_GUARD_OP_LT, "20"), wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS,
-              WYL_GUARD_OP_EQ, "trusted")),
-      wyl_guard_not (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_GE,
-              "80")));
+          WYL_GUARD_OP_LT, "20"), wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS,
+          WYL_GUARD_OP_EQ, "trusted")),
+          wyl_guard_not (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_GE,
+          "80")));
   if (f_nested == NULL)
     return 90;
   if (!wyl_eval_guard (f_nested, &scope_trusted_low_risk))
@@ -483,10 +483,10 @@ check_synthetic_fixtures (void)
   /* Depth-4 boundary fixture. */
   g_autoptr (wyl_guard_expr_t) f_depth4 =
       wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_cmp
-              (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30"),
-              wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS, WYL_GUARD_OP_EQ,
-                  "trusted")), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
-              WYL_GUARD_OP_GE, "0")), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+            (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_LOC_CLASS, WYL_GUARD_OP_EQ,
+          "trusted")), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+          WYL_GUARD_OP_GE, "0")), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
           WYL_GUARD_OP_LT, "100"));
   if (f_depth4 == NULL)
     return 93;
@@ -500,11 +500,11 @@ check_synthetic_fixtures (void)
   /* Depth-5 negative — validator rejects before any eval would run. */
   g_autoptr (wyl_guard_expr_t) f_depth5 =
       wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_and (wyl_guard_cmp
-                  (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
-                  wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
-              wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30")),
+            (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "10"),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "20")),
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "30")),
           wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "40")),
-      wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "50"));
+          wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "50"));
   if (f_depth5 == NULL)
     return 97;
   if (wyl_guard_validate (f_depth5) != WYRELOG_E_POLICY)
@@ -612,7 +612,7 @@ check_timestamp_window_extraction (void)
   g_autoptr (wyl_guard_expr_t) and_same =
       wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
           WYL_GUARD_OP_IN, "off_hours"), wyl_guard_cmp
-      (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "off_hours"));
+            (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "off_hours"));
   if (and_same == NULL)
     return 124;
   if (g_strcmp0 (wyl_guard_expr_timestamp_window (and_same), "off_hours") != 0)
@@ -635,7 +635,7 @@ check_timestamp_window_extraction (void)
   g_autoptr (wyl_guard_expr_t) and_conflict =
       wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
           WYL_GUARD_OP_IN, "off_hours"), wyl_guard_cmp
-      (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "office_hours"));
+            (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "office_hours"));
   if (and_conflict == NULL)
     return 126;
   if (wyl_guard_expr_timestamp_window (and_conflict) != NULL)
@@ -729,7 +729,7 @@ check_template_static_fact_guards (void)
   gsize len = 0;
   g_autoptr (GError) err = NULL;
   if (!g_file_get_contents (WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH,
-          &contents, &len, &err)) {
+      &contents, &len, &err)) {
     g_printerr ("cannot read %s: %s\n",
         WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH, err ? err->message : "?");
     return 200;
@@ -781,10 +781,10 @@ check_host_context_relations_start_empty (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 220;
   if (expect_engine_row_count (wyl_handle_get_read_engine (handle),
-          "loc_class", 0, 221) != 0)
+      "loc_class", 0, 221) != 0)
     return 221;
   if (expect_engine_row_count (wyl_handle_get_read_engine (handle),
-          "in_window", 0, 223) != 0)
+      "in_window", 0, 223) != 0)
     return 223;
   return 0;
 }
@@ -802,23 +802,23 @@ check_perm_state_golden_trace (void)
 {
   static const perm_step_case_t cases[] = {
     {WYL_PERM_STATE_DORMANT, WYL_PERM_EVENT_GRANT, WYRELOG_E_OK,
-        WYL_PERM_STATE_ARMED},
+     WYL_PERM_STATE_ARMED},
     {WYL_PERM_STATE_ARMED, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_OK,
-        WYL_PERM_STATE_FIRING},
+     WYL_PERM_STATE_FIRING},
     {WYL_PERM_STATE_FIRING, WYL_PERM_EVENT_COMPLETE, WYRELOG_E_OK,
-        WYL_PERM_STATE_COOLDOWN},
+     WYL_PERM_STATE_COOLDOWN},
     {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_RESET, WYRELOG_E_OK,
-        WYL_PERM_STATE_ARMED},
+     WYL_PERM_STATE_ARMED},
     {WYL_PERM_STATE_ARMED, WYL_PERM_EVENT_REVOKE, WYRELOG_E_OK,
-        WYL_PERM_STATE_DORMANT},
+     WYL_PERM_STATE_DORMANT},
     {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_EXPIRE, WYRELOG_E_OK,
-        WYL_PERM_STATE_DORMANT},
+     WYL_PERM_STATE_DORMANT},
     {WYL_PERM_STATE_DORMANT, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_POLICY,
-        WYL_PERM_STATE_DORMANT /* unused */ },
+     WYL_PERM_STATE_DORMANT /* unused */ },
     {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_POLICY,
-        WYL_PERM_STATE_COOLDOWN /* unused */ },
+     WYL_PERM_STATE_COOLDOWN /* unused */ },
     {WYL_PERM_STATE_FIRING, WYL_PERM_EVENT_REVOKE, WYRELOG_E_POLICY,
-        WYL_PERM_STATE_FIRING /* unused */ },
+     WYL_PERM_STATE_FIRING /* unused */ },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
@@ -930,7 +930,7 @@ check_perm_state_text_mirror (void)
   gsize len = 0;
   g_autoptr (GError) err = NULL;
   if (!g_file_get_contents (WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH, &contents,
-          &len, &err))
+      &len, &err))
     return 280;
 
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
@@ -990,16 +990,16 @@ check_perm_state_transition_engine_rows (void)
   guint expected = (guint) table_n;
 
   gint rc = expect_engine_row_count (wyl_handle_get_read_engine (handle),
-      "perm_state_step", expected, 410);
+          "perm_state_step", expected, 410);
   if (rc != 0)
     return rc;
 
   if (insert_symbol_row4 (handle, "perm_state", "schema-user",
-          "schema-perm", "schema-scope", "armed") != WYRELOG_E_OK)
+      "schema-perm", "schema-scope", "armed") != WYRELOG_E_OK)
     return 450;
   gboolean found = FALSE;
   if (contains_armed (handle, "schema-user", "schema-perm", "schema-scope",
-          &found) != WYRELOG_E_OK)
+      &found) != WYRELOG_E_OK)
     return 451;
   if (!found)
     return 452;
@@ -1011,9 +1011,9 @@ check_perm_state_transition_engine_rows (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (non_armed_states); i++) {
     g_autofree gchar *user = g_strdup_printf ("schema-%s-user",
-        non_armed_states[i]);
+            non_armed_states[i]);
     if (insert_symbol_row4 (handle, "perm_state", user, "schema-perm",
-            "schema-scope", non_armed_states[i]) != WYRELOG_E_OK)
+        "schema-scope", non_armed_states[i]) != WYRELOG_E_OK)
       return (gint) (460 + i);
     if (contains_armed (handle, user, "schema-perm", "schema-scope", &found)
         != WYRELOG_E_OK)
@@ -1023,10 +1023,10 @@ check_perm_state_transition_engine_rows (void)
   }
 
   if (insert_symbol_row4 (handle, "perm_state", "schema-guard-user",
-          "wr.audit.read", "schema-guard-scope", "armed") != WYRELOG_E_OK)
+      "wr.audit.read", "schema-guard-scope", "armed") != WYRELOG_E_OK)
     return 490;
   if (contains_armed (handle, "schema-guard-user", "wr.audit.read",
-          "schema-guard-scope", &found) != WYRELOG_E_OK)
+      "schema-guard-scope", &found) != WYRELOG_E_OK)
     return 491;
   if (found)
     return 492;
@@ -1044,13 +1044,13 @@ check_guard_context_template_contract (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 500;
     if (insert_permission_grant (handle, "ctx-user", "ctx-role",
-            "wr.audit.read", "ctx-scope") != WYRELOG_E_OK)
+        "wr.audit.read", "ctx-scope") != WYRELOG_E_OK)
       return 501;
     if (insert_guard_eval (handle, "ctx-user", "wr.audit.read", "ctx-scope",
-            123, "public", 69, NULL) != WYRELOG_E_OK)
+        123, "public", 69, NULL) != WYRELOG_E_OK)
       return 502;
     if (contains_armed (handle, "ctx-user", "wr.audit.read", "ctx-scope",
-            &found) != WYRELOG_E_OK)
+        &found) != WYRELOG_E_OK)
       return 503;
     if (!found)
       return 504;
@@ -1061,14 +1061,14 @@ check_guard_context_template_contract (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 505;
     if (insert_permission_grant (handle, "ctx-mismatch-user",
-            "ctx-mismatch-role", "wr.audit.read", "ctx-mismatch-scope")
+        "ctx-mismatch-role", "wr.audit.read", "ctx-mismatch-scope")
         != WYRELOG_E_OK)
       return 506;
     if (insert_guard_eval (handle, "ctx-mismatch-user", "wr.audit.read",
-            "ctx-other-scope", 123, "public", 69, NULL) != WYRELOG_E_OK)
+        "ctx-other-scope", 123, "public", 69, NULL) != WYRELOG_E_OK)
       return 507;
     if (contains_armed (handle, "ctx-mismatch-user", "wr.audit.read",
-            "ctx-mismatch-scope", &found) != WYRELOG_E_OK)
+        "ctx-mismatch-scope", &found) != WYRELOG_E_OK)
       return 508;
     if (found)
       return 509;
@@ -1079,13 +1079,13 @@ check_guard_context_template_contract (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 510;
     if (insert_permission_grant (handle, "window-user", "window-role",
-            "wr.stream.write_reserved", "window-scope") != WYRELOG_E_OK)
+        "wr.stream.write_reserved", "window-scope") != WYRELOG_E_OK)
       return 511;
     if (insert_guard_eval (handle, "window-user", "wr.stream.write_reserved",
-            "window-scope", 1234, "trusted", 10, NULL) != WYRELOG_E_OK)
+        "window-scope", 1234, "trusted", 10, NULL) != WYRELOG_E_OK)
       return 512;
     if (contains_armed (handle, "window-user", "wr.stream.write_reserved",
-            "window-scope", &found) != WYRELOG_E_OK)
+        "window-scope", &found) != WYRELOG_E_OK)
       return 513;
     if (found)
       return 514;
@@ -1096,15 +1096,15 @@ check_guard_context_template_contract (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 515;
     if (insert_permission_grant (handle, "window-wrong-user",
-            "window-wrong-role", "wr.stream.write_reserved",
-            "window-wrong-scope") != WYRELOG_E_OK)
+        "window-wrong-role", "wr.stream.write_reserved",
+        "window-wrong-scope") != WYRELOG_E_OK)
       return 516;
     if (insert_guard_eval (handle, "window-wrong-user",
-            "wr.stream.write_reserved", "window-wrong-scope", 1234, "trusted",
-            10, "office_hours") != WYRELOG_E_OK)
+        "wr.stream.write_reserved", "window-wrong-scope", 1234, "trusted",
+        10, "office_hours") != WYRELOG_E_OK)
       return 517;
     if (contains_armed (handle, "window-wrong-user",
-            "wr.stream.write_reserved", "window-wrong-scope", &found)
+        "wr.stream.write_reserved", "window-wrong-scope", &found)
         != WYRELOG_E_OK)
       return 518;
     if (found)
@@ -1116,14 +1116,14 @@ check_guard_context_template_contract (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 520;
     if (insert_permission_grant (handle, "window-ok-user", "window-ok-role",
-            "wr.stream.write_reserved", "window-ok-scope") != WYRELOG_E_OK)
+        "wr.stream.write_reserved", "window-ok-scope") != WYRELOG_E_OK)
       return 521;
     if (insert_guard_eval (handle, "window-ok-user",
-            "wr.stream.write_reserved", "window-ok-scope", 1234, "trusted",
-            10, "off_hours") != WYRELOG_E_OK)
+        "wr.stream.write_reserved", "window-ok-scope", 1234, "trusted",
+        10, "off_hours") != WYRELOG_E_OK)
       return 522;
     if (contains_armed (handle, "window-ok-user", "wr.stream.write_reserved",
-            "window-ok-scope", &found) != WYRELOG_E_OK)
+        "window-ok-scope", &found) != WYRELOG_E_OK)
       return 523;
     if (!found)
       return 524;
