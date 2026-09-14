@@ -26,6 +26,7 @@ CI_JOBS = (
     "duckdb-checkpoint-seam",
     "daemon-http-shared-fact",
     "policy-write-focused-sanitizer",
+    "leak-detection",
     "fact-mutation-focused-sanitizer",
     "daemon-http-shared-fact-audit-disabled",
     "build-windows",
@@ -73,6 +74,9 @@ EXPECTED_JOB_KEYS = {
     "policy-write-focused-sanitizer": (
         "name", "runs-on", "timeout-minutes", "env", "steps"
     ),
+    "leak-detection": (
+        "name", "runs-on", "timeout-minutes", "env", "steps"
+    ),
     "fact-mutation-focused-sanitizer": (
         "name", "runs-on", "timeout-minutes", "env", "steps"
     ),
@@ -94,6 +98,7 @@ EXPECTED_RUNS_ON = {
     "duckdb-checkpoint-seam": "${{ matrix.os }}",
     "daemon-http-shared-fact": "${{ matrix.os }}",
     "policy-write-focused-sanitizer": "ubuntu-latest",
+    "leak-detection": "ubuntu-latest",
     "fact-mutation-focused-sanitizer": "ubuntu-latest",
     "daemon-http-shared-fact-audit-disabled": "ubuntu-latest",
     "build-windows": "${{ matrix.runner }}",
@@ -120,6 +125,18 @@ EXPECTED_JOB_ENV = {
         ("SCCACHE_BASEDIRS", "${{ github.workspace }}"),
     ),
     "policy-write-focused-sanitizer": (
+        ("SCCACHE_GHA_ENABLED", '"true"'),
+        ("SCCACHE_BASEDIRS", "${{ github.workspace }}"),
+        (
+            "ASAN_OPTIONS",
+            "halt_on_error=1:abort_on_error=1:print_summary=1",
+        ),
+        (
+            "UBSAN_OPTIONS",
+            "halt_on_error=1:abort_on_error=1:print_summary=1:print_stacktrace=1",
+        ),
+    ),
+    "leak-detection": (
         ("SCCACHE_GHA_ENABLED", '"true"'),
         ("SCCACHE_BASEDIRS", "${{ github.workspace }}"),
         (
@@ -217,6 +234,10 @@ COMMON_CI_STATUS_HANDLERS = {
         ("Show sccache statistics", STATUS_ALWAYS),
         ("Upload policy WRITE sanitizer logs on failure", STATUS_FAILURE),
     ),
+    "leak-detection": (
+        ("Show sccache statistics", STATUS_ALWAYS),
+        ("Upload leak detection logs on failure", STATUS_FAILURE),
+    ),
     "fact-mutation-focused-sanitizer": (
         ("Show sccache statistics", STATUS_ALWAYS),
         ("Upload fact mutation sanitizer logs on failure", STATUS_FAILURE),
@@ -297,6 +318,12 @@ COMMON_ACTIONS = {
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
         ("Set up sccache", SCCACHE_ACTION),
         ("Upload policy WRITE sanitizer logs on failure", UPLOAD_ACTION),
+    ),
+    "leak-detection": actions(
+        ("Check out source", CHECKOUT_ACTION),
+        ("Restore meson packagecache", CACHE_RESTORE_ACTION),
+        ("Set up sccache", SCCACHE_ACTION),
+        ("Upload leak detection logs on failure", UPLOAD_ACTION),
     ),
     "fact-mutation-focused-sanitizer": actions(
         ("Check out source", CHECKOUT_ACTION),

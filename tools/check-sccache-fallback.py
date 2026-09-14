@@ -38,8 +38,8 @@ def main() -> int:
         path = root / ".github" / "workflows" / name
         text = path.read_text(encoding="utf-8")
         action = "uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
-        if text.count(action) != 4:
-            raise SystemExit(f"{path}: expected four pinned sccache actions")
+        if text.count(action) != 5:
+            raise SystemExit(f"{path}: expected five pinned sccache actions")
         require(text, "id: sccache\n        continue-on-error: true", path)
         require(text, "steps.sccache.outcome", path)
         require(text, "sccache --version", path)
