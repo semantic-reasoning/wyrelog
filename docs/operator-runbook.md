@@ -1252,6 +1252,15 @@ when the same batch and idempotency key are replayed. The final query must no
 longer contain `o-1, 42`; query results are the proof that the row was removed,
 rather than the HTTP status alone.
 
+Public schema registration is currently a one-time operation for each
+tenant/graph/namespace/relation. The positive `--schema-version` identifies
+that relation's initial schema and may be any positive version. Every later
+public registration, including an exact repeat, returns HTTP 409
+`schema_already_registered`, whether or not facts have been appended. The
+policy store contains internal version-activation machinery, but the public
+daemon/CLI does not yet provide the staged migration workflow needed to use it
+safely.
+
 Fact mutation is schema-registered: append, retract, and forget operate only on
 relations registered through `fact schema register`. The daemon does not support
 raw Datalog atom deletion endpoints such as `DELETE /api/facts/fact(1)` or

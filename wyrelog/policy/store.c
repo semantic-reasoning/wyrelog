@@ -18010,8 +18010,59 @@ insert_fact_relation_query_metadata (wyl_policy_store_t *store,
     return WYRELOG_E_IO;
   }
   int step_rc = sqlite3_step (stmt);
+  int extended = step_rc == SQLITE_DONE ? SQLITE_OK
+      : sqlite3_extended_errcode (store->db);
   sqlite3_finalize (stmt);
-  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (step_rc == SQLITE_DONE)
+    return WYRELOG_E_OK;
+  return extended == SQLITE_CONSTRAINT_UNIQUE
+         || extended == SQLITE_CONSTRAINT_PRIMARYKEY
+      ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_fact_relation_schema_exists (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name, guint32 schema_version,
+    gboolean *out_exists)
+{
+  if (out_exists != NULL)
+    *out_exists = FALSE;
+  if (store == NULL || store->db == NULL || out_exists == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !fact_graph_customer_name_is_valid (namespace_id)
+      || !fact_graph_customer_name_is_valid (relation_name))
+    return WYRELOG_E_INVALID;
+
+  static const gchar *any_version_sql =
+      "SELECT 1 FROM fact_relation_schemas WHERE tenant_id=? AND graph_id=? "
+      "AND namespace_id=? AND relation_name=? LIMIT 1;";
+  static const gchar *exact_version_sql =
+      "SELECT 1 FROM fact_relation_schemas WHERE tenant_id=? AND graph_id=? "
+      "AND namespace_id=? AND relation_name=? AND schema_version=? LIMIT 1;";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          schema_version == 0 ? any_version_sql : exact_version_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, relation_name)) != WYRELOG_E_OK
+      || (schema_version != 0
+      && sqlite3_bind_int64 (stmt, 5, schema_version) != SQLITE_OK)) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
 }
 
 wyrelog_error_t

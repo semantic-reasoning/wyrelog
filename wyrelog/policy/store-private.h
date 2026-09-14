@@ -2517,6 +2517,13 @@ wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_register_fact_relation_schema
   (wyl_policy_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * opts);
+/* Checks whether schema metadata exists for a relation. A zero version checks
+ * any version; a nonzero version checks only that exact version. */
+wyrelog_error_t wyl_policy_store_fact_relation_schema_exists
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * namespace_id,
+    const gchar * relation_name, guint32 schema_version,
+    gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * namespace_id,
