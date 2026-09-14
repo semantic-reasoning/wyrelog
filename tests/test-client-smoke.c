@@ -1341,6 +1341,23 @@ main (void)
       || !client_last_response_is (management_client, 409,
       "service_principal_conflict"))
     return 558;
+
+  /*
+   * #1061: the service-management routes answer 409 from two unrelated
+   * sources.  A genuine conflict keeps CONFLICT, above; a sealed tenant
+   * reaches the same status through service_management_front_door's
+   * set_auth_failure_error and is an authority state, which error.h scopes
+   * to POLICY.  Mapping it to CONFLICT told the caller to regenerate its
+   * idempotency key and resubmit -- a recovery that cannot work.
+   */
+  http.status = 409;
+  http.body = "{\"error\":\"tenant_sealed\"}";
+  if (wyl_client_service_principal_disable_with_request_id (management_client,
+      "svc:alice:worker", "222222222222222222222222226", 123,
+      "public", 49, &principal) != WYRELOG_E_POLICY
+      || principal.subject_id != NULL
+      || !client_last_response_is (management_client, 409, "tenant_sealed"))
+    return 573;
   http.status = 503;
   http.body = "{\"error\":\"service_principal_failed\"}";
   if (wyl_client_service_principal_disable_with_request_id (management_client,
