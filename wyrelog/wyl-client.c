@@ -2231,6 +2231,21 @@ wyl_client_service_credential_operation_reconcile_for_tenant
     return WYRELOG_E_AUTH;
   if (status == 403)
     return WYRELOG_E_POLICY;
+  /*
+   * #1073: without these two, both fell through to WYRELOG_E_IO.  That is
+   * wrong in opposite directions.  503 is the only status this route emits
+   * to mean "retry later" -- wyl_daemon_policy_write_acquire and the service
+   * authority transaction both answer it on WYRELOG_E_BUSY -- and IO is the
+   * class error.h documents as the non-retryable residue, so a caller that
+   * should have backed off was told the transport had failed permanently.
+   * 404 is merely opaque by comparison: the credential or target does not
+   * exist and the caller could not tell.  Both siblings on this route family
+   * have always mapped them.
+   */
+  if (status == 404)
+    return WYRELOG_E_NOT_FOUND;
+  if (status == 503)
+    return WYRELOG_E_BUSY;
   return WYRELOG_E_IO;
 }
 
