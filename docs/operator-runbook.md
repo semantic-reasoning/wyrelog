@@ -1272,6 +1272,62 @@ The first query returns values `1`, `2`, and `3`. The query after the retract
 returns only `2` and `3`; the raw atom `fact(1)` is not deleted through a
 separate `/api/facts` API.
 
+A retract that matches nothing answers exactly like one that matched. Retract
+`9`, which was never appended, and the response is (elided to the fields
+that matter here; for this response the route also returns `batch_id`,
+`queryable`, `reconcile` and `engine_generation`, plus `degraded_class` when
+`mutation_class` is `committed_degraded`):
+
+```
+{"ok":true,"inserted":true,"committed":true,
+ "mutation_class":"committed_ready",
+ "committed_row_delta":1,"logical_byte_delta":8}
+```
+
+The query afterwards still returns `2` and `3`.
+
+Whether a resend repeats that response or is refused depends on both identity
+keys together, not on either one alone:
+
+- a fresh `batch_id` **and** a fresh `idempotency_key` append another
+  tombstone: `"inserted":true` and positive deltas, exactly as above;
+- reusing **both**, with every other recorded field and the row content
+  unchanged, is the idempotent replay: HTTP 200 with `"inserted":false` and
+  both deltas `0`;
+- reusing only one of the two, or reusing both while anything else recorded
+  for the batch differs, fails to match the stored batch and answers
+  `409 fact_batch_conflict`.
+
+So a retry loop that mints a fresh `batch_id` *and* a fresh
+`idempotency_key` each attempt is not replaying -- it is appending a new
+tombstone every time, and each one is charged. (Minting only one of the two
+does not append at all; by the rule above it is refused `409`.) No cap is
+enforced on that today; quota policy is issue #553.
+
+`logical_byte_delta` measures the request, not the effect. It sizes each value
+by that value's own type, so it is not a byte count of the payload: fixed-width
+scalars charge their natural width (`int64` and `compound_ref` 8, `bool` 1),
+and `symbol` and `string` charge their UTF-8 byte length. A NULL is never
+priced at all. The tuple format cannot represent one, so the daemon refuses any
+batch containing a NULL -- even in a column registered `nullable` -- with
+`400 invalid_fact_payload`, before the request reaches the code that prices it.
+
+**Blind retract is intended, and the response carries nothing you can use to
+detect it.** A retract is an append of a tombstone: the write path records the
+batch and never reads the relation, so it does not know whether the value
+shadowed a live row. Do not read `"inserted":true` or a positive
+`committed_row_delta` as "a row was removed" -- both mean "a tombstone was
+written". `"committed":true` carries even less: it is a constant on this path,
+not a result.
+
+That is also why nothing matching raises no error and returns no matched-row
+count: the write path has neither to give.
+
+If you need to know whether a value was present, query for it before
+retracting. Treat that answer as advisory rather than as a precondition: it is
+a separate request, and another writer can append or retract the value between
+it and your retract.
+
 Omit `--max-rows` during schema registration to keep the default 1000-row
 Datalog query cap. Set it explicitly for larger materialized JSON queries;
 accepted values are 1 through 1000000, and `wyctl datalog query --limit`
