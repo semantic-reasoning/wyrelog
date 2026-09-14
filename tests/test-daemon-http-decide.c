@@ -1359,6 +1359,20 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
   if (status != 401 || strstr (body, "\"fact_status_auth_required\"") == NULL)
     return 1935;
 
+  /*
+   * #1053: an empty Bearer reaches the same branch as the Basic scheme
+   * above, because lookup_bearer_token collapses both into one sentinel.
+   * Asserted here as well as on /auth/logout because this route answers it
+   * from a live branch while logout's equivalent is unreachable, so the two
+   * agree today for different reasons and only a test says so.
+   */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path_probe (session, "GET", base_url, "/facts/status",
+      "Bearer ", NULL, &status, &body) != 0)
+    return 1964;
+  if (status != 401 || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 1965;
+
   /* Presenting both credential kinds is ambiguous; every other route refuses
    * it rather than silently preferring one. */
   g_clear_pointer (&body, g_free);
@@ -22593,6 +22607,26 @@ check_bearer_challenge_contract (void)
     if (scheme_status != 401
         || g_strcmp0 (scheme, "Bearer realm=\"wyrelog\"") != 0) {
       result = 217;
+      goto cleanup;
+    }
+
+    /*
+     * #1053: an empty Bearer, the third header state.  lookup_bearer_token
+     * returns the same empty-string sentinel for this as for the Basic
+     * scheme above, so both land on the absent branch and both earn the bare
+     * challenge.  Pinning it is the point: the collapse is deliberate, and a
+     * future sentinel that distinguishes the two would change this answer
+     * rather than merely refine an internal value.
+     */
+    guint empty_status = 0;
+    g_autofree gchar *empty_scheme = NULL;
+    result = send_logout_challenge_probe (session, base_url, "Bearer ",
+            &empty_status, &empty_scheme);
+    if (result != 0)
+      goto cleanup;
+    if (empty_status != 401
+        || g_strcmp0 (empty_scheme, "Bearer realm=\"wyrelog\"") != 0) {
+      result = 208;
       goto cleanup;
     }
 
