@@ -168,17 +168,15 @@ clear_values (gchar **values, gsize n_values)
     return;
   for (gsize i = 0; i < n_values; i++) {
     /*
-     * #1030: zero before freeing.  This parser is how credentials arrive --
-     * a refresh token at /auth/refresh, a credential secret at the
-     * service-token route.  It closes the failure path only: on success the
-     * caller's g_auto (GStrv) frees through g_strfreev, which does not zero,
-     * so a value that must not survive has to be moved into a wiping cleanup
-     * by its caller -- as the refresh handler does, and as the service-token
-     * route does not yet.  The NULL test is not defensive
-     * padding: a failure partway through a multi-field object leaves the
-     * later slots NULL and the earlier ones populated, and that mixed array
-     * is exactly what this function is called with on the path the wipe
-     * exists for.
+     * #1030: zero before freeing parsed values on failure.  This parser is
+     * how credentials arrive -- a refresh token at /auth/refresh, and a
+     * credential secret at the service-token route.  On success, callers
+     * that parse secrets must move them into a wiping cleanup because the
+     * ordinary g_auto (GStrv) cleanup does not zero values.  The NULL test is
+     * not defensive padding: a failure partway through a multi-field object
+     * leaves the later slots NULL and the earlier ones populated, and that
+     * mixed array is exactly what this function is called with on the path
+     * the wipe exists for.
      */
     if (values[i] != NULL)
       sodium_memzero (values[i], strlen (values[i]));
