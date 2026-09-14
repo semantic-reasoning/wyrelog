@@ -26,10 +26,32 @@ Commit messages should be professional and emoji-free.
 - Include test changes in the same commit as implementation
 - Before committing:
   1. Verify `git diff` shows only logical changes (no formatting-only changes)
-  2. Run full test suite: `meson test -C builddir`
+  2. Run the full test suite against a build that actually contains the
+     subsystem you changed. Several suites are gated behind feature options
+     that default to **disabled**, so a bare `meson setup builddir` produces a
+     build where, for example, `wyrelog:fact-store` is not registered at all
+     and `meson test` reports Ok without having compiled it:
+
+     ```
+     meson setup builddir \
+       -Denable_fact_store=enabled \
+       -Denable_audit=enabled \
+       -Denable_fault_injection=enabled \
+       -Dduckdb_source=prebuilt
+     python3 tools/report-inactive-suites.py --strict builddir
+     meson test -C builddir
+     ```
+
+     `report-inactive-suites.py` names the suite groups a build does not
+     contain. Run it without `--strict` to see them and proceed anyway; a
+     narrower build is sometimes what you want, but it should be a decision
+     rather than a surprise.
   3. Run `./tools/format-c` on changed C files, add each one to
      `tools/formatted-files.txt`, then stage only the intended formatting
      hunks (for example, with `git add -p`)
+  4. Some gates are **not** meson tests and a green suite does not cover them.
+     Run `sh tools/check-format.sh --ledger` explicitly, along with any
+     frozen-manifest guard for a file you touched.
 
 **Code Style:**
 - Uncrustify 0.83.0 is the authoritative formatter, configured by
