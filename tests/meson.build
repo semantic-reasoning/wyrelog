@@ -3637,6 +3637,20 @@ test('exit-status-truncation-self-test', python3,
     meson.project_source_root(),
   ])
 
+# Each variant main of test-daemon-http-decide.c must be able to name the check
+# that failed.  The exit status is 8 bits and that file carries codes well
+# above 255, so the status alone cannot do it (#1062).
+test('variant-diag-coverage', python3,
+  args : [files('test-variant-diag-coverage.py'),
+    meson.project_source_root()])
+
+test('variant-diag-coverage-self-test', python3,
+  args : [
+    files('test-variant-diag-coverage.py'),
+    '--self-test',
+    meson.project_source_root(),
+  ])
+
 test('windows-ci-timeout-boundary', python3,
   args : [files('test-windows-ci-timeout-boundary.py'),
     meson.project_source_root()])

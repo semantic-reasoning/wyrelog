@@ -506,8 +506,12 @@ def validate_owner_fault_matrix(root):
                 if value==api and values[i+1]=="(")
             if calls!=1:
                 raise GuardError(f"daemon WRITE owner fault {label} {api}={calls}")
-    service_marker=("#elif defined(WYL_TEST_VARIANT_SERVICE)\nint\n"
-        "main (int argc, char **argv)\n{")
+    # #1062 wrapped each variant main so every return reports its untruncated
+    # failure code, so the service body now lives in service_variant_checks and
+    # main is a thin reporter around it.  Anchor on the body, not on the name
+    # that used to hold it.
+    service_marker=("static gint\n"
+        "service_variant_checks (int argc, char **argv)\n{")
     service_end_marker="\n#else /* WYL_TEST_VARIANT_AUDIT */"
     if source.count(service_marker)!=1:
         raise GuardError("daemon WRITE service test main mismatch")
@@ -524,7 +528,10 @@ def validate_owner_fault_matrix(root):
             or not re.search(r'g_strcmp0\s*\(\s*argv\s*\[\s*1\s*\]\s*,\s*'
                 r'"--test-unconsumed-auth-lease"\s*\)',service):
         raise GuardError("daemon WRITE service fail-stop test dispatch mismatch")
-    main_items=defs.get("main",[])
+    # The variant bodies moved out of main (#1062); count both so the
+    # owner-fault invocation is still seen exactly once.
+    main_items=defs.get("main",[])+[item for name,items in defs.items()
+        if name.endswith("_variant_checks") for item in items]
     service_mains=[item for item in main_items
         if "check_service_access_token_state_contract" in
         [value for _,value in item[2]]]

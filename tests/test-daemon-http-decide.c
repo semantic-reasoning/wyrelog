@@ -22749,8 +22749,17 @@ check_login_expires_in_contract (const gchar *base_url)
   return 0;
 }
 
-int
-main (void)
+/*
+ * #1062: report the failing check untruncated.  The exit status is 8 bits,
+ * this file has hundreds of codes above 255, and the aliases are already
+ * live: check_tenant_gate_codes_contract's 1900 truncates to 108 and
+ * check_read_only_method_contract's 550 to 38, both reachable from the
+ * refresh main.  Only the service variant printed the real value, and only
+ * from its cleanup block, so a check returning early bypassed it.  Wrapping
+ * the body reports a return from anywhere.
+ */
+static gint
+refresh_variant_checks (void)
 {
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
@@ -22843,19 +22852,17 @@ main (void)
   if (challenge_rc != 0)
     return challenge_rc;
   gint fact_gate_rc = check_fact_status_tenant_gate_contract ();
-  if (fact_gate_rc != 0) {
-    /*
-     * #1041/#1062: this main has no cleanup-block diagnostic, and the exit
-     * status is truncated to 8 bits.  The two assertion codes collide there
-     * -- 239 with 495, 241 with 497 and 2801 -- so the status cannot name
-     * the arm that failed and the printed value is the discriminator.  The
-     * setup codes 237, 238, 242 and 243 are each shared across sites that
-     * mean the same thing (fixture failure, rejected token), which is
-     * deliberate; 236, 239, 240 and 241 appear once.
-     */
-    g_printerr ("WYRELOG_TEST_DIAG refresh_variant result=%d\n", fact_gate_rc);
+  /*
+   * #1041/#1062: these codes alias after 8-bit truncation -- 239 with 495,
+   * 241 with 497 and 2801 -- so the exit status cannot name the arm that
+   * failed.  The main's wrapper now prints the untruncated value for every
+   * return in this variant, so this site no longer prints its own.  The
+   * setup codes 237, 238, 242 and 243 are each shared across sites meaning
+   * the same thing (fixture failure, rejected token), which is deliberate;
+   * 236, 239, 240 and 241 appear once.
+   */
+  if (fact_gate_rc != 0)
     return fact_gate_rc;
-  }
   gint body_form_rc = check_refresh_body_form_contract (base_url);
   if (body_form_rc != 0)
     return body_form_rc;
@@ -22871,9 +22878,27 @@ main (void)
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return 0;
 }
-#elif !defined(WYL_TEST_VARIANT_AUDIT) && !defined(WYL_TEST_VARIANT_SERVICE)
+
 int
 main (void)
+{
+  gint rc = refresh_variant_checks ();
+  if (rc != 0)
+    g_printerr ("WYRELOG_TEST_DIAG refresh_variant result=%d\n", rc);
+  return rc;
+}
+#elif !defined(WYL_TEST_VARIANT_AUDIT) && !defined(WYL_TEST_VARIANT_SERVICE)
+/*
+ * #1062: report the failing check untruncated.  The exit status is 8 bits,
+ * this file has hundreds of codes above 255, and the aliases are already
+ * live: check_tenant_gate_codes_contract's 1900 truncates to 108 and
+ * check_read_only_method_contract's 550 to 38, both reachable from the
+ * refresh main.  Only the service variant printed the real value, and only
+ * from its cleanup block, so a check returning early bypassed it.  Wrapping
+ * the body reports a return from anywhere.
+ */
+static gint
+default_variant_checks (void)
 {
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
@@ -23065,9 +23090,27 @@ main (void)
   g_mutex_clear (&barrier.mutex);
   return 0;
 }
-#elif defined(WYL_TEST_VARIANT_SERVICE)
+
 int
-main (int argc, char **argv)
+main (void)
+{
+  gint rc = default_variant_checks ();
+  if (rc != 0)
+    g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);
+  return rc;
+}
+#elif defined(WYL_TEST_VARIANT_SERVICE)
+/*
+ * #1062: report the failing check untruncated.  The exit status is 8 bits,
+ * this file has hundreds of codes above 255, and the aliases are already
+ * live: check_tenant_gate_codes_contract's 1900 truncates to 108 and
+ * check_read_only_method_contract's 550 to 38, both reachable from the
+ * refresh main.  Only the service variant printed the real value, and only
+ * from its cleanup block, so a check returning early bypassed it.  Wrapping
+ * the body reports a return from anywhere.
+ */
+static gint
+service_variant_checks (int argc, char **argv)
 {
   if (argc == 2
       && g_strcmp0 (argv[1], "--test-unconsumed-auth-lease") == 0) {
@@ -23480,13 +23523,29 @@ cleanup:
   if (result == 0)
     result = check_service_profile_reconcile_denied (handle);
 #endif
-  if (result != 0)
-    g_printerr ("WYRELOG_TEST_DIAG service_variant result=%d\n", result);
   return result;
 }
-#else /* WYL_TEST_VARIANT_AUDIT */
+
 int
-main (void)
+main (int argc, char **argv)
+{
+  gint rc = service_variant_checks (argc, argv);
+  if (rc != 0)
+    g_printerr ("WYRELOG_TEST_DIAG service_variant result=%d\n", rc);
+  return rc;
+}
+#else /* WYL_TEST_VARIANT_AUDIT */
+/*
+ * #1062: report the failing check untruncated.  The exit status is 8 bits,
+ * this file has hundreds of codes above 255, and the aliases are already
+ * live: check_tenant_gate_codes_contract's 1900 truncates to 108 and
+ * check_read_only_method_contract's 550 to 38, both reachable from the
+ * refresh main.  Only the service variant printed the real value, and only
+ * from its cleanup block, so a check returning early bypassed it.  Wrapping
+ * the body reports a return from anywhere.
+ */
+static gint
+audit_variant_checks (void)
 {
   gint actual_owner_finalize_rc =
       check_policy_write_actual_owner_finalize_contract ();
@@ -23697,5 +23756,14 @@ main (void)
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return 0;
+}
+
+int
+main (void)
+{
+  gint rc = audit_variant_checks ();
+  if (rc != 0)
+    g_printerr ("WYRELOG_TEST_DIAG audit_variant result=%d\n", rc);
+  return rc;
 }
 #endif /* WYL_TEST_VARIANT_AUDIT */
