@@ -30,6 +30,7 @@
  * The two symlink-creation cases require Developer Mode (Win10 1703+)
  * on Windows; runs that lack SeCreateSymbolicLinkPrivilege skip those
  * cases with a printf rather than failing. */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -685,54 +686,54 @@ main (void)
 
   if ((rc = test_symlink_at_canonical_rejected ()) != 0) {
     g_printerr ("test_symlink_at_canonical_rejected failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_fresh_store_creates_without_check ()) != 0) {
     g_printerr ("test_fresh_store_creates_without_check failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_normal_open_still_works ()) != 0) {
     g_printerr ("test_normal_open_still_works failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_parent_directory_symlink_is_permitted ()) != 0) {
     g_printerr ("test_parent_directory_symlink_is_permitted failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
 #ifndef G_OS_WIN32
   if ((rc = test_maintenance_acquire_pins_clean_store ()) != 0) {
     g_printerr ("test_maintenance_acquire_pins_clean_store failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_symlink_rejected ()) != 0) {
     g_printerr ("test_maintenance_symlink_rejected failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_hardlink_rejected ()) != 0) {
     g_printerr ("test_maintenance_hardlink_rejected failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_loose_mode_rejected ()) != 0) {
     g_printerr ("test_maintenance_loose_mode_rejected failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_wrong_owner_rejected ()) != 0) {
     g_printerr ("test_maintenance_wrong_owner_rejected failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_verify_detects_swap ()) != 0) {
     g_printerr ("test_maintenance_verify_detects_swap failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_second_acquire_busy ()) != 0) {
     g_printerr ("test_maintenance_second_acquire_busy failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = test_maintenance_absent_store_not_found ()) != 0) {
     g_printerr ("test_maintenance_absent_store_not_found failed: %d\n", rc);
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   }
 #endif /* !G_OS_WIN32 */
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

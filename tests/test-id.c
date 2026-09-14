@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -51,7 +52,7 @@ static gint
 check_generation_uniqueness (void)
 {
   GHashTable *seen = g_hash_table_new_full (g_str_hash, g_str_equal,
-      g_free, NULL);
+          g_free, NULL);
   for (guint i = 0; i < 1000; i++) {
     wyl_id_t id;
     gchar buf[WYL_ID_STRING_BUF];
@@ -424,7 +425,7 @@ static gint
 check_request_id_uniqueness (void)
 {
   GHashTable *seen = g_hash_table_new_full (g_str_hash, g_str_equal,
-      g_free, NULL);
+          g_free, NULL);
   for (guint i = 0; i < 1000; i++) {
     gchar buf[WYL_REQUEST_ID_STRING_BUF];
     if (wyl_request_id_new (buf, sizeof buf) != WYRELOG_E_OK) {
@@ -467,63 +468,63 @@ main (void)
   gint rc;
 
   if ((rc = check_nil_sentinel ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_generation_succeeds ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_generation_null ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_generation_uniqueness ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_monotonicity ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_format_length ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_format_canonical_shape ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_format_buffer_too_small ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_format_null_inputs ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_round_trip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_fixed_vector ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_short ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_long ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_non_hex ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_misplaced_hyphens ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_preserves_out_on_error ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_accepts_uppercase ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_null_inputs ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_equal_null_handling ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compare_total_order ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_bad_version ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_parse_rejects_bad_variant ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compare_null_handling ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_rng_failure_fail_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_generation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_generation_validation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_canonical_validation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_uniqueness ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_request_id_rng_failure_fail_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

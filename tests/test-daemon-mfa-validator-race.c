@@ -32,6 +32,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -380,9 +381,9 @@ main (void)
 
   for (int iter = 0; iter < RACE_ITERATIONS; iter++) {
     if ((rc = check_race_orchestrator_same_step_one_won_receipt ()) != 0)
-      return rc;
+      return wyl_test_normalize_exit_status (rc);
   }
   if ((rc = check_newer_step_wins_on_fresh_principal ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

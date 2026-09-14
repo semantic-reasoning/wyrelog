@@ -22,6 +22,7 @@
  * test-session-state-atomic-accessor-structure.py is what statically forbids a
  * regression to a raw non-atomic access.
  */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -64,7 +65,7 @@ reader_thread (gpointer data)
   gboolean seen_closed = FALSE;
   for (guint i = 0; i < READER_PROBES; i++) {
     gboolean live = wyl_session_liveness_check_private (ctx->session,
-        ctx->expect_id, ctx->expect_actor, ctx->expect_tenant, FALSE);
+            ctx->expect_id, ctx->expect_actor, ctx->expect_tenant, FALSE);
     if (live && seen_closed)
       ctx->coherence_violation = TRUE;
     if (!live)
@@ -110,7 +111,7 @@ main (void)
 
     /* Precondition: the fresh ACTIVE session passes the liveness gate. */
     if (!wyl_session_liveness_check_private (session, session_id,
-            "human-principal-admin", WYL_TENANT_DEFAULT, FALSE))
+        "human-principal-admin", WYL_TENANT_DEFAULT, FALSE))
       g_error ("iteration %u: fresh active session failed liveness", iteration);
 
     RaceCtx ctx = {
@@ -145,7 +146,7 @@ main (void)
       g_error ("iteration %u: session word is not CLOSED after logout",
           iteration);
     if (wyl_session_liveness_check_private (session, session_id,
-            "human-principal-admin", WYL_TENANT_DEFAULT, FALSE))
+        "human-principal-admin", WYL_TENANT_DEFAULT, FALSE))
       g_error ("iteration %u: liveness check live after logout", iteration);
 
     g_cond_clear (&ctx.changed);
@@ -160,5 +161,5 @@ main (void)
 
   g_print ("OK: %u/%u runs observed the logout mid-flight; every run "
       "linearized coherently\n", transitions_observed, RACE_ITERATIONS);
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

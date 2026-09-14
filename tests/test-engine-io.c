@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/engine.h"
@@ -89,7 +90,7 @@ build_snapshot_rows (WylEngine *engine, gint64 member_row[3],
   g_assert_cmpint (role_id, >=, 0);
 
   rc = wyl_engine_intern_symbol (engine, "wr.snapshot-permission-a",
-      &permission_id);
+          &permission_id);
   g_assert_cmpint (rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (permission_id, >=, 0);
 
@@ -202,7 +203,7 @@ delta_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
 
   if (g_strcmp0 (relation, expect->expected_relation) == 0
       && kind == expect->expected_kind && delta_row_matches (expect, row,
-          ncols)) {
+      ncols)) {
     expect->matching++;
   }
 }
@@ -280,7 +281,7 @@ test_step_after_snapshot_rejected (void)
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "role",
-          snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
+      snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_INVALID);
 }
 
@@ -292,7 +293,7 @@ test_snapshot_after_step_rejected (void)
 
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
-          snapshot_count_cb, &seen), ==, WYRELOG_E_INVALID);
+      snapshot_count_cb, &seen), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -308,7 +309,7 @@ test_snapshot_observes_inserted_row (void)
       expected_permission_row);
 
   g_assert_cmpint (wyl_engine_insert (engine, "role_permission",
-          role_permission_row, 2), ==, WYRELOG_E_OK);
+      role_permission_row, 2), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
 
@@ -318,7 +319,7 @@ test_snapshot_observes_inserted_row (void)
   expect.seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "has_permission",
-          snapshot_expect_cb, &expect), ==, WYRELOG_E_OK);
+      snapshot_expect_cb, &expect), ==, WYRELOG_E_OK);
   g_assert_cmpuint (expect.seen, ==, 1);
 }
 
@@ -330,11 +331,11 @@ test_snapshot_observes_direct_permission (void)
   SnapshotExpect expect;
 
   g_assert_cmpint (wyl_engine_intern_symbol (engine,
-          "direct-permission-user", &row[0]), ==, WYRELOG_E_OK);
+      "direct-permission-user", &row[0]), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_intern_symbol (engine,
-          "wr.direct-permission", &row[1]), ==, WYRELOG_E_OK);
+      "wr.direct-permission", &row[1]), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_intern_symbol (engine,
-          "direct-permission-scope", &row[2]), ==, WYRELOG_E_OK);
+      "direct-permission-scope", &row[2]), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "direct_permission", row, 3),
       ==, WYRELOG_E_OK);
 
@@ -344,7 +345,7 @@ test_snapshot_observes_direct_permission (void)
   expect.seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "has_permission",
-          snapshot_expect_cb, &expect), ==, WYRELOG_E_OK);
+      snapshot_expect_cb, &expect), ==, WYRELOG_E_OK);
   g_assert_cmpuint (expect.seen, ==, 1);
 }
 
@@ -361,13 +362,13 @@ test_snapshot_observes_removed_row (void)
       expected_permission_row);
 
   g_assert_cmpint (wyl_engine_insert (engine, "role_permission",
-          role_permission_row, 2), ==, WYRELOG_E_OK);
+      role_permission_row, 2), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_snapshot (engine, "has_permission",
-          snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
+      snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
   g_assert_cmpuint (seen, ==, 0);
 }
 
@@ -391,7 +392,7 @@ test_delta_nominal (void)
   build_delta_rows (engine, member_row, expected_member_rows);
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          &expect), ==, WYRELOG_E_OK);
+      &expect), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_OK);
@@ -422,7 +423,7 @@ test_delta_remove (void)
   build_delta_rows (engine, member_row, expected_member_rows);
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          &expect), ==, WYRELOG_E_OK);
+      &expect), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_OK);
@@ -461,7 +462,7 @@ test_delta_clear (void)
   build_delta_rows (engine, member_row, expected_member_rows);
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          &expect), ==, WYRELOG_E_OK);
+      &expect), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, NULL, NULL),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
@@ -501,9 +502,9 @@ test_delta_replace (void)
   build_delta_rows (engine, member_row, expected_member_rows);
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          &expect_a), ==, WYRELOG_E_OK);
+      &expect_a), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          &expect_b), ==, WYRELOG_E_OK);
+      &expect_b), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", member_row, 3),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_OK);
@@ -522,9 +523,9 @@ test_delta_after_snapshot_rejected (void)
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "role",
-          snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
+      snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          NULL), ==, WYRELOG_E_INVALID);
+      NULL), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -543,7 +544,7 @@ test_delta_after_close (void)
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
-          NULL), ==, WYRELOG_E_INVALID);
+      NULL), ==, WYRELOG_E_INVALID);
 
   /* g_autoptr is intentionally not used: the test mutates engine->session via
    * the private header, and that reach-in is incompatible with autoptr's
@@ -638,7 +639,7 @@ test_snapshot_null_self (void)
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (NULL, "member_of", snapshot_count_cb,
-          &seen), ==, WYRELOG_E_INVALID);
+      &seen), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -648,7 +649,7 @@ test_snapshot_null_relation (void)
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, NULL, snapshot_count_cb,
-          &seen), ==, WYRELOG_E_INVALID);
+      &seen), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -671,7 +672,7 @@ test_snapshot_after_close (void)
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
-          snapshot_count_cb, &seen), ==, WYRELOG_E_INVALID);
+      snapshot_count_cb, &seen), ==, WYRELOG_E_INVALID);
 
   /* g_autoptr is intentionally not used: the test mutates engine->session via
    * the private header, and that reach-in is incompatible with autoptr's
@@ -786,5 +787,5 @@ main (int argc, char **argv)
   g_test_add_func ("/engine-io/remove-zero-ncols", test_remove_zero_ncols);
   g_test_add_func ("/engine-io/remove-after-close", test_remove_after_close);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include "wyrelog/fact/reconcile-private.h"
 
@@ -16,9 +17,8 @@ static void
 test_precedence (void)
 {
   WylFactReconcileEvidence e = {.raw_present = TRUE,.raw_valid = TRUE,
-    .schema_registered = TRUE,.schema_valid = TRUE,.foreign = TRUE,
-    .unsupported_newer = TRUE,.ambiguous = TRUE
-  };
+                                .schema_registered = TRUE,.schema_valid = TRUE,.foreign = TRUE,
+                                .unsupported_newer = TRUE,.ambiguous = TRUE};
   classify (e, WYL_FACT_RECONCILE_AMBIGUOUS, WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.ambiguous = FALSE;
   classify (e, WYL_FACT_RECONCILE_FOREIGN, WYL_FACT_RECONCILE_ACTION_REVIEW);
@@ -68,7 +68,7 @@ test_invalid (void)
   g_assert_cmpstr (wyl_fact_reconcile_action_name (-1), ==, "review");
   WylFactReconcileFileProbe probe;
   g_assert_cmpint (wyl_fact_reconcile_probe_file (NULL, "facts.duckdb",
-          &probe), ==, WYRELOG_E_INVALID);
+      &probe), ==, WYRELOG_E_INVALID);
 }
 
 int
@@ -78,5 +78,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/reconcile/precedence", test_precedence);
   g_test_add_func ("/fact/reconcile/classes", test_classes);
   g_test_add_func ("/fact/reconcile/invalid", test_invalid);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -24,7 +24,7 @@ WORKFLOWS = (
 TARGET = "test-duckdb-source-offbridge-c-consumer"
 NINJA_TARGET = f"tests/{TARGET}"
 EXPECTED_CONSUMER_SHA256 = (
-    "d725ec816b06f009c90d16ee95718958eeb9db907fed399105bdddcea721e13a"
+    "fd047bcc75bf5f50c35911b5da9550b4bfc35a6ab9047606de530faa5260b946"
 )
 
 
@@ -224,7 +224,11 @@ def validate_consumer(text: str) -> None:
         reject("E_CONSUMER_LIFECYCLE", "consumer lifecycle contains dead control flow")
     require_once(main, "int status = 1;", "E_CONSUMER_LIFECYCLE")
     require_once(main, "status = 0;", "E_CONSUMER_LIFECYCLE")
-    require_once(main, "return status;", "E_CONSUMER_LIFECYCLE")
+    require_once(
+        main,
+        "return wyl_test_normalize_exit_status (status);",
+        "E_CONSUMER_LIFECYCLE",
+    )
     if len(re.findall(r"\breturn\b", main)) != 1:
         reject("E_CONSUMER_LIFECYCLE", "consumer must have one final status return")
     for function in (
@@ -263,7 +267,7 @@ def validate_consumer(text: str) -> None:
         main.index("status = 0;"),
         main.index("duckdb_disconnect ("),
         main.index("duckdb_close ("),
-        main.index("return status;"),
+        main.index("return wyl_test_normalize_exit_status (status);"),
     )
     if tuple(sorted(ordered)) != ordered:
         reject("E_CONSUMER_LIFECYCLE", "consumer lifecycle order drifted")
@@ -878,14 +882,23 @@ def run_self_test(root: Path) -> None:
         Mutation(
             "consumer automatic link language",
             TESTS_MESON,
-            lambda text: replace_once(text, "    link_language : 'c',\n", ""),
+            lambda text: replace_once(
+                text,
+                "    dependencies : duckdb_dep,\n"
+                "    link_language : 'c',\n",
+                "    dependencies : duckdb_dep,\n",
+            ),
             "E_C_LINK_LANGUAGE",
         ),
         Mutation(
             "consumer C++ link language",
             TESTS_MESON,
             lambda text: replace_once(
-                text, "link_language : 'c'", "link_language : 'cpp'"
+                text,
+                "    dependencies : duckdb_dep,\n"
+                "    link_language : 'c',",
+                "    dependencies : duckdb_dep,\n"
+                "    link_language : 'cpp',",
             ),
             "E_C_LINK_LANGUAGE",
         ),
@@ -894,8 +907,10 @@ def run_self_test(root: Path) -> None:
             TESTS_MESON,
             lambda text: replace_once(
                 text,
-                "link_language : 'c'",
-                "link_language : host_machine.system() == 'linux' ? 'c' : 'cpp'",
+                "    dependencies : duckdb_dep,\n"
+                "    link_language : 'c',",
+                "    dependencies : duckdb_dep,\n"
+                "    link_language : host_machine.system() == 'linux' ? 'c' : 'cpp',",
             ),
             "E_C_LINK_LANGUAGE",
         ),
@@ -962,7 +977,7 @@ def run_self_test(root: Path) -> None:
                     "  duckdb_database database = NULL;",
                     "  if (0) {\n    duckdb_database database = NULL;",
                 ),
-                "  return status;\n",
+                "  return wyl_test_normalize_exit_status (status);\n",
                 "  }\n  return 0;\n",
             ),
             "E_CONSUMER_LIFECYCLE",

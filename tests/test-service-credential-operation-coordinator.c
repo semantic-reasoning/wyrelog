@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include "wyrelog/auth/service-credential-operation-destination-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-private.h"
@@ -23,17 +24,17 @@ test_destination_validator (void)
 
   g_assert_false (wyl_service_credential_operation_destination_is_valid (NULL));
   g_assert_false
-      (wyl_service_credential_operation_destination_is_valid (malformed));
+    (wyl_service_credential_operation_destination_is_valid (malformed));
   g_assert_true
-      (wyl_service_credential_operation_destination_is_valid (max_leaf));
+    (wyl_service_credential_operation_destination_is_valid (max_leaf));
   g_assert_false
-      (wyl_service_credential_operation_destination_is_valid (too_long));
+    (wyl_service_credential_operation_destination_is_valid (too_long));
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
     g_assert_false
-        (wyl_service_credential_operation_destination_is_valid (invalid[i]));
+      (wyl_service_credential_operation_destination_is_valid (invalid[i]));
   for (gsize i = 0; i < G_N_ELEMENTS (valid); i++)
     g_assert_true
-        (wyl_service_credential_operation_destination_is_valid (valid[i]));
+      (wyl_service_credential_operation_destination_is_valid (valid[i]));
 }
 
 static void
@@ -42,7 +43,7 @@ test_request (void)
   WylServiceCredentialOperationCoordinatorRequest r =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
   r.request_id = g_strdup ("000000000000000000000000000");
   r.subject_id = g_strdup ("subject");
@@ -58,36 +59,36 @@ test_request (void)
   g_free (r.actor_subject_id);
   r.actor_subject_id = NULL;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.actor_subject_id = g_strdup ("admin");
   g_free (r.actor_subject_id);
   r.actor_subject_id = g_strdup ("");
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_free (r.actor_subject_id);
   r.actor_subject_id = g_strnfill (129, 'a');
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_free (r.actor_subject_id);
   r.actor_subject_id = g_strdup ("admin");
   r.actor_subject_id[0] = (gchar) 0xff;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.actor_subject_id[0] = 'a';
   g_assert_true (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_assert_cmpuint (r.expected_generation, ==, 0);
   r.expected_generation = 1;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.expected_generation = 0;
   r.request_id[0] = 'x';
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.request_id[0] = '0';
   r.expires_at_us = 0;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.expires_at_us = 1;
   g_free (r.tenant_id);
   r.tenant_id = NULL;
@@ -95,25 +96,25 @@ test_request (void)
   r.expected_generation = 1;
   r.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE;
   g_assert_true (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_free (r.parent_identity);
   r.parent_identity = NULL;
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   r.parent_identity = g_strdup ("parent");
   r.tenant_id = g_strdup ("forbidden");
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_free (r.tenant_id);
   r.tenant_id = NULL;
   g_free (r.destination);
   r.destination = g_strdup ("../escape");
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   g_free (r.destination);
   r.destination = g_strdup ("bad\\path");
   g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
-      (&r));
+        (&r));
   wyl_service_credential_operation_coordinator_request_clear (&r);
   g_assert_null (r.request_id);
 }
@@ -125,5 +126,5 @@ main (int argc, char **argv)
   g_test_add_func ("/coordinator/destination-validator",
       test_destination_validator);
   g_test_add_func ("/coordinator/request", test_request);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

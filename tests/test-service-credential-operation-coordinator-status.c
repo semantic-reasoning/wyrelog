@@ -2,6 +2,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -38,8 +39,8 @@ begin_prepared_issue (WylServiceCredentialOperationStorage *storage,
       sizeof request.escrow_binding_digest);
   request.expires_at_us = 1;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
-      (storage, anchor, &request, 1, NULL, &begun), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+        (storage, anchor, &request, 1, NULL, &begun), ==, WYRELOG_E_OK);
   g_assert_cmpint (begun.state, ==, WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   wyl_service_credential_operation_record_clear (&begun);
 }
@@ -53,9 +54,9 @@ checkpoint_committed (WylServiceCredentialOperationStorage *storage,
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   gboolean replayed = TRUE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
-      (storage, anchor, request_id, SUCCESSOR_CREDENTIAL_ID, 1, 2, &replayed,
-          &committed), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+        (storage, anchor, request_id, SUCCESSOR_CREDENTIAL_ID, 1, 2, &replayed,
+      &committed), ==, WYRELOG_E_OK);
   g_assert_false (replayed);
   g_assert_cmpint (committed.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
@@ -71,9 +72,9 @@ snapshot_record_bytes (WylServiceCredentialOperationStorage *storage,
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   GBytes *bytes = NULL;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (storage,
-          anchor, request_id, &record), ==, WYRELOG_E_OK);
+      anchor, request_id, &record), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_record_encode (&record,
-          &bytes), ==, WYRELOG_E_OK);
+      &bytes), ==, WYRELOG_E_OK);
   wyl_service_credential_operation_record_clear (&record);
   return bytes;
 }
@@ -90,15 +91,15 @@ test_status_null_arguments (void)
     .n_entries = 99,
   };
   g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-      (NULL, &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
+        (NULL, &anchor, NULL, &out), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-      (&storage, NULL, NULL, &out), ==, WYRELOG_E_INVALID);
+        (&storage, NULL, NULL, &out), ==, WYRELOG_E_INVALID);
   /* out is left untouched by every rejected argument shape. */
   g_assert_true (out.entries == (WylServiceCredentialOperationStatusEntry *)
       0x1);
   g_assert_cmpuint (out.n_entries, ==, 99);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-      (&storage, &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
+        (&storage, &anchor, NULL, NULL), ==, WYRELOG_E_INVALID);
 }
 
 #ifndef G_OS_WIN32
@@ -115,15 +116,15 @@ test_status_backend (void)
   GHashTable *expected_state;
   g_assert_nonnull (base);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   /* (1) Empty root -> success and an empty listing. */
   {
     WylServiceCredentialOperationStatusList list = { 0 };
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+          (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
     g_assert_cmpuint (list.n_entries, ==, 0);
     wyl_service_credential_operation_status_list_clear (&list);
   }
@@ -131,7 +132,7 @@ test_status_backend (void)
   /* Create three PREPARED issue operations, then checkpoint the last one to
    * SERVER_COMMITTED so more than one durable .state value is exercised. */
   expected_state = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
-      NULL);
+          NULL);
   for (gsize i = 0; i < G_N_ELEMENTS (ids); i++) {
     g_assert_cmpint (wyl_request_id_new (ids[i], sizeof ids[i]), ==,
         WYRELOG_E_OK);
@@ -150,7 +151,7 @@ test_status_backend (void)
     GHashTable *seen = g_hash_table_new (g_str_hash, g_str_equal);
     WylServiceCredentialOperationStatusList list = { 0 };
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+          (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
     g_assert_cmpuint (list.n_entries, ==, G_N_ELEMENTS (ids));
     for (gsize i = 0; i < list.n_entries; i++) {
       const WylServiceCredentialOperationRecord *record =
@@ -158,7 +159,7 @@ test_status_backend (void)
       gpointer want;
       g_assert_nonnull (record->request_id);
       g_assert_true (g_hash_table_lookup_extended (expected_state,
-              record->request_id, NULL, &want));
+          record->request_id, NULL, &want));
       g_assert_cmpint (record->state, ==, GPOINTER_TO_INT (want));
       /* No duplicate request ids in the listing. */
       g_assert_true (g_hash_table_add (seen, (gpointer) record->request_id));
@@ -172,13 +173,13 @@ test_status_backend (void)
    * byte identical before and after a listing pass. */
   {
     g_autoptr (GBytes) before = snapshot_record_bytes (&storage, &anchor,
-        ids[0]);
+            ids[0]);
     WylServiceCredentialOperationStatusList list = { 0 };
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+          (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
     wyl_service_credential_operation_status_list_clear (&list);
     g_autoptr (GBytes) after = snapshot_record_bytes (&storage, &anchor,
-        ids[0]);
+            ids[0]);
     g_assert_true (g_bytes_equal (before, after));
   }
 
@@ -186,11 +187,11 @@ test_status_backend (void)
    * enumeration primitive). */
   {
     g_autofree gchar *garbage = g_build_filename (storage.root_path,
-        "garbage", NULL);
+            "garbage", NULL);
     WylServiceCredentialOperationStatusList list = { 0 };
     g_assert_true (g_file_set_contents (garbage, "x", 1, NULL));
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+          (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
     g_assert_cmpuint (list.n_entries, ==, G_N_ELEMENTS (ids));
     wyl_service_credential_operation_status_list_clear (&list);
     g_assert_cmpint (g_remove (garbage), ==, 0);
@@ -205,7 +206,7 @@ test_status_backend (void)
     };
     g_cancellable_cancel (cancellable);
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, cancellable, &out), ==, WYRELOG_E_CANCELLED);
+          (&storage, &anchor, cancellable, &out), ==, WYRELOG_E_CANCELLED);
     g_assert_true (out.entries ==
         (WylServiceCredentialOperationStatusEntry *) 0x1);
     g_assert_cmpuint (out.n_entries, ==, 99);
@@ -235,9 +236,9 @@ test_status_skips_unreadable (void)
   gchar corrupt_id[WYL_REQUEST_ID_STRING_BUF];
   g_assert_nonnull (base);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+      &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   /* Seed N=3 good PREPARED operations. */
   for (gsize i = 0; i < G_N_ELEMENTS (ids); i++) {
@@ -253,10 +254,10 @@ test_status_skips_unreadable (void)
       WYRELOG_E_OK);
   g_autofree gchar *corrupt_name = g_strconcat ("op-", corrupt_id, NULL);
   g_autofree gchar *corrupt_path = g_build_filename (storage.root_path,
-      corrupt_name, NULL);
+          corrupt_name, NULL);
   const gchar garbage[] = "this is not a decodable operation record";
   g_assert_true (g_file_set_contents (corrupt_path, garbage,
-          (gssize) (sizeof garbage - 1), NULL));
+      (gssize) (sizeof garbage - 1), NULL));
 
   /* Direct load of the corrupt child fails, and not as NOT_FOUND: the child
    * exists, its bytes just do not decode. */
@@ -265,7 +266,7 @@ test_status_skips_unreadable (void)
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     wyrelog_error_t probe_rc =
         wyl_service_credential_operation_coordinator_load (&storage, &anchor,
-        corrupt_id, &probe);
+            corrupt_id, &probe);
     g_assert_cmpint (probe_rc, !=, WYRELOG_E_OK);
     g_assert_cmpint (probe_rc, !=, WYRELOG_E_NOT_FOUND);
     wyl_service_credential_operation_record_clear (&probe);
@@ -276,7 +277,7 @@ test_status_skips_unreadable (void)
   {
     WylServiceCredentialOperationStatusList list = { 0 };
     g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
-        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+          (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
     g_assert_cmpuint (list.n_entries, ==, G_N_ELEMENTS (ids));
     for (gsize i = 0; i < list.n_entries; i++) {
       g_assert_nonnull (list.entries[i].record.request_id);
@@ -301,5 +302,5 @@ main (int argc, char **argv)
   g_test_add_func ("/operation-status/skips-unreadable",
       test_status_skips_unreadable);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

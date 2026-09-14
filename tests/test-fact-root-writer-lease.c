@@ -2,6 +2,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <gio/gio.h>
 #include <glib/gstdio.h>
@@ -48,8 +49,8 @@ assert_sqlite_schema_empty (const gchar *path)
       SQLITE_OK);
   sqlite3_stmt *statement = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM sqlite_master "
-          "WHERE name NOT LIKE 'sqlite_%'", -1, &statement, NULL), ==,
+      "SELECT count(*) FROM sqlite_master "
+      "WHERE name NOT LIKE 'sqlite_%'", -1, &statement, NULL), ==,
       SQLITE_OK);
   g_assert_cmpint (sqlite3_step (statement), ==, SQLITE_ROW);
   g_assert_cmpint (sqlite3_column_int (statement, 0), ==, 0);
@@ -97,15 +98,15 @@ spawn_holder (const gchar *root, GDataInputStream **out_stdout)
   const gchar *argv[] = { self_path, HOLDER_ARG, root, NULL };
   g_autoptr (GError) error = NULL;
   GSubprocess *process = g_subprocess_newv (argv,
-      G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE
-      | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+          G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE
+          | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
   g_assert_no_error (error);
   g_assert_nonnull (process);
   *out_stdout = g_data_input_stream_new
-      (g_subprocess_get_stdout_pipe (process));
+        (g_subprocess_get_stdout_pipe (process));
   gsize line_length = 0;
   g_autofree gchar *line = g_data_input_stream_read_line_utf8 (*out_stdout,
-      &line_length, NULL, &error);
+          &line_length, NULL, &error);
   g_assert_no_error (error);
   if (line_length > 0 && line[line_length - 1] == '\r')
     line[line_length - 1] = '\0';
@@ -119,7 +120,7 @@ stop_holder_orderly (GSubprocess *process)
   g_autoptr (GError) error = NULL;
   GOutputStream *input = g_subprocess_get_stdin_pipe (process);
   g_assert_true (g_output_stream_write_all (input, "\n", 1, NULL, NULL,
-          &error));
+      &error));
   g_assert_no_error (error);
   g_assert_true (g_output_stream_close (input, NULL, &error));
   g_assert_no_error (error);
@@ -152,9 +153,9 @@ test_same_process_identity_and_orderly_release (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root_b, &resolver_b), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_root_writer_lease_authorizes_resolver (lease_a,
-          &resolver_a), ==, WYRELOG_E_OK);
+      &resolver_a), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_root_writer_lease_authorizes_resolver (lease_a,
-          &resolver_b), ==, WYRELOG_E_POLICY);
+      &resolver_b), ==, WYRELOG_E_POLICY);
   wyl_fact_graph_resolver_clear (&resolver_b);
   wyl_fact_graph_resolver_clear (&resolver_a);
 
@@ -204,7 +205,7 @@ test_handle_fails_before_policy_open (void)
 {
   g_autofree gchar *root = make_root ("wyrelog-root-lease-order-XXXXXX");
   g_autofree gchar *policy = g_build_filename (root, "contender.sqlite",
-      NULL);
+          NULL);
   g_autoptr (WylFactRootWriterLease) holder = NULL;
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &holder), ==,
       WYRELOG_E_OK);
@@ -252,7 +253,7 @@ test_handle_init_failure_releases_lease (void)
 {
   g_autofree gchar *root = make_root ("wyrelog-root-init-fail-XXXXXX");
   g_autofree gchar *missing = g_build_filename (root, "missing-templates",
-      NULL);
+          NULL);
   WylHandleOpenOptions options = {
     .template_dir = missing,
     .fact_root = root,
@@ -296,7 +297,7 @@ test_handle_rejects_replaced_root_before_schema (void)
   g_autofree gchar *old_root = g_strdup_printf ("%s-old", root);
   g_autoptr (GError) error = NULL;
   g_autofree gchar *base = g_dir_make_tmp ("wyrelog-root-bind-db-XXXXXX",
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_nonnull (base);
   g_autofree gchar *policy = g_build_filename (base, "policy.sqlite", NULL);
@@ -343,7 +344,7 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   g_autofree gchar *root = make_root ("wyrelog-root-daemon-busy-XXXXXX");
   g_autoptr (GError) error = NULL;
   g_autofree gchar *base = g_dir_make_tmp ("wyrelog-daemon-busy-XXXXXX",
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_nonnull (base);
   g_autofree gchar *policy = g_build_filename (base, "policy.sqlite", NULL);
@@ -368,13 +369,13 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
     NULL,
   };
   g_autoptr (GSubprocess) process = g_subprocess_newv (argv,
-      G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+          G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
   g_assert_no_error (error);
   g_assert_nonnull (process);
   g_autofree gchar *stdout_text = NULL;
   g_autofree gchar *stderr_text = NULL;
   g_assert_true (g_subprocess_communicate_utf8 (process, NULL, NULL,
-          &stdout_text, &stderr_text, &error));
+      &stdout_text, &stderr_text, &error));
   g_assert_no_error (error);
   g_assert_true (g_subprocess_get_if_exited (process));
   g_assert_cmpint (g_subprocess_get_exit_status (process), !=, 0);
@@ -382,7 +383,7 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   gboolean found_busy_line = FALSE;
   for (guint i = 0; stderr_lines[i] != NULL; i++)
     if (g_str_equal (stderr_lines[i],
-            "wyrelogd: init failed: resource is busy"))
+        "wyrelogd: init failed: resource is busy"))
       found_busy_line = TRUE;
   g_assert_true (found_busy_line);
   g_assert_null (strstr (stderr_text, root));
@@ -425,7 +426,7 @@ test_replacement_and_insecure_root_fail_closed (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &replacement), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_root_writer_lease_authorizes_resolver (lease,
-          &replacement), ==, WYRELOG_E_POLICY);
+      &replacement), ==, WYRELOG_E_POLICY);
   wyl_fact_graph_resolver_clear (&replacement);
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   g_assert_cmpint (g_rmdir (root), ==, 0);
@@ -458,8 +459,8 @@ main (int argc, char **argv)
 {
   if (argc >= 2 && g_strcmp0 (argv[1], HOLDER_ARG) == 0) {
     if (argc != 3)
-      return 2;
-    return holder_main (argv[2]);
+      return wyl_test_normalize_exit_status (2);
+    return wyl_test_normalize_exit_status (holder_main (argv[2]));
   }
   if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
     g_error ("fact-root writer lease test has no executable path");
@@ -497,5 +498,5 @@ main (int argc, char **argv)
 #endif
   gint result = g_test_run ();
   g_clear_pointer (&self_path, g_free);
-  return result;
+  return wyl_test_normalize_exit_status (result);
 }

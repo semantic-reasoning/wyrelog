@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -268,5 +269,5 @@ main (int argc, char **argv)
       test_derivation_rejects_what_the_contract_rejects);
   g_test_add_func ("/fact/artifact-transition-names/probe-name-disjointness",
       test_probe_names_collide_with_nothing);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

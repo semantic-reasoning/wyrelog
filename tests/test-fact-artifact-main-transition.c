@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -2186,5 +2187,5 @@ main (int argc, char **argv)
       test_proven_absent_main);
   g_test_add_func ("/fact/artifact-main-transition/windows-width-parity",
       test_windows_width_identity_parity);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

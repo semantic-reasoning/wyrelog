@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -157,6 +158,6 @@ main (void)
 
   gint rc = fuzz_decide_inputs (seed);
   if (rc != 0)
-    return rc;
-  return fuzz_template_loading (seed);
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (fuzz_template_loading (seed));
 }

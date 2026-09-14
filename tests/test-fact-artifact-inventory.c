@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -468,5 +469,5 @@ main (int argc, char **argv)
       test_extended_identity_and_sparse_allocation);
   g_test_add_func ("/fact/artifact-inventory/published-observation-binding",
       test_published_observation_binding);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 
@@ -153,5 +154,5 @@ main (int argc, char **argv)
       test_unknown_snapshot_blocks_completion_without_reducing_usage);
   g_test_add_func ("/fact/artifact-inventory-consumers/failure-unavailable",
       test_failure_snapshot_is_not_consumable);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

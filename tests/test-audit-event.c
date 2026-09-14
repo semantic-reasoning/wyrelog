@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -89,8 +90,8 @@ check_private_rehydrate_preserves_fields (void)
   const gchar *id = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
   g_autoptr (WylAuditEvent) ev = NULL;
   if (wyl_audit_event_new_from_fields (id, 1234567, "alice", "read",
-          "doc/42", "not_armed", "perm_state", "req-123",
-          WYL_DECISION_ALLOW, &ev) != WYRELOG_E_OK)
+      "doc/42", "not_armed", "perm_state", "req-123",
+      WYL_DECISION_ALLOW, &ev) != WYRELOG_E_OK)
     return 65;
 
   g_autofree gchar *actual_id = wyl_audit_event_dup_id_string (ev);
@@ -120,17 +121,17 @@ check_private_rehydrate_rejects_invalid_fields (void)
 {
   WylAuditEvent *ev = (WylAuditEvent *) (gpointer) 0x1;
   if (wyl_audit_event_new_from_fields (NULL, 1, NULL, NULL, NULL, NULL, NULL,
-          NULL, WYL_DECISION_DENY, &ev) != WYRELOG_E_INVALID)
+      NULL, WYL_DECISION_DENY, &ev) != WYRELOG_E_INVALID)
     return 76;
   if (ev != NULL)
     return 77;
   if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
-          -1, NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY,
-          &ev) != WYRELOG_E_INVALID)
+      -1, NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY,
+      &ev) != WYRELOG_E_INVALID)
     return 78;
   if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
-          1, NULL, NULL, NULL, NULL, NULL, NULL, (wyl_decision_t) 99,
-          &ev) != WYRELOG_E_INVALID)
+      1, NULL, NULL, NULL, NULL, NULL, NULL, (wyl_decision_t) 99,
+      &ev) != WYRELOG_E_INVALID)
     return 79;
   return 0;
 }
@@ -280,39 +281,39 @@ main (void)
   gint rc;
 
   if ((rc = check_construction ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_id_is_nonempty_and_canonical ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_id_is_stable_across_calls ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_distinct_events_have_distinct_ids ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_created_at_is_recent ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_created_at_monotonic_with_minting_order ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_private_rehydrate_preserves_fields ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_private_rehydrate_rejects_invalid_fields ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_accessor_null_safety ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_default_is_deny ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_set_decision_round_trip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_get_decision_null_is_deny ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_string_field_defaults_are_null ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_string_field_round_trips ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_string_set_null_clears ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_string_caller_buffer_is_copied ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_string_get_null_event ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

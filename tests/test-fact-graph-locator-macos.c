@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #define _DARWIN_C_SOURCE
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -639,7 +640,7 @@ test_descriptor_stability_and_replacement (void)
     if (child_fd >= 0)
       (void) close (child_fd);
     (void) close (pipe_fds[1]);
-    _exit (ok ? 0 : 1);
+    WYL_TEST_EXIT(ok ? 0 : 1);
   }
   g_assert_cmpint (close (pipe_fds[1]), ==, 0);
   g_assert_true (read_exact (pipe_fds[0], &child, sizeof child));
@@ -693,5 +694,5 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/direct-final-preexisting-entries",
     test_direct_final_preexisting_entries);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

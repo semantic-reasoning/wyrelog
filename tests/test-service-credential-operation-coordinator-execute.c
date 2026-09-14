@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sodium.h>
@@ -3454,5 +3455,5 @@ main (int argc, char *argv[])
   g_test_add_func
     ("/service-credential-operation-execute/handoff-maintenance-gate",
       test_handoff_automatic_maintenance_gate);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

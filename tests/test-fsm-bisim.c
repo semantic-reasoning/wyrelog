@@ -19,6 +19,7 @@
  * of this bisimulation harness avoids mixing table-driven FSM tests
  * with permission-scope projection tests.
  */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -81,7 +82,7 @@ parse_text_table (const gchar *path, const gchar *predicate,
   }
 
   GHashTable *table = g_hash_table_new_full (g_str_hash, g_str_equal,
-      g_free, g_free);
+          g_free, g_free);
   g_autofree gchar *prefix = g_strdup_printf ("%s(", predicate);
 
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
@@ -159,7 +160,7 @@ bisim_principal_against_table (GHashTable *text_table)
 
       wyl_principal_state_t to_c = WYL_PRINCIPAL_STATE_LAST_;
       wyrelog_error_t rc = wyl_fsm_principal_step (
-          (wyl_principal_state_t) s, (wyl_principal_event_t) e, &to_c);
+        (wyl_principal_state_t) s, (wyl_principal_event_t) e, &to_c);
 
       if (text_to == NULL) {
         /* .dl has no transition; C must reject. */
@@ -186,7 +187,7 @@ check_principal_bisim (void)
   gboolean dup = FALSE;
   g_autoptr (GHashTable) text_table =
       parse_text_table (WYL_TEST_FSM_PRINCIPAL_DL_PATH, "principal_transition",
-      &dup);
+          &dup);
   if (text_table == NULL || dup)
     return 1;
   return bisim_principal_against_table (text_table);
@@ -206,7 +207,7 @@ bisim_session_against_table (GHashTable *text_table)
 
       wyl_session_state_t to_c = WYL_SESSION_STATE_LAST_;
       wyrelog_error_t rc = wyl_fsm_session_step (
-          (wyl_session_state_t) s, (wyl_session_event_t) e, &to_c);
+        (wyl_session_state_t) s, (wyl_session_event_t) e, &to_c);
 
       if (text_to == NULL) {
         if (rc != WYRELOG_E_POLICY)
@@ -231,7 +232,7 @@ check_session_bisim (void)
   gboolean dup = FALSE;
   g_autoptr (GHashTable) text_table =
       parse_text_table (WYL_TEST_FSM_SESSION_DL_PATH, "session_transition",
-      &dup);
+          &dup);
   if (text_table == NULL || dup)
     return 200;
   return bisim_session_against_table (text_table);
@@ -254,7 +255,7 @@ check_table_cardinality (void)
   gboolean dup = FALSE;
   g_autoptr (GHashTable) p_table =
       parse_text_table (WYL_TEST_FSM_PRINCIPAL_DL_PATH, "principal_transition",
-      &dup);
+          &dup);
   if (p_table == NULL || dup)
     return 400;
   gsize p_c_len = 0;
@@ -264,7 +265,7 @@ check_table_cardinality (void)
 
   g_autoptr (GHashTable) s_table =
       parse_text_table (WYL_TEST_FSM_SESSION_DL_PATH, "session_transition",
-      &dup);
+          &dup);
   if (s_table == NULL || dup)
     return 402;
   gsize s_c_len = 0;
@@ -290,7 +291,7 @@ check_divergence_detector (void)
   gboolean dup = FALSE;
   g_autoptr (GHashTable) baseline =
       parse_text_table (WYL_TEST_FSM_PRINCIPAL_DL_PATH, "principal_transition",
-      &dup);
+          &dup);
   if (baseline == NULL || dup)
     return 500;
   /* Confirm the baseline passes the bisim. */
@@ -311,7 +312,7 @@ check_divergence_detector (void)
   /* Negative test of removal: drop the row entirely. */
   g_autoptr (GHashTable) reduced =
       parse_text_table (WYL_TEST_FSM_PRINCIPAL_DL_PATH, "principal_transition",
-      &dup);
+          &dup);
   if (reduced == NULL || dup)
     return 504;
   if (!g_hash_table_remove (reduced, mutated_key))
@@ -327,12 +328,12 @@ main (void)
 {
   gint rc;
   if ((rc = check_table_cardinality ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_principal_bisim ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_bisim ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_divergence_detector ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

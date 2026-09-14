@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -50,7 +51,7 @@ current_token_user (void)
   }
   user = g_malloc0 (needed);
   if (user != NULL && !GetTokenInformation (token, TokenUser, user, needed,
-          &needed))
+      &needed))
     g_clear_pointer (&user, g_free);
   CloseHandle (token);
   return user;
@@ -75,13 +76,13 @@ stamp_owner_only_root (const gchar *path)
   g_assert_nonnull (wpath);
   g_assert_nonnull (user);
   g_assert_true (ConvertStringSecurityDescriptorToSecurityDescriptorW
-      (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
+        (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
   g_assert_true (GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
-          &dacl_defaulted));
+      &dacl_defaulted));
   g_assert_true (dacl_present);
   status = SetNamedSecurityInfoW ((LPWSTR) wpath, SE_FILE_OBJECT,
-      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
-      | PROTECTED_DACL_SECURITY_INFORMATION, user->User.Sid, NULL, dacl, NULL);
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+          | PROTECTED_DACL_SECURITY_INFORMATION, user->User.Sid, NULL, dacl, NULL);
   LocalFree (descriptor);
   g_assert_cmpuint (status, ==, ERROR_SUCCESS);
 }
@@ -106,7 +107,7 @@ encode_expected_document (const gchar *credential_id,
   gchar *document = NULL;
 
   g_assert_cmpint (wyctl_publication_credential_document_encode (credential_id,
-          credential_secret, &document), ==, WYRELOG_E_OK);
+      credential_secret, &document), ==, WYRELOG_E_OK);
   g_assert_nonnull (document);
   return document;
 }
@@ -120,7 +121,7 @@ assert_published_document (const gchar *destination_path,
 
   g_assert_true (g_file_test (destination_path, G_FILE_TEST_EXISTS));
   g_assert_true (g_file_get_contents (destination_path, &published, NULL,
-          NULL));
+      NULL));
   expected = encode_expected_document (credential_id, credential_secret);
   g_assert_cmpstr (published, ==, expected);
 }
@@ -147,9 +148,8 @@ test_backend_executor_path (void)
   g_assert_nonnull (self);
 
   g_autofree gchar *secret_text = g_strnfill
-      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
-  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)
-  };
+        (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)};
 
   WyctlPublicationPlan request = { 0 };
   WyctlPublicationPlan planned = { 0 };
@@ -161,42 +161,42 @@ test_backend_executor_path (void)
       WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
 
   g_assert_cmpint (wyctl_publication_plan_create ("credential.txt", root,
-          &request), ==, WYRELOG_E_OK);
+      &request), ==, WYRELOG_E_OK);
   g_assert_cmpint (vtable->plan (self, &request, &planned), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_plan_is_valid (&planned));
 
   g_assert_cmpint (vtable->stage_exact (self, &planned, TEST_CREDENTIAL_ID,
-          &secret, &receipt, &result, &replayed), ==, WYRELOG_E_OK);
+      &secret, &receipt, &result, &replayed), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
   g_assert_true (result.exact_identity);
   wyctl_publication_result_clear (&result);
 
   g_autofree gchar *stage_path = g_build_filename (root, planned.stage_basename,
-      NULL);
+          NULL);
   g_autofree gchar *destination_path = g_build_filename (root,
-      planned.destination, NULL);
+          planned.destination, NULL);
   g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
 
   g_assert_cmpint (vtable->receipt_target_acquire (self, &planned, &receipt,
-          FALSE, &lease, &kind), ==, WYRELOG_E_OK);
+      FALSE, &lease, &kind), ==, WYRELOG_E_OK);
   g_assert_nonnull (lease);
   g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
 
   g_assert_cmpint (vtable->receipt_target_inspect (self, lease,
-          TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
+      TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED);
   g_assert_true (result.exact_identity);
   wyctl_publication_result_clear (&result);
 
   g_assert_cmpint (vtable->receipt_target_commit (self, lease,
-          TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
+      TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
   g_assert_true (result.exact_identity);
   wyctl_publication_result_clear (&result);
 
   g_assert_cmpint (vtable->receipt_target_inspect (self, lease,
-          TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
+      TEST_CREDENTIAL_ID, &secret, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
   g_assert_true (result.exact_identity);
   wyctl_publication_result_clear (&result);
@@ -237,17 +237,17 @@ test_backend_conformance_path (void)
   gpointer self = wyctl_publication_backend_self (&backend);
 
   g_autofree gchar *secret_text = g_strnfill
-      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+        (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
   WyctlPublicationResult result = { 0 };
 
   g_assert_cmpint (wyctl_publication_backend_conformance_run (vtable, self,
-          "credential.txt", root, TEST_CREDENTIAL_ID, secret_text, &result),
+      "credential.txt", root, TEST_CREDENTIAL_ID, secret_text, &result),
       ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_result_is_valid (&result));
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
 
   g_autofree gchar *destination_path = g_build_filename (root, "credential.txt",
-      NULL);
+          NULL);
   assert_published_document (destination_path, TEST_CREDENTIAL_ID, secret_text);
 
   wyctl_publication_result_clear (&result);
@@ -281,5 +281,5 @@ main (int argc, char **argv)
       test_backend_conformance_path);
   g_test_add_func ("/wyctl/publication-backend/open-rejects-empty-root",
       test_backend_open_rejects_empty_root);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

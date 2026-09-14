@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -631,5 +632,5 @@ main (int argc, char *argv[])
     "/fact/store-provisioned/malformed-darwin-evidence-fails-before-filesystem",
     test_malformed_darwin_evidence_fails_before_filesystem);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

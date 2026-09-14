@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -2012,6 +2013,6 @@ main (int argc, char **argv)
       test_provisioned_pair_revalidation_differential);
   g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-ancestor-pin",
       test_provisioned_pair_pins_ancestor_chain);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
 #endif

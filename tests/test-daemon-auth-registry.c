@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -51,8 +52,8 @@ assert_lookup (WylServiceAuthRegistry *registry,
   gboolean found = FALSE;
 
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          expected->session_id, expected->jti, &snapshot, &actual_state,
-          &found), ==, WYRELOG_E_OK);
+      expected->session_id, expected->jti, &snapshot, &actual_state,
+      &found), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpint (actual_state, ==, state);
   g_assert_cmpstr (snapshot.session_id, ==, expected->session_id);
@@ -87,25 +88,25 @@ test_copy_lifetime_and_state_table (void)
   value = fixture (SESSION_A, JTI_A);
   assert_lookup (registry, &value, WYL_SERVICE_AUTH_PENDING);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   changed = TRUE;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
-          &changed), ==, WYRELOG_E_POLICY);
+      &changed), ==, WYRELOG_E_POLICY);
   g_assert_false (changed);
   assert_lookup (registry, &value, WYL_SERVICE_AUTH_ACTIVE);
   g_assert_cmpint (wyl_service_auth_registry_revoke_exact (registry, &value,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   g_assert_true (changed);
   changed = TRUE;
   g_assert_cmpint (wyl_service_auth_registry_revoke_exact (registry, &value,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   g_assert_false (changed);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
-          &changed), ==, WYRELOG_E_POLICY);
+      &changed), ==, WYRELOG_E_POLICY);
   assert_lookup (registry, &value, WYL_SERVICE_AUTH_REVOKED);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -123,37 +124,37 @@ test_validation_and_mismatches (void)
   changed = original;
   changed.session_id = (gchar *) JTI_A;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_INVALID);
+      &result), ==, WYRELOG_E_INVALID);
   g_assert_false (result);
   changed = original;
   changed.session_id = (gchar *) SESSION_B;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   changed = original;
   changed.jti = (gchar *) JTI_B;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   changed = original;
   changed.credential_id = (gchar *) CREDENTIAL_B;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   changed = original;
   changed.generation = 2;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   changed = original;
   changed.principal = (gchar *) "svc:tenant-a:other";
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   changed = original;
   changed.tenant = (gchar *) "tenant-b";
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &changed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_false (result);
   assert_lookup (registry, &original, WYL_SERVICE_AUTH_PENDING);
 
@@ -169,17 +170,17 @@ test_validation_and_mismatches (void)
   for (guint i = 0; i < G_N_ELEMENTS (mismatches); i++) {
     result = TRUE;
     g_assert_cmpint (wyl_service_auth_registry_revoke_exact (registry,
-            &mismatches[i], &result), ==, WYRELOG_E_POLICY);
+        &mismatches[i], &result), ==, WYRELOG_E_POLICY);
     g_assert_false (result);
     result = TRUE;
     g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry,
-            &mismatches[i], &result), ==, WYRELOG_E_POLICY);
+        &mismatches[i], &result), ==, WYRELOG_E_POLICY);
     g_assert_false (result);
     assert_lookup (registry, &original, WYL_SERVICE_AUTH_PENDING);
     g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
         1);
     g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-        (registry));
+          (registry));
   }
 
   changed = original;
@@ -214,12 +215,12 @@ test_duplicates_crossed_and_remove (void)
   WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
   WylServiceAuthReservation crossed = fixture (SESSION_A, JTI_B);
   WylServiceAuthReservation duplicate_session = fixture (SESSION_A,
-      "01890c10-2e3f-7000-8000-000000000105");
+          "01890c10-2e3f-7000-8000-000000000105");
   WylServiceAuthReservation duplicate_jti = fixture
-      ("01890c10-2e3f-7000-8000-000000000106", JTI_A);
+        ("01890c10-2e3f-7000-8000-000000000106", JTI_A);
   WylServiceAuthReservation absent = fixture
-      ("01890c10-2e3f-7000-8000-000000000107",
-      "01890c10-2e3f-7000-8000-000000000108");
+        ("01890c10-2e3f-7000-8000-000000000107",
+          "01890c10-2e3f-7000-8000-000000000108");
   WylServiceAuthReservation snapshot = { 0 };
   WylServiceAuthState state;
   gboolean result = FALSE;
@@ -231,41 +232,41 @@ test_duplicates_crossed_and_remove (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-          &duplicate_session), ==, WYRELOG_E_POLICY);
+      &duplicate_session), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-          &duplicate_jti), ==, WYRELOG_E_POLICY);
+      &duplicate_jti), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &crossed), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          crossed.session_id, crossed.jti, &snapshot, &state, &result), ==,
+      crossed.session_id, crossed.jti, &snapshot, &state, &result), ==,
       WYRELOG_E_POLICY);
   g_assert_false (result);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &crossed,
-          &result), ==, WYRELOG_E_POLICY);
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 2);
 
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &first,
-          &result), ==, WYRELOG_E_OK);
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result);
   result = TRUE;
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &first,
-          &result), ==, WYRELOG_E_OK);
+      &result), ==, WYRELOG_E_OK);
   g_assert_false (result);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &absent,
-          &result), ==, WYRELOG_E_OK);
+      &result), ==, WYRELOG_E_OK);
   g_assert_false (result);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &absent,
-          &result), ==, WYRELOG_E_NOT_FOUND);
+      &result), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_service_auth_registry_revoke_exact (registry, &absent,
-          &result), ==, WYRELOG_E_NOT_FOUND);
+      &result), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
-          &result), ==, WYRELOG_E_OK);
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &second,
-          &result), ==, WYRELOG_E_OK);
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -286,9 +287,9 @@ test_populated_clear_and_reuse (void)
   wyl_service_auth_registry_clear (registry);
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 0);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          first.session_id, first.jti, &snapshot, &state, &found), ==,
+      first.session_id, first.jti, &snapshot, &state, &found), ==,
       WYRELOG_E_OK);
   g_assert_false (found);
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
@@ -313,11 +314,11 @@ test_indexed_authority_sets (void)
   WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
   WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
   WylServiceAuthReservation third = fixture
-      ("01890c10-2e3f-7000-8000-000000000105",
-      "01890c10-2e3f-7000-8000-000000000106");
+        ("01890c10-2e3f-7000-8000-000000000105",
+          "01890c10-2e3f-7000-8000-000000000106");
   WylServiceAuthReservation fourth = fixture
-      ("01890c10-2e3f-7000-8000-000000000107",
-      "01890c10-2e3f-7000-8000-000000000108");
+        ("01890c10-2e3f-7000-8000-000000000107",
+          "01890c10-2e3f-7000-8000-000000000108");
   WylServiceAuthRevokeResult result = { 0 };
   gboolean changed = FALSE;
 
@@ -334,57 +335,57 @@ test_indexed_authority_sets (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &fourth), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+        (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 2, 2);
   assert_lookup (registry, &first, WYL_SERVICE_AUTH_REVOKED);
   assert_lookup (registry, &second, WYL_SERVICE_AUTH_REVOKED);
   assert_lookup (registry, &third, WYL_SERVICE_AUTH_PENDING);
   assert_lookup (registry, &fourth, WYL_SERVICE_AUTH_PENDING);
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+        (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 2, 0);
 
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          third.principal, &result), ==, WYRELOG_E_OK);
+      third.principal, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 1, 1);
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          third.principal, &result), ==, WYRELOG_E_OK);
+      third.principal, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 1, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
-          "tenant-a", &result), ==, WYRELOG_E_OK);
+      "tenant-a", &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 3, 1);
   g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
-          "tenant-a", &result), ==, WYRELOG_E_OK);
+      "tenant-a", &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 3, 0);
   assert_lookup (registry, &fourth, WYL_SERVICE_AUTH_REVOKED);
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          first.principal, &result), ==, WYRELOG_E_OK);
+      first.principal, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 3, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, CREDENTIAL_A, 99, &result), ==, WYRELOG_E_OK);
+        (registry, CREDENTIAL_A, 99, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          "svc:tenant-a:absent", &result), ==, WYRELOG_E_OK);
+      "svc:tenant-a:absent", &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
-          "tenant-absent", &result), ==, WYRELOG_E_OK);
+      "tenant-absent", &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
 
   result.matched = result.transitioned = 9;
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, CREDENTIAL_A, 0, &result), ==, WYRELOG_E_INVALID);
+        (registry, CREDENTIAL_A, 0, &result), ==, WYRELOG_E_INVALID);
   assert_revoke_result (&result, 0, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, "wlc_invalid", 1, &result), ==, WYRELOG_E_INVALID);
+        (registry, "wlc_invalid", 1, &result), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          "human:a", &result), ==, WYRELOG_E_INVALID);
+      "human:a", &result), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
-          "tenant/a", &result), ==, WYRELOG_E_INVALID);
+      "tenant/a", &result), ==, WYRELOG_E_INVALID);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -399,30 +400,30 @@ test_indexed_remove_ordering (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
-          &removed), ==, WYRELOG_E_OK);
+      &removed), ==, WYRELOG_E_OK);
   g_assert_true (removed);
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, value.credential_id, value.generation, &result), ==,
+        (registry, value.credential_id, value.generation, &result), ==,
       WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
 
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, value.credential_id, value.generation, &result), ==,
+        (registry, value.credential_id, value.generation, &result), ==,
       WYRELOG_E_OK);
   assert_revoke_result (&result, 1, 1);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
-          &removed), ==, WYRELOG_E_OK);
+      &removed), ==, WYRELOG_E_OK);
   g_assert_true (removed);
   g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
-          value.principal, &result), ==, WYRELOG_E_OK);
+      value.principal, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
   g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
-          value.tenant, &result), ==, WYRELOG_E_OK);
+      value.tenant, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 0, 0);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -433,8 +434,8 @@ test_zero_survivor_selector_and_corruption (void)
   WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
   WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
   WylServiceAuthReservation unrelated = fixture
-      ("01890c10-2e3f-7000-8000-000000000107",
-      "01890c10-2e3f-7000-8000-000000000108");
+        ("01890c10-2e3f-7000-8000-000000000107",
+          "01890c10-2e3f-7000-8000-000000000108");
   WylServiceAuthSelector principal = { 0 };
   WylServiceAuthSelector tenant = { 0 };
   WylServiceAuthRevokeResult result = { 0 };
@@ -450,26 +451,26 @@ test_zero_survivor_selector_and_corruption (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&principal,
-          first.principal), ==, WYRELOG_E_OK);
+      first.principal), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-          &principal, &result), ==, WYRELOG_E_OK);
+    (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &principal, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 2, 2);
   assert_lookup (registry, &first, WYL_SERVICE_AUTH_REVOKED);
   assert_lookup (registry, &second, WYL_SERVICE_AUTH_REVOKED);
   assert_lookup (registry, &unrelated, WYL_SERVICE_AUTH_PENDING);
 
   g_assert_cmpint (wyl_service_auth_selector_init_tenant (&tenant,
-          unrelated.tenant), ==, WYRELOG_E_OK);
+      unrelated.tenant), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-          &tenant, &result), ==, WYRELOG_E_OK);
+    (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &tenant, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, 1, 1);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 
   registry = new_registry ();
@@ -477,12 +478,12 @@ test_zero_survivor_selector_and_corruption (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_selector_init_principal (&principal,
-          first.principal), ==, WYRELOG_E_OK);
+      first.principal), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
-      (registry, &principal));
+        (registry, &principal));
   g_assert_cmpint
-      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-          &principal, &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &principal, &result), ==, WYRELOG_E_POLICY);
   assert_revoke_result (&result, 0, 0);
   assert_lookup (registry, &first, WYL_SERVICE_AUTH_PENDING);
   wyl_service_auth_registry_unref (registry);
@@ -504,14 +505,14 @@ test_zero_survivor_global_corruption_matrix (void)
         WYRELOG_E_OK);
     WylServiceAuthSelector selector = { 0 };
     g_assert_cmpint
-        (wyl_service_auth_selector_init_credential_generation (&selector,
-            first.credential_id, first.generation), ==, WYRELOG_E_OK);
+      (wyl_service_auth_selector_init_credential_generation (&selector,
+        first.credential_id, first.generation), ==, WYRELOG_E_OK);
     g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry,
-            &first, (WylServiceAuthRegistryCorruption) corruption));
+        &first, (WylServiceAuthRegistryCorruption) corruption));
     WylServiceAuthRevokeResult result = { 9, 9 };
     g_assert_cmpint
-        (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-            &selector, &result), ==, WYRELOG_E_POLICY);
+      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+        &selector, &result), ==, WYRELOG_E_POLICY);
     assert_revoke_result (&result, 0, 0);
     wyl_service_auth_registry_unref (registry);
   }
@@ -540,18 +541,18 @@ test_due_cleanup_rejects_corrupt_indexes (void)
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
-            &changed), ==, WYRELOG_E_OK);
+        &changed), ==, WYRELOG_E_OK);
     g_assert_true (changed);
     g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry,
-            &value, corruptions[i]));
+        &value, corruptions[i]));
 
     /* copy_due is the expiry worker's read half; it must inspect every
      * authoritative index before handing a snapshot to removal. */
     g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 1,
-            &due), ==, WYRELOG_E_POLICY);
+        &due), ==, WYRELOG_E_POLICY);
     g_assert_null (due);
     g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
-            &removed), ==, WYRELOG_E_POLICY);
+        &removed), ==, WYRELOG_E_POLICY);
     g_assert_false (removed);
     wyl_service_auth_registry_unref (registry);
   }
@@ -574,17 +575,17 @@ test_due_cleanup_rejects_foreign_selector_member (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &first,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   changed = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
-          &changed), ==, WYRELOG_E_OK);
+      &changed), ==, WYRELOG_E_OK);
   g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry, &first,
-          WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER));
+      WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER));
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
-          &due), ==, WYRELOG_E_POLICY);
+      &due), ==, WYRELOG_E_POLICY);
   g_assert_null (due);
   g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &first,
-          &removed), ==, WYRELOG_E_POLICY);
+      &removed), ==, WYRELOG_E_POLICY);
   g_assert_false (removed);
   wyl_service_auth_registry_unref (registry);
 }
@@ -600,16 +601,16 @@ test_due_cleanup_rejects_any_pending (void)
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &future), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
-          &due), ==, WYRELOG_E_POLICY);
+      &due), ==, WYRELOG_E_POLICY);
   g_assert_null (due);
   wyl_service_auth_registry_unref (registry);
 
   registry = new_registry ();
   for (guint i = 0; i < 33; i++) {
     g_autofree gchar *session = g_strdup_printf
-        ("01890c10-2e3f-7000-8000-%012u", 1000 + i);
+          ("01890c10-2e3f-7000-8000-%012u", 1000 + i);
     g_autofree gchar *jti = g_strdup_printf
-        ("01890c10-2e3f-7000-8001-%012u", 1000 + i);
+          ("01890c10-2e3f-7000-8001-%012u", 1000 + i);
     WylServiceAuthReservation value = fixture (session, jti);
     gboolean changed = FALSE;
 
@@ -618,13 +619,13 @@ test_due_cleanup_rejects_any_pending (void)
         WYRELOG_E_OK);
     if (i < 32) {
       g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
-              &changed), ==, WYRELOG_E_OK);
+          &changed), ==, WYRELOG_E_OK);
       g_assert_true (changed);
     }
   }
   due = (GPtrArray *) 0x1;
   g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
-          &due), ==, WYRELOG_E_POLICY);
+      &due), ==, WYRELOG_E_POLICY);
   g_assert_null (due);
   wyl_service_auth_registry_unref (registry);
 }
@@ -692,7 +693,7 @@ new_counting_registry (CountingAllocator *counter)
   };
   WylServiceAuthRegistry *registry = NULL;
   g_assert_cmpint (wyl_service_auth_registry_new_with_allocator (&allocator,
-          &registry), ==, WYRELOG_E_OK);
+      &registry), ==, WYRELOG_E_OK);
   return registry;
 }
 
@@ -720,7 +721,7 @@ test_counted_clear_reuse (void)
   wyl_service_auth_registry_clear (registry);
   g_assert_cmpuint (counter.allocations, ==, counter.frees);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
       WYRELOG_E_OK);
   wyl_service_auth_registry_unref (registry);
@@ -745,7 +746,7 @@ test_allocation_failures_and_cleanup (void)
     g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
         0);
     g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-        (registry));
+          (registry));
     g_assert_cmpuint (counter.frees, ==, fail_at - 1);
     wyl_service_auth_registry_unref (registry);
     counter_clear (&counter);
@@ -763,7 +764,7 @@ test_allocation_failures_and_cleanup (void)
     gboolean found = TRUE;
     counter.fail_at = counter.allocations + fail_offset;
     g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-            value.session_id, value.jti, &snapshot, &state, &found), ==,
+        value.session_id, value.jti, &snapshot, &state, &found), ==,
         WYRELOG_E_NOMEM);
     g_assert_false (found);
     g_assert_null (snapshot.session_id);
@@ -777,20 +778,20 @@ test_allocation_failures_and_cleanup (void)
   WylServiceAuthState reusable_state = WYL_SERVICE_AUTH_REVOKED;
   gboolean reusable_found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          value.session_id, value.jti, &reusable, &reusable_state,
-          &reusable_found), ==, WYRELOG_E_OK);
+      value.session_id, value.jti, &reusable, &reusable_state,
+      &reusable_found), ==, WYRELOG_E_OK);
   g_assert_true (reusable_found);
   guint frees_before_reuse = counter.frees;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          reusable.session_id, reusable.jti, &reusable, &reusable_state,
-          &reusable_found), ==, WYRELOG_E_OK);
+      reusable.session_id, reusable.jti, &reusable, &reusable_state,
+      &reusable_found), ==, WYRELOG_E_OK);
   g_assert_true (reusable_found);
   g_assert_cmpuint (counter.frees, ==, frees_before_reuse + 5);
   counter.fail_at = counter.allocations + 1;
   frees_before_reuse = counter.frees;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          reusable.session_id, reusable.jti, &reusable, &reusable_state,
-          &reusable_found), ==, WYRELOG_E_NOMEM);
+      reusable.session_id, reusable.jti, &reusable, &reusable_state,
+      &reusable_found), ==, WYRELOG_E_NOMEM);
   g_assert_false (reusable_found);
   g_assert_null (reusable.session_id);
   g_assert_null (reusable.jti);
@@ -801,10 +802,10 @@ test_allocation_failures_and_cleanup (void)
   g_assert_cmpuint (counter.frees, ==, frees_before_reuse + 5);
   counter.fail_at = 0;
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          value.session_id, value.jti, &reusable, &reusable_state,
-          &reusable_found), ==, WYRELOG_E_OK);
+      value.session_id, value.jti, &reusable, &reusable_state,
+      &reusable_found), ==, WYRELOG_E_OK);
   g_assert_true (reusable_found);
   wyl_service_auth_reservation_clear (&reusable);
 
@@ -812,8 +813,8 @@ test_allocation_failures_and_cleanup (void)
   WylServiceAuthState retained_state = WYL_SERVICE_AUTH_REVOKED;
   gboolean retained_found = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-          value.session_id, value.jti, &retained, &retained_state,
-          &retained_found), ==, WYRELOG_E_OK);
+      value.session_id, value.jti, &retained, &retained_state,
+      &retained_found), ==, WYRELOG_E_OK);
   g_assert_true (retained_found);
   g_assert_cmpint (retained_state, ==, WYL_SERVICE_AUTH_PENDING);
   wyl_service_auth_registry_ref (registry);
@@ -857,13 +858,13 @@ thread_call (gpointer data)
     call->rc = wyl_service_auth_registry_reserve (call->registry, &call->value);
   else if (call->operation == 1)
     call->rc = wyl_service_auth_registry_activate (call->registry,
-        &call->value, &call->result);
+            &call->value, &call->result);
   else if (call->operation == 2)
     call->rc = wyl_service_auth_registry_revoke_exact (call->registry,
-        &call->value, &call->result);
+            &call->value, &call->result);
   else
     call->rc = wyl_service_auth_registry_remove_exact (call->registry,
-        &call->value, &call->result);
+            &call->value, &call->result);
   return NULL;
 }
 
@@ -920,9 +921,9 @@ test_concurrent_shared_bucket_reserve (void)
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
       G_N_ELEMENTS (calls));
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
-      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+        (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
   assert_revoke_result (&result, G_N_ELEMENTS (calls), G_N_ELEMENTS (calls));
   wyl_service_auth_registry_unref (registry);
   g_assert_cmpuint (counter.allocations, ==, counter.frees);
@@ -948,11 +949,11 @@ indexed_race_call (gpointer data)
   start_gate_wait (call->gate);
   if (call->remove)
     call->rc = wyl_service_auth_registry_remove_exact (call->registry,
-        &call->value, &call->removed);
+            &call->value, &call->removed);
   else
     call->rc = wyl_service_auth_registry_revoke_credential_generation
-        (call->registry, call->value.credential_id, call->value.generation,
-        &call->result);
+          (call->registry, call->value.credential_id, call->value.generation,
+            &call->result);
   return NULL;
 }
 
@@ -964,20 +965,18 @@ test_indexed_revoke_remove_race (void)
     WylServiceAuthReservation value = fixture (SESSION_A, JTI_A);
     StartGate gate = { 0 };
     IndexedRaceCall revoke = { registry, value, &gate, FALSE, FALSE,
-      {0}, WYRELOG_E_INTERNAL
-    };
+                               {0}, WYRELOG_E_INTERNAL};
     IndexedRaceCall remove = { registry, value, &gate, TRUE, FALSE,
-      {0}, WYRELOG_E_INTERNAL
-    };
+                               {0}, WYRELOG_E_INTERNAL};
 
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
         WYRELOG_E_OK);
     g_mutex_init (&gate.mutex);
     g_cond_init (&gate.cond);
     GThread *revoke_thread = g_thread_new ("indexed-revoke",
-        indexed_race_call, &revoke);
+            indexed_race_call, &revoke);
     GThread *remove_thread = g_thread_new ("indexed-remove",
-        indexed_race_call, &remove);
+            indexed_race_call, &remove);
     start_gate_release (&gate, 2);
     g_thread_join (revoke_thread);
     g_thread_join (remove_thread);
@@ -987,12 +986,12 @@ test_indexed_revoke_remove_race (void)
     g_assert_cmpint (remove.rc, ==, WYRELOG_E_OK);
     g_assert_true (remove.removed);
     g_assert_true ((revoke.result.matched == 0
-            && revoke.result.transitioned == 0)
+        && revoke.result.transitioned == 0)
         || (revoke.result.matched == 1 && revoke.result.transitioned == 1));
     g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
         0);
     g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-        (registry));
+          (registry));
     wyl_service_auth_registry_unref (registry);
   }
 }
@@ -1012,24 +1011,22 @@ test_concurrent_indexed_revokes (void)
     };
     StartGate gate = { 0 };
     IndexedRaceCall first = { registry, values[0], &gate, FALSE, FALSE,
-      {0}, WYRELOG_E_INTERNAL
-    };
+                              {0}, WYRELOG_E_INTERNAL};
     IndexedRaceCall second = { registry, values[0], &gate, FALSE, FALSE,
-      {0}, WYRELOG_E_INTERNAL
-    };
+                               {0}, WYRELOG_E_INTERNAL};
     gboolean changed = FALSE;
 
     for (guint i = 0; i < G_N_ELEMENTS (values); i++)
       g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
-              &values[i]), ==, WYRELOG_E_OK);
+          &values[i]), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_service_auth_registry_activate (registry, &values[1],
-            &changed), ==, WYRELOG_E_OK);
+        &changed), ==, WYRELOG_E_OK);
     g_mutex_init (&gate.mutex);
     g_cond_init (&gate.cond);
     GThread *first_thread = g_thread_new ("indexed-revoke-a",
-        indexed_race_call, &first);
+            indexed_race_call, &first);
     GThread *second_thread = g_thread_new ("indexed-revoke-b",
-        indexed_race_call, &second);
+            indexed_race_call, &second);
     start_gate_release (&gate, 2);
     g_thread_join (first_thread);
     g_thread_join (second_thread);
@@ -1042,13 +1039,13 @@ test_concurrent_indexed_revokes (void)
     g_assert_cmpuint (first.result.transitioned + second.result.transitioned,
         ==, G_N_ELEMENTS (values));
     g_assert_true ((first.result.transitioned == G_N_ELEMENTS (values)
-            && second.result.transitioned == 0)
+        && second.result.transitioned == 0)
         || (first.result.transitioned == 0
-            && second.result.transitioned == G_N_ELEMENTS (values)));
+        && second.result.transitioned == G_N_ELEMENTS (values)));
     for (guint i = 0; i < G_N_ELEMENTS (values); i++)
       assert_lookup (registry, &values[i], WYL_SERVICE_AUTH_REVOKED);
     g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-        (registry));
+          (registry));
     wyl_service_auth_registry_unref (registry);
   }
 }
@@ -1086,7 +1083,7 @@ test_duplicate_after_preflight (void)
   g_assert_cmpint (delayed.rc, ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 1);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
   g_assert_cmpuint (counter.allocations, ==, counter.frees);
   counter_clear (&counter);
@@ -1151,7 +1148,7 @@ test_concurrent_duplicate_and_transitions (void)
   g_assert_cmpuint (removed, ==, 1);
   g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 0);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-      (registry));
+        (registry));
   wyl_service_auth_registry_unref (registry);
 }
 
@@ -1176,7 +1173,7 @@ test_transition_remove_races (void)
       g_mutex_init (&gate.mutex);
       g_cond_init (&gate.cond);
       GThread *transition_thread = g_thread_new ("transition", thread_call,
-          &transition);
+              &transition);
       GThread *remove_thread = g_thread_new ("remove", thread_call, &remove);
       start_gate_release (&gate, 2);
       g_thread_join (transition_thread);
@@ -1189,11 +1186,11 @@ test_transition_remove_races (void)
           || transition.rc == WYRELOG_E_NOT_FOUND);
       g_assert_cmpint (transition.result, ==, transition.rc == WYRELOG_E_OK);
       g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
-              value.session_id, value.jti, &snapshot, &state, &found), ==,
+          value.session_id, value.jti, &snapshot, &state, &found), ==,
           WYRELOG_E_OK);
       g_assert_false (found);
       g_assert_true (wyl_service_auth_registry_check_invariants_for_test
-          (registry));
+            (registry));
       wyl_service_auth_registry_unref (registry);
     }
   }
@@ -1241,5 +1238,5 @@ main (int argc, char **argv)
       test_concurrent_duplicate_and_transitions);
   g_test_add_func ("/daemon/auth-registry/transition-remove-races",
       test_transition_remove_races);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

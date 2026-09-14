@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
@@ -13,7 +14,7 @@ static gint
 check_arm_rejects_null_handle (void)
 {
   if (wyl_handle_break_glass_arm (NULL,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
       != WYRELOG_E_INVALID)
     return 1;
   if (wyl_handle_break_glass_disarm (NULL) != WYRELOG_E_INVALID)
@@ -31,11 +32,11 @@ check_arm_rejects_out_of_range_reason (void)
     return 10;
 
   if (wyl_handle_break_glass_arm (handle,
-          (wyl_break_glass_reason_code_t) WYL_BREAK_GLASS_REASON_LAST_, 60)
+      (wyl_break_glass_reason_code_t) WYL_BREAK_GLASS_REASON_LAST_, 60)
       != WYRELOG_E_INVALID)
     return 11;
   if (wyl_handle_break_glass_arm (handle,
-          (wyl_break_glass_reason_code_t) 99, 60)
+      (wyl_break_glass_reason_code_t) 99, 60)
       != WYRELOG_E_INVALID)
     return 12;
   if (wyl_handle_break_glass_is_active (handle))
@@ -51,20 +52,20 @@ check_arm_rejects_bad_ttl (void)
     return 20;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 0)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 0)
       != WYRELOG_E_INVALID)
     return 21;
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, -1)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, -1)
       != WYRELOG_E_INVALID)
     return 22;
   /* Strictly above the 900s ceiling rejected. */
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 901)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 901)
       != WYRELOG_E_INVALID)
     return 23;
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, G_MAXINT64)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, G_MAXINT64)
       != WYRELOG_E_INVALID)
     return 24;
   if (wyl_handle_break_glass_is_active (handle))
@@ -82,7 +83,7 @@ check_arm_then_active_then_disarm (void)
   if (wyl_handle_break_glass_is_active (handle))
     return 31;
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_POLICY_CORRUPTION, 60)
+      WYL_BREAK_GLASS_REASON_POLICY_CORRUPTION, 60)
       != WYRELOG_E_OK)
     return 32;
   if (!wyl_handle_break_glass_is_active (handle))
@@ -105,13 +106,13 @@ check_double_arm_is_rejected (void)
     return 40;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_SERVICE_UNFREEZE, 60)
+      WYL_BREAK_GLASS_REASON_SERVICE_UNFREEZE, 60)
       != WYRELOG_E_OK)
     return 41;
   /* Second arm before disarm: the operator must explicitly tear
    * down the first activation before starting a fresh one. */
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
       != WYRELOG_E_INVALID)
     return 42;
   /* The original activation is still in effect after the rejected
@@ -134,7 +135,7 @@ check_disarm_then_arm_succeeds (void)
   if (wyl_handle_break_glass_disarm (handle) != WYRELOG_E_OK)
     return 52;
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_SECURITY_OFFICER_LOCKOUT, 60)
+      WYL_BREAK_GLASS_REASON_SECURITY_OFFICER_LOCKOUT, 60)
       != WYRELOG_E_OK)
     return 53;
   if (!wyl_handle_break_glass_is_active (handle))
@@ -153,7 +154,7 @@ check_isolation_across_handles (void)
     return 61;
 
   if (wyl_handle_break_glass_arm (ha,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
       != WYRELOG_E_OK)
     return 62;
   /* Activation on handle A must not be visible on handle B. */
@@ -174,7 +175,7 @@ check_arm_in_disabled_build_returns_disabled_error (void)
     return 70;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60)
       != WYRELOG_E_BREAK_GLASS_DISABLED)
     return 71;
   if (wyl_handle_break_glass_disarm (handle)
@@ -194,23 +195,23 @@ main (void)
 
 #ifdef WYL_HAS_BREAK_GLASS
   if ((rc = check_arm_rejects_null_handle ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_arm_rejects_out_of_range_reason ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_arm_rejects_bad_ttl ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_arm_then_active_then_disarm ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_double_arm_is_rejected ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_disarm_then_arm_succeeds ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_isolation_across_handles ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #else
   if ((rc = check_arm_in_disabled_build_returns_disabled_error ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #endif
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

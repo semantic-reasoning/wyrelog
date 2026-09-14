@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
@@ -51,9 +52,9 @@ main (void)
   gint rc;
 
   if (g_getenv ("WYL_TEST_LOBAC_PARTIAL_DELTA") == NULL)
-    return 77;
+    return wyl_test_normalize_exit_status (77);
 
   if ((rc = check_role_permission_partial_exec ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

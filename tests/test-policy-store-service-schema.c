@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -96,7 +97,7 @@ static void
 assert_no_foreign_key_errors (sqlite3 *db)
 {
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM pragma_foreign_key_check;"), ==, 0);
+      "SELECT count(*) FROM pragma_foreign_key_check;"), ==, 0);
 }
 
 static void
@@ -111,17 +112,17 @@ static gint64
 service_object_count (sqlite3 *db)
 {
   return scalar_int64 (db,
-      "SELECT count(*) FROM sqlite_schema WHERE tbl_name IN ("
-      "'service_principals','service_credentials','service_credential_cvk',"
-      "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions',"
-      "'service_credential_operation_fences',"
-      "'service_credential_handoff_dispositions',"
-      "'service_credential_handoff_cancellation_claims',"
-      "'service_credential_handoff_remediation_actions',"
-      "'service_credential_handoff_retirement_receipts',"
-      "'service_permission_remediation_receipts',"
-      "'service_retirement_receipts');");
+             "SELECT count(*) FROM sqlite_schema WHERE tbl_name IN ("
+             "'service_principals','service_credentials','service_credential_cvk',"
+             "'service_principal_events','service_credential_events',"
+             "'service_domain_requests','service_exchange_audit_intentions',"
+             "'service_credential_operation_fences',"
+             "'service_credential_handoff_dispositions',"
+             "'service_credential_handoff_cancellation_claims',"
+             "'service_credential_handoff_remediation_actions',"
+             "'service_credential_handoff_retirement_receipts',"
+             "'service_permission_remediation_receipts',"
+             "'service_retirement_receipts');");
 }
 
 static gchar *
@@ -244,7 +245,7 @@ test_runtime_and_template_fingerprints (void)
   g_autofree gchar *schema = NULL;
   gsize schema_len = 0;
   g_assert_true (g_file_get_contents (WYL_TEST_SQLITE_SCHEMA_PATH, &schema,
-          &schema_len, NULL));
+      &schema_len, NULL));
   g_assert_cmpuint (schema_len, >, 0);
   g_autoptr (wyl_policy_store_t) templated = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &templated), ==, WYRELOG_E_OK);
@@ -273,7 +274,7 @@ test_service_subject_parser (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (valid); i++)
     g_assert_true (wyl_policy_service_subject_is_valid (valid[i],
-            strlen (valid[i])));
+        strlen (valid[i])));
   static const gchar *const invalid[] = {
     "", "svc:", "SVC:a", "Svc:a", "svc::a", "svc:a:", "svc:-a",
     "svc:a-", "svc:.a", "svc:a.", "svc:a/b", "svc:a b", "svc:a\n",
@@ -281,15 +282,15 @@ test_service_subject_parser (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
     g_assert_false (wyl_policy_service_subject_is_valid (invalid[i],
-            strlen (invalid[i])));
+        strlen (invalid[i])));
   static const gchar embedded_nul[] = { 's', 'v', 'c', ':', 'a', 0, 'b' };
   g_assert_false (wyl_policy_service_subject_is_valid (embedded_nul,
-          sizeof embedded_nul));
+      sizeof embedded_nul));
   gchar too_long[129];
   memset (too_long, 'a', sizeof too_long);
   memcpy (too_long, "svc:", 4);
   g_assert_false (wyl_policy_service_subject_is_valid (too_long,
-          sizeof too_long));
+      sizeof too_long));
   g_assert_false (wyl_policy_service_subject_is_valid (NULL, 5));
 }
 
@@ -318,7 +319,7 @@ insert_credential (sqlite3 *db, const gchar *credential_id, gint64 generation)
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, credential_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_int64 (stmt, 2, generation), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
@@ -417,22 +418,22 @@ test_retirement_receipt_schema_contracts (void)
   sqlite3 *db = wyl_policy_store_get_db (store);
 
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_schema WHERE"
-          " (type='table' AND name='service_retirement_receipts') OR"
-          " (type='index' AND name IN ('idx_service_retirement_event',"
-          " 'idx_service_retirement_diagnostic')) OR"
-          " (type='trigger' AND name IN ("
-          " 'trg_service_retirement_no_update',"
-          " 'trg_service_retirement_no_delete',"
-          " 'trg_service_retirement_no_claim_collision',"
-          " 'trg_service_domain_no_retirement_collision',"
-          " 'trg_service_fence_no_retirement_collision',"
-          " 'trg_service_escrow_no_retirement_collision',"
-          " 'trg_service_cancellation_no_retirement_collision',"
-          " 'trg_service_remediation_no_retirement_collision',"
-          " 'trg_service_permission_no_retirement_collision',"
-          " 'trg_service_handoff_retirement_no_service_retirement_collision',"
-          " 'trg_service_handoff_disposition_no_retirement_collision'));"),
+      "SELECT count(*) FROM sqlite_schema WHERE"
+      " (type='table' AND name='service_retirement_receipts') OR"
+      " (type='index' AND name IN ('idx_service_retirement_event',"
+      " 'idx_service_retirement_diagnostic')) OR"
+      " (type='trigger' AND name IN ("
+      " 'trg_service_retirement_no_update',"
+      " 'trg_service_retirement_no_delete',"
+      " 'trg_service_retirement_no_claim_collision',"
+      " 'trg_service_domain_no_retirement_collision',"
+      " 'trg_service_fence_no_retirement_collision',"
+      " 'trg_service_escrow_no_retirement_collision',"
+      " 'trg_service_cancellation_no_retirement_collision',"
+      " 'trg_service_remediation_no_retirement_collision',"
+      " 'trg_service_permission_no_retirement_collision',"
+      " 'trg_service_handoff_retirement_no_service_retirement_collision',"
+      " 'trg_service_handoff_disposition_no_retirement_collision'));"),
       ==, 14);
 
   exec_ok (db,
@@ -831,18 +832,18 @@ test_handoff_cancellation_schema_contracts (void)
   sqlite3 *db = wyl_policy_store_get_db (store);
 
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_schema WHERE"
-          " (type='table' AND name="
-          "'service_credential_handoff_cancellation_claims')"
-          " OR (type='index' AND name="
-          "'idx_service_handoff_cancellation_exact')"
-          " OR (type='trigger' AND name IN ("
-          "'trg_service_handoff_cancellation_no_update',"
-          "'trg_service_handoff_cancellation_no_delete',"
-          "'trg_service_handoff_cancellation_no_legacy_collision',"
-          "'trg_service_handoff_cancellation_no_remediation_collision',"
-          "'trg_service_handoff_remediation_no_cancellation_collision',"
-          "'trg_service_domain_requests_no_cancellation_collision'));"), ==, 8);
+      "SELECT count(*) FROM sqlite_schema WHERE"
+      " (type='table' AND name="
+      "'service_credential_handoff_cancellation_claims')"
+      " OR (type='index' AND name="
+      "'idx_service_handoff_cancellation_exact')"
+      " OR (type='trigger' AND name IN ("
+      "'trg_service_handoff_cancellation_no_update',"
+      "'trg_service_handoff_cancellation_no_delete',"
+      "'trg_service_handoff_cancellation_no_legacy_collision',"
+      "'trg_service_handoff_cancellation_no_remediation_collision',"
+      "'trg_service_handoff_remediation_no_cancellation_collision',"
+      "'trg_service_domain_requests_no_cancellation_collision'));"), ==, 8);
   exec_ok (db,
       "INSERT INTO service_credential_handoff_cancellation_claims"
       " (cancellation_request_id,request_fingerprint,decision_request_id,"
@@ -1094,13 +1095,13 @@ test_handoff_remediation_legacy_upgrade (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_domain_requests"
-          " WHERE request_id='000000000000000000000000025'"
-          " AND operation='credential_revoke';"), ==, 1);
+      "SELECT count(*) FROM service_domain_requests"
+      " WHERE request_id='000000000000000000000000025'"
+      " AND operation='credential_revoke';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN"
-          " ('trg_service_handoff_remediation_no_legacy_collision',"
-          " 'trg_service_domain_requests_no_remediation_collision');"), ==, 2);
+      "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN"
+      " ('trg_service_handoff_remediation_no_legacy_collision',"
+      " 'trg_service_domain_requests_no_remediation_collision');"), ==, 2);
 }
 
 static void
@@ -1113,7 +1114,7 @@ test_collision_policy (void)
   insert_fixture_principal (db);
   wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
   exec_ok (db,
@@ -1124,7 +1125,7 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
   exec_ok (db,
@@ -1133,7 +1134,7 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM principal_states WHERE subject_id='svc:tenant-a:worker';"
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
@@ -1142,7 +1143,7 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM totp_enrollments WHERE subject_id='svc:tenant-a:worker';"
       "INSERT INTO wyrelog_config(config_key,config_value,updated_at)"
@@ -1152,7 +1153,7 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM wyrelog_config WHERE config_key LIKE 'bootstrap_admin_%';"
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
@@ -1160,7 +1161,7 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
+      "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
 }
 
 static void
@@ -1177,14 +1178,14 @@ test_unregistered_legacy_service_artifacts (void)
       " VALUES('svc:legacy','wr.fact.read','__wr_default',1);");
   wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_SERVICE;
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
 
   exec_ok (db,
       "INSERT INTO principal_states(subject_id,state,updated_at)"
       " VALUES('svc:legacy','idle',1);");
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
   exec_ok (db,
       "DELETE FROM principal_states WHERE subject_id='svc:legacy';"
@@ -1192,30 +1193,30 @@ test_unregistered_legacy_service_artifacts (void)
       " enrolled_at,id_uuidv7) VALUES"
       " ('svc:legacy',zeroblob(20),-1,1,'legacy-service-totp');");
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
   exec_ok (db,
       "DELETE FROM totp_enrollments WHERE subject_id='svc:legacy';"
       "INSERT INTO wyrelog_config(config_key,config_value,updated_at)"
       " VALUES('bootstrap_admin_subject','svc:legacy',1);");
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
   exec_ok (db,
       "DELETE FROM wyrelog_config WHERE config_key='bootstrap_admin_subject';"
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
       " VALUES('svc:legacy','wr.login.skip_mfa','login',1);");
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:unknown",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principals"
-          " WHERE subject_id='svc:legacy';"), ==, 0);
+      "SELECT count(*) FROM service_principals"
+      " WHERE subject_id='svc:legacy';"), ==, 0);
 }
 
 static gchar *
@@ -1240,8 +1241,8 @@ assert_table_corruption_rejected (const gchar *table, const gchar *needle,
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_autofree gchar *query =
       g_strdup_printf
-      ("SELECT sql FROM sqlite_schema WHERE type='table' AND name='%s';",
-      table);
+        ("SELECT sql FROM sqlite_schema WHERE type='table' AND name='%s';",
+          table);
   g_autofree gchar *original = scalar_text (db, query);
   g_autofree gchar *corrupt = replace_once (original, needle, replacement);
   exec_ok (db, "PRAGMA foreign_keys=OFF;");
@@ -1257,7 +1258,7 @@ static void
 test_corruption_matrix (void)
 {
   assert_table_corruption_rejected
-      ("service_credential_handoff_retirement_receipts",
+    ("service_credential_handoff_retirement_receipts",
       "retired_at_us-retention_basis_at_us>=2592000000000",
       "retired_at_us-retention_basis_at_us>=1");
   assert_table_corruption_rejected ("service_credentials",
@@ -1582,46 +1583,46 @@ test_read_only_service_schema_access (void)
 
   wyl_policy_service_principal_info_t principal = { 0 };
   g_assert_cmpint (wyl_policy_store_lookup_service_principal (store,
-          "svc:tenant-a:worker", &principal), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.display_name, ==, "worker");
   g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "svc:a",
-          &principal), ==, WYRELOG_E_OK);
+      &principal), ==, WYRELOG_E_OK);
   g_assert_cmpstr (principal.subject_id, ==, "svc:a");
   g_assert_cmpint (wyl_policy_store_lookup_service_principal (store,
-          "svc:missing", &principal), ==, WYRELOG_E_NOT_FOUND);
+      "svc:missing", &principal), ==, WYRELOG_E_NOT_FOUND);
   assert_principal_cleared (&principal);
   g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "bad",
-          &principal), ==, WYRELOG_E_INVALID);
+      &principal), ==, WYRELOG_E_INVALID);
   assert_principal_cleared (&principal);
 
   g_autoptr (GPtrArray) rows = g_ptr_array_new_with_free_func (g_free);
   g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
-          collect_principal, rows), ==, WYRELOG_E_OK);
+      collect_principal, rows), ==, WYRELOG_E_OK);
   g_assert_cmpuint (rows->len, ==, 2);
   g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "svc:a");
   g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
-          reject_principal, NULL), ==, WYRELOG_E_INTERNAL);
+      reject_principal, NULL), ==, WYRELOG_E_INTERNAL);
 
   wyl_policy_service_credential_info_t credential = { 0 };
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
-          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpstr (credential.credential_id, ==, "cred-a");
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-b",
-          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpstr (credential.credential_id, ==, "cred-b");
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
-          "svc:tenant-a:worker", "__wr_default", &credential), ==,
+      "svc:tenant-a:worker", "__wr_default", &credential), ==,
       WYRELOG_E_NOT_FOUND);
   assert_credential_cleared (&credential);
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
-          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+      "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, NULL,
-          "svc:tenant-a:worker", "tenant-a", &credential), ==,
+      "svc:tenant-a:worker", "tenant-a", &credential), ==,
       WYRELOG_E_INVALID);
   assert_credential_cleared (&credential);
   g_ptr_array_set_size (rows, 0);
   g_assert_cmpint (wyl_policy_store_foreach_service_credential (store,
-          "svc:tenant-a:worker", "tenant-a", collect_credential, rows), ==,
+      "svc:tenant-a:worker", "tenant-a", collect_credential, rows), ==,
       WYRELOG_E_OK);
   g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "cred-a");
   g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "cred-b");
@@ -1650,19 +1651,19 @@ test_read_only_service_schema_access (void)
 
   g_ptr_array_set_size (rows, 0);
   g_assert_cmpint (wyl_policy_store_foreach_service_principal_event (store,
-          "svc:tenant-a:worker", collect_principal_event, rows), ==,
+      "svc:tenant-a:worker", collect_principal_event, rows), ==,
       WYRELOG_E_OK);
   g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "created");
   g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "disabled");
   g_ptr_array_set_size (rows, 0);
   g_assert_cmpint (wyl_policy_store_foreach_service_credential_event (store,
-          "cred-a", "svc:tenant-a:worker", "tenant-a",
-          collect_credential_event, rows), ==, WYRELOG_E_OK);
+      "cred-a", "svc:tenant-a:worker", "tenant-a",
+      collect_credential_event, rows), ==, WYRELOG_E_OK);
   g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "issued");
   g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "revoked");
   g_assert_cmpint (wyl_policy_store_foreach_service_credential_event (store,
-          "cred-a", "svc:tenant-a:worker", "__wr_default",
-          collect_credential_event, rows), ==, WYRELOG_E_OK);
+      "cred-a", "svc:tenant-a:worker", "__wr_default",
+      collect_credential_event, rows), ==, WYRELOG_E_OK);
 
   wyl_policy_service_principal_event_info_t principal_event = {
     .event_id = 1,
@@ -1696,19 +1697,19 @@ test_malformed_service_row_read (void)
       "INSERT INTO service_principals VALUES"
       " (CAST(x'7376633a610062' AS TEXT),'bad','active',1,'admin',1,1,NULL,NULL);");
   g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
-          collect_principal, NULL), ==, WYRELOG_E_POLICY);
+      collect_principal, NULL), ==, WYRELOG_E_POLICY);
   exec_ok (db, "DELETE FROM service_principals;"
       "INSERT INTO service_principals VALUES"
       " ('SVC:a','bad','active',1,'admin',1,1,NULL,NULL);");
   wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "SVC:a",
-          &kind), ==, WYRELOG_E_POLICY);
+      &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db, "DELETE FROM service_principals;"
       "INSERT INTO service_principals VALUES"
       " ('svc:bad','bad','corrupt',1,'admin',1,1,NULL,NULL);");
   wyl_policy_service_principal_info_t principal = { 0 };
   g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "svc:bad",
-          &principal), ==, WYRELOG_E_POLICY);
+      &principal), ==, WYRELOG_E_POLICY);
   assert_principal_cleared (&principal);
 }
 
@@ -1813,8 +1814,8 @@ assert_immediate_parent_objects (sqlite3 *db)
       continue;
     g_autofree gchar *sql =
         g_strdup_printf
-        ("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='%s';",
-        name);
+          ("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='%s';",
+            name);
     g_assert_cmpint (scalar_int64 (db, sql), ==, 1);
   }
   g_assert_cmpint (service_object_count (db), ==, 0);
@@ -1830,7 +1831,7 @@ build_immediate_parent_fixture (sqlite3 *db)
   g_autofree gchar *schema = NULL;
   gsize schema_len = 0;
   g_assert_true (g_file_get_contents (WYL_TEST_SQLITE_SCHEMA_PATH, &schema,
-          &schema_len, NULL));
+      &schema_len, NULL));
   const gchar *start = strstr (schema, start_marker);
   const gchar *end = strstr (schema, end_marker);
   g_assert_nonnull (start);
@@ -1852,49 +1853,49 @@ static void
 assert_legacy_values (sqlite3 *db)
 {
   g_autofree gchar *mode = scalar_text (db,
-      "SELECT config_value FROM wyrelog_config"
-      " WHERE config_key='deployment_mode';");
+          "SELECT config_value FROM wyrelog_config"
+          " WHERE config_key='deployment_mode';");
   g_assert_cmpstr (mode, ==, "development");
   g_autofree gchar *bootstrap = scalar_text (db,
-      "SELECT config_value FROM wyrelog_config"
-      " WHERE config_key='bootstrap_admin_subject';");
+          "SELECT config_value FROM wyrelog_config"
+          " WHERE config_key='bootstrap_admin_subject';");
   g_assert_cmpstr (bootstrap, ==, "svc:legacy");
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT failed_attempt_count FROM principal_states"
-          " WHERE subject_id='legacy-human';"), ==, 3);
+      "SELECT failed_attempt_count FROM principal_states"
+      " WHERE subject_id='legacy-human';"), ==, 3);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT last_verified_step FROM totp_enrollments"
-          " WHERE subject_id='legacy-human';"), ==, 9);
+      "SELECT last_verified_step FROM totp_enrollments"
+      " WHERE subject_id='legacy-human';"), ==, 9);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM role_memberships"
-          " WHERE subject_id='legacy-human' AND role_id='wr.system_admin'"
-          " AND scope='__wr_default' AND granted_by='legacy-root';"), ==, 1);
+      "SELECT count(*) FROM role_memberships"
+      " WHERE subject_id='legacy-human' AND role_id='wr.system_admin'"
+      " AND scope='__wr_default' AND granted_by='legacy-root';"), ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM direct_permissions"
-          " WHERE subject_id='legacy-human' AND perm_id IN"
-          " ('wr.login.skip_mfa','legacy.read');"), ==, 2);
+      "SELECT count(*) FROM direct_permissions"
+      " WHERE subject_id='legacy-human' AND perm_id IN"
+      " ('wr.login.skip_mfa','legacy.read');"), ==, 2);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT failed_attempt_count FROM principal_states"
-          " WHERE subject_id='svc:legacy';"), ==, 4);
+      "SELECT failed_attempt_count FROM principal_states"
+      " WHERE subject_id='svc:legacy';"), ==, 4);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT last_verified_step FROM totp_enrollments"
-          " WHERE subject_id='svc:legacy';"), ==, 10);
+      "SELECT last_verified_step FROM totp_enrollments"
+      " WHERE subject_id='svc:legacy';"), ==, 10);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM role_memberships"
-          " WHERE subject_id='svc:legacy' AND role_id='wr.system_admin';"),
+      "SELECT count(*) FROM role_memberships"
+      " WHERE subject_id='svc:legacy' AND role_id='wr.system_admin';"),
       ==, 1);
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM direct_permissions"
-          " WHERE subject_id='svc:legacy' AND perm_id IN"
-          " ('wr.login.skip_mfa','legacy.read');"), ==, 2);
+      "SELECT count(*) FROM direct_permissions"
+      " WHERE subject_id='svc:legacy' AND perm_id IN"
+      " ('wr.login.skip_mfa','legacy.read');"), ==, 2);
 }
 
 static void
 assert_legacy_service_unregistered (sqlite3 *db)
 {
   g_assert_cmpint (scalar_int64 (db,
-          "SELECT count(*) FROM service_principals"
-          " WHERE subject_id='svc:legacy';"), ==, 0);
+      "SELECT count(*) FROM service_principals"
+      " WHERE subject_id='svc:legacy';"), ==, 0);
 }
 
 static gboolean
@@ -1952,7 +1953,7 @@ backup_to_encrypted (const gchar *source_path, const gchar *encrypted_path,
       WYRELOG_E_OK);
   sqlite3_backup *backup =
       sqlite3_backup_init (wyl_policy_store_get_db (destination), "main",
-      wyl_policy_store_get_db (source), "main");
+          wyl_policy_store_get_db (source), "main");
   g_assert_nonnull (backup);
   g_assert_cmpint (sqlite3_backup_step (backup, -1), ==, SQLITE_DONE);
   g_assert_cmpint (sqlite3_backup_remaining (backup), ==, 0);
@@ -2038,14 +2039,14 @@ test_encrypted_legacy_migration (void)
   g_autofree gchar *before = NULL;
   gsize before_len = 0;
   g_assert_true (g_file_get_contents (encrypted_path, &before, &before_len,
-          NULL));
+      NULL));
   g_autoptr (wyl_policy_store_t) wrong = NULL;
   g_assert_cmpint (open_encrypted (encrypted_path, wrong_key_path, &wrong), !=,
       WYRELOG_E_OK);
   g_autofree gchar *after = NULL;
   gsize after_len = 0;
   g_assert_true (g_file_get_contents (encrypted_path, &after, &after_len,
-          NULL));
+      NULL));
   g_assert_cmpmem (before, before_len, after, after_len);
 
   for (guint pass = 0; pass < 2; pass++) {
@@ -2073,7 +2074,7 @@ exercise_failed_migration (gboolean encrypted)
   g_assert_nonnull (tmpdir);
   g_autofree gchar *source_path = g_build_filename (tmpdir, "source.db", NULL);
   g_autofree gchar *store_path = g_build_filename (tmpdir,
-      encrypted ? "policy.store" : "policy.db", NULL);
+          encrypted ? "policy.store" : "policy.db", NULL);
   g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
   if (encrypted)
     g_assert_true (write_policy_key (key_path, 7));
@@ -2084,7 +2085,7 @@ exercise_failed_migration (gboolean encrypted)
   for (guint pass = 0; pass < 2; pass++) {
     g_autoptr (wyl_policy_store_t) store = NULL;
     wyrelog_error_t rc = encrypted ? open_encrypted (store_path, key_path,
-        &store) : wyl_policy_store_open (store_path, &store);
+            &store) : wyl_policy_store_open (store_path, &store);
     g_assert_cmpint (rc, ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
     sqlite3 *db = wyl_policy_store_get_db (store);
@@ -2092,8 +2093,8 @@ exercise_failed_migration (gboolean encrypted)
     g_assert_cmpint (row_count (db, "service_credentials"), ==, 0);
     g_assert_cmpint (service_object_count (db), ==, 1);
     g_autofree gchar *columns = scalar_text (db,
-        "SELECT group_concat(name,',') FROM pragma_table_info"
-        " ('service_credentials');");
+            "SELECT group_concat(name,',') FROM pragma_table_info"
+            " ('service_credentials');");
     g_assert_cmpstr (columns, ==, "credential_id");
   }
   g_remove (source_path);
@@ -2152,5 +2153,5 @@ main (int argc, char **argv)
       test_failed_migration_preserves_plaintext);
   g_test_add_func ("/policy/service-schema/encrypted-failure-preserves",
       test_failed_migration_preserves_encrypted);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

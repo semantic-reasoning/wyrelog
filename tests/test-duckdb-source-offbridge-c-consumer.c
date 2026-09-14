@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "test-exit-status.h"
 
 #include <duckdb.h>
 
@@ -48,5 +49,5 @@ out:
     duckdb_disconnect (&connection);
   if (database != NULL)
     duckdb_close (&database);
-  return status;
+  return wyl_test_normalize_exit_status (status);
 }

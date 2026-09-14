@@ -7,6 +7,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <gio/gio.h>
@@ -24,7 +25,7 @@ run_child (gchar **argv, gchar **stdout_buf, gchar **stderr_buf,
   g_autoptr (GError) error = NULL;
 
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          stdout_buf, stderr_buf, wait_status, &error));
+      stdout_buf, stderr_buf, wait_status, &error));
   g_assert_no_error (error);
 }
 
@@ -541,5 +542,5 @@ main (int argc, char **argv)
       test_service_credential_rotate_missing_flags);
   g_test_add_func ("/wyctl/service-credential/rotate-expires-bounds",
       test_service_credential_rotate_expires_bounds);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

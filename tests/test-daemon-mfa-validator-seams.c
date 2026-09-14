@@ -27,6 +27,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -116,7 +117,7 @@ read_principal_state (WylHandle *handle, const gchar *subject_id,
   gint64 locked_at = 0;
   gboolean found = FALSE;
   wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
-      subject_id, out_state, &count, &locked_at, &found);
+          subject_id, out_state, &count, &locked_at, &found);
   if (rc != WYRELOG_E_OK || !found)
     return -1;
   return 0;
@@ -172,7 +173,7 @@ find_event_id (WylHandle *handle, const gchar *subject_id, const gchar *event,
 {
   EventFind find = { subject_id, event, 0, FALSE };
   if (wyl_policy_store_foreach_principal_event
-      (wyl_handle_get_policy_store (handle), event_find_cb, &find)
+        (wyl_handle_get_policy_store (handle), event_find_cb, &find)
       != WYRELOG_E_OK || !find.found)
     return -1;
   *out_id = find.event_id;
@@ -228,7 +229,7 @@ seed_locked_principal (WylHandle *handle, const gchar *subject_id,
     g_autofree gchar *st = NULL;
     gint64 c = 0, l = 0;
     if (wyl_policy_store_apply_principal_failure (store, subject_id, 5,
-            locked_at_secs, &st, &c, &l, NULL) != WYRELOG_E_OK)
+        locked_at_secs, &st, &c, &l, NULL) != WYRELOG_E_OK)
       return -1;
   }
   return 0;
@@ -271,7 +272,7 @@ check_fifth_failure_publishes_and_verifies (void)
   if (find_event_id (handle, "seam.lock-publish", "lock", &event_id) != 0)
     return 309;
   if (!engine_observes_fired (handle, event_id, "seam.lock-publish",
-          "mfa_required", "lock", "locked"))
+      "mfa_required", "lock", "locked"))
     return 310;
   return 0;
 }
@@ -365,7 +366,7 @@ check_auto_unlock_publishes_and_verifies (void)
   if (find_event_id (handle, "seam.unlock-publish", "unlock", &event_id) != 0)
     return 349;
   if (!engine_observes_fired (handle, event_id, "seam.unlock-publish",
-          "locked", "unlock", "unverified"))
+      "locked", "unlock", "unverified"))
     return 350;
   return 0;
 }
@@ -481,16 +482,16 @@ main (void)
   gint rc;
 
   if ((rc = check_fifth_failure_publishes_and_verifies ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_fifth_failure_publication_fault_fails_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_auto_unlock_publishes_and_verifies ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_auto_unlock_not_elapsed_is_policy ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_auto_unlock_publication_fault_fails_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_first_four_failures_do_not_republish ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

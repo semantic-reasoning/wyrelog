@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include "auth/service-credential-operation-coordinator-cancel-private.h"
 #ifdef G_OS_WIN32
 #include "auth/service-credential-operation-storage-windows-private.h"
@@ -26,10 +27,10 @@ count_cancellation_claims (sqlite3 *db, const gchar *request_id)
 {
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM service_credential_handoff_cancellation_claims"
-          " WHERE original_request_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
+      "SELECT count(*) FROM service_credential_handoff_cancellation_claims"
+      " WHERE original_request_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, request_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -41,11 +42,11 @@ count_cancellation_audits (sqlite3 *db, const gchar *cancellation_request_id)
 {
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM audit_events WHERE action="
-          "'service.credential.handoff.cancel' AND request_id=?;", -1,
-          &stmt, NULL), ==, SQLITE_OK);
+      "SELECT count(*) FROM audit_events WHERE action="
+      "'service.credential.handoff.cancel' AND request_id=?;", -1,
+      &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, cancellation_request_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -59,17 +60,17 @@ set_handoff_permission (WylHandle *handle, const gchar *actor,
   wyl_policy_store_t *store = store_of (handle);
   wyrelog_error_t rc = granted ?
       wyl_policy_store_grant_direct_permission (store, actor,
-      "wr.service_credential.manage", session_id) :
+          "wr.service_credential.manage", session_id) :
       wyl_policy_store_revoke_direct_permission (store, actor,
-      "wr.service_credential.manage", session_id);
+          "wr.service_credential.manage", session_id);
   g_assert_cmpint (rc, ==, WYRELOG_E_OK);
   if (granted) {
     g_assert_cmpint (wyl_policy_store_set_principal_state (store, actor,
-            "authenticated"), ==, WYRELOG_E_OK);
+        "authenticated"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_session_state (store, session_id,
-            "active"), ==, WYRELOG_E_OK);
+        "active"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_permission_state (store, actor,
-            "wr.service_credential.manage", session_id, "armed"), ==,
+        "wr.service_credential.manage", session_id, "armed"), ==,
         WYRELOG_E_OK);
   }
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
@@ -86,8 +87,9 @@ cancel_request_ids_new (WylServiceCredentialOperationHandoffCancelRequest
   fresh_uuid (disposition_id);
   fresh_uuid (audit_id);
   *request = (WylServiceCredentialOperationHandoffCancelRequest) {
-  .cancellation_request_id = cancellation_request_id,.disposition_id =
-        disposition_id,.audit_id = audit_id,};
+    .cancellation_request_id = cancellation_request_id,.disposition_id =
+        disposition_id,.audit_id = audit_id,
+  };
 }
 
 static void
@@ -103,8 +105,8 @@ begin_rotate_handoff_for_cancel (WylHandle *handle,
   wyl_service_credential_issue_result_t seed = { 0 };
   fresh_request_id (seed_request_id);
   g_assert_cmpint (wyl_service_credential_issue (handle,
-          "svc:handoff:executor", "tenant-a", "admin", seed_request_id,
-          now_us + 4 * G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
+      "svc:handoff:executor", "tenant-a", "admin", seed_request_id,
+      now_us + 4 * G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
   g_autofree gchar *old_credential_id =
       g_strdup (seed.credential.credential_id);
   guint64 old_generation = seed.credential.generation;
@@ -128,8 +130,8 @@ begin_rotate_handoff_for_cancel (WylHandle *handle,
   request->expected_generation = old_generation;
   gboolean replayed = TRUE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
-      (storage, anchor, request, now_us, &replayed, prepared), ==,
+    (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+        (storage, anchor, request, now_us, &replayed, prepared), ==,
       WYRELOG_E_OK);
   g_assert_false (replayed);
 }
@@ -150,7 +152,7 @@ materialize_rotate_handoff_for_cancel (WylHandle *handle,
 
   guint8 target_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 0 };
   g_assert_cmpint (wyl_service_credential_operation_handoff_target_digest
-      (&prepared, target_digest), ==, WYRELOG_E_OK);
+        (&prepared, target_digest), ==, WYRELOG_E_OK);
   wyl_service_credential_handoff_request_t handoff = {
     .escrow_id = escrow,
     .target_digest = target_digest,
@@ -165,15 +167,15 @@ materialize_rotate_handoff_for_cancel (WylHandle *handle,
   };
   wyl_service_credential_handoff_result_t rotated = { 0 };
   g_assert_cmpint
-      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
-          request->old_credential_id, "admin", request_id,
-          now_us + 4 * G_TIME_SPAN_HOUR, &handoff, &rotate_runtime,
-          &rotated), ==, WYRELOG_E_OK);
+    (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+      request->old_credential_id, "admin", request_id,
+      now_us + 4 * G_TIME_SPAN_HOUR, &handoff, &rotate_runtime,
+      &rotated), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
-      (storage, anchor, request_id, rotated.handoff.credential_id,
-          rotated.handoff.credential_generation,
-          rotated.handoff.binding_digest, now_us + 1, &replayed, record), ==,
+    (wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+        (storage, anchor, request_id, rotated.handoff.credential_id,
+      rotated.handoff.credential_generation,
+      rotated.handoff.binding_digest, now_us + 1, &replayed, record), ==,
       WYRELOG_E_OK);
   g_assert_false (replayed);
   wyl_service_credential_handoff_result_clear (&rotated);
@@ -190,19 +192,19 @@ test_cancellation_tenant_binding (void)
   prepare_authority (handle, "svc:handoff:executor");
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-          "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
+      "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-tenant-operations");
+          "cancel-tenant-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) cross_tenant_session =
       handoff_human_session_new ("operator", "tenant-b");
   g_autofree gchar *session_id =
@@ -249,21 +251,21 @@ test_cancellation_tenant_binding (void)
         decision_request_id, disposition_id, audit_id);
     runtime.decision_request_id = decision_request_id;
     g_autoptr (GBytes) before = read_handoff_journal_bytes (operation_root,
-        original_request_id);
+            original_request_id);
     wyl_service_credential_handoff_cancellation_result_t result = { 0 };
     g_assert_cmpint
-        (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-            &storage, &anchor, original_request_id, &request, &runtime,
-            &result), ==, WYRELOG_E_POLICY);
+      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+        &storage, &anchor, original_request_id, &request, &runtime,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_cmpuint (authorization_calls, ==, 0);
     g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==,
         0);
     g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-            "operation_cancelled"), ==, 0);
+        "operation_cancelled"), ==, 0);
     g_assert_cmpint (count_cancellation_audits (db,
-            cancellation_request_id), ==, 0);
+        cancellation_request_id), ==, 0);
     g_autoptr (GBytes) after = read_handoff_journal_bytes (operation_root,
-        original_request_id);
+            original_request_id);
     g_assert_true (g_bytes_equal (before, after));
     wyl_service_credential_operation_record_clear (&record);
     wyl_service_credential_operation_coordinator_request_clear (&operation);
@@ -290,8 +292,8 @@ handoff_cancel_thread (gpointer data)
 {
   HandoffCancelCall *call = data;
   call->rc = wyl_service_credential_operation_coordinator_cancel_handoff
-      (call->handle, call->storage, call->anchor, call->request_id,
-      call->request, call->runtime, &call->result);
+        (call->handle, call->storage, call->anchor, call->request_id,
+          call->request, call->runtime, &call->result);
   return NULL;
 }
 
@@ -453,15 +455,15 @@ test_cancellation_lifecycle_contention (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-contention-operations");
+          "cancel-contention-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
   wyl_id_t escrow;
@@ -473,7 +475,7 @@ test_cancellation_lifecycle_contention (void)
   begin_handoff_issue_for_test (&storage, &anchor, now, original_request_id,
       &escrow, &operation, &prepared);
   g_autoptr (GBytes) journal_before = read_handoff_journal_bytes
-      (operation_root, original_request_id);
+        (operation_root, original_request_id);
 
   g_autoptr (WylSession) operator_session =
       handoff_human_session_new ("operator", "tenant-a");
@@ -516,7 +518,7 @@ test_cancellation_lifecycle_contention (void)
     .rc = WYRELOG_E_INTERNAL,
   };
   GThread *canceller = g_thread_new ("handoff-cancel-first",
-      handoff_cancel_thread, &cancel_call);
+          handoff_cancel_thread, &cancel_call);
   g_mutex_lock (&cancellation_barrier.mutex);
   while (!cancellation_barrier.entered)
     g_cond_wait (&cancellation_barrier.cond, &cancellation_barrier.mutex);
@@ -550,21 +552,21 @@ test_cancellation_lifecycle_contention (void)
   };
   ContendedExecuteCall execute_call = {
     .execute = {
-          .handle = handle,
-          .storage = &storage,
-          .anchor = &anchor,
-          .request_id = original_request_id,
-          .runtime = &execute_runtime,
-          .outcome = WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT,
-          .rc = WYRELOG_E_INTERNAL,
-        },
+      .handle = handle,
+      .storage = &storage,
+      .anchor = &anchor,
+      .request_id = original_request_id,
+      .runtime = &execute_runtime,
+      .outcome = WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT,
+      .rc = WYRELOG_E_INTERNAL,
+    },
     .probe = &probe,
     .first_rc = WYRELOG_E_INTERNAL,
   };
   wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
       contention_unseal, &probe);
   GThread *executor = g_thread_new ("handoff-execute-after-cancel",
-      contended_execute_thread, &execute_call);
+          contended_execute_thread, &execute_call);
   g_mutex_lock (&probe.mutex);
   while (!probe.first_attempt_done)
     g_cond_wait (&probe.cond, &probe.mutex);
@@ -594,8 +596,8 @@ test_cancellation_lifecycle_contention (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
   WylServiceCredentialOperationTerminalKind contention_terminal_kind = 0;
   g_assert_true (wyl_service_credential_operation_terminal_reason_parse
-      (execute_call.execute.outcome.terminal_reason,
-          &contention_terminal_kind, NULL));
+        (execute_call.execute.outcome.terminal_reason,
+      &contention_terminal_kind, NULL));
   g_assert_cmpint (contention_terminal_kind, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED);
   g_mutex_lock (&probe.mutex);
@@ -606,12 +608,12 @@ test_cancellation_lifecycle_contention (void)
   g_assert_cmpuint (probe.unseal_calls, ==, 0);
   g_mutex_unlock (&probe.mutex);
   g_autoptr (GBytes) journal_after = read_handoff_journal_bytes
-      (operation_root, original_request_id);
+        (operation_root, original_request_id);
   g_assert_false (g_bytes_equal (journal_before, journal_after));
 
   wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
   wyl_service_credential_handoff_cancellation_result_clear
-      (&cancel_call.result);
+    (&cancel_call.result);
   wyl_service_credential_operation_record_clear (&execute_call.execute.outcome);
   wyl_service_credential_operation_record_clear (&prepared);
   wyl_service_credential_operation_coordinator_request_clear (&operation);
@@ -638,15 +640,15 @@ test_cancellation_state_matrix (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-state-operations");
+          "cancel-state-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) operator_session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *operator_session_id =
@@ -682,12 +684,12 @@ test_cancellation_state_matrix (void)
         decision_request_id, disposition_id, audit_id);
     runtime.decision_request_id = decision_request_id;
     g_autoptr (GBytes) before = read_handoff_journal_bytes (operation_root,
-        original_request_id);
+            original_request_id);
     wyl_service_credential_handoff_cancellation_result_t result = { 0 };
     g_assert_cmpint
-        (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-            &storage, &anchor, original_request_id, &request, &runtime,
-            &result), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+        &storage, &anchor, original_request_id, &request, &runtime,
+        &result), ==, WYRELOG_E_OK);
     g_assert_false (result.replayed);
     g_assert_cmpint (result.outcome, ==,
         WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION);
@@ -696,11 +698,11 @@ test_cancellation_state_matrix (void)
     g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==,
         1);
     g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-            "operation_cancelled"), ==, 1);
+        "operation_cancelled"), ==, 1);
     g_assert_cmpint (count_cancellation_audits (db,
-            cancellation_request_id), ==, 1);
+        cancellation_request_id), ==, 1);
     g_autoptr (GBytes) after = read_handoff_journal_bytes (operation_root,
-        original_request_id);
+            original_request_id);
     g_assert_true (g_bytes_equal (before, after));
     wyl_service_credential_handoff_cancellation_result_clear (&result);
     wyl_service_credential_operation_record_clear (&record);
@@ -745,12 +747,12 @@ test_cancellation_state_matrix (void)
       wyrelog_error_t checkpoint_rc = rejected_states[i] ==
           WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL ?
           wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
-          (&storage, &anchor, original_request_id, state_now + 10,
-          &replayed, &rejected) :
+            (&storage, &anchor, original_request_id, state_now + 10,
+              &replayed, &rejected) :
           wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
-          (&storage, &anchor, original_request_id,
-          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED,
-          state_now + 10, &replayed, &rejected);
+            (&storage, &anchor, original_request_id,
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED,
+              state_now + 10, &replayed, &rejected);
       g_assert_cmpint (checkpoint_rc, ==, WYRELOG_E_OK);
       wyl_service_credential_operation_record_clear (&record);
       record = rejected;
@@ -765,16 +767,16 @@ test_cancellation_state_matrix (void)
     guint calls_before = authorization_calls;
     wyl_service_credential_handoff_cancellation_result_t result = { 0 };
     g_assert_cmpint
-        (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-            &storage, &anchor, original_request_id, &request, &runtime,
-            &result), ==, WYRELOG_E_POLICY);
+      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+        &storage, &anchor, original_request_id, &request, &runtime,
+        &result), ==, WYRELOG_E_POLICY);
     g_assert_cmpuint (authorization_calls, ==, calls_before);
     g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==,
         0);
     g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-            "operation_cancelled"), ==, 0);
+        "operation_cancelled"), ==, 0);
     g_assert_cmpint (count_cancellation_audits (db,
-            cancellation_request_id), ==, 0);
+        cancellation_request_id), ==, 0);
     wyl_service_credential_operation_record_clear (&rejected);
     wyl_service_credential_operation_record_clear (&record);
     wyl_service_credential_operation_coordinator_request_clear (&operation);
@@ -803,11 +805,11 @@ commit_prepared_issue_authority_for_cancel (WylHandle *handle,
     .authorization = &authorization,
   };
   g_assert_cmpint
-      (wyl_service_credential_issue_handoff_with_runtime (handle,
-          prepared->subject_id, prepared->tenant_id,
-          prepared->actor_subject_id, prepared->request_id,
-          g_get_real_time () + 2 * G_TIME_SPAN_HOUR, &handoff,
-          &issue_runtime, out_issued), ==, WYRELOG_E_OK);
+    (wyl_service_credential_issue_handoff_with_runtime (handle,
+      prepared->subject_id, prepared->tenant_id,
+      prepared->actor_subject_id, prepared->request_id,
+      g_get_real_time () + 2 * G_TIME_SPAN_HOUR, &handoff,
+      &issue_runtime, out_issued), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -831,10 +833,10 @@ commit_prepared_rotate_authority_for_cancel (WylHandle *handle,
     .authorization = &authorization,
   };
   g_assert_cmpint
-      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
-          prepared->old_credential_id, prepared->actor_subject_id,
-          prepared->request_id, g_get_real_time () + 2 * G_TIME_SPAN_HOUR,
-          &handoff, &rotate_runtime, out_rotated), ==, WYRELOG_E_OK);
+    (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+      prepared->old_credential_id, prepared->actor_subject_id,
+      prepared->request_id, g_get_real_time () + 2 * G_TIME_SPAN_HOUR,
+      &handoff, &rotate_runtime, out_rotated), ==, WYRELOG_E_OK);
 }
 
 static void
@@ -843,37 +845,37 @@ insert_terminal_issue_fence_for_cancel (sqlite3 *db,
 {
   guint8 fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES] = { 0 };
   g_assert_cmpint
-      (wyl_policy_store_service_credential_operation_fence_fingerprint
-      (WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, prepared->subject_id,
-          strlen (prepared->subject_id), prepared->tenant_id,
-          strlen (prepared->tenant_id), fingerprint), ==, WYRELOG_E_OK);
+    (wyl_policy_store_service_credential_operation_fence_fingerprint
+        (WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, prepared->subject_id,
+      strlen (prepared->subject_id), prepared->tenant_id,
+      strlen (prepared->tenant_id), fingerprint), ==, WYRELOG_E_OK);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "INSERT OR IGNORE INTO service_credential_operation_fences"
-          "(request_id,operation,operation_fingerprint,terminal_state,"
-          "created_at_us) VALUES(?,'credential_issue',?,'not_committed',?);",
-          -1, &stmt, NULL), ==, SQLITE_OK);
+      "INSERT OR IGNORE INTO service_credential_operation_fences"
+      "(request_id,operation,operation_fingerprint,terminal_state,"
+      "created_at_us) VALUES(?,'credential_issue',?,'not_committed',?);",
+      -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, prepared->request_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_blob (stmt, 2, fingerprint,
-          sizeof fingerprint, SQLITE_TRANSIENT), ==, SQLITE_OK);
+      sizeof fingerprint, SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_int64 (stmt, 3, g_get_real_time ()), ==,
       SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
   stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT operation,operation_fingerprint,terminal_state FROM"
-          " service_credential_operation_fences WHERE request_id=?;", -1,
-          &stmt, NULL), ==, SQLITE_OK);
+      "SELECT operation,operation_fingerprint,terminal_state FROM"
+      " service_credential_operation_fences WHERE request_id=?;", -1,
+      &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, prepared->request_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   g_assert_cmpstr ((const gchar *) sqlite3_column_text (stmt, 0), ==,
       "credential_issue");
   g_assert_cmpint (sqlite3_column_type (stmt, 1), ==, SQLITE_BLOB);
   g_assert_cmpmem (sqlite3_column_blob (stmt, 1), sqlite3_column_bytes (stmt,
-          1), fingerprint, sizeof fingerprint);
+      1), fingerprint, sizeof fingerprint);
   g_assert_cmpstr ((const gchar *) sqlite3_column_text (stmt, 2), ==,
       "not_committed");
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
@@ -891,7 +893,7 @@ handoff_checkpoint_lock_acquire (const WylServiceCredentialOperationStorage
     HandoffCheckpointLock *out_lock)
 {
   return wyl_service_credential_operation_child_lock (storage, anchor, name,
-      out_lock);
+             out_lock);
 }
 
 static void
@@ -934,15 +936,15 @@ test_prepared_cancellation_reconciliation (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-prepared-operations");
+          "cancel-prepared-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) operator_session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *operator_session_id =
@@ -992,32 +994,32 @@ test_prepared_cancellation_reconciliation (void)
   g_autofree gchar *committed_checkpoint_component =
       g_strdup_printf ("op-%s", committed_request_id);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (committed_checkpoint_component, &committed_checkpoint_name), ==,
+        (committed_checkpoint_component, &committed_checkpoint_name), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (handoff_checkpoint_lock_acquire (&storage, &anchor,
-          &committed_checkpoint_name, &committed_checkpoint_lock), ==,
+      &committed_checkpoint_name, &committed_checkpoint_lock), ==,
       WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, committed_request_id, &committed_cancel,
-          &runtime, &result), ==, WYRELOG_E_BUSY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, committed_request_id, &committed_cancel,
+      &runtime, &result), ==, WYRELOG_E_BUSY);
   g_assert_null (result.disposition_id);
   g_assert_cmpint (count_cancellation_claims (db, committed_request_id), ==, 1);
   WylServiceCredentialOperationRecord committed_still_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
-          &anchor, committed_request_id, &committed_still_prepared), ==,
+      &anchor, committed_request_id, &committed_still_prepared), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (committed_still_prepared.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   handoff_checkpoint_lock_release (&storage, &anchor,
       &committed_checkpoint_name, committed_checkpoint_lock);
   wyl_service_credential_operation_child_name_clear
-      (&committed_checkpoint_name);
+    (&committed_checkpoint_name);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, committed_request_id, &committed_cancel,
-          &runtime, &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, committed_request_id, &committed_cancel,
+      &runtime, &result), ==, WYRELOG_E_OK);
   g_assert_true (result.replayed);
   g_assert_cmpint (result.outcome, ==,
       WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION);
@@ -1030,7 +1032,7 @@ test_prepared_cancellation_reconciliation (void)
   WylServiceCredentialOperationRecord committed_checkpoint =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
-          &anchor, committed_request_id, &committed_checkpoint), ==,
+      &anchor, committed_request_id, &committed_checkpoint), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (committed_checkpoint.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
@@ -1071,68 +1073,68 @@ test_prepared_cancellation_reconciliation (void)
   g_autofree gchar *checkpoint_component =
       g_strdup_printf ("op-%s", absent_request_id);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
-      (checkpoint_component, &checkpoint_name), ==, WYRELOG_E_OK);
+        (checkpoint_component, &checkpoint_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (handoff_checkpoint_lock_acquire (&storage, &anchor,
-          &checkpoint_name, &checkpoint_lock), ==, WYRELOG_E_OK);
+      &checkpoint_name, &checkpoint_lock), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
-          &result), ==, WYRELOG_E_BUSY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
+      &result), ==, WYRELOG_E_BUSY);
   g_assert_null (result.disposition_id);
   g_assert_cmpint (count_cancellation_claims (db, absent_request_id), ==, 1);
   g_assert_cmpint (count_handoff_rows_for_request (db, absent_request_id,
-          "not_committed"), ==, 1);
+      "not_committed"), ==, 1);
   g_assert_cmpint (count_cancellation_audits (db, absent_cancel_id), ==, 1);
   WylServiceCredentialOperationRecord still_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
-          &anchor, absent_request_id, &still_prepared), ==, WYRELOG_E_OK);
+      &anchor, absent_request_id, &still_prepared), ==, WYRELOG_E_OK);
   g_assert_cmpint (still_prepared.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   handoff_checkpoint_lock_release (&storage, &anchor, &checkpoint_name,
       checkpoint_lock);
   wyl_service_credential_operation_child_name_clear (&checkpoint_name);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result.replayed);
   g_assert_cmpint (result.outcome, ==,
       WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED);
   WylServiceCredentialOperationRecord terminal =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
-          &anchor, absent_request_id, &terminal), ==, WYRELOG_E_OK);
+      &anchor, absent_request_id, &terminal), ==, WYRELOG_E_OK);
   g_assert_cmpint (terminal.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
   WylServiceCredentialOperationTerminalKind terminal_kind = 0;
   g_assert_true (wyl_service_credential_operation_terminal_reason_parse
-      (terminal.terminal_reason, &terminal_kind, NULL));
+        (terminal.terminal_reason, &terminal_kind, NULL));
   g_assert_cmpint (terminal_kind, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED);
   g_assert_cmpint (terminal.updated_at_us, ==,
       MAX (absent_prepared.updated_at_us, result.created_at_us));
   g_autoptr (GBytes) terminal_before_replay = read_handoff_journal_bytes
-      (operation_root, absent_request_id);
+        (operation_root, absent_request_id);
   wyl_service_credential_handoff_cancellation_result_clear (&result);
 
   /* Terminal replay still requires current authority. A different durable
    * cancellation identity cannot create a second claim. */
   set_handoff_permission (handle, "operator", operator_session_id, FALSE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   set_handoff_permission (handle, "operator", operator_session_id, TRUE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, absent_request_id, &absent_cancel, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result.replayed);
   g_assert_cmpint (result.outcome, ==,
       WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED);
   g_autoptr (GBytes) terminal_after_replay = read_handoff_journal_bytes
-      (operation_root, absent_request_id);
+        (operation_root, absent_request_id);
   g_assert_true (g_bytes_equal (terminal_before_replay, terminal_after_replay));
   wyl_service_credential_handoff_cancellation_result_clear (&result);
   gchar foreign_cancel_id[WYL_REQUEST_ID_STRING_BUF];
@@ -1144,9 +1146,9 @@ test_prepared_cancellation_reconciliation (void)
       foreign_decision_id, foreign_disposition_id, foreign_audit_id);
   runtime.decision_request_id = foreign_decision_id;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, absent_request_id, &foreign_cancel, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, absent_request_id, &foreign_cancel, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (count_cancellation_claims (db, absent_request_id), ==, 1);
 
   /* Explicit cancellation cannot steal an already expired PREPARED operation
@@ -1169,14 +1171,14 @@ test_prepared_cancellation_reconciliation (void)
       expired_decision_id, expired_disposition_id, expired_audit_id);
   runtime.decision_request_id = expired_decision_id;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, expired_request_id, &expired_cancel, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, expired_request_id, &expired_cancel, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (count_cancellation_claims (db, expired_request_id), ==, 0);
   WylServiceCredentialOperationRecord expired_after =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
-          &anchor, expired_request_id, &expired_after), ==, WYRELOG_E_OK);
+      &anchor, expired_request_id, &expired_after), ==, WYRELOG_E_OK);
   g_assert_cmpint (expired_after.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   g_assert_cmpuint (authorization_calls, ==, 7);
@@ -1184,18 +1186,18 @@ test_prepared_cancellation_reconciliation (void)
   wyl_service_credential_operation_record_clear (&expired_after);
   wyl_service_credential_operation_record_clear (&expired_prepared);
   wyl_service_credential_operation_coordinator_request_clear
-      (&expired_operation);
+    (&expired_operation);
   wyl_service_credential_operation_record_clear (&terminal);
   wyl_service_credential_operation_record_clear (&still_prepared);
   wyl_service_credential_operation_record_clear (&absent_prepared);
   wyl_service_credential_operation_coordinator_request_clear
-      (&absent_operation);
+    (&absent_operation);
   wyl_service_credential_operation_record_clear (&committed_checkpoint);
   wyl_service_credential_operation_record_clear (&committed_still_prepared);
   wyl_service_credential_handoff_result_clear (&issued);
   wyl_service_credential_operation_record_clear (&committed_prepared);
   wyl_service_credential_operation_coordinator_request_clear
-      (&committed_operation);
+    (&committed_operation);
   wyl_service_credential_operation_storage_clear (&storage);
   remove_operation_root_for_test (operation_root);
 }
@@ -1210,15 +1212,15 @@ test_prepared_rotate_cancellation_reconciliation (void)
   prepare_authority (handle, "svc:handoff:executor");
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-prepared-rotate-operations");
+          "cancel-prepared-rotate-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
   g_autoptr (WylSession) operator_session =
       handoff_human_session_new ("operator", "tenant-a");
   g_autofree gchar *operator_session_id =
@@ -1261,9 +1263,9 @@ test_prepared_rotate_cancellation_reconciliation (void)
     runtime.decision_request_id = decision_request_id;
     wyl_service_credential_handoff_cancellation_result_t result = { 0 };
     g_assert_cmpint
-        (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-            &storage, &anchor, original_request_id, &request, &runtime,
-            &result), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+        &storage, &anchor, original_request_id, &request, &runtime,
+        &result), ==, WYRELOG_E_OK);
     g_assert_false (result.replayed);
     g_assert_cmpint (result.outcome, ==, authority_committed ?
         WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION :
@@ -1271,15 +1273,15 @@ test_prepared_rotate_cancellation_reconciliation (void)
     g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==,
         1);
     g_assert_cmpint (count_cancellation_audits (db,
-            cancellation_request_id), ==, 1);
+        cancellation_request_id), ==, 1);
     g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-            authority_committed ? "operation_cancelled" : "not_committed"),
+        authority_committed ? "operation_cancelled" : "not_committed"),
         ==, 1);
 
     WylServiceCredentialOperationRecord checkpointed =
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     g_assert_cmpint (wyl_service_credential_operation_coordinator_load
-        (&storage, &anchor, original_request_id, &checkpointed), ==,
+          (&storage, &anchor, original_request_id, &checkpointed), ==,
         WYRELOG_E_OK);
     if (authority_committed) {
       g_assert_cmpint (checkpointed.state, ==,
@@ -1301,7 +1303,7 @@ test_prepared_rotate_cancellation_reconciliation (void)
       g_assert_cmpint (checkpointed.state, ==,
           WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
       g_assert_true (wyl_service_credential_operation_terminal_reason_parse
-          (checkpointed.terminal_reason, &terminal_kind, NULL));
+            (checkpointed.terminal_reason, &terminal_kind, NULL));
       g_assert_cmpint (terminal_kind, ==,
           WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED);
       g_assert_cmpstr (result.successor_credential_id, ==, "");
@@ -1334,15 +1336,15 @@ test_authenticated_cancellation_and_executor_gate (void)
 
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,
-      "cancel-operations");
+          "cancel-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (operation_root, &storage), ==, WYRELOG_E_OK);
+        (operation_root, &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
-      (&storage, &anchor), ==, WYRELOG_E_OK);
+        (&storage, &anchor), ==, WYRELOG_E_OK);
 
   gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
   wyl_id_t escrow;
@@ -1355,7 +1357,7 @@ test_authenticated_cancellation_and_executor_gate (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED,
       original_request_id, &escrow, &operation, &committed);
   g_autoptr (GBytes) journal_before = read_handoff_journal_bytes
-      (operation_root, original_request_id);
+        (operation_root, original_request_id);
 
   g_autoptr (WylSession) operator_session =
       handoff_human_session_new ("operator", "tenant-a");
@@ -1392,32 +1394,32 @@ test_authenticated_cancellation_and_executor_gate (void)
   g_cancellable_cancel (cancelled);
   runtime.cancellable = cancelled;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_BUSY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_BUSY);
   g_assert_cmpuint (cancellation_authorizations, ==, 0);
   g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==, 0);
   g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-          "operation_cancelled"), ==, 0);
+      "operation_cancelled"), ==, 0);
   g_assert_cmpint (count_cancellation_audits (db,
-          cancellation_request_id), ==, 0);
+      cancellation_request_id), ==, 0);
   runtime.cancellable = NULL;
 
   /* A fresh decision denial leaves every durable cancellation row absent. */
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (cancellation_authorizations, ==, 0);
   g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==, 0);
   g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-          "operation_cancelled"), ==, 0);
+      "operation_cancelled"), ==, 0);
 
   set_handoff_permission (handle, "operator", operator_session_id, TRUE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_false (result.replayed);
   g_assert_cmpstr (result.disposition_id, ==, disposition_id);
   g_assert_cmpstr (result.audit_id, ==, audit_id);
@@ -1425,32 +1427,32 @@ test_authenticated_cancellation_and_executor_gate (void)
   g_assert_cmpuint (cancellation_authorizations, ==, 1);
   g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==, 1);
   g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-          "operation_cancelled"), ==, 1);
+      "operation_cancelled"), ==, 1);
   g_assert_cmpint (count_cancellation_audits (db,
-          cancellation_request_id), ==, 1);
+      cancellation_request_id), ==, 1);
   g_autoptr (GBytes) journal_after = read_handoff_journal_bytes
-      (operation_root, original_request_id);
+        (operation_root, original_request_id);
   g_assert_true (g_bytes_equal (journal_before, journal_after));
   wyl_service_credential_handoff_cancellation_result_clear (&result);
 
   /* Even an exact durable replay is refused after current authority loss. */
   set_handoff_permission (handle, "operator", operator_session_id, FALSE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_POLICY);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (cancellation_authorizations, ==, 1);
   g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==, 1);
   set_handoff_permission (handle, "operator", operator_session_id, TRUE);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
-          &storage, &anchor, original_request_id, &request, &runtime,
-          &result), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_cancel_handoff (handle,
+      &storage, &anchor, original_request_id, &request, &runtime,
+      &result), ==, WYRELOG_E_OK);
   g_assert_true (result.replayed);
   g_assert_cmpuint (cancellation_authorizations, ==, 2);
   g_assert_cmpint (count_cancellation_claims (db, original_request_id), ==, 1);
   g_assert_cmpint (count_handoff_rows_for_request (db, original_request_id,
-          "operation_cancelled"), ==, 1);
+      "operation_cancelled"), ==, 1);
   wyl_service_credential_handoff_cancellation_result_clear (&result);
 
   /* The unchanged journal is now stopped by maintenance ATTENTION before the
@@ -1492,15 +1494,15 @@ test_authenticated_cancellation_and_executor_gate (void)
   wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
       handoff_unseal_gate, &unseal);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
-          &storage, &anchor, original_request_id, &execute_runtime,
-          &stopped), ==, WYRELOG_E_OK);
+    (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+      &storage, &anchor, original_request_id, &execute_runtime,
+      &stopped), ==, WYRELOG_E_OK);
   g_assert_cmpint (stopped.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
   assert_no_handoff_execution_callbacks (&publication, &unseal,
       execution_authorizations, &clock);
   g_autoptr (GBytes) journal_stopped = read_handoff_journal_bytes
-      (operation_root, original_request_id);
+        (operation_root, original_request_id);
   g_assert_true (g_bytes_equal (journal_before, journal_stopped));
 
   wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
@@ -1520,7 +1522,7 @@ main (int argc, char *argv[])
   g_test_add_func ("/service-credential-operation-cancel/prepared-reconcile",
       test_prepared_cancellation_reconciliation);
   g_test_add_func
-      ("/service-credential-operation-cancel/prepared-rotate-reconcile",
+    ("/service-credential-operation-cancel/prepared-rotate-reconcile",
       test_prepared_rotate_cancellation_reconciliation);
   g_test_add_func ("/service-credential-operation-cancel/tenant-binding",
       test_cancellation_tenant_binding);
@@ -1528,5 +1530,5 @@ main (int argc, char *argv[])
       test_cancellation_lifecycle_contention);
   g_test_add_func ("/service-credential-operation-cancel/auth-replay-gate",
       test_authenticated_cancellation_and_executor_gate);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

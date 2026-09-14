@@ -2,6 +2,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -23305,7 +23306,7 @@ main (void)
   gint rc = refresh_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG refresh_variant result=%d\n", rc);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }
 #elif !defined(WYL_TEST_VARIANT_AUDIT) && !defined(WYL_TEST_VARIANT_SERVICE)
 /*
@@ -23517,7 +23518,7 @@ main (void)
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }
 #elif defined(WYL_TEST_VARIANT_SERVICE)
 /*
@@ -23952,7 +23953,7 @@ main (int argc, char **argv)
   gint rc = service_variant_checks (argc, argv);
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG service_variant result=%d\n", rc);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }
 #else /* WYL_TEST_VARIANT_AUDIT */
 /*
@@ -24184,6 +24185,6 @@ main (void)
   gint rc = audit_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG audit_variant result=%d\n", rc);
-  return rc;
+  return wyl_test_normalize_exit_status (rc);
 }
 #endif /* WYL_TEST_VARIANT_AUDIT */

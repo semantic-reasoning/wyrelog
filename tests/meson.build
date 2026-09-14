@@ -3694,6 +3694,50 @@ test('variant-diag-coverage', python3,
   args : [files('test-variant-diag-coverage.py'),
     meson.project_source_root()])
 
+test('exit-status-boundaries', python3,
+  args : [files('test-exit-status-boundaries.py'),
+    meson.project_source_root()],
+  timeout : 120,
+)
+test('exit-status-boundaries-self-test', python3,
+  args : [
+    files('test-exit-status-boundaries.py'),
+    '--self-test',
+    meson.project_source_root(),
+  ],
+)
+
+if host_machine.system() != 'windows'
+  exit_status_termination = executable(
+    'test-exit-status-termination',
+    'test-exit-status-termination.c',
+    link_language : 'c',
+  )
+  test('exit-status-termination', exit_status_termination)
+
+endif
+
+if enable_secure_duckdb_bridge_opt.enabled()
+  exit_status_nested_lambda = executable(
+    'test-exit-status-nested-lambda',
+    'fixtures/test-exit-status-nested-lambda.cpp',
+    link_language : 'cpp',
+  )
+  test('exit-status-nested-lambda', exit_status_nested_lambda)
+
+  if host_machine.system() != 'windows'
+    exit_status_nested_lambda_mutant = executable(
+      'test-exit-status-nested-lambda-mutant',
+      'fixtures/test-exit-status-nested-lambda.cpp',
+      cpp_args : ['-DWYL_TEST_OUTER_RETURN_MUTATION'],
+      link_language : 'cpp',
+    )
+    test('exit-status-nested-lambda-outer-mutation', python3,
+      args : [files('test-exit-status-main-mutation.py'),
+        exit_status_nested_lambda_mutant.full_path()])
+  endif
+endif
+
 test('variant-diag-coverage-self-test', python3,
   args : [
     files('test-variant-diag-coverage.py'),

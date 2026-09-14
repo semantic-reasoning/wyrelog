@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <gio/gio.h>
 #include <glib.h>
 
@@ -17,7 +18,7 @@ lookup_schema (void)
   GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
   g_assert_nonnull (source);
   GSettingsSchema *schema = g_settings_schema_source_lookup (source,
-      WYCTL_SCHEMA_ID, FALSE);
+          WYCTL_SCHEMA_ID, FALSE);
   g_assert_nonnull (schema);
   return schema;
 }
@@ -45,9 +46,9 @@ test_schema_keys_and_types (void)
   for (gsize i = 0; i < G_N_ELEMENTS (expected); i++) {
     g_assert_true (g_settings_schema_has_key (schema, expected[i].name));
     g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
-        expected[i].name);
+            expected[i].name);
     g_assert_true (g_variant_type_equal (g_settings_schema_key_get_value_type
-            (key), expected[i].type));
+          (key), expected[i].type));
   }
 }
 
@@ -97,7 +98,7 @@ test_schema_defaults_safe (void)
 
   for (gsize i = 0; i < G_N_ELEMENTS (string_keys); i++) {
     g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
-        string_keys[i]);
+            string_keys[i]);
     g_autoptr (GVariant) def = g_settings_schema_key_get_default_value (key);
     g_assert_true (g_variant_is_of_type (def, G_VARIANT_TYPE_STRING));
     g_assert_cmpstr (g_variant_get_string (def, NULL), ==, "");
@@ -106,13 +107,13 @@ test_schema_defaults_safe (void)
   /* Numeric sentinels: 2000ms timeout, -1 risk score. */
   {
     g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
-        "default-timeout-ms");
+            "default-timeout-ms");
     g_autoptr (GVariant) def = g_settings_schema_key_get_default_value (key);
     g_assert_cmpuint (g_variant_get_uint32 (def), ==, 2000);
   }
   {
     g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
-        "default-guard-risk");
+            "default-guard-risk");
     g_autoptr (GVariant) def = g_settings_schema_key_get_default_value (key);
     g_assert_cmpint (g_variant_get_int32 (def), ==, -1);
   }
@@ -121,7 +122,7 @@ test_schema_defaults_safe (void)
      that preserves required-on-every-call semantics). */
   {
     g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
-        "default-guard-timestamp-mode");
+            "default-guard-timestamp-mode");
     g_autoptr (GVariant) def = g_settings_schema_key_get_default_value (key);
     g_assert_cmpstr (g_variant_get_string (def, NULL), ==, "none");
   }
@@ -135,5 +136,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/gschema/no-token-value-keys",
       test_schema_omits_token_value_keys);
   g_test_add_func ("/wyctl/gschema/defaults-safe", test_schema_defaults_safe);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

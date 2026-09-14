@@ -9,6 +9,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #ifndef G_OS_WIN32
@@ -271,16 +272,16 @@ start_lease_holder_process (const WylFactGraphDirectory *directory,
               &lease) : wyl_fact_artifact_namespace_acquire_reader_guard
             (namespace_, &lease);
     if (!write_exact (ready[1], &result, sizeof result))
-      _exit (91);
+      WYL_TEST_EXIT(91);
     close (ready[1]);
     if (result != WYRELOG_E_OK || crash_after_ready)
-      _exit (result == WYRELOG_E_OK ? 0 : 92);
+      WYL_TEST_EXIT(result == WYRELOG_E_OK ? 0 : 92);
     guint8 token;
     if (!read_exact (release[0], &token, sizeof token))
-      _exit (93);
+      WYL_TEST_EXIT(93);
     wyl_fact_artifact_mutation_lease_free (lease);
     wyl_fact_artifact_namespace_free (namespace_);
-    _exit (0);
+    WYL_TEST_EXIT(0);
   }
   close (ready[1]);
   close (release[0]);
@@ -337,26 +338,26 @@ start_reader_binding_holder (const WylFactGraphDirectory *directory,
       result = wyl_fact_artifact_reader_guard_open_existing_wal_binding (reader,
               &wal, &wal_fd);
     if (!write_exact (ready[1], &result, sizeof result))
-      _exit (95);
+      WYL_TEST_EXIT(95);
     close (ready[1]);
     if (result != WYRELOG_E_OK || crash_after_ready)
-      _exit (result == WYRELOG_E_OK ? 0 : 96);
+      WYL_TEST_EXIT(result == WYRELOG_E_OK ? 0 : 96);
     guint8 token;
     if (!read_exact (release[0], &token, sizeof token)) {
       close (release[0]);
-      _exit (97);
+      WYL_TEST_EXIT(97);
     }
     close (release[0]);
     if (wyl_fact_artifact_reader_wal_binding_close (wal, &wal_fd)
         != WYRELOG_E_OK || wal_fd != -1
         || wyl_fact_artifact_reader_main_binding_close (main, &main_fd)
         != WYRELOG_E_OK || main_fd != -1)
-      _exit (98);
+      WYL_TEST_EXIT(98);
     wyl_fact_artifact_reader_wal_binding_free (wal);
     wyl_fact_artifact_reader_main_binding_free (main);
     wyl_fact_artifact_mutation_lease_free (reader);
     wyl_fact_artifact_namespace_free (namespace_);
-    _exit (0);
+    WYL_TEST_EXIT(0);
   }
   close (ready[1]);
   close (release[0]);
@@ -392,10 +393,10 @@ attempt_lease_in_fresh_process (const WylFactGraphDirectory *directory,
               &lease) : wyl_fact_artifact_namespace_acquire_reader_guard
             (namespace_, &lease);
     if (!write_exact (result_pipe[1], &result, sizeof result))
-      _exit (94);
+      WYL_TEST_EXIT(94);
     wyl_fact_artifact_mutation_lease_free (lease);
     wyl_fact_artifact_namespace_free (namespace_);
-    _exit (0);
+    WYL_TEST_EXIT(0);
   }
   close (result_pipe[1]);
   wyrelog_error_t result = WYRELOG_E_INTERNAL;
@@ -4508,5 +4509,5 @@ main (int argc, char **argv)
 #endif
   g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
       test_duckdb_temp_root);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -7531,334 +7532,334 @@ main (int argc, char **argv)
   const gchar *crash_policy = g_getenv ("WYL_COMMITTED_CRASH_POLICY");
   const gchar *crash_marker = g_getenv ("WYL_COMMITTED_CRASH_MARKER");
   if (crash_policy != NULL || crash_marker != NULL)
-    return crash_policy != NULL && crash_marker != NULL ?
-           run_committed_crash_child (crash_policy, crash_marker) : 921;
+    return wyl_test_normalize_exit_status (crash_policy != NULL && crash_marker != NULL ?
+               run_committed_crash_child (crash_policy, crash_marker) : 921);
   test_program_path = argc > 0 ? argv[0] : NULL;
   gint rc;
 
   if ((rc = check_tenant_registry_projects_effective_scope_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_scope_projection_requires_compatible_engine_relation ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_init_keeps_engines_absent ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_open_pair_creates_distinct_engines ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_owned_read_engine_rejects_public_mutation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_owned_delta_engine_rejects_public_probe_and_mutation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_init_config_opens_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_invalid_template_pair_open_fails_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_invalid_config_init_fails_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_shutdown_clears_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_second_open_is_rejected ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_reload_rejects_missing_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_reload_loads_policy_store_snapshot ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_symbol_intern_reaches_both_engines ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_symbol_intern_is_stable ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_symbol_intern_can_be_reversed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_symbol_intern_rejects_missing_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compound_make_rejects_invalid_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compound_make_rejects_missing_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compound_make_reaches_read_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_compound_make_result_is_insertable ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_guard_context_compound_allocates_request_handles ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_arm_rule_guard_payload_contract ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_arm_rule_guard_payload_contract_after_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_window_guard_derivation_contract ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_arm_rule_guard_payload_projection ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_internal_projection_rows_skip_delta_callbacks ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_state_transition_fanout_reaches_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_principal_event_fanout_derives_delta ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_event_fanout_derives_delta ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_delta_insert_failure_repairs_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_delta_step_failure_repairs_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_delta_step_failure_suppresses_callback ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_remove_fanout_delta_remove_failure_repairs_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_remove_fanout_delta_step_failure_suppresses_callback ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_repair_failure_poisons_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_durable_session_event_fanout_failure_poisons_pair ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_delta_callback_survives_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_snapshot_only_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_permission_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_principal_state_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_state_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_active_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_perm_state_insert_skips_delta_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_insert_fanout_rejects_missing_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_allows_matching_tuple ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_missing_tuple ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_frozen_scope ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_disabled_role ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_sod_violation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_unarmed_catalogue_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_denies_armed_catalogue_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decision_rule_runtime_invariants ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_permissions_load_into_engine ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_permissions_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_inheritances_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_login_skip_mfa_projection_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_role_permission_projection_autoload_on_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_inheritance_depth_cap_projection ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_memberships_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_role_memberships_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_direct_permissions_autoload_without_auto_arm ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_guarded_direct_permissions_do_not_auto_arm ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #ifdef WYL_TEST_HANDLE_SEAMS
   if ((rc = check_decision_holds_one_recursive_engine_session ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_engine_operations_serialize_with_replacement ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_poison_waits_for_inflight_operation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_engine_pair_status_and_poison_fail_closed_on_rank_failure ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_concurrent_reloads_publish_in_acquisition_order ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_reload_uses_one_external_wal_snapshot ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_shutdown_waits_for_engine_session ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_typed_engine_session_nesting_and_foreign_release ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_snapshot_finish_failure_poisons_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_partial_arena_failure_poisons_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_reentrant_callback_delivers_detached_batch_once ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_postcommit_not_found_is_internal ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_committed_publication_fault_stages_and_bundle_classifier ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_retained_external_publication_outcomes ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_state_accepted_input_witness ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_member_of_accepted_input_witness ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_member_of_accepted_input_owner_and_derivation_boundaries ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_member_of_accepted_input_survives_candidate_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_session_state_witness_survives_durable_restart ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_committed_unpublished_process_kill_recovers_on_restart ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_concurrent_retained_session_state_verification ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #endif
   if ((rc =
       check_policy_store_guarded_direct_permission_decides_with_context ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_guarded_direct_permission_tags_miss_after_allow ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_guarded_direct_permission_denies_without_context
         ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_guarded_direct_permission_denies_context_miss ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_states_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_states_override_auto_arm ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_states_reject_non_armed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_guarded_permission_state_stays_guarded ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_guarded_permission_state_needs_context ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_states_reject_unknown_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_permission_states_reload_failure_preserves_pair ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_states_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_permission_state_events_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_permission_state_event_duplicates_autoload_on_open
         ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_state_events_reject_invalid_edges ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_permission_state_events_reload_failure_preserves_pair
         ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_handle_permission_state_transition_reloads_snapshot ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_handle_permission_state_transition_projects_audit_fact ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_handle_permission_state_transition_reload_failure_poisons_pair
         ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_handle_permission_state_transition_rollback_hides_event_id ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_permission_state_events_require_engine_pair ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_state_required_for_decide ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_states_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_events_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_event_duplicates_autoload_on_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_events_reject_invalid_edges ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_principal_events_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_states_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_states_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_events_autoload_on_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_event_duplicates_autoload_on_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_events_reject_invalid_edges ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_events_reload_failure_preserves_pair ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_inheritance_cycle_fails_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc =
       check_policy_store_inheritance_depth_fails_reload_and_preserves_pair
         ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_break_glass_audit_write_fails_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_admin_auditor_membership_fails_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_service_admin_auditor_membership_fails_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_auditor_admin_cross_scope_opens ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_inherited_auditor_admin_membership_fails_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_direct_permission_sod_fails_reload ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_direct_audit_write_sod_fails_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_direct_audit_role_admin_sod_fails_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_auditor_role_direct_admin_sod_fails_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_custom_role_permission_sod_fails_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_session_events_require_engine_pair ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_poisoned_pair_requires_verified_reconciliation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

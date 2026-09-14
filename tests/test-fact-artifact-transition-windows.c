@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -1656,7 +1657,7 @@ int
 main (int argc, char **argv)
 {
   if (argc == 5 && strcmp (argv[1], "--driver-crash-child") == 0)
-    return run_driver_crash_child (argv[2], argv[3], argv[4]);
+    return wyl_test_normalize_exit_status (run_driver_crash_child (argv[2], argv[3], argv[4]));
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-artifact-transition/windows/names-match",
       test_names_derived_internally_match);
@@ -1706,13 +1707,13 @@ main (int argc, char **argv)
       test_graph_directory_authority_is_revalidated);
   g_test_add_func ("/fact-artifact-transition/windows/driver/child-crash-restart",
       test_child_crash_restarts_from_fresh_capture);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
 
 #else
 int
 main (void)
 {
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }
 #endif

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sodium.h>
@@ -2814,5 +2815,5 @@ main (int argc, char **argv)
       JournalFixture, NULL, journal_fixture_set_up,
       test_exact_terminal_snapshot_remediation_markers,
       journal_fixture_tear_down);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

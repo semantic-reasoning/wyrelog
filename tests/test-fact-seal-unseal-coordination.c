@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include "fact-test-support.h"
@@ -377,5 +378,5 @@ main (int argc, char **argv)
       GUINT_TO_POINTER (2), test_opposing_wrappers);
   g_test_add_data_func ("/fact-coordination/failed-seal-then-unseal",
       GUINT_TO_POINTER (3), test_opposing_wrappers);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

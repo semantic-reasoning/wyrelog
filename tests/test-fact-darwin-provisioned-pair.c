@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #define _DARWIN_C_SOURCE
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -499,5 +500,5 @@ main (int argc, char **argv)
       test_pair_r0_r5_fail_closed);
   g_test_add_func ("/fact/darwin-pair/control-isolation",
       test_pair_control_isolation);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

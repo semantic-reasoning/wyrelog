@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -47,12 +48,12 @@ test_insert_then_lookup (void)
   wyl_policy_service_permission_receipt_t in =
       sample_receipt ("req-lookup-1", "audit-abc", 7, 42);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &in), ==, WYRELOG_E_OK);
+      &in), ==, WYRELOG_E_OK);
 
   gboolean found = FALSE;
   wyl_policy_service_permission_receipt_t out = { 0 };
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          "req-lookup-1", &found, &out), ==, WYRELOG_E_OK);
+      "req-lookup-1", &found, &out), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpstr (out.request_id, ==, "req-lookup-1");
   g_assert_cmpstr (out.actor_identity, ==, "svc:tenant-a:remediator");
@@ -70,11 +71,11 @@ test_insert_then_lookup (void)
   wyl_policy_service_permission_receipt_t in_null =
       sample_receipt ("req-lookup-2", NULL, 1, 2);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &in_null), ==, WYRELOG_E_OK);
+      &in_null), ==, WYRELOG_E_OK);
   found = FALSE;
   memset (&out, 0, sizeof out);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          "req-lookup-2", &found, &out), ==, WYRELOG_E_OK);
+      "req-lookup-2", &found, &out), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_null (out.audit_id);
   wyl_policy_service_permission_receipt_clear (&out);
@@ -92,7 +93,7 @@ test_lookup_missing (void)
   gboolean found = TRUE;
   wyl_policy_service_permission_receipt_t out = { 0 };
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          "absent", &found, &out), ==, WYRELOG_E_OK);
+      "absent", &found, &out), ==, WYRELOG_E_OK);
   g_assert_false (found);
   g_assert_null (out.request_id);
   wyl_policy_service_permission_receipt_clear (&out);
@@ -110,26 +111,26 @@ test_duplicate_request_id_conflicts (void)
   wyl_policy_service_permission_receipt_t first =
       sample_receipt ("req-dup", "audit-1", 1, 2);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &first), ==, WYRELOG_E_OK);
+      &first), ==, WYRELOG_E_OK);
 
   wyl_policy_service_permission_receipt_t second =
       sample_receipt ("req-dup", "audit-2", 9, 10);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &second), ==, WYRELOG_E_POLICY);
+      &second), ==, WYRELOG_E_POLICY);
 
   /* Direct duplicate insert surfaces SQLITE_CONSTRAINT at the SQL layer. */
   int rc = sqlite3_exec (db,
-      "INSERT INTO service_permission_remediation_receipts ("
-      " request_id, actor_identity, manifest_fingerprint, operation_count,"
-      " applied_at_us, pre_generation, pre_digest, post_generation,"
-      " post_digest) VALUES ('req-dup','svc:x','" DIGEST64 "',0,1,0,'" DIGEST64
-      "',0,'" DIGEST64 "');", NULL, NULL, NULL);
+          "INSERT INTO service_permission_remediation_receipts ("
+          " request_id, actor_identity, manifest_fingerprint, operation_count,"
+          " applied_at_us, pre_generation, pre_digest, post_generation,"
+          " post_digest) VALUES ('req-dup','svc:x','" DIGEST64 "',0,1,0,'" DIGEST64
+          "',0,'" DIGEST64 "');", NULL, NULL, NULL);
   g_assert_cmpint (rc & 0xff, ==, SQLITE_CONSTRAINT);
 
   gboolean found = FALSE;
   wyl_policy_service_permission_receipt_t out = { 0 };
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          "req-dup", &found, &out), ==, WYRELOG_E_OK);
+      "req-dup", &found, &out), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpstr (out.audit_id, ==, "audit-1");
   g_assert_cmpuint (out.pre_generation, ==, 1);
@@ -148,24 +149,24 @@ test_immutability_triggers (void)
   wyl_policy_service_permission_receipt_t in =
       sample_receipt ("req-immutable", "audit-x", 5, 6);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &in), ==, WYRELOG_E_OK);
+      &in), ==, WYRELOG_E_OK);
 
   int rc = sqlite3_exec (db,
-      "UPDATE service_permission_remediation_receipts"
-      " SET operation_count = 99 WHERE request_id = 'req-immutable';",
-      NULL, NULL, NULL);
+          "UPDATE service_permission_remediation_receipts"
+          " SET operation_count = 99 WHERE request_id = 'req-immutable';",
+          NULL, NULL, NULL);
   g_assert_cmpint (rc & 0xff, ==, SQLITE_CONSTRAINT);
 
   rc = sqlite3_exec (db,
-      "DELETE FROM service_permission_remediation_receipts"
-      " WHERE request_id = 'req-immutable';", NULL, NULL, NULL);
+          "DELETE FROM service_permission_remediation_receipts"
+          " WHERE request_id = 'req-immutable';", NULL, NULL, NULL);
   g_assert_cmpint (rc & 0xff, ==, SQLITE_CONSTRAINT);
 
   /* The row is intact and the schema is still valid. */
   gboolean found = FALSE;
   wyl_policy_service_permission_receipt_t out = { 0 };
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_lookup (store,
-          "req-immutable", &found, &out), ==, WYRELOG_E_OK);
+      "req-immutable", &found, &out), ==, WYRELOG_E_OK);
   g_assert_true (found);
   g_assert_cmpuint (out.operation_count, ==, 3);
   wyl_policy_service_permission_receipt_clear (&out);
@@ -183,32 +184,32 @@ test_generation_counter (void)
 
   guint64 generation = 123;
   g_assert_cmpint (wyl_policy_store_service_permission_remediation_generation
-      (store, &generation), ==, WYRELOG_E_OK);
+        (store, &generation), ==, WYRELOG_E_OK);
   g_assert_cmpuint (generation, ==, 0);
 
   wyl_policy_service_permission_receipt_t first =
       sample_receipt ("req-gen-1", NULL, 1, 2);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &first), ==, WYRELOG_E_OK);
+      &first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_permission_remediation_generation
-      (store, &generation), ==, WYRELOG_E_OK);
+        (store, &generation), ==, WYRELOG_E_OK);
   g_assert_cmpuint (generation, ==, 1);
 
   wyl_policy_service_permission_receipt_t second =
       sample_receipt ("req-gen-2", NULL, 2, 3);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &second), ==, WYRELOG_E_OK);
+      &second), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_permission_remediation_generation
-      (store, &generation), ==, WYRELOG_E_OK);
+        (store, &generation), ==, WYRELOG_E_OK);
   g_assert_cmpuint (generation, ==, 2);
 
   /* A conflicting insert does not advance the counter. */
   wyl_policy_service_permission_receipt_t dup =
       sample_receipt ("req-gen-2", NULL, 2, 3);
   g_assert_cmpint (wyl_policy_store_service_permission_receipt_insert (store,
-          &dup), ==, WYRELOG_E_POLICY);
+      &dup), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_service_permission_remediation_generation
-      (store, &generation), ==, WYRELOG_E_OK);
+        (store, &generation), ==, WYRELOG_E_OK);
   g_assert_cmpuint (generation, ==, 2);
 }
 
@@ -226,5 +227,5 @@ main (int argc, char **argv)
       test_immutability_triggers);
   g_test_add_func ("/service-permission-receipt/generation-counter",
       test_generation_counter);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -98,6 +98,10 @@ COMPILER_PROTECTED_SYMBOLS = (
 )
 
 TOKEN_PASTE_ALLOWLIST = {
+    "tests/test-exit-status.h": (
+        "#define WYL_TEST_EXIT_CAPTURE_NAME_I(line) "
+        "wyl_test_exit_status_capture_ ## line",
+    ),
     "tests/test-fact-artifact-transition-driver.c": (
         "#define MT(name) WYL_FACT_ARTIFACT_MAIN_TRANSITION_ ## name",
     ),
@@ -136,11 +140,11 @@ CXX_SOURCE_DIGESTS = {
 
 PROTECTED_INCLUDE_DIGESTS = {
     "tests/test-fact-artifact-transition-driver.c":
-        "c15817aeb1aea0593c9b7d0af33582e1228d61ba8b9501b55d3197d306b5b8b6",
+        "12cb6e5f5575b45926ddc1ada59760325e505524b66fa3174b7d455029bafefb",
     "tests/test-fact-artifact-transition-posix.c":
-        "aa9c8004d6162f88c396e2ae3e74a5d8dbcdd5c396287315a42b76480dc1cf27",
+        "46293b269398079a3088662bffeb1cfbb9421cf2463fd8371fe2f80550fb8730",
     "tests/test-fact-artifact-transition-windows.c":
-        "4e19001f0567a0a9fc63b6094474840bf9a516ced48f3b7005a84bbcdcaf93fc",
+        "cb4e151894b9b7a1dc641c1bb323ba5113dc6c72facf1cb37dc14f0931ee411e",
     "tests/fact-artifact-transition-driver-fixture.c":
         "74a975256e7128de001fb2729451d1e8e0fd174d0d2e86b5d7171b06fc28b842",
     "tests/fact-artifact-transition-driver-fixture.h":
@@ -155,13 +159,14 @@ PROTECTED_DIRECTIVE_DIGESTS = {
     "wyrelog/fact/graph-artifact-transition-windows-private.c":
         "75f0c23580c6d2e7263bd49667b9f99950ed637741ac84e1b0d63e92af8b772f",
     "tests/test-fact-artifact-transition-windows.c":
-        "107ffd8238dacceccebe05d94969aa38f4632464581051f120cb59a4845652a1",
+        "952bd09432c73c8e2a78f2902c6305d46d2fdab3e6747392782a7248e505ea30",
 }
 
 TEST_HEADER_INVENTORY = {
     "tests/fact-artifact-transition-driver-fixture.h",
     "tests/fact-test-support.h",
     "tests/test-daemon-http-decide-seed-helper.h",
+    "tests/test-exit-status.h",
     "tests/test-publication-root.h",
     "tests/test-service-credential-operation-root.h",
 }
@@ -222,8 +227,8 @@ POSIX_AUTHORITY_BODY_SHA256 = (
 
 TERMINATION_PROFILES = {
     "tests/test-fact-artifact-transition-posix.c": (
-        "_exit (77)",
-        "_exit (78)",
+        "WYL_TEST_EXIT(77)",
+        "WYL_TEST_EXIT(78)",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
         "ExitProcess (effect == MT (EFFECT_APPLIED) && windows_write_counter "
@@ -286,6 +291,7 @@ def require_directive_profile(name: str, text: str) -> None:
 def require_termination_profile(name: str, raw: str, code: str) -> None:
     termination = re.compile(
         r"\b(?:g_test_skip|g_test_incomplete|exit|_Exit|quick_exit|_exit|"
+        r"WYL_TEST__EXIT|WYL_TEST_EXIT|"
         r"ExitProcess|TerminateProcess|ExitThread|RtlExitUserProcess|"
         r"NtTerminateProcess|ZwTerminateProcess|_endthread|_endthreadex|"
         r"pthread_exit|thrd_exit|longjmp|syscall|execl|execle|execlp|execv|"
@@ -571,9 +577,10 @@ def require_test_registrations(
         prefix_pattern = (
             r"\s*if\s*\(\s*argc\s*==\s*5\s*&&\s*strcmp\s*\(\s*"
             r"argv\s*\[\s*1\s*\]\s*,\s*\)\s*==\s*0\s*\)\s*"
-            r"return\s+run_posix_driver_crash_child\s*\(\s*"
+            r"return\s+wyl_test_normalize_exit_status\s*\(\s*"
+            r"run_posix_driver_crash_child\s*\(\s*"
             r"argv\s*\[\s*2\s*\]\s*,\s*argv\s*\[\s*3\s*\]\s*,\s*"
-            r"argv\s*\[\s*4\s*\]\s*\)\s*;\s*"
+            r"argv\s*\[\s*4\s*\]\s*\)\s*\)\s*;\s*"
             r"driver_test_executable\s*=\s*g_canonicalize_filename\s*\(\s*"
             r"argv\s*\[\s*0\s*\]\s*,\s*NULL\s*\)\s*;\s*"
         )
@@ -581,9 +588,10 @@ def require_test_registrations(
         prefix_pattern = (
             r"\s*if\s*\(\s*argc\s*==\s*5\s*&&\s*strcmp\s*\(\s*"
             r"argv\s*\[\s*1\s*\]\s*,\s*\)\s*==\s*0\s*\)\s*"
-            r"return\s+run_driver_crash_child\s*\(\s*"
+            r"return\s+wyl_test_normalize_exit_status\s*\(\s*"
+            r"run_driver_crash_child\s*\(\s*"
             r"argv\s*\[\s*2\s*\]\s*,\s*argv\s*\[\s*3\s*\]\s*,\s*"
-            r"argv\s*\[\s*4\s*\]\s*\)\s*;\s*"
+            r"argv\s*\[\s*4\s*\]\s*\)\s*\)\s*;\s*"
         )
     if re.fullmatch(prefix_pattern, prefix) is None:
         raise AssertionError(f"{label}: non-canonical control flow before g_test_init")
@@ -595,7 +603,8 @@ def require_test_registrations(
     )
     straight_line_suffix = (
         rf"(?:\s*{registration_statement})*"
-        r"\s*return\s+g_test_run\s*\(\s*\)\s*;\s*"
+        r"\s*return\s+wyl_test_normalize_exit_status\s*\(\s*"
+        r"g_test_run\s*\(\s*\)\s*\)\s*;\s*"
     )
     if re.fullmatch(straight_line_suffix, body_code[init_end + 1 : -1]) is None:
         raise AssertionError(
@@ -2560,8 +2569,8 @@ def negative_mutations(root: pathlib.Path) -> list[tuple[str, dict[str, str]]]:
     )
     goto_mutated = replace_once(
         goto_mutated,
-        "  return g_test_run ();",
-        "registrations_done:\n  return g_test_run ();",
+        "  return wyl_test_normalize_exit_status (g_test_run ());",
+        "registrations_done:\n  return wyl_test_normalize_exit_status (g_test_run ());",
         "POSIX goto label",
     )
     mutations[-1] = ("POSIX goto over registrations", {goto_name: goto_mutated})

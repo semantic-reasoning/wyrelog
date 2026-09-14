@@ -2,6 +2,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -51,7 +52,7 @@ make_root (void)
 {
   g_autoptr (GError) error = NULL;
   gchar *root = wyl_test_make_secure_fact_root ("wyl-reconcile-move-XXXXXX",
-      &error);
+          &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   return root;
@@ -79,8 +80,8 @@ open_native_handle (const gchar *path)
   wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   g_assert_nonnull (wpath);
   HANDLE h = CreateFileW (wpath, GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   g_free (wpath);
   g_assert_true (h != INVALID_HANDLE_VALUE);
   return h;
@@ -132,7 +133,7 @@ test_capture_known_vector (void)
 
   WylPolicyFactReconcileArtifactEvidence evidence;
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd,
-          &evidence), ==, WYRELOG_E_OK);
+      &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpuint (evidence.version, ==,
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1);
 #ifdef G_OS_WIN32
@@ -166,9 +167,9 @@ test_capture_reproduces_across_inodes (void)
 {
   g_autofree gchar *root = make_root ();
   g_autofree gchar *path_a = write_secure_file (root, "a.bin",
-      "duckdb-payload", -1);
+          "duckdb-payload", -1);
   g_autofree gchar *path_b = write_secure_file (root, "b.bin",
-      "duckdb-payload", -1);
+          "duckdb-payload", -1);
   gint fd_a = open_regular (path_a);
   gint fd_b = open_regular (path_b);
 
@@ -183,7 +184,7 @@ test_capture_reproduces_across_inodes (void)
    * exactly. */
 #ifdef G_OS_WIN32
   g_assert_cmpint (memcmp (ev_a.windows_file_id, ev_b.windows_file_id,
-          sizeof ev_a.windows_file_id), !=, 0);
+      sizeof ev_a.windows_file_id), !=, 0);
 #else
   g_assert_cmpuint (ev_a.posix_inode, !=, ev_b.posix_inode);
 #endif
@@ -203,7 +204,7 @@ test_capture_rejects_bad_input (void)
 {
   WylPolicyFactReconcileArtifactEvidence evidence;
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (-1,
-          &evidence), ==, WYRELOG_E_INVALID);
+      &evidence), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (0, NULL), ==,
       WYRELOG_E_INVALID);
 
@@ -215,7 +216,7 @@ test_capture_rejects_bad_input (void)
   gint dir_fd = open (root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   g_assert_cmpint (dir_fd, >=, 0);
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (dir_fd,
-          &evidence), ==, WYRELOG_E_POLICY);
+      &evidence), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (close (dir_fd), ==, 0);
   g_assert_true (wyl_test_remove_empty_directory (root, NULL));
 #endif
@@ -241,14 +242,14 @@ test_capture_from_handle_initialises_evidence (void)
 
   FILE_ID_INFO id_info = { 0 };
   g_assert_true (GetFileInformationByHandleEx (handle, FileIdInfo, &id_info,
-          sizeof id_info));
+      sizeof id_info));
   BY_HANDLE_FILE_INFORMATION basic = { 0 };
   g_assert_true (GetFileInformationByHandle (handle, &basic));
 
   WylPolicyFactReconcileArtifactEvidence evidence;
   memset (&evidence, 0xA5, sizeof evidence);
   g_assert_cmpint (wyl_fact_reconcile_capture_evidence_from_handle_for_test
-      (handle, &evidence), ==, WYRELOG_E_OK);
+        (handle, &evidence), ==, WYRELOG_E_OK);
 
   g_assert_cmpuint (evidence.version, ==,
       WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1);
@@ -268,7 +269,7 @@ test_capture_from_handle_initialises_evidence (void)
       sizeof sha256_abc);
   /* The same invariant the move phase now gates on after every capture. */
   g_assert_true (wyl_policy_fact_reconcile_artifact_evidence_is_valid
-      (&evidence));
+        (&evidence));
 
   g_assert_true (CloseHandle (handle));
   (void) g_remove (path);
@@ -364,12 +365,12 @@ static void
 insert_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id)
 {
   g_autofree gchar *sql = g_strdup_printf
-      ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('%s',0,1,1);" "INSERT INTO fact_graphs "
-      "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
-      "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
-      "('%s','%s','file:///legacy','/legacy',1,'%s',0,1,1,NULL);", tenant_id,
-      tenant_id, graph_id, tenant_id);
+        ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+          "VALUES ('%s',0,1,1);" "INSERT INTO fact_graphs "
+          "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+          "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
+          "('%s','%s','file:///legacy','/legacy',1,'%s',0,1,1,NULL);", tenant_id,
+          tenant_id, graph_id, tenant_id);
   char *message = NULL;
   int rc = sqlite3_exec (db, sql, NULL, NULL, &message);
   if (rc != SQLITE_OK)
@@ -400,14 +401,14 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
 
   WylFactGraphLocator locator = { 0 };
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, MOVE_TENANT,
-          MOVE_GRAPH), ==, WYRELOG_E_OK);
+      MOVE_GRAPH), ==, WYRELOG_E_OK);
   fx->tenant_component = g_strdup (locator.tenant_component);
   fx->graph_component = g_strdup (locator.graph_component);
   wyl_fact_graph_locator_clear (&locator);
 
   g_autoptr (GError) error = NULL;
   g_autofree gchar *tenant_dir = g_build_filename (fx->root,
-      fx->tenant_component, NULL);
+          fx->tenant_component, NULL);
   g_assert_true (wyl_test_create_secure_directory (tenant_dir, &error));
   g_assert_no_error (error);
   fx->graph_dir = g_build_filename (tenant_dir, fx->graph_component, NULL);
@@ -416,7 +417,7 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
 
   fx->source_abs = g_build_filename (fx->graph_dir, MOVE_SOURCE_BASENAME, NULL);
   g_assert_true (g_file_set_contents (fx->source_abs, payload, payload_len,
-          NULL));
+      NULL));
   g_assert_true (wyl_test_secure_regular_file (fx->source_abs, &error));
   g_assert_no_error (error);
 
@@ -424,13 +425,13 @@ move_fixture_setup (MoveFixture *fx, const gchar *payload, gssize payload_len)
   /* Journal relative paths are canonical forward-slash form; g_build_filename
    * would use a backslash separator on Windows and fail path validation. */
   fx->source_rel = g_build_path ("/", fx->tenant_component, fx->graph_component,
-      MOVE_SOURCE_BASENAME, NULL);
+          MOVE_SOURCE_BASENAME, NULL);
   fx->canonical_rel = g_build_path ("/", fx->tenant_component,
-      fx->graph_component, MOVE_FINAL_BASENAME, NULL);
+          fx->graph_component, MOVE_FINAL_BASENAME, NULL);
 
   gint fd = open_regular (fx->source_abs);
   g_assert_cmpint (wyl_fact_reconcile_capture_artifact_evidence (fd,
-          &fx->source_ev), ==, WYRELOG_E_OK);
+      &fx->source_ev), ==, WYRELOG_E_OK);
   close_regular (fd);
 
   g_assert_cmpint (wyl_policy_store_open (NULL, &fx->store), ==, WYRELOG_E_OK);
@@ -449,12 +450,12 @@ move_fixture_seed_moving_canonical (MoveFixture *fx, const gchar *canonical_rel)
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx->store,
-          &input, &record, &result), ==, WYRELOG_E_OK);
+      &input, &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   wyl_policy_fact_reconcile_journal_record_free (record);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (fx->store,
-          MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+      MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
 }
 
@@ -476,12 +477,12 @@ move_fixture_seed_moving_paths (MoveFixture *fx, const gchar *source_rel,
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx->store,
-          &input, &record, &result), ==, WYRELOG_E_OK);
+      &input, &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   wyl_policy_fact_reconcile_journal_record_free (record);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (fx->store,
-          MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+      MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
 }
 
@@ -500,12 +501,12 @@ move_fixture_seed_moving_generations (MoveFixture *fx, guint64 life_gen,
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx->store,
-          &input, &record, &result), ==, WYRELOG_E_OK);
+      &input, &record, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   wyl_policy_fact_reconcile_journal_record_free (record);
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (fx->store,
-          MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
-          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+      MOVE_OP, WYL_POLICY_FACT_RECONCILE_PREPARED,
+      WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
 }
 
@@ -514,7 +515,7 @@ move_fixture_exec_sql (MoveFixture *fx, const gchar *sql)
 {
   char *message = NULL;
   int rc = sqlite3_exec (wyl_policy_store_get_db (fx->store), sql, NULL, NULL,
-      &message);
+          &message);
   if (rc != SQLITE_OK)
     g_test_message ("sqlite error: %s", message != NULL ? message : "unknown");
   sqlite3_free (message);
@@ -527,7 +528,7 @@ move_fixture_teardown (MoveFixture *fx)
   g_clear_pointer (&fx->store, wyl_policy_store_close);
   remove_directory_files (fx->graph_dir);
   g_autofree gchar *tenant_dir = g_build_filename (fx->root,
-      fx->tenant_component, NULL);
+          fx->tenant_component, NULL);
   (void) wyl_test_remove_empty_directory (fx->graph_dir, NULL);
   (void) wyl_test_remove_empty_directory (tenant_dir, NULL);
   (void) wyl_test_remove_empty_directory (fx->root, NULL);
@@ -560,7 +561,7 @@ assert_journal_state (wyl_policy_store_t *store,
 {
   WylPolicyFactReconcileJournalRecord *record = NULL;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_read (store, MOVE_OP,
-          &record), ==, WYRELOG_E_OK);
+      &record), ==, WYRELOG_E_OK);
   g_assert_nonnull (record);
   g_assert_cmpint (record->state, ==, expected);
   wyl_policy_fact_reconcile_journal_record_free (record);
@@ -665,8 +666,7 @@ test_move_publish_crux_target_durable_before_cas (void)
   move_fixture_seed_moving (&fx);
 
   CheckpointFault fault = {.point = "stage-unlinked",.fired = 0,.rc =
-        WYRELOG_E_IO
-  };
+                               WYRELOG_E_IO};
   WylFactReconcileMoveContext ctx = move_context (&fx);
   ctx.checkpoint = fault_at_point;
   ctx.checkpoint_data = &fault;
@@ -702,8 +702,7 @@ test_move_publish_interrupt_before_copy (void)
   move_fixture_seed_moving (&fx);
 
   CheckpointFault fault = {.point = "source-verified",.fired = 0,.rc =
-        WYRELOG_E_IO
-  };
+                               WYRELOG_E_IO};
   WylFactReconcileMoveContext ctx = move_context (&fx);
   ctx.checkpoint = fault_at_point;
   ctx.checkpoint_data = &fault;
@@ -778,7 +777,7 @@ test_move_publish_rejects_foreign_basename (void)
   MoveFixture fx;
   move_fixture_setup (&fx, "duckdb-artifact-payload", -1);
   g_autofree gchar *evil_rel = g_build_path ("/", fx.tenant_component,
-      fx.graph_component, "evil.duckdb", NULL);
+          fx.graph_component, "evil.duckdb", NULL);
   move_fixture_seed_moving_canonical (&fx, evil_rel);
 
   WylFactReconcileMoveContext ctx = move_context (&fx);
@@ -787,7 +786,7 @@ test_move_publish_rejects_foreign_basename (void)
       WYRELOG_E_POLICY);
 
   g_autofree gchar *evil_abs = g_build_filename (fx.graph_dir, "evil.duckdb",
-      NULL);
+          NULL);
   g_assert_false (g_file_test (fx.final_abs, G_FILE_TEST_EXISTS));
   g_assert_false (g_file_test (evil_abs, G_FILE_TEST_EXISTS));
   assert_journal_state (fx.store, WYL_POLICY_FACT_RECONCILE_MOVING);
@@ -813,9 +812,9 @@ test_move_publish_source_identity_mismatch (void)
    * sibling then atomically rename it over the recorded source name. */
   g_autoptr (GError) error = NULL;
   g_autofree gchar *replacement = g_build_filename (fx.graph_dir,
-      "legacy.new", NULL);
+          "legacy.new", NULL);
   g_assert_true (g_file_set_contents (replacement, "duckdb-artifact-payload",
-          -1, NULL));
+      -1, NULL));
   g_assert_true (wyl_test_secure_regular_file (replacement, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_rename (replacement, fx.source_abs), ==, 0);
@@ -831,7 +830,7 @@ test_move_publish_source_identity_mismatch (void)
       sizeof fx.source_ev.digest);
 #ifdef G_OS_WIN32
   g_assert_cmpint (memcmp (fresh.windows_file_id, fx.source_ev.windows_file_id,
-          sizeof fresh.windows_file_id), !=, 0);
+      sizeof fresh.windows_file_id), !=, 0);
 #else
   g_assert_cmpuint (fresh.posix_inode, !=, fx.source_ev.posix_inode);
 #endif
@@ -987,8 +986,7 @@ test_move_publish_rejects_root_identity_drift (void)
 
   g_autofree gchar *aside = g_strconcat (fx.root, ".aside", NULL);
   RootSwapFault swap = {.point = "source-verified",.fx = &fx,.fired = 0,
-    .aside = aside
-  };
+                        .aside = aside};
   WylFactReconcileMoveContext ctx = move_context (&fx);
   ctx.checkpoint = swap_root_at_point;
   ctx.checkpoint_data = &swap;
@@ -1027,7 +1025,7 @@ corrupt_published_at_point (const gchar *point, gpointer user_data)
   if (g_strcmp0 (point, "published") == 0) {
     g_autoptr (GError) error = NULL;
     g_assert_true (g_file_set_contents (fx->final_abs, "corrupted-artifact",
-            -1, NULL));
+        -1, NULL));
     g_assert_true (wyl_test_secure_regular_file (fx->final_abs, &error));
     g_assert_no_error (error);
   }
@@ -1061,7 +1059,7 @@ test_move_publish_reopen_verify_rejects_swap (void)
    * branch recognises our own artifact and commits the CAS. */
   g_autoptr (GError) error = NULL;
   g_assert_true (g_file_set_contents (fx.final_abs, "duckdb-artifact-payload",
-          -1, NULL));
+      -1, NULL));
   g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
   g_assert_no_error (error);
 
@@ -1150,7 +1148,7 @@ test_move_publish_present_converges_without_source (void)
 
   g_autoptr (GError) error = NULL;
   g_assert_true (g_file_set_contents (fx.final_abs, "duckdb-artifact-payload",
-          -1, NULL));
+      -1, NULL));
   g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_remove (fx.source_abs), ==, 0);
@@ -1179,7 +1177,7 @@ test_move_publish_rejects_prepared_state (void)
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (fx.store,
-          &input, &record, &result), ==, WYRELOG_E_OK);
+      &input, &record, &result), ==, WYRELOG_E_OK);
   wyl_policy_fact_reconcile_journal_record_free (record);
 
   WylFactReconcileMoveContext ctx = move_context (&fx);
@@ -1252,7 +1250,7 @@ test_move_publish_rejects_unknown_target (void)
   move_fixture_seed_moving (&fx);
 
   g_assert_true (g_file_set_contents (fx.final_abs, "foreign-artifact", -1,
-          NULL));
+      NULL));
   g_autoptr (GError) error = NULL;
   g_assert_true (wyl_test_secure_regular_file (fx.final_abs, &error));
   g_assert_no_error (error);
@@ -1283,7 +1281,7 @@ main (int argc, char **argv)
       test_capture_rejects_bad_input);
 #ifdef G_OS_WIN32
   g_test_add_func
-      ("/fact/reconcile-move/capture/from-handle-initialises-evidence",
+    ("/fact/reconcile-move/capture/from-handle-initialises-evidence",
       test_capture_from_handle_initialises_evidence);
 #endif
   g_test_add_func ("/fact/reconcile-move/capture/is-position-independent",
@@ -1294,7 +1292,7 @@ main (int argc, char **argv)
       test_move_publish_idempotent_replay);
 #ifndef G_OS_WIN32
   g_test_add_func
-      ("/fact/reconcile-move/publish/crux-target-durable-before-cas",
+    ("/fact/reconcile-move/publish/crux-target-durable-before-cas",
       test_move_publish_crux_target_durable_before_cas);
 #endif
   g_test_add_func ("/fact/reconcile-move/publish/interrupt-before-copy",
@@ -1310,7 +1308,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/reconcile-move/publish/rejects-generation-drift",
       test_move_publish_rejects_generation_drift);
   g_test_add_func
-      ("/fact/reconcile-move/publish/rejects-precas-generation-drift",
+    ("/fact/reconcile-move/publish/rejects-precas-generation-drift",
       test_move_publish_rejects_precas_generation_drift);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-missing-tenant",
       test_move_publish_rejects_missing_tenant);
@@ -1334,5 +1332,5 @@ main (int argc, char **argv)
       test_move_publish_rejects_invalid_arguments);
   g_test_add_func ("/fact/reconcile-move/publish/rejects-unknown-target",
       test_move_publish_rejects_unknown_target);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

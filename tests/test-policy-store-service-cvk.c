@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #endif
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sodium.h>
@@ -73,7 +74,7 @@ provider_derive (gpointer data, const gchar *label, guint8 *out, gsize len)
   g_assert_cmpuint (len, ==, 32);
   if (g_str_equal (label, "wyrelog.service-credential.cvk.provider-binding.v1")
       || g_str_equal (label,
-          "wyrelog.service-credential.handoff.escrow.provider-binding.v1")) {
+      "wyrelog.service-credential.handoff.escrow.provider-binding.v1")) {
     p->binding_derives++;
     if (p->fail_binding_derive)
       return WYRELOG_E_CRYPTO;
@@ -97,7 +98,8 @@ provider_seal (gpointer data, const guint8 *plaintext, gsize len,
   TestProvider *p = data;
   p->seals++;
   *out = (wyl_sealed_blob_t) {
-  0};
+    0
+  };
   if (p->fail_seal)
     return WYRELOG_E_CRYPTO;
   out->bytes = g_malloc (len);
@@ -114,7 +116,7 @@ provider_unseal (gpointer data, const wyl_sealed_blob_t *blob, guint8 *out,
   TestProvider *p = data;
   p->unseals++;
   if (p->fail_unseal || (p->fail_unseal_at != 0
-          && p->unseals == p->fail_unseal_at))
+      && p->unseals == p->fail_unseal_at))
     return WYRELOG_E_CRYPTO;
   if (capacity < blob->len)
     return WYRELOG_E_INVALID;
@@ -144,7 +146,8 @@ provider_clear (gpointer data, wyl_sealed_blob_t *blob)
   }
   if (blob != NULL)
     *blob = (wyl_sealed_blob_t) {
-    0};
+      0
+    };
 }
 
 static const wyl_keyprovider_vtable_t provider_vtable = {
@@ -257,10 +260,11 @@ static wyl_policy_store_cvk_runtime_t
 make_runtime (TestRuntime *state)
 {
   return (wyl_policy_store_cvk_runtime_t) {
-  .secure_alloc = runtime_alloc,.secure_lock = runtime_lock,.secure_wipe =
-        runtime_wipe,.secure_unlock = runtime_unlock,.secure_free =
-        runtime_free,.fill_random = runtime_random,.now_us =
-        runtime_now,.data = state,};
+           .secure_alloc = runtime_alloc,.secure_lock = runtime_lock,.secure_wipe =
+               runtime_wipe,.secure_unlock = runtime_unlock,.secure_free =
+               runtime_free,.fill_random = runtime_random,.now_us =
+               runtime_now,.data = state,
+  };
 }
 
 static wyrelog_error_t
@@ -289,7 +293,7 @@ expected_binding (guint8 out[32])
       0);
   const gchar *domain = "wyrelog.service-credential.cvk.provider-binding";
   g_assert_cmpint (crypto_generichash_update (&state,
-          (const guint8 *) domain, strlen (domain)), ==, 0);
+      (const guint8 *) domain, strlen (domain)), ==, 0);
   const guint8 suffix[] = { 0, 1 };
   g_assert_cmpint (crypto_generichash_update (&state, suffix, sizeof suffix),
       ==, 0);
@@ -302,8 +306,7 @@ static void
 handoff_binding (const wyl_id_t *escrow_id, guint8 target[32], guint8 out[32])
 {
   const gchar *parts[] = { "wyrelog.service-credential.handoff.binding.v1",
-    "issue", "escrow-request-1", "operator", FIXTURE_ID
-  };
+                           "issue", "escrow-request-1", "operator", FIXTURE_ID};
   crypto_generichash_state state;
   g_assert_cmpint (crypto_generichash_init (&state, NULL, 0, 32), ==, 0);
   for (gsize i = 0; i < G_N_ELEMENTS (parts); i++) {
@@ -314,7 +317,7 @@ handoff_binding (const wyl_id_t *escrow_id, guint8 target[32], guint8 out[32])
     g_assert_cmpint (crypto_generichash_update (&state, len, sizeof len), ==,
         0);
     g_assert_cmpint (crypto_generichash_update (&state,
-            (const guint8 *) parts[i], strlen (parts[i])), ==, 0);
+        (const guint8 *) parts[i], strlen (parts[i])), ==, 0);
   }
   guint8 numbers[24];
   memcpy (numbers, escrow_id->bytes, 16);
@@ -371,7 +374,7 @@ ensure_thread (gpointer data)
     g_cond_wait (t->cond, t->mutex);
   g_mutex_unlock (t->mutex);
   t->rc = wyl_policy_store_ensure_service_cvk_for_issuance (t->store,
-      &t->cvk, &t->len);
+          &t->cvk, &t->len);
   return NULL;
 }
 
@@ -394,7 +397,7 @@ assert_file_omits (const gchar *path, const guint8 *needle, gsize needle_len)
   gsize len = 0;
   g_assert_true (g_file_get_contents (path, &contents, &len, NULL));
   g_assert_false (contains_bytes ((const guint8 *) contents, len, needle,
-          needle_len));
+      needle_len));
 }
 
 static void
@@ -412,7 +415,7 @@ test_fixture_concurrency_and_reopen (void)
   const guint8 *missing = (const guint8 *) 0x1;
   gsize missing_len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
+      &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (missing);
   g_assert_cmpuint (missing_len, ==, 0);
 
@@ -426,7 +429,8 @@ test_fixture_concurrency_and_reopen (void)
   GThread *threads[8];
   for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
     calls[i] = (EnsureThread) {
-    .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,};
+      .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,
+    };
     threads[i] = g_thread_new ("cvk-ensure", ensure_thread, &calls[i]);
   }
   g_mutex_lock (&mutex);
@@ -457,7 +461,7 @@ test_fixture_concurrency_and_reopen (void)
   expected_envelope (expected);
   g_assert_cmpmem (decoded, sizeof decoded, expected, sizeof expected);
   g_assert_false (contains_bytes (info.sealed_cvk, info.sealed_cvk_len,
-          expected + CVK_OFFSET, 32));
+      expected + CVK_OFFSET, 32));
   wyl_policy_service_cvk_info_clear (&info);
   g_autofree gchar *work_path = g_strdup_printf ("%s.wyrelog-clear", path);
   g_assert_false (g_file_test (work_path, G_FILE_TEST_EXISTS));
@@ -466,7 +470,7 @@ test_fixture_concurrency_and_reopen (void)
   missing = (const guint8 *) 0x1;
   missing_len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &missing, &missing_len), ==, WYRELOG_E_BUSY);
+      &missing, &missing_len), ==, WYRELOG_E_BUSY);
   g_assert_null (missing);
   g_assert_cmpuint (missing_len, ==, 0);
   wyl_policy_store_rollback_mutation (store);
@@ -480,14 +484,15 @@ test_fixture_concurrency_and_reopen (void)
   reopened_runtime.trace = &close_trace;
   store = NULL;
   g_assert_cmpint (open_store (path, &reopened_provider, &reopened_runtime,
-          &store), ==, WYRELOG_E_OK);
+      &store), ==, WYRELOG_E_OK);
   g_mutex_init (&mutex);
   g_cond_init (&cond);
   ready = 0;
   go = FALSE;
   for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
     calls[i] = (EnsureThread) {
-    .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,};
+      .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,
+    };
     threads[i] = g_thread_new ("cvk-reopen", ensure_thread, &calls[i]);
   }
   g_mutex_lock (&mutex);
@@ -512,7 +517,7 @@ test_fixture_concurrency_and_reopen (void)
 
   wyl_service_credential_secret_t *parsed = NULL;
   g_assert_cmpint (wyl_service_credential_secret_parse (1, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
+      strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
   wyl_policy_service_credential_info_t credential = {
     .credential_id = (gchar *) FIXTURE_ID,
     .credential_format_version = 1,
@@ -523,27 +528,27 @@ test_fixture_concurrency_and_reopen (void)
   for (guint i = 0; i < sizeof credential.salt; i++)
     credential.salt[i] = (guint8) (0x10 + i);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, reopened_cvk,
-          reopened_len, credential.credential_id,
-          strlen (credential.credential_id), credential.tenant_id,
-          strlen (credential.tenant_id), credential.subject_id,
-          strlen (credential.subject_id), credential.salt,
-          sizeof credential.salt, parsed, credential.verifier,
-          sizeof credential.verifier), ==, WYRELOG_E_OK);
+      reopened_len, credential.credential_id,
+      strlen (credential.credential_id), credential.tenant_id,
+      strlen (credential.tenant_id), credential.subject_id,
+      strlen (credential.subject_id), credential.salt,
+      sizeof credential.salt, parsed, credential.verifier,
+      sizeof credential.verifier), ==, WYRELOG_E_OK);
   wyl_service_credential_secret_clear (&parsed);
   gboolean match = FALSE;
   g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
-          &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
       WYRELOG_E_OK);
   g_assert_true (match);
   credential.verifier_version = 2;
   match = TRUE;
   g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
-          &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
       WYRELOG_E_POLICY);
   g_assert_true (match);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE service_credential_cvk SET envelope_format_version=2;",
-          NULL, NULL, NULL), ==, SQLITE_OK);
+      "UPDATE service_credential_cvk SET envelope_format_version=2;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
   close_trace.n_events = 0;
   wyl_policy_store_close (store);
   g_assert_cmpuint (close_trace.n_events, >=, 4);
@@ -553,11 +558,11 @@ test_fixture_concurrency_and_reopen (void)
   TestRuntime version_runtime = { 0 };
   store = NULL;
   g_assert_cmpint (open_store (path, &version_provider, &version_runtime,
-          &store), ==, WYRELOG_E_OK);
+      &store), ==, WYRELOG_E_OK);
   const guint8 *bad_version_cvk = (const guint8 *) 0x1;
   gsize bad_version_len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &bad_version_cvk, &bad_version_len), ==, WYRELOG_E_POLICY);
+      &bad_version_cvk, &bad_version_len), ==, WYRELOG_E_POLICY);
   g_assert_null (bad_version_cvk);
   g_assert_cmpuint (bad_version_len, ==, 0);
   g_assert_cmpuint (version_provider.unseals, ==, 0);
@@ -595,16 +600,16 @@ test_handoff_escrow_roundtrip_and_tamper (void)
     .secret = secret,.secret_len = sizeof secret,
   };
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
-          &input), ==, WYRELOG_E_OK);
+      &input), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
-          &input), ==, WYRELOG_E_POLICY);
+      &input), ==, WYRELOG_E_POLICY);
 
   wyl_policy_service_handoff_escrow_info_t info = { 0 };
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
-          &escrow_id, &info), ==, WYRELOG_E_OK);
+      &escrow_id, &info), ==, WYRELOG_E_OK);
   wyl_policy_service_handoff_secret_t *opened = NULL;
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
-          &info, &opened), ==, WYRELOG_E_OK);
+      &info, &opened), ==, WYRELOG_E_OK);
   gsize opened_len = 0;
   g_assert_cmpmem (wyl_policy_service_handoff_secret_peek (opened, &opened_len),
       opened_len, secret, sizeof secret);
@@ -612,10 +617,10 @@ test_handoff_escrow_roundtrip_and_tamper (void)
 
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_exec (db,
-          "UPDATE service_credential_handoff_escrows "
-          "SET binding_digest=zeroblob(32);", NULL, NULL, NULL), ==, SQLITE_OK);
+      "UPDATE service_credential_handoff_escrows "
+      "SET binding_digest=zeroblob(32);", NULL, NULL, NULL), ==, SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
-          &info, &opened), ==, WYRELOG_E_POLICY);
+      &info, &opened), ==, WYRELOG_E_POLICY);
   g_assert_null (opened);
   wyl_policy_service_handoff_escrow_info_clear (&info);
   sodium_memzero (secret, sizeof secret);
@@ -645,11 +650,11 @@ test_absent_with_credentials_is_policy (void)
       "',1,'svc:tenant-a:worker','tenant-a',1,'active',1,zeroblob(16),"
       "zeroblob(32),'admin',1,1);";
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), sql, NULL,
-          NULL, NULL), ==, SQLITE_OK);
+      NULL, NULL), ==, SQLITE_OK);
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_POLICY);
+      &cvk, &len), ==, WYRELOG_E_POLICY);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpuint (runtime.rng_calls, ==, 0);
@@ -668,7 +673,7 @@ assert_ensure_failure (TestRuntime *runtime, TestProvider *provider,
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, expected);
+      &cvk, &len), ==, expected);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   wyl_policy_store_close (store);
@@ -682,14 +687,16 @@ test_fault_cleanup (void)
   assert_ensure_failure (&alloc, &provider, WYRELOG_E_NOMEM);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime lock = {.fail_lock_at = 1 };
   assert_ensure_failure (&lock, &provider, WYRELOG_E_NOMEM);
   g_assert_cmpuint (lock.unlocks, ==, 0);
   g_assert_cmpuint (lock.frees, ==, 1);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime second_alloc = {.fail_alloc_at = 2 };
   assert_ensure_failure (&second_alloc, &provider, WYRELOG_E_NOMEM);
   g_assert_cmpuint (second_alloc.allocs, ==, 2);
@@ -697,7 +704,8 @@ test_fault_cleanup (void)
   g_assert_cmpuint (second_alloc.frees, ==, 1);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime second_lock = {.fail_lock_at = 2 };
   assert_ensure_failure (&second_lock, &provider, WYRELOG_E_NOMEM);
   g_assert_cmpuint (second_lock.locks, ==, 2);
@@ -705,7 +713,8 @@ test_fault_cleanup (void)
   g_assert_cmpuint (second_lock.frees, ==, 2);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime third_alloc = {.fail_alloc_at = 3 };
   assert_ensure_failure (&third_alloc, &provider, WYRELOG_E_NOMEM);
   g_assert_cmpuint (third_alloc.allocs, ==, 3);
@@ -713,7 +722,8 @@ test_fault_cleanup (void)
   g_assert_cmpuint (third_alloc.frees, ==, 2);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime third_lock = {.fail_lock_at = 3 };
   assert_ensure_failure (&third_lock, &provider, WYRELOG_E_NOMEM);
   g_assert_cmpuint (third_lock.locks, ==, 3);
@@ -721,7 +731,8 @@ test_fault_cleanup (void)
   g_assert_cmpuint (third_lock.frees, ==, 3);
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   TestRuntime rng = {.fail_rng = TRUE };
   assert_ensure_failure (&rng, &provider, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (rng.rng_calls, ==, 1);
@@ -729,7 +740,8 @@ test_fault_cleanup (void)
   g_assert_cmpuint (rng.unlocks, ==, rng.frees);
 
   provider = (TestProvider) {
-  .fail_seal = TRUE};
+    .fail_seal = TRUE
+  };
   TestRuntime seal = { 0 };
   assert_ensure_failure (&seal, &provider, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (provider.clears, ==, 1);
@@ -765,20 +777,20 @@ test_commit_before_cache (void)
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_IO);
+      &cvk, &len), ==, WYRELOG_E_IO);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpint (sqlite3_set_authorizer (db, NULL, NULL), ==, SQLITE_OK);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "SELECT count(*) FROM service_credential_cvk;", -1, &stmt, NULL),
+      "SELECT count(*) FROM service_credential_cvk;", -1, &stmt, NULL),
       ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 0);
   sqlite3_finalize (stmt);
   g_assert_cmpuint (runtime.rng_calls, ==, 1);
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_OK);
+      &cvk, &len), ==, WYRELOG_E_OK);
   g_assert_cmpuint (runtime.rng_calls, ==, 2);
   g_assert_cmpuint (provider.seals, ==, 2);
   g_assert_cmpuint (provider.clears, ==, 2);
@@ -800,7 +812,7 @@ test_unseal_failure_is_closed (void)
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_OK);
+      &cvk, &len), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
 
   TestProvider failing = {.fail_unseal = TRUE };
@@ -811,7 +823,7 @@ test_unseal_failure_is_closed (void)
   cvk = (const guint8 *) 0x1;
   len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+      &cvk, &len), ==, WYRELOG_E_CRYPTO);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpuint (failing.unseals, ==, 1);
@@ -837,7 +849,7 @@ assert_authenticated_inner_tamper_is_policy (gsize offset, guint8 mask)
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_OK);
+      &cvk, &len), ==, WYRELOG_E_OK);
 
   wyl_policy_service_cvk_info_t info = { 0 };
   g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &info), ==,
@@ -849,19 +861,19 @@ assert_authenticated_inner_tamper_is_policy (gsize offset, guint8 mask)
     .len = info.sealed_cvk_len,
   };
   g_assert_cmpint (provider_unseal (&provider, &original, envelope,
-          sizeof envelope, &written), ==, WYRELOG_E_OK);
+      sizeof envelope, &written), ==, WYRELOG_E_OK);
   g_assert_cmpuint (written, ==, sizeof envelope);
   envelope[offset] ^= mask;
   wyl_sealed_blob_t resealed = { 0 };
   g_assert_cmpint (provider_seal (&provider, envelope, sizeof envelope,
-          &resealed), ==, WYRELOG_E_OK);
+      &resealed), ==, WYRELOG_E_OK);
   sodium_memzero (envelope, sizeof envelope);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "UPDATE service_credential_cvk SET sealed_cvk=? WHERE slot=1;", -1,
-          &stmt, NULL), ==, SQLITE_OK);
+      "UPDATE service_credential_cvk SET sealed_cvk=? WHERE slot=1;", -1,
+      &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_blob (stmt, 1, resealed.bytes,
-          (int) resealed.len, SQLITE_TRANSIENT), ==, SQLITE_OK);
+      (int) resealed.len, SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
   provider_clear (&provider, &resealed);
@@ -872,11 +884,11 @@ assert_authenticated_inner_tamper_is_policy (gsize offset, guint8 mask)
   TestRuntime reopened_runtime = { 0 };
   store = NULL;
   g_assert_cmpint (open_store (path, &reopened_provider, &reopened_runtime,
-          &store), ==, WYRELOG_E_OK);
+      &store), ==, WYRELOG_E_OK);
   cvk = (const guint8 *) 0x1;
   len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_POLICY);
+      &cvk, &len), ==, WYRELOG_E_POLICY);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpuint (reopened_provider.unseals, ==, 1);
@@ -910,13 +922,13 @@ test_providerless_is_policy (void)
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_POLICY);
+      &cvk, &len), ==, WYRELOG_E_POLICY);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   cvk = (const guint8 *) 0x1;
   len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_POLICY);
+      &cvk, &len), ==, WYRELOG_E_POLICY);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpuint (runtime.allocs, ==, 0);
@@ -935,11 +947,11 @@ assert_schema_gate (const gchar *mutation)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), mutation,
-          NULL, NULL, NULL), ==, SQLITE_OK);
+      NULL, NULL, NULL), ==, SQLITE_OK);
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_POLICY);
+      &cvk, &len), ==, WYRELOG_E_POLICY);
   g_assert_null (cvk);
   g_assert_cmpuint (len, ==, 0);
   g_assert_cmpuint (provider.binding_derives, ==, 0);
@@ -958,7 +970,7 @@ test_schema_gate_precedes_crypto (void)
       "CREATE INDEX idx_service_credentials_tenant_state_expiry"
       " ON service_credentials(state,tenant_id,expires_at_us);");
   assert_schema_gate
-      ("CREATE TRIGGER trg_service_extra BEFORE INSERT ON service_principals"
+    ("CREATE TRIGGER trg_service_extra BEFORE INSERT ON service_principals"
       " BEGIN SELECT 1; END;");
 }
 
@@ -974,7 +986,7 @@ create_persisted_cvk (const gchar *path)
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &len), ==, WYRELOG_E_OK);
+      &cvk, &len), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
 }
 
@@ -994,50 +1006,56 @@ test_binding_and_unseal_boundaries (void)
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+      &cvk, &len), ==, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (provider.binding_derives, ==, 1);
   g_assert_cmpuint (provider.unseals, ==, 0);
   wyl_policy_store_close (store);
 
   for (guint i = 0; i < 2; i++) {
     provider = (TestProvider) {
-    .unseal_written_override = i == 0 ? 123 : 125};
+      .unseal_written_override = i == 0 ? 123 : 125
+    };
     runtime = (TestRuntime) {
-    0};
+      0
+    };
     store = NULL;
     g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
         WYRELOG_E_OK);
     cvk = (const guint8 *) 0x1;
     len = 99;
     g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-            &cvk, &len), ==, WYRELOG_E_CRYPTO);
+        &cvk, &len), ==, WYRELOG_E_CRYPTO);
     g_assert_null (cvk);
     g_assert_cmpuint (provider.unseals, ==, 1);
     wyl_policy_store_close (store);
   }
 
   provider = (TestProvider) {
-  0};
+    0
+  };
   runtime = (TestRuntime) {
-  0};
+    0
+  };
   store = NULL;
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-          "UPDATE service_credential_cvk SET provider_binding=zeroblob(32);",
-          NULL, NULL, NULL), ==, SQLITE_OK);
+      "UPDATE service_credential_cvk SET provider_binding=zeroblob(32);",
+      NULL, NULL, NULL), ==, SQLITE_OK);
   wyl_policy_store_close (store);
   provider = (TestProvider) {
-  0};
+    0
+  };
   runtime = (TestRuntime) {
-  0};
+    0
+  };
   store = NULL;
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   cvk = (const guint8 *) 0x1;
   len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+      &cvk, &len), ==, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (provider.unseals, ==, 0);
   wyl_policy_store_close (store);
 
@@ -1090,7 +1108,7 @@ static void
 remove_rotation_sidecar (const gchar *path)
 {
   g_autofree gchar *sidecar = g_strconcat (path,
-      ".wyrelog-rotation-intent", NULL);
+          ".wyrelog-rotation-intent", NULL);
   (void) g_remove (sidecar);
 }
 
@@ -1102,40 +1120,40 @@ insert_golden_credential (wyl_policy_store_t *store, const guint8 *cvk,
     out_salt[i] = (guint8) (0x10 + i);
   wyl_service_credential_secret_t *parsed = NULL;
   g_assert_cmpint (wyl_service_credential_secret_parse (1, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
+      strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk, cvk_len,
-          FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
-          "svc:tenant-a:worker", 19, out_salt, 16, parsed, out_verifier, 32),
+      FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
+      "svc:tenant-a:worker", 19, out_salt, 16, parsed, out_verifier, 32),
       ==, WYRELOG_E_OK);
   wyl_service_credential_secret_clear (&parsed);
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
-          "VALUES('tenant-a',0,1,1);"
-          "INSERT INTO service_principals(subject_id,display_name,state,"
-          "generation,created_by,created_at_us,updated_at_us) VALUES("
-          "'svc:tenant-a:worker','worker','active',1,'admin',1,1);",
-          NULL, NULL, NULL), ==, SQLITE_OK);
+      "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
+      "VALUES('tenant-a',0,1,1);"
+      "INSERT INTO service_principals(subject_id,display_name,state,"
+      "generation,created_by,created_at_us,updated_at_us) VALUES("
+      "'svc:tenant-a:worker','worker','active',1,'admin',1,1);",
+      NULL, NULL, NULL), ==, SQLITE_OK);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "INSERT INTO service_credentials(credential_id,"
-          "credential_format_version,subject_id,tenant_id,generation,state,"
-          "verifier_version,salt,verifier,created_by,created_at_us,"
-          "updated_at_us) VALUES(?,1,'svc:tenant-a:worker','tenant-a',1,"
-          "'active',1,?,?,'admin',1,1);", -1, &stmt, NULL), ==, SQLITE_OK);
+      "INSERT INTO service_credentials(credential_id,"
+      "credential_format_version,subject_id,tenant_id,generation,state,"
+      "verifier_version,salt,verifier,created_by,created_at_us,"
+      "updated_at_us) VALUES(?,1,'svc:tenant-a:worker','tenant-a',1,"
+      "'active',1,?,?,'admin',1,1);", -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, FIXTURE_ID, -1,
-          SQLITE_STATIC), ==, SQLITE_OK);
+      SQLITE_STATIC), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_blob (stmt, 2, out_salt, 16,
-          SQLITE_STATIC), ==, SQLITE_OK);
+      SQLITE_STATIC), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_blob (stmt, 3, out_verifier, 32,
-          SQLITE_STATIC), ==, SQLITE_OK);
+      SQLITE_STATIC), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO service_domain_requests "
-          "(request_id,operation,resource_id,input_fingerprint,created_at_us) "
-          "VALUES('rotation-request','credential_issue',"
-          "'svc:tenant-a:worker',zeroblob(32),1);", NULL, NULL, NULL), ==,
+      "INSERT INTO service_domain_requests "
+      "(request_id,operation,resource_id,input_fingerprint,created_at_us) "
+      "VALUES('rotation-request','credential_issue',"
+      "'svc:tenant-a:worker',zeroblob(32),1);", NULL, NULL, NULL), ==,
       SQLITE_OK);
 }
 
@@ -1145,9 +1163,9 @@ assert_golden_verifies (wyl_policy_store_t *store, const guint8 salt[16],
 {
   sqlite3_stmt *request_stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
-          "SELECT count(*) FROM service_domain_requests "
-          "WHERE request_id='rotation-request' "
-          "AND operation='credential_issue';", -1, &request_stmt, NULL), ==,
+      "SELECT count(*) FROM service_domain_requests "
+      "WHERE request_id='rotation-request' "
+      "AND operation='credential_issue';", -1, &request_stmt, NULL), ==,
       SQLITE_OK);
   g_assert_cmpint (sqlite3_step (request_stmt), ==, SQLITE_ROW);
   g_assert_cmpint (sqlite3_column_int64 (request_stmt, 0), ==, 1);
@@ -1155,18 +1173,18 @@ assert_golden_verifies (wyl_policy_store_t *store, const guint8 salt[16],
 
   wyl_policy_service_credential_info_t info = { 0 };
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store,
-          FIXTURE_ID, "svc:tenant-a:worker", "tenant-a", &info), ==,
+      FIXTURE_ID, "svc:tenant-a:worker", "tenant-a", &info), ==,
       WYRELOG_E_OK);
   g_assert_cmpmem (info.salt, sizeof info.salt, salt, 16);
   g_assert_cmpmem (info.verifier, sizeof info.verifier, verifier, 32);
   gboolean match = FALSE;
   g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
-          &info, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      &info, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
       WYRELOG_E_OK);
   g_assert_true (match);
   match = TRUE;
   g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
-          &info, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 43, &match),
+      &info, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 43, &match),
       ==, WYRELOG_E_OK);
   g_assert_false (match);
   wyl_policy_service_credential_info_clear (&info);
@@ -1185,7 +1203,7 @@ create_golden_store (const gchar *path, guint8 salt[16], guint8 verifier[32],
   const guint8 *materialized = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &materialized, &len), ==, WYRELOG_E_OK);
+      &materialized, &len), ==, WYRELOG_E_OK);
   memcpy (cvk, materialized, 32);
   insert_golden_credential (store, materialized, len, salt, verifier);
   assert_golden_verifies (store, salt, verifier);
@@ -1231,10 +1249,11 @@ recovery_make_opts (RecoveryFactory *factory, guint8 seed,
   box->provider.seed = seed;
   box->owner = factory;
   *out = (wyl_policy_store_open_options_t) {
-  .keyprovider_vtable = &provider_vtable,.keyprovider_state =
+    .keyprovider_vtable = &provider_vtable,.keyprovider_state =
         box,.keyprovider_state_free =
         recovery_provider_free,.require_encrypted =
-        TRUE,.service_cvk_runtime = &factory->cvk_runtime,};
+        TRUE,.service_cvk_runtime = &factory->cvk_runtime,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -1263,8 +1282,9 @@ recovery_factory_init (RecoveryFactory *factory, guint8 old_seed,
   factory->new_seed = new_seed;
   factory->cvk_runtime = make_runtime (&factory->runtime);
   *out = (wyl_policy_rotation_recovery_factory_t) {
-  .make_old_opts = recovery_make_old,.make_new_opts =
-        recovery_make_new,.data = factory,};
+    .make_old_opts = recovery_make_old,.make_new_opts =
+        recovery_make_new,.data = factory,
+  };
 }
 
 static void
@@ -1278,7 +1298,7 @@ read_store_cvk (const gchar *path, guint8 seed, guint8 out_cvk[32])
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &len), ==, WYRELOG_E_OK);
+      &cvk, &len), ==, WYRELOG_E_OK);
   g_assert_cmpuint (len, ==, 32);
   memcpy (out_cvk, cvk, 32);
   wyl_policy_store_close (store);
@@ -1308,7 +1328,7 @@ insert_golden_handoff_escrow (const gchar *path, wyl_id_t *out_escrow_id,
     .secret = out_secret,.secret_len = 32,
   };
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
-          &input), ==, WYRELOG_E_OK);
+      &input), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
 }
 
@@ -1327,7 +1347,7 @@ test_rotation_rewraps_handoff_escrows (void)
   TestProvider new_provider = {.seed = 0x20 };
   TestRuntime runtime = { 0 };
   g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
-          NULL), ==, WYRELOG_E_OK);
+      NULL), ==, WYRELOG_E_OK);
   g_assert_cmpuint (runtime.allocs, ==, runtime.frees);
   g_assert_cmpuint (runtime.locks, ==, runtime.unlocks);
   g_assert_cmpuint (runtime.wipes, >=, runtime.frees);
@@ -1339,7 +1359,7 @@ test_rotation_rewraps_handoff_escrows (void)
       WYRELOG_E_OK);
   wyl_policy_service_handoff_escrow_info_t info = { 0 };
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
-          &escrow_id, &info), ==, WYRELOG_E_OK);
+      &escrow_id, &info), ==, WYRELOG_E_OK);
   g_assert_cmpstr (info.operation, ==, "issue");
   g_assert_cmpstr (info.request_id, ==, "escrow-request-1");
   g_assert_cmpmem (info.target_digest, sizeof info.target_digest, target,
@@ -1348,7 +1368,7 @@ test_rotation_rewraps_handoff_escrows (void)
       sizeof binding);
   wyl_policy_service_handoff_secret_t *opened = NULL;
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
-          &info, &opened), ==, WYRELOG_E_OK);
+      &info, &opened), ==, WYRELOG_E_OK);
   gsize opened_len = 0;
   g_assert_cmpmem (wyl_policy_service_handoff_secret_peek (opened, &opened_len),
       opened_len, secret, sizeof secret);
@@ -1368,7 +1388,7 @@ test_rotation_rewrap_failure_preserves_old (void)
 {
   for (guint scenario = 0; scenario < 2; scenario++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-escrow-rewrap-fail-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32], target[32], binding[32], secret[32];
@@ -1383,7 +1403,7 @@ test_rotation_rewrap_failure_preserves_old (void)
     TestProvider new_provider = {.seed = 0x20,.fail_seal = scenario == 1 };
     TestRuntime runtime = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, NULL), ==, WYRELOG_E_CRYPTO);
+        &runtime, NULL), ==, WYRELOG_E_CRYPTO);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -1396,10 +1416,10 @@ test_rotation_rewrap_failure_preserves_old (void)
         ==, WYRELOG_E_OK);
     wyl_policy_service_handoff_escrow_info_t info = { 0 };
     g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
-            &escrow_id, &info), ==, WYRELOG_E_OK);
+        &escrow_id, &info), ==, WYRELOG_E_OK);
     wyl_policy_service_handoff_secret_t *opened = NULL;
     g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
-            &info, &opened), ==, WYRELOG_E_OK);
+        &info, &opened), ==, WYRELOG_E_OK);
     wyl_policy_service_handoff_secret_clear (&opened);
     wyl_policy_service_handoff_escrow_info_clear (&info);
     wyl_policy_store_close (store);
@@ -1429,15 +1449,15 @@ test_rotation_preserves_golden_credential (void)
     TestRuntime inspect_runtime = { 0 };
     wyl_policy_store_t *inspect_store = NULL;
     g_assert_cmpint (open_store (path, &inspect_provider, &inspect_runtime,
-            &inspect_store), ==, WYRELOG_E_OK);
+        &inspect_store), ==, WYRELOG_E_OK);
     wyl_policy_service_cvk_info_t inspect_info = { 0 };
     g_assert_cmpint (wyl_policy_store_load_service_cvk (inspect_store,
-            &inspect_info), ==, WYRELOG_E_OK);
+        &inspect_info), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (inspect_store,
-            old_auth_key, sizeof old_auth_key), ==, WYRELOG_E_OK);
+        old_auth_key, sizeof old_auth_key), ==, WYRELOG_E_OK);
     memcpy (old_binding, inspect_info.provider_binding, sizeof old_binding);
     old_sealed = g_memdup2 (inspect_info.sealed_cvk,
-        inspect_info.sealed_cvk_len);
+            inspect_info.sealed_cvk_len);
     old_sealed_len = inspect_info.sealed_cvk_len;
     wyl_policy_service_cvk_info_clear (&inspect_info);
     wyl_policy_store_close (inspect_store);
@@ -1445,7 +1465,7 @@ test_rotation_preserves_golden_credential (void)
   g_autofree gchar *old_canonical = NULL;
   gsize old_canonical_len = 0;
   g_assert_true (g_file_get_contents (path, &old_canonical,
-          &old_canonical_len, NULL));
+      &old_canonical_len, NULL));
 
   TestProvider old_provider = { 0 };
   TestProvider new_provider = {.seed = 0x20 };
@@ -1456,7 +1476,7 @@ test_rotation_preserves_golden_credential (void)
   runtime.trace = &rotation_trace;
   RotationFault fault = { 0 };
   g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
-          &fault), ==, WYRELOG_E_OK);
+      &fault), ==, WYRELOG_E_OK);
   g_assert_cmpuint (old_provider.unseals, ==, 1);
   g_assert_cmpuint (new_provider.seals, ==, 1);
   g_assert_cmpuint (new_provider.clears, ==, 1);
@@ -1482,12 +1502,12 @@ test_rotation_preserves_golden_credential (void)
       WYRELOG_E_OK);
   WylPolicyRotationIntent cleared = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
-          old_auth_key, sizeof old_auth_key, &cleared), ==,
+      old_auth_key, sizeof old_auth_key, &cleared), ==,
       WYRELOG_E_NOT_FOUND);
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &cvk, &cvk_len), ==, WYRELOG_E_OK);
+      &cvk, &cvk_len), ==, WYRELOG_E_OK);
   g_assert_cmpmem (cvk, cvk_len, original_cvk, sizeof original_cvk);
   assert_golden_verifies (store, salt, verifier);
   wyl_policy_service_cvk_info_t info = { 0 };
@@ -1495,13 +1515,13 @@ test_rotation_preserves_golden_credential (void)
       WYRELOG_E_OK);
   g_assert_cmpuint (info.generation, ==, 2);
   g_assert_cmpint (sodium_memcmp (info.provider_binding, old_binding,
-          sizeof old_binding), !=, 0);
+      sizeof old_binding), !=, 0);
   g_assert_false (info.sealed_cvk_len == old_sealed_len
       && memcmp (info.sealed_cvk, old_sealed, old_sealed_len) == 0);
   g_assert_false (contains_bytes (info.sealed_cvk, info.sealed_cvk_len,
-          original_cvk, sizeof original_cvk));
+      original_cvk, sizeof original_cvk));
   g_assert_false (contains_bytes ((const guint8 *) old_canonical,
-          old_canonical_len, original_cvk, sizeof original_cvk));
+      old_canonical_len, original_cvk, sizeof original_cvk));
   wyl_policy_service_cvk_info_clear (&info);
   wyl_policy_store_close (store);
   sodium_memzero (old_auth_key, sizeof old_auth_key);
@@ -1509,14 +1529,17 @@ test_rotation_preserves_golden_credential (void)
   TestProvider second = {.seed = 0x20 };
   TestProvider third = {.seed = 0x40 };
   runtime = (TestRuntime) {
-  0};
+    0
+  };
   fault = (RotationFault) {
-  0};
+    0
+  };
   g_assert_cmpint (rotate_store (path, &second, &third, &runtime, &fault), ==,
       WYRELOG_E_OK);
   TestProvider third_reopen = {.seed = 0x40 };
   reopened_runtime = (TestRuntime) {
-  0};
+    0
+  };
   store = NULL;
   g_assert_cmpint (open_store (path, &third_reopen, &reopened_runtime, &store),
       ==, WYRELOG_E_OK);
@@ -1555,7 +1578,7 @@ test_rotation_publish_failpoints (void)
   };
   for (guint iteration = 0; iteration < G_N_ELEMENTS (cases); iteration++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-fail-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -1570,7 +1593,7 @@ test_rotation_publish_failpoints (void)
       .fail_stage = cases[iteration].stage,
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==, cases[iteration].expected);
+        &runtime, &fault), ==, cases[iteration].expected);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -1584,7 +1607,8 @@ test_rotation_publish_failpoints (void)
     wyl_policy_store_close (store);
     TestProvider wrong_new = {.seed = 0x20 };
     reopened_runtime = (TestRuntime) {
-    0};
+      0
+    };
     store = NULL;
     g_assert_cmpint (open_store (path, &wrong_new, &reopened_runtime, &store),
         !=, WYRELOG_E_OK);
@@ -1614,20 +1638,20 @@ test_rotation_intent_codec (void)
   guint8 *encoded = NULL;
   gsize encoded_len = 0;
   g_assert_cmpint (wyl_policy_rotation_intent_encode (&intent, auth_key,
-          sizeof auth_key, &encoded, &encoded_len), ==, WYRELOG_E_OK);
+      sizeof auth_key, &encoded, &encoded_len), ==, WYRELOG_E_OK);
   g_assert_nonnull (encoded);
   g_assert_cmpuint (encoded_len, >, sizeof auth_key);
 
   WylPolicyRotationIntent decoded = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
-          auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpmem (&decoded, sizeof decoded, &intent, sizeof intent);
 
   encoded[encoded_len / 2] ^= 0x01;
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
-          auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_POLICY);
+      auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded,
-          encoded_len - 1, auth_key, sizeof auth_key, &decoded), ==,
+      encoded_len - 1, auth_key, sizeof auth_key, &decoded), ==,
       WYRELOG_E_POLICY);
   sodium_memzero (encoded, encoded_len);
   g_free (encoded);
@@ -1649,9 +1673,9 @@ test_rotation_intent_auth_key_derivation (void)
   guint8 first[crypto_generichash_KEYBYTES];
   guint8 second[crypto_generichash_KEYBYTES];
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store, first,
-          sizeof first), ==, WYRELOG_E_OK);
+      sizeof first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store, second,
-          sizeof second), ==, WYRELOG_E_OK);
+      sizeof second), ==, WYRELOG_E_OK);
   g_assert_cmpmem (first, sizeof first, second, sizeof second);
   g_assert_false (sodium_is_zero (first, sizeof first));
   guint8 store_key[crypto_generichash_KEYBYTES];
@@ -1659,9 +1683,9 @@ test_rotation_intent_auth_key_derivation (void)
   for (gsize i = 0; i < sizeof store_key; i++)
     store_key[i] = (guint8) (0x40 + i);
   g_assert_cmpint (crypto_generichash (expected, sizeof expected,
-          (const guint8 *) "wyrelog.policy.rotation-intent.auth.v1",
-          strlen ("wyrelog.policy.rotation-intent.auth.v1"), store_key,
-          sizeof store_key), ==, 0);
+      (const guint8 *) "wyrelog.policy.rotation-intent.auth.v1",
+      strlen ("wyrelog.policy.rotation-intent.auth.v1"), store_key,
+      sizeof store_key), ==, 0);
   g_assert_cmpmem (first, sizeof first, expected, sizeof expected);
   g_assert_false (sodium_is_zero (store_key, sizeof store_key));
   sodium_memzero (store_key, sizeof store_key);
@@ -1673,7 +1697,7 @@ test_rotation_intent_auth_key_derivation (void)
   guint8 short_key[16];
   memset (short_key, 0xa5, sizeof short_key);
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (NULL,
-          short_key, sizeof short_key), ==, WYRELOG_E_INVALID);
+      short_key, sizeof short_key), ==, WYRELOG_E_INVALID);
   g_assert_true (sodium_is_zero (short_key, sizeof short_key));
 
   wyl_policy_store_t *providerless = NULL;
@@ -1681,11 +1705,11 @@ test_rotation_intent_auth_key_derivation (void)
     .path = ":memory:",
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&providerless_options,
-          &providerless), ==, WYRELOG_E_OK);
+      &providerless), ==, WYRELOG_E_OK);
   guint8 rejected[crypto_generichash_KEYBYTES];
   memset (rejected, 0xa5, sizeof rejected);
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (providerless,
-          rejected, sizeof rejected), ==, WYRELOG_E_POLICY);
+      rejected, sizeof rejected), ==, WYRELOG_E_POLICY);
   g_assert_true (sodium_is_zero (rejected, sizeof rejected));
   sodium_memzero (rejected, sizeof rejected);
   wyl_policy_store_close (providerless);
@@ -1722,57 +1746,57 @@ test_rotation_intent_sidecar_lifecycle (void)
 
   WylPolicyRotationIntent loaded = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_OK);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpmem (&loaded, sizeof loaded, &intent, sizeof intent);
   guint8 wrong_key[crypto_generichash_KEYBYTES];
   memset (wrong_key, 0x5d, sizeof wrong_key);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, wrong_key,
-          sizeof wrong_key, &loaded), ==, WYRELOG_E_POLICY);
+      sizeof wrong_key, &loaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          1, &loaded), ==, WYRELOG_E_INVALID);
+      1, &loaded), ==, WYRELOG_E_INVALID);
 
   g_autofree gchar *sidecar_path = g_strconcat (path,
-      ".wyrelog-rotation-intent", NULL);
+          ".wyrelog-rotation-intent", NULL);
   const guint8 malformed[] = { 0x57, 0x59, 0x4c };
   g_assert_true (g_file_set_contents (sidecar_path,
-          (const gchar *) malformed, sizeof malformed, NULL));
+      (const gchar *) malformed, sizeof malformed, NULL));
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   gchar *tampered = NULL;
   gsize tampered_len = 0;
   g_assert_true (g_file_get_contents (sidecar_path, &tampered, &tampered_len,
-          NULL));
+      NULL));
   g_assert_cmpuint (tampered_len, >, 0);
   tampered[tampered_len / 2] ^= 0x01;
   g_assert_true (g_file_set_contents (sidecar_path, tampered, tampered_len,
-          NULL));
+      NULL));
   g_free (tampered);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
 #ifndef G_OS_WIN32
   g_assert_cmpint (g_remove (sidecar_path), ==, 0);
   g_autofree gchar *symlink_target = g_build_filename (dir, "target", NULL);
   g_assert_cmpint (symlink (symlink_target, sidecar_path), ==, 0);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (g_remove (sidecar_path), ==, 0);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
 #endif
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
-          sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
+      sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
   sodium_memzero (auth_key, sizeof auth_key);
   wyl_policy_store_close (store);
   g_assert_cmpint (g_remove (path), ==, 0);
@@ -1796,7 +1820,7 @@ test_rotation_intent_status (void)
   const guint8 *materialized = NULL;
   gsize materialized_len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &materialized, &materialized_len), ==, WYRELOG_E_OK);
+      &materialized, &materialized_len), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
   store = NULL;
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
@@ -1807,7 +1831,7 @@ test_rotation_intent_status (void)
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (NULL, &status),
       ==, WYRELOG_E_INVALID);
   g_assert_true (sodium_is_zero ((const unsigned char *) &status,
-          sizeof status));
+      sizeof status));
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (status.state, ==, WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT);
@@ -1815,28 +1839,28 @@ test_rotation_intent_status (void)
 
   guint8 auth_key[crypto_generichash_KEYBYTES];
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   WylPolicyRotationIntent intent = { 0 };
   g_assert_cmpint (wyl_id_new (&intent.transaction_id), ==, WYRELOG_E_OK);
   gchar *canonical = NULL;
   gsize canonical_len = 0;
   g_assert_true (g_file_get_contents (path, &canonical, &canonical_len, NULL));
   g_assert_cmpint (crypto_generichash (intent.canonical_digest,
-          sizeof intent.canonical_digest, (const guint8 *) canonical,
-          canonical_len, NULL, 0), ==, 0);
+      sizeof intent.canonical_digest, (const guint8 *) canonical,
+      canonical_len, NULL, 0), ==, 0);
   guint8 store_key[crypto_generichash_KEYBYTES];
   for (gsize i = 0; i < sizeof store_key; i++)
     store_key[i] = (guint8) (0x40 + i);
   g_assert_cmpint (crypto_generichash (intent.old_provider_id,
-          sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
-          0), ==, 0);
+      sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
+      0), ==, 0);
   sodium_memzero (store_key, sizeof store_key);
   memset (intent.new_provider_id, 0x53, sizeof intent.new_provider_id);
   intent.old_generation = 21;
   intent.expected_new_generation = 22;
   intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
 
   memset (&status, 0, sizeof status);
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
@@ -1857,30 +1881,30 @@ test_rotation_intent_status (void)
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
       ==, WYRELOG_E_POLICY);
   g_assert_true (sodium_is_zero ((const unsigned char *) &status,
-          sizeof status));
+      sizeof status));
   g_assert_true (g_file_set_contents (path, canonical, canonical_len, NULL));
 
   memset (intent.old_provider_id, 0x99, sizeof intent.old_provider_id);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   memset (&status, 0xa5, sizeof status);
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
       ==, WYRELOG_E_POLICY);
   g_assert_true (sodium_is_zero ((const unsigned char *) &status,
-          sizeof status));
+      sizeof status));
   /* Restore the provider ID derived from the deterministic test key. */
   for (gsize i = 0; i < sizeof store_key; i++)
     store_key[i] = (guint8) (0x40 + i);
   g_assert_cmpint (crypto_generichash (intent.old_provider_id,
-          sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
-          0), ==, 0);
+      sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
+      0), ==, 0);
   sodium_memzero (store_key, sizeof store_key);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
 
   intent.state = WYL_POLICY_ROTATION_INTENT_COMMITTED;
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
-          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+      auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   memset (&status, 0, sizeof status);
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
       ==, WYRELOG_E_OK);
@@ -1888,20 +1912,20 @@ test_rotation_intent_status (void)
       WYL_POLICY_ROTATION_INTENT_STATUS_COMMITTED);
 
   g_autofree gchar *sidecar_path = g_strconcat (path,
-      ".wyrelog-rotation-intent", NULL);
+          ".wyrelog-rotation-intent", NULL);
   gchar *tampered = NULL;
   gsize tampered_len = 0;
   g_assert_true (g_file_get_contents (sidecar_path, &tampered, &tampered_len,
-          NULL));
+      NULL));
   tampered[tampered_len / 2] ^= 0x01;
   g_assert_true (g_file_set_contents (sidecar_path, tampered, tampered_len,
-          NULL));
+      NULL));
   g_free (tampered);
   memset (&status, 0xa5, sizeof status);
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
       ==, WYRELOG_E_POLICY);
   g_assert_true (sodium_is_zero ((const unsigned char *) &status,
-          sizeof status));
+      sizeof status));
 
   sodium_memzero (auth_key, sizeof auth_key);
   g_free (canonical);
@@ -1912,12 +1936,12 @@ test_rotation_intent_status (void)
     .path = ":memory:",
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&providerless_options,
-          &providerless), ==, WYRELOG_E_OK);
+      &providerless), ==, WYRELOG_E_OK);
   memset (&status, 0xa5, sizeof status);
   g_assert_cmpint (wyl_policy_store_rotation_intent_status (providerless,
-          &status), ==, WYRELOG_E_POLICY);
+      &status), ==, WYRELOG_E_POLICY);
   g_assert_true (sodium_is_zero ((const unsigned char *) &status,
-          sizeof status));
+      sizeof status));
   wyl_policy_store_close (providerless);
 
   g_assert_cmpint (g_remove (path), ==, 0);
@@ -1985,7 +2009,7 @@ test_rotation_recovery_plan (void)
   WylPolicyRotationRecoveryState state = 0;
   WylPolicyRotationRecoveryAction action = 0;
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_OK);
+      &action), ==, WYRELOG_E_OK);
   g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_OLD);
   g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD);
 
@@ -1995,13 +2019,13 @@ test_rotation_recovery_plan (void)
   probe.new_binding_matches = TRUE;
   probe.new_inner_invariants_match = TRUE;
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_OK);
+      &action), ==, WYRELOG_E_OK);
   g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
   g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
 
   intent.state = WYL_POLICY_ROTATION_INTENT_COMMITTED;
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_OK);
+      &action), ==, WYRELOG_E_OK);
   g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
 
   probe.old_root_authenticated = TRUE;
@@ -2010,22 +2034,22 @@ test_rotation_recovery_plan (void)
   probe.old_inner_invariants_match = TRUE;
   probe.new_root_authenticated = FALSE;
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_POLICY);
+      &action), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
 
   memset (&probe, 0, sizeof probe);
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_OK);
+      &action), ==, WYRELOG_E_OK);
   g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
   g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
 
   intent.expected_new_generation = 99;
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
-          &action), ==, WYRELOG_E_POLICY);
+      &action), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (NULL, &probe, &state,
-          &action), ==, WYRELOG_E_INVALID);
+      &action), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, NULL,
-          &action), ==, WYRELOG_E_INVALID);
+      &action), ==, WYRELOG_E_INVALID);
 }
 
 static void
@@ -2034,7 +2058,7 @@ test_rotation_recovery_status (void)
   /* (a) A clean rotation leaves a single new root: probe NEW, action FINALIZE. */
   {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-a-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2043,7 +2067,7 @@ test_rotation_recovery_status (void)
     TestProvider new_provider = {.seed = 0x20 };
     TestRuntime rotate_runtime = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &rotate_runtime, NULL), ==, WYRELOG_E_OK);
+        &rotate_runtime, NULL), ==, WYRELOG_E_OK);
 
     RecoveryFactory factory;
     wyl_policy_rotation_recovery_factory_t api;
@@ -2052,7 +2076,7 @@ test_rotation_recovery_status (void)
     WylPolicyRotationRecoveryAction action =
         WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
-            &probe, &action), ==, WYRELOG_E_OK);
+        &probe, &action), ==, WYRELOG_E_OK);
     g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
     g_assert_cmpint (probe.intent_state, ==,
         WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT);
@@ -2072,7 +2096,7 @@ test_rotation_recovery_status (void)
   /* (b) A crash before the rename leaves the old root plus a pending intent. */
   {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-b-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2084,7 +2108,7 @@ test_rotation_recovery_status (void)
       .fail_stage = WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &rotate_runtime, &fault), ==, WYRELOG_E_IO);
+        &rotate_runtime, &fault), ==, WYRELOG_E_IO);
 
     RecoveryFactory factory;
     wyl_policy_rotation_recovery_factory_t api;
@@ -2093,14 +2117,14 @@ test_rotation_recovery_status (void)
     WylPolicyRotationRecoveryAction action =
         WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
-            &probe, &action), ==, WYRELOG_E_OK);
+        &probe, &action), ==, WYRELOG_E_OK);
     g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_OLD);
     g_assert_cmpint (probe.intent_state, ==,
         WYL_POLICY_ROTATION_INTENT_STATUS_PENDING);
     g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD);
     g_assert_cmpuint (probe.old_generation, ==, 1);
     g_assert_false (sodium_is_zero ((const unsigned char *)
-            &probe.transaction_id, sizeof probe.transaction_id));
+        &probe.transaction_id, sizeof probe.transaction_id));
 
     /* Cross-check the probe against the intent sidecar the crash left behind. */
     TestProvider inspect = { 0 };
@@ -2131,7 +2155,7 @@ test_rotation_recovery_status (void)
   /* (c) When neither retained provider authenticates, the state is ambiguous. */
   {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-c-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2144,7 +2168,7 @@ test_rotation_recovery_status (void)
     WylPolicyRotationRecoveryAction action =
         WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
-            &probe, &action), ==, WYRELOG_E_OK);
+        &probe, &action), ==, WYRELOG_E_OK);
     g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
     g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
     g_assert_cmpuint (factory.frees, ==, 2);
@@ -2165,9 +2189,9 @@ test_rotation_recovery_status (void)
     WylPolicyRotationRecoveryAction action =
         WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status (NULL, &api,
-            &probe, &action), ==, WYRELOG_E_INVALID);
+        &probe, &action), ==, WYRELOG_E_INVALID);
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status ("p", NULL,
-            &probe, &action), ==, WYRELOG_E_INVALID);
+        &probe, &action), ==, WYRELOG_E_INVALID);
     g_assert_cmpuint (factory.old_mints, ==, 0);
   }
 }
@@ -2191,7 +2215,7 @@ test_rotation_recover (void)
       .fail_stage = WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &rotate_runtime, &fault), ==, WYRELOG_E_IO);
+        &rotate_runtime, &fault), ==, WYRELOG_E_IO);
 
     RecoveryFactory factory;
     wyl_policy_rotation_recovery_factory_t api;
@@ -2208,7 +2232,7 @@ test_rotation_recover (void)
     WylPolicyRotationRecoveryAction action =
         WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
     g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path,
-            &after_api, &probe, &action), ==, WYRELOG_E_OK);
+        &after_api, &probe, &action), ==, WYRELOG_E_OK);
     g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
     g_assert_cmpuint (probe.new_generation, ==, 2);
     g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
@@ -2224,7 +2248,7 @@ test_rotation_recover (void)
     assert_golden_verifies (store, salt, verifier);
     wyl_policy_store_close (store);
     g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
-        NULL);
+            NULL);
     g_assert_false (g_file_test (sidecar, G_FILE_TEST_EXISTS));
 
     /* Re-running recover on the finalized store is a no-op: still generation 2. */
@@ -2257,9 +2281,9 @@ test_rotation_recover (void)
     TestProvider new_provider = {.seed = 0x20 };
     TestRuntime rotate_runtime = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &rotate_runtime, NULL), ==, WYRELOG_E_OK);
+        &rotate_runtime, NULL), ==, WYRELOG_E_OK);
     g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
-        NULL);
+            NULL);
     g_assert_true (g_file_set_contents (sidecar, "residual-intent", 15, NULL));
 
     RecoveryFactory factory;
@@ -2366,17 +2390,17 @@ test_rotation_recover (void)
       .fail_stage = WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &rotate_runtime, &fault), ==, WYRELOG_E_IO);
+        &rotate_runtime, &fault), ==, WYRELOG_E_IO);
     g_autofree gchar *before = NULL;
     gsize before_len = 0;
     g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
 
     g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
-        NULL);
+            NULL);
     gchar *tampered = NULL;
     gsize tampered_len = 0;
     g_assert_true (g_file_get_contents (sidecar, &tampered, &tampered_len,
-            NULL));
+        NULL));
     g_assert_cmpuint (tampered_len, >, 0);
     tampered[tampered_len / 2] ^= 0x01;
     g_assert_true (g_file_set_contents (sidecar, tampered, tampered_len, NULL));
@@ -2466,9 +2490,9 @@ assert_file_lacks_secrets (const gchar *file, const guint8 cvk[32],
     return;
   g_assert_false (bytes_contains ((const guint8 *) data, len, cvk, 32));
   g_assert_false (bytes_contains ((const guint8 *) data, len, store_key_old,
-          32));
+      32));
   g_assert_false (bytes_contains ((const guint8 *) data, len, store_key_new,
-          32));
+      32));
   g_free (data);
 }
 
@@ -2503,10 +2527,10 @@ test_rotation_recover_secret_hygiene (void)
     .fail_stage = WYL_POLICY_ROTATION_AFTER_INTENT_WRITE,
   };
   g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-          &rotate_runtime, &fault), ==, WYRELOG_E_POLICY);
+      &rotate_runtime, &fault), ==, WYRELOG_E_POLICY);
 
   g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
-      NULL);
+          NULL);
   g_assert_true (g_file_test (sidecar, G_FILE_TEST_EXISTS));
   /* Neither the raw CVK nor either derived store key may appear on disk. */
   assert_file_lacks_secrets (sidecar, cvk, store_key_old, store_key_new);
@@ -2515,7 +2539,7 @@ test_rotation_recover_secret_hygiene (void)
   g_autofree gchar *tmp = g_strconcat (path, ".wyrelog-tmp", NULL);
   assert_file_lacks_secrets (tmp, cvk, store_key_old, store_key_new);
   g_autofree gchar *work = g_build_filename (dir, "policy.db.wyrelog-work",
-      NULL);
+          NULL);
   assert_file_lacks_secrets (work, cvk, store_key_old, store_key_new);
 
   /* Recover converges the stranded rotation to the new root at generation 2. */
@@ -2554,7 +2578,7 @@ rotate_crash_checkpoint (gpointer data, wyl_policy_store_rotation_stage_t stage)
 {
   (void) data;
   if (stage == rotate_crash_target)
-    _exit (99);
+    WYL_TEST_EXIT(99);
   return 0;
 }
 
@@ -2584,7 +2608,7 @@ rotate_crash_child (const gchar *path, int seam_id)
     .require_encrypted = TRUE,
   };
   wyrelog_error_t rc = wyl_policy_store_rotate_keyprovider (path, &old_opts,
-      &new_opts);
+          &new_opts);
   /* Only reached if the seam never fired; surface a non-99 status. */
   return rc == WYRELOG_E_OK ? 0 : 1;
 }
@@ -2594,12 +2618,11 @@ run_rotate_crash (const gchar *path, wyl_policy_store_rotation_stage_t seam)
 {
   g_autofree gchar *seam_str = g_strdup_printf ("%d", (int) seam);
   const gchar *argv[] = { rotate_crash_self_path, "--rotate-crash", path,
-    seam_str, NULL
-  };
+                          seam_str, NULL};
   GError *error = NULL;
   GSubprocess *proc = g_subprocess_newv (argv,
-      G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
-      &error);
+          G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+          &error);
   g_assert_no_error (error);
   g_assert_true (g_subprocess_wait (proc, NULL, &error));
   g_assert_no_error (error);
@@ -2619,7 +2642,7 @@ probe_new_generation (const gchar *path)
   WylPolicyRotationRecoveryAction action =
       WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
   g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
-          &probe, &action), ==, WYRELOG_E_OK);
+      &probe, &action), ==, WYRELOG_E_OK);
   g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
   return probe.new_generation;
 }
@@ -2689,7 +2712,7 @@ test_rotation_recover_crash_harness (void)
 
     /* Secret hygiene across the retained artifacts. */
     g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
-        NULL);
+            NULL);
     assert_file_lacks_secrets (path, cvk, store_key_old, store_key_new);
     assert_file_lacks_secrets (sidecar, cvk, store_key_old, store_key_new);
     g_autofree gchar *tmp = g_strconcat (path, ".wyrelog-tmp", NULL);
@@ -2744,7 +2767,7 @@ test_rotation_post_rename_warning_commits (void)
       .fail_stage = stages[iteration],
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==, WYRELOG_E_OK);
+        &runtime, &fault), ==, WYRELOG_E_OK);
     TestProvider reopened = {.seed = 0x20 };
     TestRuntime reopened_runtime = { 0 };
     wyl_policy_store_t *store = NULL;
@@ -2765,7 +2788,7 @@ test_rotation_provider_failures_preserve_old (void)
 {
   for (guint scenario = 0; scenario < 6; scenario++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-provider-fail-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2790,7 +2813,7 @@ test_rotation_provider_failures_preserve_old (void)
     TestRuntime runtime = { 0 };
     RotationFault fault = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==, WYRELOG_E_CRYPTO);
+        &runtime, &fault), ==, WYRELOG_E_CRYPTO);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -2817,7 +2840,7 @@ test_rotation_secure_memory_failures_preserve_old (void)
 {
   for (guint scenario = 0; scenario < 10; scenario++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-memory-fail-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2834,7 +2857,7 @@ test_rotation_secure_memory_failures_preserve_old (void)
       runtime.fail_lock_at = scenario - 4;
     RotationFault fault = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==, WYRELOG_E_NOMEM);
+        &runtime, &fault), ==, WYRELOG_E_NOMEM);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -2853,7 +2876,7 @@ test_rotation_policy_edges (void)
 {
   for (guint scenario = 0; scenario < 4; scenario++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-policy-edge-XXXXXX",
-        NULL);
+            NULL);
     g_assert_nonnull (dir);
     g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
     guint8 salt[16], verifier[32], cvk[32];
@@ -2871,7 +2894,7 @@ test_rotation_policy_edges (void)
           "CREATE TRIGGER trg_service_credential_events_no_delete BEFORE "
           "DELETE ON service_credential_events BEGIN SELECT 1; END;";
       g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), sql,
-              NULL, NULL, NULL), ==, SQLITE_OK);
+          NULL, NULL, NULL), ==, SQLITE_OK);
       wyl_policy_store_close (store);
     }
     g_autofree gchar *before = NULL;
@@ -2882,7 +2905,7 @@ test_rotation_policy_edges (void)
     TestRuntime runtime = { 0 };
     RotationFault fault = { 0 };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==, WYRELOG_E_POLICY);
+        &runtime, &fault), ==, WYRELOG_E_POLICY);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -2915,14 +2938,14 @@ test_rotation_policy_edges (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   guint8 legacy_auth_key[crypto_generichash_KEYBYTES];
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store,
-          legacy_auth_key, sizeof legacy_auth_key), ==, WYRELOG_E_OK);
+      legacy_auth_key, sizeof legacy_auth_key), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
   TestProvider old_provider = { 0 };
   TestProvider new_provider = {.seed = 0x20 };
   TestRuntime runtime = { 0 };
   RotationFault fault = { 0 };
   g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
-          &fault), ==, WYRELOG_E_OK);
+      &fault), ==, WYRELOG_E_OK);
   g_assert_cmpuint (old_provider.binding_derives, ==, 0);
   g_assert_cmpuint (old_provider.unseals, ==, 0);
   g_assert_cmpuint (new_provider.binding_derives, ==, 0);
@@ -2935,13 +2958,13 @@ test_rotation_policy_edges (void)
       WYRELOG_E_OK);
   WylPolicyRotationIntent legacy_pending = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
-          legacy_auth_key, sizeof legacy_auth_key, &legacy_pending), ==,
+      legacy_auth_key, sizeof legacy_auth_key, &legacy_pending), ==,
       WYRELOG_E_NOT_FOUND);
   sodium_memzero (legacy_auth_key, sizeof legacy_auth_key);
   const guint8 *missing = NULL;
   gsize missing_len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
-          &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
+      &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
   wyl_policy_store_close (store);
   g_assert_cmpint (g_remove (path), ==, 0);
   remove_rotation_sidecar (path);
@@ -2957,9 +2980,9 @@ main (int argc, char **argv)
   /* Child power-loss mode must be handled before g_test_init consumes argv. */
   if (argc >= 4 && g_strcmp0 (argv[1], "--rotate-crash") == 0) {
     if (sodium_init () < 0)
-      return 2;
-    return rotate_crash_child (argv[2],
-        (int) g_ascii_strtoll (argv[3], NULL, 10));
+      return wyl_test_normalize_exit_status (2);
+    return wyl_test_normalize_exit_status (rotate_crash_child (argv[2],
+               (int) g_ascii_strtoll (argv[3], NULL, 10)));
   }
   if (argc >= 1 && argv[0] != NULL && argv[0][0] != '\0')
     rotate_crash_self_path = g_canonicalize_filename (argv[0], NULL);
@@ -3022,5 +3045,5 @@ main (int argc, char **argv)
       test_rotation_secure_memory_failures_preserve_old);
   g_test_add_func ("/policy-store-service-cvk/rotation-policy-edges",
       test_rotation_policy_edges);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

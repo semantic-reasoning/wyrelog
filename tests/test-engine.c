@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <string.h>
@@ -1053,79 +1054,79 @@ main (void)
   gint rc;
 
   if ((rc = test_engine_open_canonical_smoke ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_eager_build_surfaces_errors ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_missing_decision_fail_closed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_legacy_decision_fallback ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_canonical_read_error_beats_legacy ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_null_template_dir_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_null_out_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_rejects_inline_session_state_capability ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_rejects_derived_session_state_capability ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_rejects_session_state_input_before_open ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_rejects_undeclared_session_state_input ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_template_path_rejects_session_state_input_before_open ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_close_then_finalize_safe ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_double_close_safe ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_concat_with_newline_helper ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_engine_open_empty_templates ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_manifest_validates_canonical ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_manifest_rejects_tampered_template ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_manifest_rejects_retraction_migrations ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_artifact_info_reports_identity ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_artifact_rejects_missing_migration ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc = test_template_artifact_rejects_duplicate_migration ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc =
       test_template_artifact_rejects_tampered_migration_signature ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   if ((rc =
       test_template_artifact_rejects_reserved_namespace_violation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

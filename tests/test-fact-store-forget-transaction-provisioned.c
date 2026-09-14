@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -284,12 +285,12 @@ int
 main (int argc, char **argv)
 {
   if (argc != 2 || argv[1] == NULL || !g_path_is_absolute (argv[1]))
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   provision_helper_path = argv[1];
   argv[1] = NULL;
   argc = 1;
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-store/forget-transaction/provisioned-commit-failure",
       test_provisioned_commit_failure_rolls_back);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <string.h>
 
@@ -646,57 +647,57 @@ main (void)
 
   /* Legacy flat-struct tests */
   if ((rc = check_domain_names ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_total_kinds ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_exhaustive_kind_names ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_out_of_range ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_zero_init ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   /* GObject ctor tests - PRINCIPAL */
   if ((rc = test_event_ctor_principal_valid ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_principal_nil_event_id_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_principal_nil_principal_id_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_principal_null_auth_method_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_principal_null_out_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_principal_sentinel_fsm_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   /* GObject ctor tests - SESSION */
   if ((rc = test_event_ctor_session_valid ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_session_sentinel_fsm_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_session_nil_event_id_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_session_nil_session_id_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_ctor_session_null_out_rejects ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   /* Autoptr, cross-domain, context, owned strings */
   if ((rc = test_event_autoptr_cleanup ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_cross_domain_accessor_isolation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_cross_domain_accessor_isolation_full ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_context_attachment ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = test_event_owned_strings ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
   /* Preserved total-kinds contract */
   if ((rc = test_event_total_kinds_preserved ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

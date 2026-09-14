@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <sodium.h>
 #include <string.h>
@@ -30,8 +31,8 @@ parse_fixture_secret (void)
 {
   wyl_service_credential_secret_t *secret = NULL;
   g_assert_cmpint (wyl_service_credential_secret_parse
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &secret), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, FIXTURE_SECRET,
+      strlen (FIXTURE_SECRET), &secret), ==, WYRELOG_E_OK);
   return secret;
 }
 
@@ -46,19 +47,19 @@ test_kat_and_verify (void)
   guint8 actual[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
   memset (actual, 0xa5, sizeof actual);
   g_assert_cmpint (wyl_service_credential_verifier_compute
-      (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
-          strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
-          sizeof salt, secret, actual, sizeof actual), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
+      strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
+      sizeof salt, secret, actual, sizeof actual), ==, WYRELOG_E_OK);
   g_assert_cmpmem (actual, sizeof actual, fixture_digest,
       sizeof fixture_digest);
 
   gboolean match = FALSE;
   g_assert_cmpint (wyl_service_credential_verify
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
-          WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
-          strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
-          sizeof salt, fixture_digest, sizeof fixture_digest, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &match), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
+      strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
+      sizeof salt, fixture_digest, sizeof fixture_digest, FIXTURE_SECRET,
+      strlen (FIXTURE_SECRET), &match), ==, WYRELOG_E_OK);
   g_assert_true (match);
 
   guint8 wrong[sizeof fixture_digest];
@@ -66,21 +67,21 @@ test_kat_and_verify (void)
   wrong[9] ^= 1;
   match = TRUE;
   g_assert_cmpint (wyl_service_credential_verify
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
-          WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
-          strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
-          sizeof salt, wrong, sizeof wrong, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &match), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
+      strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
+      sizeof salt, wrong, sizeof wrong, FIXTURE_SECRET,
+      strlen (FIXTURE_SECRET), &match), ==, WYRELOG_E_OK);
   g_assert_false (match);
 
   match = TRUE;
   const gchar *wrong_secret = "ASEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
   g_assert_cmpint (wyl_service_credential_verify
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
-          WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
-          strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
-          sizeof salt, fixture_digest, sizeof fixture_digest, wrong_secret,
-          strlen (wrong_secret), &match), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION,
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
+      strlen (FIXTURE_ID), "tenant-a", 8, "svc:tenant-a:worker", 19, salt,
+      sizeof salt, fixture_digest, sizeof fixture_digest, wrong_secret,
+      strlen (wrong_secret), &match), ==, WYRELOG_E_OK);
   g_assert_false (match);
   wyl_service_credential_secret_clear (&secret);
   g_assert_null (secret);
@@ -93,10 +94,10 @@ assert_verifier_changed (const guint8 *cvk, const gchar *id,
 {
   guint8 digest[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
   g_assert_cmpint (wyl_service_credential_verifier_compute
-      (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk,
-          WYL_SERVICE_CREDENTIAL_CVK_BYTES, id, strlen (id), tenant,
-          strlen (tenant), subject, strlen (subject), salt,
-          WYL_SERVICE_CREDENTIAL_SALT_BYTES, secret, digest, sizeof digest), ==,
+        (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk,
+      WYL_SERVICE_CREDENTIAL_CVK_BYTES, id, strlen (id), tenant,
+      strlen (tenant), subject, strlen (subject), salt,
+      WYL_SERVICE_CREDENTIAL_SALT_BYTES, secret, digest, sizeof digest), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (sodium_memcmp (digest, fixture_digest, sizeof digest), !=,
       0);
@@ -133,8 +134,8 @@ test_transcript_field_binding (void)
   wyl_service_credential_secret_t *other_secret = NULL;
   const gchar *other_text = "ASEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8";
   g_assert_cmpint (wyl_service_credential_secret_parse
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, other_text, strlen (other_text),
-          &other_secret), ==, WYRELOG_E_OK);
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, other_text, strlen (other_text),
+      &other_secret), ==, WYRELOG_E_OK);
   assert_verifier_changed (cvk, FIXTURE_ID, "tenant-a", "svc:tenant-a:worker",
       salt, other_secret);
   wyl_service_credential_secret_clear (&other_secret);
@@ -143,11 +144,11 @@ test_transcript_field_binding (void)
   guint8 first[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
   guint8 second[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES];
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "ab", 2, "svc:c", 5,
-          salt, sizeof salt, secret, first, sizeof first), ==, WYRELOG_E_OK);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "ab", 2, "svc:c", 5,
+      salt, sizeof salt, secret, first, sizeof first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "bsvc:c", 6,
-          salt, sizeof salt, secret, second, sizeof second), ==, WYRELOG_E_OK);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "bsvc:c", 6,
+      salt, sizeof salt, secret, second, sizeof second), ==, WYRELOG_E_OK);
   g_assert_cmpint (sodium_memcmp (first, second, sizeof first), !=, 0);
   wyl_service_credential_secret_clear (&secret);
 }
@@ -156,15 +157,15 @@ static void
 test_id_contract (void)
 {
   g_assert_true (wyl_service_credential_id_is_canonical (FIXTURE_ID,
-          strlen (FIXTURE_ID)));
+      strlen (FIXTURE_ID)));
   g_assert_false (wyl_service_credential_id_is_canonical
-      ("WLC_0ujtsYcgvSTl8PAuAdqWYSMnLOv", WYL_SERVICE_CREDENTIAL_ID_LEN));
+        ("WLC_0ujtsYcgvSTl8PAuAdqWYSMnLOv", WYL_SERVICE_CREDENTIAL_ID_LEN));
   g_assert_false (wyl_service_credential_id_is_canonical (FIXTURE_ID,
-          WYL_SERVICE_CREDENTIAL_ID_LEN - 1));
+      WYL_SERVICE_CREDENTIAL_ID_LEN - 1));
   g_assert_true (wyl_service_credential_id_is_canonical
-      ("wlc_000000000000000000000000000", WYL_SERVICE_CREDENTIAL_ID_LEN));
+        ("wlc_000000000000000000000000000", WYL_SERVICE_CREDENTIAL_ID_LEN));
   g_assert_false (wyl_service_credential_id_is_canonical
-      ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLO!", WYL_SERVICE_CREDENTIAL_ID_LEN));
+        ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLO!", WYL_SERVICE_CREDENTIAL_ID_LEN));
 
   gchar id[WYL_SERVICE_CREDENTIAL_ID_BUF];
   g_assert_cmpint (wyl_service_credential_id_new (id, sizeof id), ==,
@@ -174,7 +175,7 @@ test_id_contract (void)
   gchar canary[WYL_SERVICE_CREDENTIAL_ID_BUF];
   memset (canary, 0x5a, sizeof canary);
   g_assert_cmpint (wyl_service_credential_id_new (canary,
-          WYL_SERVICE_CREDENTIAL_ID_BUF - 1), ==, WYRELOG_E_INVALID);
+      WYL_SERVICE_CREDENTIAL_ID_BUF - 1), ==, WYRELOG_E_INVALID);
   for (guint i = 0; i < sizeof canary; i++)
     g_assert_cmpuint ((guint8) canary[i], ==, 0x5a);
 }
@@ -185,7 +186,7 @@ test_secret_codec_contract (void)
   wyl_service_credential_secret_t *secret = parse_fixture_secret ();
   gsize len = 0;
   const gchar *encoded = wyl_service_credential_secret_peek_encoded (secret,
-      &len);
+          &len);
   g_assert_cmpuint (len, ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
   g_assert_cmpmem (encoded, len, FIXTURE_SECRET, strlen (FIXTURE_SECRET));
   wyl_service_credential_secret_clear (&secret);
@@ -200,13 +201,13 @@ test_secret_codec_contract (void)
   for (guint i = 0; i < G_N_ELEMENTS (bad); i++) {
     secret = NULL;
     g_assert_cmpint (wyl_service_credential_secret_parse
-        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, bad[i], strlen (bad[i]),
-            &secret), ==, WYRELOG_E_INVALID);
+          (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, bad[i], strlen (bad[i]),
+        &secret), ==, WYRELOG_E_INVALID);
     g_assert_null (secret);
   }
   secret = NULL;
   g_assert_cmpint (wyl_service_credential_secret_parse (2, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &secret), ==, WYRELOG_E_INVALID);
+      strlen (FIXTURE_SECRET), &secret), ==, WYRELOG_E_INVALID);
   g_assert_null (secret);
 }
 
@@ -321,10 +322,11 @@ static wyl_service_credential_runtime_t
 make_runtime (TestRuntime *state)
 {
   return (wyl_service_credential_runtime_t) {
-  .secure_alloc = test_alloc,.secure_lock = test_lock,.secure_wipe =
-        test_wipe,.secure_unlock = test_unlock,.secure_free =
-        test_free,.new_id = test_new_id,.fill_random = test_random,.data =
-        state,};
+           .secure_alloc = test_alloc,.secure_lock = test_lock,.secure_wipe =
+               test_wipe,.secure_unlock = test_unlock,.secure_free =
+               test_free,.new_id = test_new_id,.fill_random = test_random,.data =
+               state,
+  };
 }
 
 static void
@@ -347,8 +349,8 @@ test_deterministic_generate_and_snapshot (void)
   memset (&material, 0xa5, sizeof material);
   wyl_service_credential_secret_t *secret = NULL;
   g_assert_cmpint (wyl_service_credential_generate_with_runtime (cvk,
-          sizeof cvk, "tenant-a", 8, "svc:tenant-a:worker", 19, &runtime,
-          &material, &secret), ==, WYRELOG_E_OK);
+      sizeof cvk, "tenant-a", 8, "svc:tenant-a:worker", 19, &runtime,
+      &material, &secret), ==, WYRELOG_E_OK);
   g_assert_cmpuint (state.id_calls, ==, 1);
   g_assert_cmpuint (state.rng_calls, ==, 1);
   g_assert_cmpmem (material.salt, sizeof material.salt, salt, sizeof salt);
@@ -356,7 +358,7 @@ test_deterministic_generate_and_snapshot (void)
       fixture_digest, sizeof fixture_digest);
   gsize text_len = 0;
   g_assert_cmpstr (wyl_service_credential_secret_peek_encoded (secret,
-          &text_len), ==, FIXTURE_SECRET);
+      &text_len), ==, FIXTURE_SECRET);
   g_assert_cmpuint (text_len, ==, strlen (FIXTURE_SECRET));
 
   /* The object owns a callback snapshot; changing the caller's table must not
@@ -382,8 +384,8 @@ assert_generate_failure (TestRuntime *state, wyrelog_error_t expected)
   wyl_service_credential_material_t before = material;
   wyl_service_credential_secret_t *secret = NULL;
   g_assert_cmpint (wyl_service_credential_generate_with_runtime (cvk,
-          sizeof cvk, "tenant-a", 8, "svc:tenant-a:worker", 19, &runtime,
-          &material, &secret), ==, expected);
+      sizeof cvk, "tenant-a", 8, "svc:tenant-a:worker", 19, &runtime,
+      &material, &secret), ==, expected);
   g_assert_cmpmem (&material, sizeof material, &before, sizeof before);
   g_assert_null (secret);
 }
@@ -450,8 +452,8 @@ test_failure_cleanup_and_transactionality (void)
   incomplete.secure_unlock = NULL;
   wyl_service_credential_secret_t *secret = NULL;
   g_assert_cmpint (wyl_service_credential_secret_parse_with_runtime
-      (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, FIXTURE_SECRET,
-          strlen (FIXTURE_SECRET), &incomplete, &secret), ==,
+        (WYL_SERVICE_CREDENTIAL_FORMAT_VERSION, FIXTURE_SECRET,
+      strlen (FIXTURE_SECRET), &incomplete, &secret), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpuint (incomplete_state.allocs, ==, 0);
 
@@ -461,8 +463,8 @@ test_failure_cleanup_and_transactionality (void)
   wyl_service_credential_material_t material = { 0 };
   secret = NULL;
   g_assert_cmpint (wyl_service_credential_generate_with_runtime (short_cvk,
-          sizeof short_cvk, "tenant-a", 8, "svc:tenant-a:worker", 19,
-          &runtime, &material, &secret), ==, WYRELOG_E_INVALID);
+      sizeof short_cvk, "tenant-a", 8, "svc:tenant-a:worker", 19,
+      &runtime, &material, &secret), ==, WYRELOG_E_INVALID);
   g_assert_cmpuint (prevalidation.id_calls, ==, 0);
   g_assert_cmpuint (prevalidation.rng_calls, ==, 0);
   g_assert_cmpuint (prevalidation.allocs, ==, 0);
@@ -471,19 +473,19 @@ test_failure_cleanup_and_transactionality (void)
   guint8 salt[WYL_SERVICE_CREDENTIAL_SALT_BYTES] = { 0 };
   guint8 expected[WYL_SERVICE_CREDENTIAL_VERIFIER_BYTES] = { 0 };
   g_assert_cmpint (wyl_service_credential_verify_with_runtime (2, 1,
-          expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
-          "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
-          expected, sizeof expected, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
-          &runtime, &match), ==, WYRELOG_E_INVALID);
+      expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
+      "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
+      expected, sizeof expected, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
+      &runtime, &match), ==, WYRELOG_E_INVALID);
   g_assert_true (match);
   g_assert_cmpuint (prevalidation.allocs, ==, 0);
 
   match = TRUE;
   g_assert_cmpint (wyl_service_credential_verify_with_runtime (1, 2,
-          expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
-          "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
-          expected, sizeof expected, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
-          &runtime, &match), ==, WYRELOG_E_INVALID);
+      expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
+      "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
+      expected, sizeof expected, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
+      &runtime, &match), ==, WYRELOG_E_INVALID);
   g_assert_true (match);
   g_assert_cmpuint (prevalidation.n_events, ==, 0);
 
@@ -493,10 +495,10 @@ test_failure_cleanup_and_transactionality (void)
   const gchar *noncanonical = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj9";
   match = TRUE;
   g_assert_cmpint (wyl_service_credential_verify_with_runtime (1, 1,
-          expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
-          "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
-          expected, sizeof expected, noncanonical, strlen (noncanonical),
-          &malformed_runtime, &match), ==, WYRELOG_E_INVALID);
+      expected, sizeof expected, FIXTURE_ID, strlen (FIXTURE_ID),
+      "tenant-a", 8, "svc:tenant-a:worker", 19, salt, sizeof salt,
+      expected, sizeof expected, noncanonical, strlen (noncanonical),
+      &malformed_runtime, &match), ==, WYRELOG_E_INVALID);
   g_assert_true (match);
   assert_last_events (&malformed_state, "WUF");
 }
@@ -513,53 +515,53 @@ test_version_bounds_and_unchanged_outputs (void)
   guint8 before[sizeof out];
   memcpy (before, out, sizeof out);
   g_assert_cmpint (wyl_service_credential_verifier_compute (2, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
-          "svc:tenant-a:worker", 19, salt, sizeof salt, secret, out,
-          sizeof out), ==, WYRELOG_E_INVALID);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
+      "svc:tenant-a:worker", 19, salt, sizeof salt, secret, out,
+      sizeof out), ==, WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
 
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "svc:a", 5,
-          salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_OK);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "svc:a", 5,
+      salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_OK);
 
   const gchar embedded_nul[] = { 'a', '\0', 'b' };
   const gchar invalid_utf8[] = { (gchar) 0xc3, '(' };
   memset (out, 0xa5, sizeof out);
   memcpy (before, out, sizeof out);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), embedded_nul,
-          sizeof embedded_nul, "svc:a", 5, salt, sizeof salt, secret, out,
-          sizeof out), ==, WYRELOG_E_INVALID);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), embedded_nul,
+      sizeof embedded_nul, "svc:a", 5, salt, sizeof salt, secret, out,
+      sizeof out), ==, WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), invalid_utf8,
-          sizeof invalid_utf8, "svc:a", 5, salt, sizeof salt, secret, out,
-          sizeof out), ==, WYRELOG_E_INVALID);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), invalid_utf8,
+      sizeof invalid_utf8, "svc:a", 5, salt, sizeof salt, secret, out,
+      sizeof out), ==, WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "", 0, "svc:a", 5,
-          salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_INVALID);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "", 0, "svc:a", 5,
+      salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
   g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk,
-          sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "svc:", 4,
-          salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_INVALID);
+      sizeof cvk, FIXTURE_ID, strlen (FIXTURE_ID), "a", 1, "svc:", 4,
+      salt, sizeof salt, secret, out, sizeof out), ==, WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
 
   gboolean match = TRUE;
   g_assert_cmpint (wyl_service_credential_verify (2,
-          WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk,
-          FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
-          "svc:tenant-a:worker", 19, salt, sizeof salt, fixture_digest,
-          sizeof fixture_digest, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
-          &match), ==, WYRELOG_E_INVALID);
+      WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk,
+      FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
+      "svc:tenant-a:worker", 19, salt, sizeof salt, fixture_digest,
+      sizeof fixture_digest, FIXTURE_SECRET, strlen (FIXTURE_SECRET),
+      &match), ==, WYRELOG_E_INVALID);
   g_assert_true (match);
 
   gchar too_long[WYL_SERVICE_CREDENTIAL_BINDING_MAX_BYTES + 1];
   memset (too_long, 'x', sizeof too_long);
   g_assert_cmpint (wyl_service_credential_verifier_compute
-      (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
-          strlen (FIXTURE_ID), too_long, sizeof too_long, "svc:tenant-a:worker",
-          19, salt, sizeof salt, secret, out, sizeof out), ==,
+        (WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION, cvk, sizeof cvk, FIXTURE_ID,
+      strlen (FIXTURE_ID), too_long, sizeof too_long, "svc:tenant-a:worker",
+      19, salt, sizeof salt, secret, out, sizeof out), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpmem (out, sizeof out, before, sizeof before);
   wyl_service_credential_secret_clear (&secret);
@@ -582,5 +584,5 @@ main (int argc, char **argv)
       test_failure_cleanup_and_transactionality);
   g_test_add_func ("/service-credential/version-bounds",
       test_version_bounds_and_unchanged_outputs);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -24,6 +24,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -54,7 +55,7 @@ write_policy_key (const gchar *path, guint8 seed)
   for (gsize i = 0; i < sizeof key; i++)
     key[i] = (guint8) (seed + i);
   g_assert_true (g_file_set_contents (path, (const gchar *) key, sizeof key,
-          NULL));
+      NULL));
 }
 
 static wyrelog_error_t
@@ -89,7 +90,7 @@ create_encrypted_store (const gchar *store_path, const gchar *key_path)
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
-          &cvk, &cvk_len), ==, WYRELOG_E_OK);
+      &cvk, &cvk_len), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
 }
 
@@ -200,7 +201,7 @@ run_wyctl_key (const gchar *subcommand, const gchar *store,
   g_autoptr (GError) error = NULL;
   gint wait_status = 0;
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          out, err, &wait_status, &error));
+      out, err, &wait_status, &error));
   g_assert_no_error (error);
   if (WIFEXITED (wait_status))
     return WEXITSTATUS (wait_status);
@@ -214,7 +215,7 @@ run_wyctl_argv (gchar **argv, gchar **out, gchar **err)
   g_autoptr (GError) error = NULL;
   gint wait_status = 0;
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          out, err, &wait_status, &error));
+      out, err, &wait_status, &error));
   g_assert_no_error (error);
   if (WIFEXITED (wait_status))
     return WEXITSTATUS (wait_status);
@@ -299,7 +300,7 @@ test_key_status_new (void)
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("status", fx.store, fx.old_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   if (rc != 0)
     g_printerr ("status-new stderr: %s\n", err);
   g_assert_cmpint (rc, ==, 0);
@@ -328,12 +329,12 @@ test_key_status_interrupted (void)
   /* Abort before the canonical rename: the store stays old-encrypted and a
    * pending rotation-intent sidecar is left behind. */
   g_assert_cmpint (rotate_store (fx.store, fx.old_key, fx.new_key,
-          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
+      WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
 
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("status", fx.store, fx.old_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   if (rc != 0)
     g_printerr ("status-interrupted stderr: %s\n", err);
   g_assert_cmpint (rc, ==, 0);
@@ -366,7 +367,7 @@ test_key_status_clean_old (void)
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("status", fx.store, fx.old_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   if (rc != 0)
     g_printerr ("status-clean-old stderr: %s\n", err);
   g_assert_cmpint (rc, ==, 0);
@@ -393,12 +394,12 @@ test_key_recover_converges_and_idempotent (void)
   key_fixture_init (&fx);
   create_encrypted_store (fx.store, fx.old_key);
   g_assert_cmpint (rotate_store (fx.store, fx.old_key, fx.new_key,
-          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
+      WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
 
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("recover", fx.store, fx.old_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   if (rc != 0)
     g_printerr ("recover stderr: %s\n", err);
   g_assert_cmpint (rc, ==, 0);
@@ -409,7 +410,7 @@ test_key_recover_converges_and_idempotent (void)
   g_autofree gchar *sout = NULL;
   g_autofree gchar *serr = NULL;
   g_assert_cmpint (run_wyctl_key ("status", fx.store, fx.old_spec, fx.new_spec,
-          &sout, &serr), ==, 0);
+      &sout, &serr), ==, 0);
   g_autofree gchar *state = extract_kv (sout, "state");
   g_assert_cmpstr (state, ==, "new");
 
@@ -417,7 +418,7 @@ test_key_recover_converges_and_idempotent (void)
   g_autofree gchar *out2 = NULL;
   g_autofree gchar *err2 = NULL;
   gint rc2 = run_wyctl_key ("recover", fx.store, fx.old_spec, fx.new_spec,
-      &out2, &err2);
+          &out2, &err2);
   if (rc2 != 0)
     g_printerr ("recover-again stderr: %s\n", err2);
   g_assert_cmpint (rc2, ==, 0);
@@ -435,12 +436,12 @@ test_key_resume_alias (void)
   key_fixture_init (&fx);
   create_encrypted_store (fx.store, fx.old_key);
   g_assert_cmpint (rotate_store (fx.store, fx.old_key, fx.new_key,
-          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
+      WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
 
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("resume", fx.store, fx.old_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   if (rc != 0)
     g_printerr ("resume stderr: %s\n", err);
   g_assert_cmpint (rc, ==, 0);
@@ -468,7 +469,7 @@ test_key_recover_fail_closed_ambiguous (void)
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   gint rc = run_wyctl_key ("recover", fx.store, wrong_spec, fx.new_spec,
-      &out, &err);
+          &out, &err);
   g_assert_cmpint (rc, ==, 1);
   g_assert_nonnull (g_strstr_len (err, -1, "wyctl: key recovery fail-closed:"));
   g_assert_nonnull (g_strstr_len (err, -1, "operator action required"));
@@ -499,7 +500,7 @@ test_key_usage_and_unreadable (void)
     gint rc = run_wyctl_argv (argv, &out, &err);
     g_assert_cmpint (rc, ==, 2);
     g_assert_nonnull (g_strstr_len (err, -1,
-            "wyctl: missing --from-keyprovider"));
+        "wyctl: missing --from-keyprovider"));
   }
 
   /* recover missing --to-keyprovider -> usage exit 2. */
@@ -513,7 +514,7 @@ test_key_usage_and_unreadable (void)
     gint rc = run_wyctl_argv (argv, &out, &err);
     g_assert_cmpint (rc, ==, 2);
     g_assert_nonnull (g_strstr_len (err, -1,
-            "wyctl: missing --to-keyprovider"));
+        "wyctl: missing --to-keyprovider"));
   }
 
   /* recover missing --store -> usage exit 2. */
@@ -536,7 +537,7 @@ test_key_usage_and_unreadable (void)
     g_autofree gchar *missing = g_build_filename (fx.dir, "no-such-key", NULL);
     g_autofree gchar *missing_spec = file_spec (missing);
     gint rc = run_wyctl_key ("status", fx.store, missing_spec, fx.new_spec,
-        &out, &err);
+            &out, &err);
     g_assert_cmpint (rc, ==, 1);
     g_assert_nonnull (g_strstr_len (err, -1, "keyprovider unreadable"));
   }
@@ -553,7 +554,7 @@ test_key_secret_hygiene (void)
   key_fixture_init (&fx);
   create_encrypted_store (fx.store, fx.old_key);
   g_assert_cmpint (rotate_store (fx.store, fx.old_key, fx.new_key,
-          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
+      WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME), ==, WYRELOG_E_IO);
 
   guint8 old_bytes[KEY_BYTES];
   guint8 new_bytes[KEY_BYTES];
@@ -573,7 +574,7 @@ test_key_secret_hygiene (void)
   g_autofree gchar *sout = NULL;
   g_autofree gchar *serr = NULL;
   g_assert_cmpint (run_wyctl_key ("status", fx.store, fx.old_spec, fx.new_spec,
-          &sout, &serr), ==, 0);
+      &sout, &serr), ==, 0);
   g_string_append (captured, sout);
   g_string_append (captured, serr);
 
@@ -581,14 +582,14 @@ test_key_secret_hygiene (void)
   g_autofree gchar *rout = NULL;
   g_autofree gchar *rerr = NULL;
   g_assert_cmpint (run_wyctl_key ("recover", fx.store, fx.old_spec, fx.new_spec,
-          &rout, &rerr), ==, 0);
+      &rout, &rerr), ==, 0);
   g_string_append (captured, rout);
   g_string_append (captured, rerr);
 
   g_assert_false (bytes_contained (captured->str, captured->len, old_bytes,
-          KEY_BYTES));
+      KEY_BYTES));
   g_assert_false (bytes_contained (captured->str, captured->len, new_bytes,
-          KEY_BYTES));
+      KEY_BYTES));
 
   key_fixture_clear (&fx);
 }
@@ -611,5 +612,5 @@ main (int argc, char **argv)
       test_key_usage_and_unreadable);
   g_test_add_func ("/wyctl/key/secret-hygiene", test_key_secret_hygiene);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

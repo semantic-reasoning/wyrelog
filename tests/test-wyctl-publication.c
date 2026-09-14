@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <string.h>
@@ -78,14 +79,15 @@ fake_stage_exact (gpointer self, const WyctlPublicationPlan *plan,
   fake_backend_add_call (backend, FAKE_STAGE_EXACT);
   g_assert_true (wyctl_publication_plan_is_valid (plan));
   g_assert_true (wyctl_publication_expected_credential_is_valid
-      (credential_id, credential_secret));
+        (credential_id, credential_secret));
   *out_replayed = TRUE;
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity =
-        TRUE,.cleanup_required = FALSE,};
+        TRUE,.cleanup_required = FALSE,
+  };
   return wyctl_publication_receipt_create (plan, "exact-stage-identity",
-      out_receipt);
+             out_receipt);
 }
 
 static wyrelog_error_t
@@ -129,13 +131,14 @@ fake_commit (gpointer self, WyctlPublicationReceipt *receipt,
   g_assert_nonnull (credential_secret->text);
   backend->seen_credential_id = g_strdup (credential_id);
   backend->seen_secret = g_strndup (credential_secret->text,
-      credential_secret->len);
+          credential_secret->len);
   g_free (receipt->stage_identity);
   receipt->stage_identity = g_strdup ("committed-stage-identity");
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity =
-        TRUE,.cleanup_required = FALSE,};
+        TRUE,.cleanup_required = FALSE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -150,12 +153,13 @@ fake_inspect (gpointer self, const WyctlPublicationReceipt *receipt,
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
   g_assert_cmpstr (receipt->stage_identity, ==, "committed-stage-identity");
   g_assert_true (wyl_service_credential_id_is_canonical
-      (expected_credential_id, strlen (expected_credential_id)));
+        (expected_credential_id, strlen (expected_credential_id)));
   g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN,.exact_identity =
-        TRUE,.cleanup_required = TRUE,};
+        TRUE,.cleanup_required = TRUE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -169,12 +173,13 @@ fake_resync (gpointer self, const WyctlPublicationReceipt *receipt,
   fake_backend_add_call (backend, FAKE_RESYNC);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
   g_assert_true (wyl_service_credential_id_is_canonical
-      (expected_credential_id, strlen (expected_credential_id)));
+        (expected_credential_id, strlen (expected_credential_id)));
   g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity
-        = TRUE,.cleanup_required = FALSE,};
+      = TRUE,.cleanup_required = FALSE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -188,12 +193,13 @@ fake_cleanup (gpointer self, const WyctlPublicationReceipt *receipt,
   fake_backend_add_call (backend, FAKE_CLEANUP);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
   g_assert_true (wyl_service_credential_id_is_canonical
-      (expected_credential_id, strlen (expected_credential_id)));
+        (expected_credential_id, strlen (expected_credential_id)));
   g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity
-        = TRUE,.cleanup_required = FALSE,};
+      = TRUE,.cleanup_required = FALSE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -202,23 +208,23 @@ test_plan_create_and_validate (void)
 {
   WyctlPublicationPlan plan = { 0 };
   g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
-          "parent-identity", &plan), ==, WYRELOG_E_OK);
+      "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_plan_is_valid (&plan));
   g_assert_nonnull (plan.reservation_id);
   g_assert_cmpuint (strlen (plan.reservation_id), ==, WYL_ID_STRING_LEN);
   g_assert_true (g_str_has_prefix (plan.stage_basename, "wypub-"));
   WyctlPublicationPlan rejected = { 0 };
   g_assert_cmpint (wyctl_publication_plan_create ("nested/credential.txt",
-          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
+      "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyctl_publication_plan_create ("CON.txt",
-          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
+      "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
   g_autofree gchar *max_leaf = g_strnfill (255, 'a');
   g_autofree gchar *too_long = g_strnfill (256, 'a');
   g_assert_cmpint (wyctl_publication_plan_create (max_leaf,
-          "parent-identity", &rejected), ==, WYRELOG_E_OK);
+      "parent-identity", &rejected), ==, WYRELOG_E_OK);
   wyctl_publication_plan_clear (&rejected);
   g_assert_cmpint (wyctl_publication_plan_create (too_long,
-          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
+      "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
 
   WyctlPublicationPlan clone = { 0 };
   g_assert_cmpint (wyctl_publication_plan_clone (&plan, &clone), ==,
@@ -239,9 +245,9 @@ test_receipt_create_and_validate (void)
   WyctlPublicationPlan plan = { 0 };
   WyctlPublicationReceipt receipt = { 0 };
   g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
-          "parent-identity", &plan), ==, WYRELOG_E_OK);
+      "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_receipt_create (&plan,
-          "stage-identity", &receipt), ==, WYRELOG_E_OK);
+      "stage-identity", &receipt), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
   g_assert_cmpstr (receipt.destination, ==, plan.destination);
   g_assert_cmpstr (receipt.reservation_id, ==, plan.reservation_id);
@@ -258,20 +264,20 @@ test_credential_document_roundtrip (void)
 {
   const gchar *credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
   g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
-      'A');
+          'A');
   g_autofree gchar *document = NULL;
   g_autofree gchar *decoded_id = NULL;
   WyctlSensitiveText decoded_secret = { 0 };
 
   g_assert_cmpint (wyctl_publication_credential_document_encode (credential_id,
-          secret, &document), ==, WYRELOG_E_OK);
+      secret, &document), ==, WYRELOG_E_OK);
   g_assert_nonnull (document);
   g_assert_cmpstr (document,
       ==,
       "{\"version\":1,\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"credential_secret\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}\n");
 
   g_assert_cmpint (wyctl_publication_credential_document_decode (document,
-          strlen (document), &decoded_id, &decoded_secret), ==, WYRELOG_E_OK);
+      strlen (document), &decoded_id, &decoded_secret), ==, WYRELOG_E_OK);
   g_assert_cmpstr (decoded_id, ==, credential_id);
   g_assert_cmpuint (decoded_secret.len, ==,
       WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
@@ -286,17 +292,17 @@ static void
 test_credential_document_rejects_noncanonical_form (void)
 {
   g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
-      'A');
+          'A');
   g_autofree gchar *document = NULL;
   g_autofree gchar *decoded_id = NULL;
   WyctlSensitiveText decoded_secret = { 0 };
 
   g_assert_cmpint (wyctl_publication_credential_document_encode
-      ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &document), ==, WYRELOG_E_OK);
+        ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &document), ==, WYRELOG_E_OK);
   g_autofree gchar *mutated = g_strdup (document);
   mutated[0] = ' ';
   g_assert_cmpint (wyctl_publication_credential_document_decode (mutated,
-          strlen (mutated), &decoded_id, &decoded_secret), ==,
+      strlen (mutated), &decoded_id, &decoded_secret), ==,
       WYRELOG_E_INVALID);
   g_assert_null (decoded_id);
   g_assert_null (decoded_secret.text);
@@ -329,13 +335,13 @@ test_backend_conformance_harness (void)
     .cleanup = fake_cleanup,
   };
   g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
-      'A');
+          'A');
   WyctlPublicationResult result = { 0 };
 
   fake_backend_init (&backend);
   g_assert_cmpint (wyctl_publication_backend_conformance_run (&vtable,
-          &backend, "credential.txt", "parent-identity",
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &result), ==,
+      &backend, "credential.txt", "parent-identity",
+      "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &result), ==,
       WYRELOG_E_OK);
   g_assert_true (wyctl_publication_result_is_valid (&result));
   g_assert_cmpint (result.kind, ==,
@@ -377,18 +383,18 @@ test_receipt_target_acquire_contract (void)
 
   fake_backend_init (&backend);
   g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
-          "parent-identity", &plan), ==, WYRELOG_E_OK);
+      "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_receipt_create (&plan,
-          "stage-identity", &receipt), ==, WYRELOG_E_OK);
+      "stage-identity", &receipt), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
-          &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_OK);
+      &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_OK);
   g_assert_nonnull (lease);
   g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
   wyctl_publication_backend_receipt_target_release (&vtable, &backend, &lease);
   g_assert_null (lease);
 
   g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
-          &backend, &plan, &receipt, TRUE, &lease, &kind), ==, WYRELOG_E_OK);
+      &backend, &plan, &receipt, TRUE, &lease, &kind), ==, WYRELOG_E_OK);
   g_assert_nonnull (lease);
   g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION);
   wyctl_publication_backend_receipt_target_release (&vtable, &backend, &lease);
@@ -397,7 +403,7 @@ test_receipt_target_acquire_contract (void)
 
   backend.target_acquire_rc = WYRELOG_E_IO;
   g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
-          &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_IO);
+      &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_IO);
   g_assert_null (lease);
   g_assert_cmpint (kind, ==,
       WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
@@ -406,7 +412,7 @@ test_receipt_target_acquire_contract (void)
   backend.target_acquire_rc = WYRELOG_E_OK;
   backend.target_returns_foreign_with_lease = TRUE;
   g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
-          &backend, &plan, &receipt, FALSE, &lease, &kind), ==,
+      &backend, &plan, &receipt, FALSE, &lease, &kind), ==,
       WYRELOG_E_INVALID);
   g_assert_null (lease);
   g_assert_cmpint (kind, ==,
@@ -427,17 +433,16 @@ test_stage_exact_contract (void)
   WyctlPublicationReceipt receipt = { 0 };
   WyctlPublicationResult result = { 0 };
   g_autofree gchar *secret_text = g_strnfill
-      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
-  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)
-  };
+        (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)};
   gboolean replayed = FALSE;
 
   fake_backend_init (&backend);
   g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
-          "parent-identity", &plan), ==, WYRELOG_E_OK);
+      "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_backend_stage_exact (&vtable, &backend,
-          &plan, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
-          &result, &replayed), ==, WYRELOG_E_OK);
+      &plan, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
+      &result, &replayed), ==, WYRELOG_E_OK);
   g_assert_true (replayed);
   g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
@@ -471,5 +476,5 @@ main (int argc, char **argv)
       test_stage_exact_contract);
   g_test_add_func ("/wyctl/publication/receipt-target-acquire-contract",
       test_receipt_target_acquire_contract);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
@@ -132,40 +133,40 @@ check_golden_trace (void)
   static const step_case_t cases[] = {
     /* canonical: idle -> active -> elevated -> active -> expiring -> closed */
     {WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_REQUEST,
-        WYRELOG_E_OK, WYL_SESSION_STATE_ACTIVE},
+     WYRELOG_E_OK, WYL_SESSION_STATE_ACTIVE},
     {WYL_SESSION_STATE_ACTIVE, WYL_SESSION_EVENT_ELEVATE_GRANT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_ELEVATED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_ELEVATED},
     {WYL_SESSION_STATE_ELEVATED, WYL_SESSION_EVENT_ELEVATE_DROP,
-        WYRELOG_E_OK, WYL_SESSION_STATE_ACTIVE},
+     WYRELOG_E_OK, WYL_SESSION_STATE_ACTIVE},
     {WYL_SESSION_STATE_ACTIVE, WYL_SESSION_EVENT_EXPIRY,
-        WYRELOG_E_OK, WYL_SESSION_STATE_EXPIRING},
+     WYRELOG_E_OK, WYL_SESSION_STATE_EXPIRING},
     {WYL_SESSION_STATE_EXPIRING, WYL_SESSION_EVENT_LOGOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     /* coverage of the remaining defined transitions */
     {WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_EXPIRY,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     {WYL_SESSION_STATE_IDLE, WYL_SESSION_EVENT_LOGOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     {WYL_SESSION_STATE_ACTIVE, WYL_SESSION_EVENT_IDLE_TIMEOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_IDLE},
+     WYRELOG_E_OK, WYL_SESSION_STATE_IDLE},
     {WYL_SESSION_STATE_ACTIVE, WYL_SESSION_EVENT_LOGOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     {WYL_SESSION_STATE_ELEVATED, WYL_SESSION_EVENT_IDLE_TIMEOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_IDLE},
+     WYRELOG_E_OK, WYL_SESSION_STATE_IDLE},
     {WYL_SESSION_STATE_ELEVATED, WYL_SESSION_EVENT_EXPIRY,
-        WYRELOG_E_OK, WYL_SESSION_STATE_EXPIRING},
+     WYRELOG_E_OK, WYL_SESSION_STATE_EXPIRING},
     {WYL_SESSION_STATE_ELEVATED, WYL_SESSION_EVENT_LOGOUT,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     {WYL_SESSION_STATE_EXPIRING, WYL_SESSION_EVENT_EXPIRY,
-        WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
+     WYRELOG_E_OK, WYL_SESSION_STATE_CLOSED},
     /* negatives — terminal state */
     {WYL_SESSION_STATE_CLOSED, WYL_SESSION_EVENT_REQUEST,
-        WYRELOG_E_POLICY, WYL_SESSION_STATE_CLOSED /* unused */ },
+     WYRELOG_E_POLICY, WYL_SESSION_STATE_CLOSED /* unused */ },
     /* negatives — intentional omissions on `expiring` */
     {WYL_SESSION_STATE_EXPIRING, WYL_SESSION_EVENT_REQUEST,
-        WYRELOG_E_POLICY, WYL_SESSION_STATE_EXPIRING /* unused */ },
+     WYRELOG_E_POLICY, WYL_SESSION_STATE_EXPIRING /* unused */ },
     {WYL_SESSION_STATE_EXPIRING, WYL_SESSION_EVENT_IDLE_TIMEOUT,
-        WYRELOG_E_POLICY, WYL_SESSION_STATE_EXPIRING /* unused */ },
+     WYRELOG_E_POLICY, WYL_SESSION_STATE_EXPIRING /* unused */ },
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
@@ -187,13 +188,13 @@ check_argument_validation (void)
 {
   wyl_session_state_t to = WYL_SESSION_STATE_LAST_;
   if (wyl_fsm_session_step (WYL_SESSION_STATE_IDLE,
-          WYL_SESSION_EVENT_REQUEST, NULL) != WYRELOG_E_INVALID)
+      WYL_SESSION_EVENT_REQUEST, NULL) != WYRELOG_E_INVALID)
     return 71;
   if (wyl_fsm_session_step (WYL_SESSION_STATE_LAST_,
-          WYL_SESSION_EVENT_REQUEST, &to) != WYRELOG_E_INVALID)
+      WYL_SESSION_EVENT_REQUEST, &to) != WYRELOG_E_INVALID)
     return 72;
   if (wyl_fsm_session_step (WYL_SESSION_STATE_IDLE,
-          WYL_SESSION_EVENT_LAST_, &to) != WYRELOG_E_INVALID)
+      WYL_SESSION_EVENT_LAST_, &to) != WYRELOG_E_INVALID)
     return 73;
   return 0;
 }
@@ -264,7 +265,7 @@ check_text_mirror (void)
   gsize len = 0;
   g_autoptr (GError) err = NULL;
   if (!g_file_get_contents (WYL_TEST_FSM_SESSION_DL_PATH, &contents,
-          &len, &err)) {
+      &len, &err)) {
     g_printerr ("cannot read %s: %s\n", WYL_TEST_FSM_SESSION_DL_PATH,
         err ? err->message : "?");
     return 81;
@@ -318,16 +319,16 @@ main (void)
 {
   gint rc;
   if ((rc = check_stratification ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_functional_ic ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_name_roundtrip ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_golden_trace ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_argument_validation ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_text_mirror ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <sqlite3.h>
 #include <string.h>
@@ -14,14 +15,14 @@ register_service (wyl_policy_store_t *store, const gchar *subject_id)
   sqlite3_stmt *stmt = NULL;
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_prepare_v2 (db,
-          "INSERT INTO service_principals "
-          "(subject_id,display_name,state,generation,created_by,created_at_us,"
-          "updated_at_us) VALUES (?,?,'active',1,'test-admin',1,1);",
-          -1, &stmt, NULL), ==, SQLITE_OK);
+      "INSERT INTO service_principals "
+      "(subject_id,display_name,state,generation,created_by,created_at_us,"
+      "updated_at_us) VALUES (?,?,'active',1,'test-admin',1,1);",
+      -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, subject_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 2, subject_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
 }
@@ -40,7 +41,7 @@ exec_fixture_sql (wyl_policy_store_t *store, const gchar *sql)
 {
   gchar *message = NULL;
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), sql, NULL,
-          NULL, &message), ==, SQLITE_OK);
+      NULL, &message), ==, SQLITE_OK);
   sqlite3_free (message);
 }
 
@@ -50,9 +51,9 @@ count_subject_rows (wyl_policy_store_t *store, const gchar *sql,
 {
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql,
-          -1, &stmt, NULL), ==, SQLITE_OK);
+      -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, subject_id, -1,
-          SQLITE_TRANSIENT), ==, SQLITE_OK);
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -65,7 +66,7 @@ count_all_rows (wyl_policy_store_t *store, const gchar *table)
   g_autofree gchar *sql = g_strdup_printf ("SELECT count(*) FROM %s;", table);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql,
-          -1, &stmt, NULL), ==, SQLITE_OK);
+      -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -132,7 +133,7 @@ test_bootstrap_rejects_service_namespace (void)
     gboolean applied = TRUE;
     gchar *existing = (gchar *) 0x1;
     g_assert_cmpint (wyl_policy_store_apply_bootstrap_admin (store,
-            subjects[i], TRUE, &applied, &existing), ==, WYRELOG_E_POLICY);
+        subjects[i], TRUE, &applied, &existing), ==, WYRELOG_E_POLICY);
     g_assert_false (applied);
     g_assert_null (existing);
   }
@@ -140,7 +141,7 @@ test_bootstrap_rejects_service_namespace (void)
   gboolean applied = FALSE;
   g_autofree gchar *existing = NULL;
   g_assert_cmpint (wyl_policy_store_apply_bootstrap_admin (store,
-          "human.bootstrap", FALSE, &applied, &existing), ==, WYRELOG_E_OK);
+      "human.bootstrap", FALSE, &applied, &existing), ==, WYRELOG_E_OK);
   g_assert_true (applied);
   g_assert_null (existing);
   wyl_policy_store_close (store);
@@ -163,19 +164,19 @@ test_totp_rejects_service_namespace (void)
     };
     memset (enrollment.secret, 0x5a, sizeof enrollment.secret);
     g_assert_cmpint (wyl_policy_store_totp_enrollment_insert (store,
-            &enrollment), ==, WYRELOG_E_POLICY);
+        &enrollment), ==, WYRELOG_E_POLICY);
     wyl_totp_enrollment_clear (&enrollment);
 
     WylTotpEnrollment out = { 0 };
     gboolean found = TRUE;
     g_assert_cmpint (wyl_policy_store_totp_enrollment_lookup (store,
-            subjects[i], &out, &found), ==, WYRELOG_E_POLICY);
+        subjects[i], &out, &found), ==, WYRELOG_E_POLICY);
     g_assert_false (found);
     g_assert_null (out.subject_id);
     g_assert_cmpint (wyl_policy_store_totp_enrollment_update_step (store,
-            subjects[i], 2), ==, WYRELOG_E_POLICY);
+        subjects[i], 2), ==, WYRELOG_E_POLICY);
     g_assert_cmpint (wyl_policy_store_totp_enrollment_delete (store,
-            subjects[i]), ==, WYRELOG_E_OK);
+        subjects[i]), ==, WYRELOG_E_OK);
   }
 
   WylTotpEnrollment human = {
@@ -188,7 +189,7 @@ test_totp_rejects_service_namespace (void)
       WYRELOG_E_OK);
   wyl_totp_enrollment_clear (&human);
   g_assert_cmpint (wyl_policy_store_totp_enrollment_delete (store,
-          "human.totp"), ==, WYRELOG_E_OK);
+      "human.totp"), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
 }
 
@@ -211,7 +212,7 @@ test_mfa_enrollment_rejects_service_namespace (void)
     };
     memset (enrollment.secret, 0x5a, sizeof enrollment.secret);
     g_assert_cmpint (wyl_mfa_enrollment_commit (store, &enrollment,
-            "human.admin", "service-mfa-rejected", "test", FALSE), ==,
+        "human.admin", "service-mfa-rejected", "test", FALSE), ==,
         WYRELOG_E_POLICY);
     g_assert_cmpint (count_all_rows (store, "totp_enrollments"), ==,
         totp_before);
@@ -228,15 +229,15 @@ test_mfa_enrollment_rejects_service_namespace (void)
   };
   memset (human.secret, 0x33, sizeof human.secret);
   g_assert_cmpint (wyl_mfa_enrollment_commit (store, &human, "human.admin",
-          "human-mfa-enrolled", "test", FALSE), ==, WYRELOG_E_OK);
+      "human-mfa-enrolled", "test", FALSE), ==, WYRELOG_E_OK);
   g_assert_nonnull (human.id_uuidv7);
   g_assert_cmpint (count_all_rows (store, "totp_enrollments"), ==,
       totp_before + 1);
   g_assert_cmpint (count_all_rows (store, "audit_events"), ==,
       audit_before + 1);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM audit_events WHERE resource_id = ? "
-          "AND action = 'mfa_enrolled';", human.id_uuidv7), ==, 1);
+      "SELECT count(*) FROM audit_events WHERE resource_id = ? "
+      "AND action = 'mfa_enrolled';", human.id_uuidv7), ==, 1);
   wyl_totp_enrollment_clear (&human);
   wyl_policy_store_close (store);
 }
@@ -247,56 +248,56 @@ test_authorization_is_kind_aware (void)
   wyl_policy_store_t *store = open_store ();
   register_service (store, "svc:registered");
   g_assert_cmpint (wyl_policy_store_upsert_role (store, "app.reader",
-          "application reader"), ==, WYRELOG_E_OK);
+      "application reader"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_upsert_permission (store, "app.read",
-          "application read", "basic"), ==, WYRELOG_E_OK);
+      "application read", "basic"), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:unregistered", "app.reader", "tenant-a", TRUE), ==,
+      "svc:unregistered", "app.reader", "tenant-a", TRUE), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_POLICY);
+      "svc:", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:unregistered", "app.read", "tenant-a", TRUE), ==,
+      "svc:unregistered", "app.read", "tenant-a", TRUE), ==,
       WYRELOG_E_POLICY);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:registered", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+      "svc:registered", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
   /* #614: a custom permission persisted with class 'basic' is control-plane,
    * so a service principal can no longer be granted it directly. */
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:registered", "app.read", "tenant-a", TRUE), ==,
+      "svc:registered", "app.read", "tenant-a", TRUE), ==,
       WYRELOG_E_POLICY);
   gboolean has_permission = FALSE;
   g_assert_cmpint (wyl_policy_store_subject_has_permission (store,
-          "svc:registered", "app.read", "tenant-a", &has_permission), ==,
+      "svc:registered", "app.read", "tenant-a", &has_permission), ==,
       WYRELOG_E_OK);
   g_assert_false (has_permission);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:registered", "wr.login.skip_mfa", "login", TRUE), ==,
+      "svc:registered", "wr.login.skip_mfa", "login", TRUE), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:unregistered", "wr.login.skip_mfa", "login", TRUE), ==,
+      "svc:unregistered", "wr.login.skip_mfa", "login", TRUE), ==,
       WYRELOG_E_POLICY);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "human.authz", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+      "human.authz", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "human.authz", "app.read", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+      "human.authz", "app.read", "tenant-a", TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, "svc:bad",
-          "unverified"), ==, WYRELOG_E_POLICY);
+      "unverified"), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_set_session_state (store, "svc:bad",
-          "active"), ==, WYRELOG_E_POLICY);
+      "active"), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_permission_state_transition (store,
-          "svc:registered", "app.read", "tenant-a", "grant", NULL), ==,
+      "svc:registered", "app.read", "tenant-a", "grant", NULL), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, "human.authz",
-          "unverified"), ==, WYRELOG_E_OK);
+      "unverified"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_apply_permission_state_transition (store,
-          "human.authz", "app.read", "tenant-a", "grant", NULL), ==,
+      "human.authz", "app.read", "tenant-a", "grant", NULL), ==,
       WYRELOG_E_OK);
   wyl_policy_store_close (store);
 }
@@ -307,9 +308,9 @@ test_destructive_remediation (void)
   wyl_policy_store_t *store = open_store ();
   register_service (store, "svc:registered");
   g_assert_cmpint (wyl_policy_store_upsert_role (store, "app.reader",
-          "application reader"), ==, WYRELOG_E_OK);
+      "application reader"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_upsert_permission (store, "app.read",
-          "application read", "basic"), ==, WYRELOG_E_OK);
+      "application read", "basic"), ==, WYRELOG_E_OK);
 
   exec_fixture_sql (store,
       "INSERT INTO role_memberships(subject_id,role_id,scope,granted_at) "
@@ -322,58 +323,58 @@ test_destructive_remediation (void)
    * general permission projection. */
   wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_HUMAN;
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
-          &kind), ==, WYRELOG_E_OK);
+      &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
 
   /* Audit failure occurs after delete + event append.  The wrapper must roll
    * both back so repair can be retried without a torn event. */
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation_with_audit
-      (store, "svc:legacy", "app.read", "tenant-a", FALSE, "not-an-audit-id", 1,
-          "repair-admin", "permission.revoke", "svc:legacy", NULL, NULL,
-          "repair-request", WYL_DECISION_ALLOW), ==, WYRELOG_E_INVALID);
+        (store, "svc:legacy", "app.read", "tenant-a", FALSE, "not-an-audit-id", 1,
+      "repair-admin", "permission.revoke", "svc:legacy", NULL, NULL,
+      "repair-request", WYL_DECISION_ALLOW), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
-          "svc:legacy"), ==, 1);
+      "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
+      "svc:legacy"), ==, 1);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permission_events "
-          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 0);
+      "SELECT count(*) FROM direct_permission_events "
+      "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 0);
 
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:legacy", "app.read", "tenant-a", FALSE), ==, WYRELOG_E_OK);
+      "svc:legacy", "app.read", "tenant-a", FALSE), ==, WYRELOG_E_OK);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
-          "svc:legacy"), ==, 0);
+      "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
+      "svc:legacy"), ==, 0);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permission_events "
-          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
+      "SELECT count(*) FROM direct_permission_events "
+      "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:legacy", "app.reader", "tenant-a", FALSE), ==, WYRELOG_E_OK);
+      "svc:legacy", "app.reader", "tenant-a", FALSE), ==, WYRELOG_E_OK);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM role_memberships WHERE subject_id=?;",
-          "svc:legacy"), ==, 0);
+      "SELECT count(*) FROM role_memberships WHERE subject_id=?;",
+      "svc:legacy"), ==, 0);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM role_membership_events "
-          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
+      "SELECT count(*) FROM role_membership_events "
+      "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
 
   exec_fixture_sql (store,
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at) "
       "VALUES('svc:registered','wr.login.skip_mfa','login',unixepoch());");
   kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:registered", &kind), ==, WYRELOG_E_POLICY);
+      "svc:registered", &kind), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:registered", "wr.login.skip_mfa", "login", FALSE), ==,
+      "svc:registered", "wr.login.skip_mfa", "login", FALSE), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permissions WHERE subject_id=? "
-          "AND perm_id='wr.login.skip_mfa';", "svc:registered"), ==, 0);
+      "SELECT count(*) FROM direct_permissions WHERE subject_id=? "
+      "AND perm_id='wr.login.skip_mfa';", "svc:registered"), ==, 0);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM direct_permission_events "
-          "WHERE subject_id=? AND perm_id='wr.login.skip_mfa' "
-          "AND operation='revoke';", "svc:registered"), ==, 1);
+      "SELECT count(*) FROM direct_permission_events "
+      "WHERE subject_id=? AND perm_id='wr.login.skip_mfa' "
+      "AND operation='revoke';", "svc:registered"), ==, 1);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:registered", &kind), ==, WYRELOG_E_OK);
+      "svc:registered", &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
   exec_fixture_sql (store,
@@ -381,10 +382,10 @@ test_destructive_remediation (void)
       "enrolled_at,id_uuidv7) "
       "VALUES('svc:legacy-totp',zeroblob(20),0,1,'legacy-totp-id');");
   g_assert_cmpint (wyl_policy_store_totp_enrollment_delete (store,
-          "svc:legacy-totp"), ==, WYRELOG_E_OK);
+      "svc:legacy-totp"), ==, WYRELOG_E_OK);
   g_assert_cmpint (count_subject_rows (store,
-          "SELECT count(*) FROM totp_enrollments WHERE subject_id=?;",
-          "svc:legacy-totp"), ==, 0);
+      "SELECT count(*) FROM totp_enrollments WHERE subject_id=?;",
+      "svc:legacy-totp"), ==, 0);
 
   wyl_policy_store_close (store);
 }
@@ -407,5 +408,5 @@ main (int argc, char **argv)
       test_authorization_is_kind_aware);
   g_test_add_func ("/policy/service-namespace/destructive-remediation",
       test_destructive_remediation);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

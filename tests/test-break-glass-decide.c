@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
@@ -92,11 +93,11 @@ seed_armed_allow_fixture (WylHandle *handle, const gchar *subject,
     const gchar *action, const gchar *resource)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
-      "wr.decide-role", action);
+          "wr.decide-role", action);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
@@ -109,7 +110,7 @@ seed_armed_allow_fixture (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
-      "armed");
+             "armed");
 }
 
 static gint
@@ -122,13 +123,13 @@ check_decide_marks_break_glass_used_when_armed (void)
       != WYRELOG_E_OK)
     return 11;
   if (seed_armed_allow_fixture (handle, "bg-decide-user-1",
-          "wr.decide-permission-1", "bg-decide-resource-1") != WYRELOG_E_OK)
+      "wr.decide-permission-1", "bg-decide-resource-1") != WYRELOG_E_OK)
     return 12;
 
   if (wyl_handle_break_glass_has_been_used (handle))
     return 13;
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
     return 14;
   if (wyl_handle_break_glass_has_been_used (handle))
     return 15;
@@ -168,7 +169,7 @@ check_decide_does_not_mark_when_inactive (void)
       != WYRELOG_E_OK)
     return 31;
   if (seed_armed_allow_fixture (handle, "bg-decide-user-2",
-          "wr.decide-permission-2", "bg-decide-resource-2") != WYRELOG_E_OK)
+      "wr.decide-permission-2", "bg-decide-resource-2") != WYRELOG_E_OK)
     return 32;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -197,11 +198,11 @@ check_disarm_clears_used_and_active (void)
       != WYRELOG_E_OK)
     return 41;
   if (seed_armed_allow_fixture (handle, "bg-decide-user-3",
-          "wr.decide-permission-3", "bg-decide-resource-3") != WYRELOG_E_OK)
+      "wr.decide-permission-3", "bg-decide-resource-3") != WYRELOG_E_OK)
     return 42;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_POLICY_CORRUPTION, 60) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_POLICY_CORRUPTION, 60) != WYRELOG_E_OK)
     return 43;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -234,7 +235,7 @@ check_ttl_expiry_disarm_and_rearm (void)
       != WYRELOG_E_OK)
     return 71;
   if (seed_armed_allow_fixture (handle, "bg-decide-user-4",
-          "wr.decide-permission-4", "bg-decide-resource-4") != WYRELOG_E_OK)
+      "wr.decide-permission-4", "bg-decide-resource-4") != WYRELOG_E_OK)
     return 72;
 
   /* Arm with a 1-second per-arm TTL. The host-side gate
@@ -242,7 +243,7 @@ check_ttl_expiry_disarm_and_rearm (void)
    * a g_usleep past the horizon flips the gate to FALSE long before
    * the 900-second DL self-disable horizon would fire. */
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 1) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 1) != WYRELOG_E_OK)
     return 73;
   if (!wyl_handle_break_glass_is_active (handle))
     return 74;
@@ -278,7 +279,7 @@ check_ttl_expiry_disarm_and_rearm (void)
   /* Re-arm with a fresh TTL and confirm the new activation is live;
    * the prior expiry must not bleed into the new window. */
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
     return 81;
   if (!wyl_handle_break_glass_is_active (handle))
     return 82;
@@ -297,11 +298,11 @@ check_decide_fact_insert_failure_does_not_latch_used (void)
       != WYRELOG_E_OK)
     return 91;
   if (seed_armed_allow_fixture (handle, "bg-decide-user-5",
-          "wr.decide-permission-5", "bg-decide-resource-5") != WYRELOG_E_OK)
+      "wr.decide-permission-5", "bg-decide-resource-5") != WYRELOG_E_OK)
     return 92;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
     return 93;
   if (wyl_handle_break_glass_has_been_used (handle))
     return 94;
@@ -344,13 +345,13 @@ check_arm_writes_audit_row (void)
     return 50;
 
   if (wyl_handle_break_glass_arm (handle,
-          WYL_BREAK_GLASS_REASON_SECURITY_OFFICER_LOCKOUT, 60) != WYRELOG_E_OK)
+      WYL_BREAK_GLASS_REASON_SECURITY_OFFICER_LOCKOUT, 60) != WYRELOG_E_OK)
     return 51;
 
   wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
   g_autofree gchar *arm_json = NULL;
   if (wyl_audit_conn_query_events_json (conn,
-          "action(\"break_glass_arm\")", &arm_json) != WYRELOG_E_OK)
+      "action(\"break_glass_arm\")", &arm_json) != WYRELOG_E_OK)
     return 52;
   if (g_strstr_len (arm_json, -1, "\"action\":\"break_glass_arm\"") == NULL)
     return 53;
@@ -358,7 +359,7 @@ check_arm_writes_audit_row (void)
       == NULL)
     return 54;
   if (g_strstr_len (arm_json, -1,
-          "\"deny_reason\":\"security_officer_lockout\"") == NULL)
+      "\"deny_reason\":\"security_officer_lockout\"") == NULL)
     return 55;
   if (g_strstr_len (arm_json, -1, "\"deny_origin\":\"break_glass\"") == NULL)
     return 56;
@@ -370,7 +371,7 @@ check_arm_writes_audit_row (void)
 
   g_autofree gchar *disarm_json = NULL;
   if (wyl_audit_conn_query_events_json (conn,
-          "action(\"break_glass_disarm\")", &disarm_json) != WYRELOG_E_OK)
+      "action(\"break_glass_disarm\")", &disarm_json) != WYRELOG_E_OK)
     return 59;
   if (g_strstr_len (disarm_json, -1, "\"action\":\"break_glass_disarm\"")
       == NULL)
@@ -392,17 +393,17 @@ main (void)
 #if defined(WYL_HAS_BREAK_GLASS) && defined(WYL_HAS_AUDIT)
   gint rc;
   if ((rc = check_decide_marks_break_glass_used_when_armed ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_does_not_mark_when_inactive ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_disarm_clears_used_and_active ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_ttl_expiry_disarm_and_rearm ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_fact_insert_failure_does_not_latch_used ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_arm_writes_audit_row ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
 #endif
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

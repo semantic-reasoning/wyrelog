@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <stdlib.h>
 
@@ -39,22 +40,22 @@ seed_fixture (WylHandle *handle)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
-      "bench.decision.read", "bench decision read", "basic");
+          "bench.decision.read", "bench decision read", "basic");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_grant_direct_permission (store, "bench-user",
-      "bench.decision.read", "bench-scope");
+          "bench.decision.read", "bench-scope");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_principal_state (store, "bench-user",
-      "authenticated");
+          "authenticated");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, "bench-scope", "active");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_permission_state (store, "bench-user",
-      "bench.decision.read", "bench-scope", "armed");
+          "bench.decision.read", "bench-scope", "armed");
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_reload_engine_pair (handle);
@@ -69,7 +70,7 @@ run_one_decide (WylHandle *handle, wyl_decide_req_t *req,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
-      WYRELOG_E_OK : WYRELOG_E_POLICY;
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 int
@@ -82,13 +83,13 @@ main (void)
   const gint64 p99_budget = env_i64 ("WYL_LATENCY_P99_USEC", 1000000);
 
   if (iterations < 32)
-    return 1;
+    return wyl_test_normalize_exit_status (1);
 
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 2;
+    return wyl_test_normalize_exit_status (2);
   if (seed_fixture (handle) != WYRELOG_E_OK)
-    return 3;
+    return wyl_test_normalize_exit_status (3);
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -98,14 +99,14 @@ main (void)
 
   for (guint i = 0; i < warmup; i++) {
     if (run_one_decide (handle, req, resp) != WYRELOG_E_OK)
-      return 4;
+      return wyl_test_normalize_exit_status (4);
   }
 
   g_autofree Sample *samples = g_new0 (Sample, iterations);
   for (guint i = 0; i < iterations; i++) {
     gint64 start = g_get_monotonic_time ();
     if (run_one_decide (handle, req, resp) != WYRELOG_E_OK)
-      return 5;
+      return wyl_test_normalize_exit_status (5);
     samples[i].usec = g_get_monotonic_time () - start;
   }
 
@@ -121,7 +122,7 @@ main (void)
     g_printerr ("decision latency budget exceeded: p50<=%" G_GINT64_FORMAT
         "us p95<=%" G_GINT64_FORMAT "us p99<=%" G_GINT64_FORMAT "us\n",
         p50_budget, p95_budget, p99_budget);
-    return 6;
+    return wyl_test_normalize_exit_status (6);
   }
-  return 0;
+  return wyl_test_normalize_exit_status (0);
 }

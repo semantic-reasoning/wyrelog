@@ -6,6 +6,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -46,7 +47,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *message,
   TestHttpServer *http = user_data;
   http->request_count++;
   SoupMessageBody *request_body = soup_server_message_get_request_body
-      (message);
+        (message);
   g_free (http->last_body);
   http->last_body = request_body != NULL && request_body->data != NULL ?
       g_strndup (request_body->data, request_body->length) : NULL;
@@ -62,7 +63,7 @@ run_child (gchar **argv, gchar **stdout_buf, gchar **stderr_buf,
   g_autoptr (GError) error = NULL;
 
   g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
-          stdout_buf, stderr_buf, wait_status, &error));
+      stdout_buf, stderr_buf, wait_status, &error));
   g_assert_no_error (error);
 }
 
@@ -121,7 +122,7 @@ test_service_principal_local_and_remote_invalid (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
   g_autoptr (GThread) thread = g_thread_new ("wyctl-principal-http",
-      test_http_server_thread, &http);
+          test_http_server_thread, &http);
   g_autofree gchar *token_path = write_access_token_file ();
 
   gchar *local_invalid_argv[] = {
@@ -166,7 +167,7 @@ test_service_principal_local_and_remote_invalid (void)
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, 3);
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "service_principal_create_failed"));
+      "service_principal_create_failed"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "INJECTED_DIAGNOSTIC"));
 
   http.status = 200;
@@ -215,7 +216,7 @@ test_service_principal_local_and_remote_invalid (void)
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
   g_assert_nonnull (http.last_body);
   g_assert_true (g_str_has_prefix (http.last_body,
-          "{\"version\":\"1\",\"request_id\":\""));
+      "{\"version\":\"1\",\"request_id\":\""));
   g_assert_cmpuint (strlen (http.last_body), ==,
       strlen ("{\"version\":\"1\",\"request_id\":\"\"}")
       + 27);
@@ -425,5 +426,5 @@ main (int argc, char **argv)
       test_service_principal_disable_help);
   g_test_add_func ("/wyctl/service-principal/local-and-remote-invalid",
       test_service_principal_local_and_remote_invalid);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

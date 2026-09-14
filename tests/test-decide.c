@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -90,11 +91,11 @@ insert_allow_fixture_state (WylHandle *handle, const gchar *subject,
 {
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.decide-role",
-      action);
+          action);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
@@ -109,7 +110,7 @@ insert_allow_fixture_state (WylHandle *handle, const gchar *subject,
   if (!armed)
     return WYRELOG_E_OK;
   return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
-      "armed");
+             "armed");
 }
 
 static wyrelog_error_t
@@ -125,11 +126,11 @@ insert_grant_fixture (WylHandle *handle, const gchar *subject,
 {
   wyrelog_error_t rc =
       insert_symbol_row2 (handle, "role_permission", "wr.decide-role",
-      action);
+          action);
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
-      resource);
+             resource);
 }
 
 /*
@@ -152,7 +153,7 @@ insert_service_grant_fixture (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "session_state", resource, "active");
@@ -162,7 +163,7 @@ insert_service_grant_fixture (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
-      "armed");
+             "armed");
 }
 
 /*
@@ -185,7 +186,7 @@ insert_service_grant_unarmed_fixture (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = insert_symbol_row2 (handle, "session_state", resource, "active");
@@ -201,11 +202,11 @@ seed_policy_store_decide_fixture (WylHandle *handle, const gchar *subject,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
   wyrelog_error_t rc = wyl_policy_store_upsert_permission (store, action,
-      action, "basic");
+          action, "basic");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_grant_direct_permission (store, subject, action,
-      resource);
+          resource);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_principal_state (store, subject, "authenticated");
@@ -216,7 +217,7 @@ seed_policy_store_decide_fixture (WylHandle *handle, const gchar *subject,
     return rc;
   if (perm_state != NULL) {
     rc = wyl_policy_store_set_permission_state (store, subject, action,
-        resource, perm_state);
+            resource, perm_state);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -318,7 +319,7 @@ check_guard_context_field_absent (WylHandle *handle, const gchar *relation,
 {
   guint seen = 0;
   wyrelog_error_t rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      relation, count_any_guard_context_field_cb, &seen);
+          relation, count_any_guard_context_field_cb, &seen);
   if (rc != WYRELOG_E_OK)
     return base_code;
   if (seen != 0)
@@ -343,7 +344,7 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
 
   GuardFactExpect expect = { row, 0 };
   rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      "context_now", count_context_now_cb, &expect);
+          "context_now", count_context_now_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return base_code + 3;
   if (expect.matches != 0)
@@ -351,7 +352,7 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
 
   expect.matches = 0;
   rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      "eval_guard", count_eval_guard_cb, &expect);
+          "eval_guard", count_eval_guard_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return base_code + 5;
   if (expect.matches != 0)
@@ -359,26 +360,26 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
 
   expect.matches = 0;
   rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      "guard_context", count_guard_context_cb, &expect);
+          "guard_context", count_guard_context_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return base_code + 7;
   if (expect.matches != 0)
     return base_code + 8;
 
   rc = check_guard_context_field_absent (handle, "guard_context_timestamp",
-      base_code + 9);
+          base_code + 9);
   if (rc != 0)
     return rc;
   rc = check_guard_context_field_absent (handle, "guard_context_loc_class",
-      base_code + 11);
+          base_code + 11);
   if (rc != 0)
     return rc;
   rc = check_guard_context_field_absent (handle, "guard_context_risk",
-      base_code + 13);
+          base_code + 13);
   if (rc != 0)
     return rc;
   rc = check_guard_context_field_absent (handle, "guard_context_in_window",
-      base_code + 15);
+          base_code + 15);
   if (rc != 0)
     return rc;
 
@@ -411,7 +412,7 @@ count_guard_bridge_fact (WylHandle *handle, const gint64 row[3],
   }
 
   wyrelog_error_t rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-      relation, cb, &expect);
+          relation, cb, &expect);
   if (rc != WYRELOG_E_OK)
     return 998;
   *out_matches = expect.matches;
@@ -436,15 +437,15 @@ check_guard_cleanup_fault_residue (WylHandle *handle, gint base_code)
   guint context_now = 0;
   guint guard_context = 0;
   gint check = count_guard_bridge_fact (handle, row, GUARD_FACT_EVAL_GUARD,
-      &eval_guard);
+          &eval_guard);
   if (check != 0)
     return base_code + 3;
   check = count_guard_bridge_fact (handle, row, GUARD_FACT_CONTEXT_NOW,
-      &context_now);
+          &context_now);
   if (check != 0)
     return base_code + 4;
   check = count_guard_bridge_fact (handle, row, GUARD_FACT_GUARD_CONTEXT,
-      &guard_context);
+          &guard_context);
   if (check != 0)
     return base_code + 5;
 
@@ -452,19 +453,19 @@ check_guard_cleanup_fault_residue (WylHandle *handle, gint base_code)
     return base_code + 6;
 
   gint field_check = check_guard_context_field_absent (handle,
-      "guard_context_timestamp", base_code + 7);
+          "guard_context_timestamp", base_code + 7);
   if (field_check != 0)
     return field_check;
   field_check = check_guard_context_field_absent (handle,
-      "guard_context_loc_class", base_code + 9);
+          "guard_context_loc_class", base_code + 9);
   if (field_check != 0)
     return field_check;
   field_check = check_guard_context_field_absent (handle,
-      "guard_context_risk", base_code + 11);
+          "guard_context_risk", base_code + 11);
   if (field_check != 0)
     return field_check;
   field_check = check_guard_context_field_absent (handle,
-      "guard_context_in_window", base_code + 13);
+          "guard_context_in_window", base_code + 13);
   if (field_check != 0)
     return field_check;
 
@@ -626,7 +627,7 @@ check_decide_allows_engine_tuple (void)
       != WYRELOG_E_OK)
     return 41;
   if (insert_allow_fixture (handle, "decide-user-a",
-          "wr.decide-permission-a", "decide-resource-a") != WYRELOG_E_OK)
+      "wr.decide-permission-a", "decide-resource-a") != WYRELOG_E_OK)
     return 42;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -656,7 +657,7 @@ check_decide_denies_engine_miss (void)
       != WYRELOG_E_OK)
     return 51;
   if (insert_allow_fixture (handle, "decide-user-b",
-          "wr.decide-permission-b", "decide-resource-b") != WYRELOG_E_OK)
+      "wr.decide-permission-b", "decide-resource-b") != WYRELOG_E_OK)
     return 52;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -686,17 +687,17 @@ check_decide_unclassified_read_denies (void)
       != WYRELOG_E_OK)
     return 211;
   if (insert_grant_fixture (handle, "missing-session-user",
-          "missing-session-permission", "missing-session-resource")
+      "missing-session-permission", "missing-session-resource")
       != WYRELOG_E_OK)
     return 212;
   if (insert_symbol_row2 (handle, "principal_state", "missing-session-user",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 213;
   if (insert_symbol_row1 (handle, "session_active", "active")
       != WYRELOG_E_OK)
     return 214;
   if (insert_symbol_row4 (handle, "perm_state", "missing-session-user",
-          "missing-session-permission", "missing-session-resource", "armed")
+      "missing-session-permission", "missing-session-resource", "armed")
       != WYRELOG_E_OK)
     return 215;
 
@@ -727,7 +728,7 @@ check_decide_allows_guarded_permission_with_context (void)
       != WYRELOG_E_OK)
     return 61;
   if (insert_allow_fixture_state (handle, "decide-user-c", "wr.audit.read",
-          "decide-resource-c", FALSE) != WYRELOG_E_OK)
+      "decide-resource-c", FALSE) != WYRELOG_E_OK)
     return 62;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -742,7 +743,7 @@ check_decide_allows_guarded_permission_with_context (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 64;
   gint guard_rc = check_guard_bridge_facts_absent (handle, "decide-user-c",
-      "wr.audit.read", "decide-resource-c", 67);
+          "wr.audit.read", "decide-resource-c", 67);
   if (guard_rc != 0)
     return guard_rc;
 
@@ -766,7 +767,7 @@ check_decide_denies_guarded_permission_on_context_miss (void)
       != WYRELOG_E_OK)
     return 71;
   if (insert_allow_fixture_state (handle, "decide-user-d", "wr.audit.read",
-          "decide-resource-d", TRUE) != WYRELOG_E_OK)
+      "decide-resource-d", TRUE) != WYRELOG_E_OK)
     return 72;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -807,10 +808,10 @@ check_decide_allows_self_authorize_for_system_admin (void)
   /* Seed only a wr.system_admin membership at __wr_default and rely on the
    * bootstrap role_permission fact for has_permission -- no direct grant. */
   if (insert_symbol_row3 (handle, "member_of", "self-arm-admin",
-          "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
+      "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
     return 302;
   if (insert_symbol_row2 (handle, "principal_state", "self-arm-admin",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 303;
   if (insert_symbol_row2 (handle, "session_state", "__wr_default", "active")
       != WYRELOG_E_OK)
@@ -855,13 +856,13 @@ check_policy_store_replay_requires_durable_permission_state (void)
     return 123;
 
   if (seed_policy_store_decide_fixture (handle, "replay-legacy-user",
-          "site.replay.read", "tenant/replay", NULL) != WYRELOG_E_OK)
+      "site.replay.read", "tenant/replay", NULL) != WYRELOG_E_OK)
     return 124;
 
   gboolean has_durable_state = TRUE;
   if (wyl_policy_store_permission_state_exists (wyl_handle_get_policy_store
-          (handle), "replay-legacy-user", "site.replay.read",
-          "tenant/replay", &has_durable_state) != WYRELOG_E_OK)
+        (handle), "replay-legacy-user", "site.replay.read",
+      "tenant/replay", &has_durable_state) != WYRELOG_E_OK)
     return 125;
   if (has_durable_state)
     return 126;
@@ -880,14 +881,14 @@ check_policy_store_replay_requires_durable_permission_state (void)
   if (intern_symbol (handle, "armed", &armed_row[3]) != WYRELOG_E_OK)
     return 153;
   if (wyl_handle_engine_contains (handle, "perm_state", armed_row, 4,
-          &contains) != WYRELOG_E_OK)
+      &contains) != WYRELOG_E_OK)
     return 154;
   if (contains)
     return 155;
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (decide_policy_store_fixture (handle, "replay-legacy-user",
-          "site.replay.read", "tenant/replay", resp) != WYRELOG_E_OK)
+      "site.replay.read", "tenant/replay", resp) != WYRELOG_E_OK)
     return 127;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 128;
@@ -906,7 +907,7 @@ check_policy_store_replay_preserves_dormant_permission_state (void)
     return 130;
 
   if (seed_policy_store_decide_fixture (handle, "replay-dormant-user",
-          "site.replay.write", "tenant/replay", "dormant") != WYRELOG_E_OK)
+      "site.replay.write", "tenant/replay", "dormant") != WYRELOG_E_OK)
     return 131;
   gboolean contains = FALSE;
   gint64 dormant_row[4];
@@ -922,14 +923,14 @@ check_policy_store_replay_preserves_dormant_permission_state (void)
   if (intern_symbol (handle, "dormant", &dormant_row[3]) != WYRELOG_E_OK)
     return 145;
   if (wyl_handle_engine_contains (handle, "perm_state", dormant_row, 4,
-          &contains) != WYRELOG_E_OK)
+      &contains) != WYRELOG_E_OK)
     return 146;
   if (!contains)
     return 147;
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (decide_policy_store_fixture (handle, "replay-dormant-user",
-          "site.replay.write", "tenant/replay", resp) != WYRELOG_E_OK)
+      "site.replay.write", "tenant/replay", resp) != WYRELOG_E_OK)
     return 132;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 133;
@@ -948,12 +949,12 @@ check_policy_store_replay_preserves_armed_permission_state (void)
     return 136;
 
   if (seed_policy_store_decide_fixture (handle, "replay-armed-user",
-          "site.replay.admin", "tenant/replay", "armed") != WYRELOG_E_OK)
+      "site.replay.admin", "tenant/replay", "armed") != WYRELOG_E_OK)
     return 137;
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (decide_policy_store_fixture (handle, "replay-armed-user",
-          "site.replay.admin", "tenant/replay", resp) != WYRELOG_E_OK)
+      "site.replay.admin", "tenant/replay", resp) != WYRELOG_E_OK)
     return 138;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 139;
@@ -993,12 +994,12 @@ check_persistent_permission_state_authority_matrix (void)
     if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
       return 158;
     if (seed_policy_store_decide_fixture (handle, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", NULL) != WYRELOG_E_OK)
+        "site.matrix.read", "tenant/matrix", NULL) != WYRELOG_E_OK)
       return 159;
 
     g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
     if (decide_policy_store_fixture (handle, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+        "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
       return 160;
     if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
       return 161;
@@ -1009,13 +1010,13 @@ check_persistent_permission_state_authority_matrix (void)
       return 163;
     g_autoptr (wyl_decide_resp_t) reload_resp = wyl_decide_resp_new ();
     if (decide_policy_store_fixture (handle, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", reload_resp)
+        "site.matrix.read", "tenant/matrix", reload_resp)
         != WYRELOG_E_OK)
       return 164;
     if (wyl_decide_resp_get_decision (reload_resp) != WYL_DECISION_DENY)
       return 165;
     if (g_strcmp0 (wyl_decide_resp_get_deny_reason (reload_resp),
-            "not_armed") != 0)
+        "not_armed") != 0)
       return 166;
   }
 
@@ -1033,7 +1034,7 @@ check_persistent_permission_state_authority_matrix (void)
 
     g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
     if (decide_policy_store_fixture (handle, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+        "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
       return 168;
     if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
       return 169;
@@ -1042,14 +1043,14 @@ check_persistent_permission_state_authority_matrix (void)
 
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     if (wyl_policy_store_set_permission_state (store, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", "armed") != WYRELOG_E_OK)
+        "site.matrix.read", "tenant/matrix", "armed") != WYRELOG_E_OK)
       return 171;
     if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
       return 172;
     g_clear_pointer (&resp, wyl_decide_resp_free);
     resp = wyl_decide_resp_new ();
     if (decide_policy_store_fixture (handle, "matrix-direct-user",
-            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+        "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
       return 173;
     if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
       return 174;
@@ -1057,16 +1058,16 @@ check_persistent_permission_state_authority_matrix (void)
       return 175;
 
     if (wyl_policy_store_upsert_permission (store, "site.matrix.transition",
-            "transition only", "basic") != WYRELOG_E_OK)
+        "transition only", "basic") != WYRELOG_E_OK)
       return 176;
     if (wyl_policy_store_set_principal_state (store, "matrix-transition-user",
-            "authenticated") != WYRELOG_E_OK)
+        "authenticated") != WYRELOG_E_OK)
       return 177;
     if (wyl_policy_store_set_session_state (store, "tenant/matrix-transition",
-            "active") != WYRELOG_E_OK)
+        "active") != WYRELOG_E_OK)
       return 178;
     if (wyl_policy_store_set_permission_state (store, "matrix-transition-user",
-            "site.matrix.transition", "tenant/matrix-transition", "armed")
+        "site.matrix.transition", "tenant/matrix-transition", "armed")
         != WYRELOG_E_OK)
       return 179;
     if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
@@ -1074,7 +1075,7 @@ check_persistent_permission_state_authority_matrix (void)
     g_clear_pointer (&resp, wyl_decide_resp_free);
     resp = wyl_decide_resp_new ();
     if (decide_policy_store_fixture (handle, "matrix-transition-user",
-            "site.matrix.transition", "tenant/matrix-transition", resp)
+        "site.matrix.transition", "tenant/matrix-transition", resp)
         != WYRELOG_E_OK)
       return 181;
     if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
@@ -1102,7 +1103,7 @@ check_decide_cleans_guard_facts_after_guarded_deny (void)
       != WYRELOG_E_OK)
     return 81;
   if (insert_allow_fixture_state (handle, "decide-user-e", "wr.audit.read",
-          "decide-resource-e", FALSE) != WYRELOG_E_OK)
+      "decide-resource-e", FALSE) != WYRELOG_E_OK)
     return 82;
   if (insert_symbol_row1 (handle, "frozen", "decide-resource-e")
       != WYRELOG_E_OK)
@@ -1124,7 +1125,7 @@ check_decide_cleans_guard_facts_after_guarded_deny (void)
     return 86;
 
   return check_guard_bridge_facts_absent (handle, "decide-user-e",
-      "wr.audit.read", "decide-resource-e", 87);
+             "wr.audit.read", "decide-resource-e", 87);
 }
 
 static gint
@@ -1137,10 +1138,10 @@ check_decide_reports_state_deny_reasons (void)
       != WYRELOG_E_OK)
     return 221;
   if (insert_grant_fixture (handle, "state-deny-user",
-          "state-deny-permission", "state-deny-resource") != WYRELOG_E_OK)
+      "state-deny-permission", "state-deny-resource") != WYRELOG_E_OK)
     return 222;
   if (insert_symbol_row2 (handle, "session_state", "state-deny-resource",
-          "active") != WYRELOG_E_OK)
+      "active") != WYRELOG_E_OK)
     return 223;
   if (insert_symbol_row1 (handle, "session_active", "active")
       != WYRELOG_E_OK)
@@ -1157,21 +1158,21 @@ check_decide_reports_state_deny_reasons (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 226;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "not_authenticated") != 0)
+      "not_authenticated") != 0)
     return 227;
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp),
-          "principal_state") != 0)
+      "principal_state") != 0)
     return 228;
 
   if (insert_grant_fixture (handle, "inactive-session-user",
-          "inactive-session-permission", "inactive-session-resource")
+      "inactive-session-permission", "inactive-session-resource")
       != WYRELOG_E_OK)
     return 229;
   if (insert_symbol_row2 (handle, "principal_state", "inactive-session-user",
-          "authenticated") != WYRELOG_E_OK)
+      "authenticated") != WYRELOG_E_OK)
     return 230;
   if (insert_symbol_row2 (handle, "session_state", "inactive-session-resource",
-          "idle") != WYRELOG_E_OK)
+      "idle") != WYRELOG_E_OK)
     return 231;
   wyl_decide_req_set_subject_id (req, "inactive-session-user");
   wyl_decide_req_set_action (req, "inactive-session-permission");
@@ -1181,7 +1182,7 @@ check_decide_reports_state_deny_reasons (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 233;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "session_inactive") != 0)
+      "session_inactive") != 0)
     return 234;
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "session_state")
       != 0)
@@ -1199,15 +1200,15 @@ check_decide_prioritizes_guarded_blockers (void)
       != WYRELOG_E_OK)
     return 241;
   if (insert_allow_fixture_state (handle, "guard-priority-user",
-          "wr.audit.read", "guard-priority-resource", FALSE)
+      "wr.audit.read", "guard-priority-resource", FALSE)
       != WYRELOG_E_OK)
     return 242;
   if (insert_symbol_row4 (handle, "policy_violation", "sod",
-          "guard-priority-user", "wr.audit.read", "fixture")
+      "guard-priority-user", "wr.audit.read", "fixture")
       != WYRELOG_E_OK)
     return 243;
   if (insert_symbol_row2 (handle, "disabled_role_for", "guard-priority-user",
-          "wr.audit.read") != WYRELOG_E_OK)
+      "wr.audit.read") != WYRELOG_E_OK)
     return 244;
   if (insert_symbol_row1 (handle, "frozen", "guard-priority-resource")
       != WYRELOG_E_OK)
@@ -1230,7 +1231,7 @@ check_decide_prioritizes_guarded_blockers (void)
     return 249;
 
   return check_guard_bridge_facts_absent (handle, "guard-priority-user",
-      "wr.audit.read", "guard-priority-resource", 250);
+             "wr.audit.read", "guard-priority-resource", 250);
 }
 
 static gint
@@ -1243,7 +1244,7 @@ check_guard_cleanup_fault (const gchar *relation, gint base_code)
       != WYRELOG_E_OK)
     return base_code + 1;
   if (insert_allow_fixture_state (handle, "cleanup-user", "wr.audit.read",
-          "cleanup-resource", FALSE) != WYRELOG_E_OK)
+      "cleanup-resource", FALSE) != WYRELOG_E_OK)
     return base_code + 2;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -1261,7 +1262,7 @@ check_guard_cleanup_fault (const gchar *relation, gint base_code)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return base_code + 4;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "guard_cleanup_failed") != 0)
+      "guard_cleanup_failed") != 0)
     return base_code + 5;
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "eval_guard") != 0)
     return base_code + 6;
@@ -1299,7 +1300,7 @@ check_window_guard_cleanup_fault (void)
       != WYRELOG_E_OK)
     return 311;
   if (insert_allow_fixture_state (handle, "cleanup-window-user",
-          "wr.stream.write_reserved", "cleanup-window-resource", FALSE)
+      "wr.stream.write_reserved", "cleanup-window-resource", FALSE)
       != WYRELOG_E_OK)
     return 312;
 
@@ -1326,11 +1327,11 @@ check_window_guard_cleanup_fault (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 315;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "guard_cleanup_failed") != 0)
+      "guard_cleanup_failed") != 0)
     return 316;
 
   return check_guard_bridge_facts_absent (handle, "cleanup-window-user",
-      "wr.stream.write_reserved", "cleanup-window-resource", 317);
+             "wr.stream.write_reserved", "cleanup-window-resource", 317);
 }
 
 static gint
@@ -1343,7 +1344,7 @@ check_decide_evaluates_window_guard (void)
       != WYRELOG_E_OK)
     return 91;
   if (insert_allow_fixture_state (handle, "window-user",
-          "wr.stream.write_reserved", "window-resource", FALSE)
+      "wr.stream.write_reserved", "window-resource", FALSE)
       != WYRELOG_E_OK)
     return 92;
 
@@ -1355,7 +1356,7 @@ check_decide_evaluates_window_guard (void)
   if (decision != WYL_DECISION_DENY || calls != 0)
     return 94;
   if (check_guard_bridge_facts_absent (handle, "window-user",
-          "wr.stream.write_reserved", "window-resource", 95) != 0)
+      "wr.stream.write_reserved", "window-resource", 95) != 0)
     return 102;
 
   if (run_stream_window_decide (handle, TRUE, FALSE, &decision, &calls)
@@ -1364,7 +1365,7 @@ check_decide_evaluates_window_guard (void)
   if (decision != WYL_DECISION_DENY || calls != 1)
     return 104;
   if (check_guard_bridge_facts_absent (handle, "window-user",
-          "wr.stream.write_reserved", "window-resource", 105) != 0)
+      "wr.stream.write_reserved", "window-resource", 105) != 0)
     return 112;
 
   if (run_stream_window_decide (handle, TRUE, TRUE, &decision, &calls)
@@ -1373,7 +1374,7 @@ check_decide_evaluates_window_guard (void)
   if (decision != WYL_DECISION_ALLOW || calls != 1)
     return 114;
   if (check_guard_bridge_facts_absent (handle, "window-user",
-          "wr.stream.write_reserved", "window-resource", 115) != 0)
+      "wr.stream.write_reserved", "window-resource", 115) != 0)
     return 122;
 
   return 0;
@@ -1443,7 +1444,7 @@ check_decide_service_bearer_injects_principal_state (void)
   if (intern_symbol (handle, "authenticated", &probe_row[1]) != WYRELOG_E_OK)
     return 710;
   if (wyl_handle_engine_contains (handle, "principal_state", probe_row, 2,
-          &present) != WYRELOG_E_OK)
+      &present) != WYRELOG_E_OK)
     return 711;
   if (present)
     return 712;
@@ -1477,7 +1478,7 @@ check_decide_service_bearer_respects_other_blockers (void)
 
   /* Case D (freeze still denies). */
   if (insert_service_grant_fixture (handle, "svc:frozen-user-740",
-          "wr.decide-permission-svc", "svc-frozen-resource-740")
+      "wr.decide-permission-svc", "svc-frozen-resource-740")
       != WYRELOG_E_OK)
     return 722;
   if (insert_symbol_row1 (handle, "frozen", "svc-frozen-resource-740")
@@ -1499,11 +1500,11 @@ check_decide_service_bearer_respects_other_blockers (void)
 
   /* Case E (disabled_role still denies). */
   if (insert_service_grant_fixture (handle, "svc:disabled-user-740",
-          "wr.decide-permission-svc", "svc-disabled-resource-740")
+      "wr.decide-permission-svc", "svc-disabled-resource-740")
       != WYRELOG_E_OK)
     return 727;
   if (insert_symbol_row2 (handle, "disabled_role_for", "svc:disabled-user-740",
-          "wr.decide-permission-svc") != WYRELOG_E_OK)
+      "wr.decide-permission-svc") != WYRELOG_E_OK)
     return 728;
 
   g_autoptr (wyl_decide_req_t) disabled_req = wyl_decide_req_new ();
@@ -1517,7 +1518,7 @@ check_decide_service_bearer_respects_other_blockers (void)
   if (wyl_decide_resp_get_decision (disabled_resp) != WYL_DECISION_DENY)
     return 730;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (disabled_resp),
-          "disabled_role") != 0)
+      "disabled_role") != 0)
     return 731;
 
   return 0;
@@ -1538,7 +1539,7 @@ check_decide_human_path_unchanged_without_flag (void)
       != WYRELOG_E_OK)
     return 741;
   if (insert_allow_fixture (handle, "human-user-740",
-          "wr.decide-permission-human", "human-resource-740") != WYRELOG_E_OK)
+      "wr.decide-permission-human", "human-resource-740") != WYRELOG_E_OK)
     return 742;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -1595,7 +1596,7 @@ check_decide_fail_closes_on_pstate_cleanup_fault (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 764;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "principal_state_cleanup_failed") != 0)
+      "principal_state_cleanup_failed") != 0)
     return 765;
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "principal_state")
       != 0)
@@ -1844,7 +1845,7 @@ check_decide_fail_closes_on_perm_state_cleanup_fault (void)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 854;
   if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "perm_state_cleanup_failed") != 0)
+      "perm_state_cleanup_failed") != 0)
     return 855;
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
     return 856;
@@ -1856,65 +1857,65 @@ main (void)
 {
   gint rc;
   if ((rc = check_decide_returns_ok_and_deny ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_rejects_null_args ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_rejects_incomplete_req_as_deny ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_rejects_invalid_guard_context ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_allows_engine_tuple ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_denies_engine_miss ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_unclassified_read_denies ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_allows_guarded_permission_with_context ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_allows_self_authorize_for_system_admin ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_replay_requires_durable_permission_state ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_replay_preserves_dormant_permission_state ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_replay_preserves_armed_permission_state ())
       != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_persistent_permission_state_authority_matrix ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_reports_state_deny_reasons ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_prioritizes_guarded_blockers ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_fail_closes_on_guard_cleanup_faults ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_window_guard_cleanup_fault ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_evaluates_window_guard ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_injects_principal_state ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_respects_other_blockers ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_human_path_unchanged_without_flag ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_fail_closes_on_pstate_cleanup_fault ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_arms_data_plane_permission ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_does_not_arm_control_plane ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_ungranted_denies ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_service_bearer_data_plane_respects_freeze ()) != 0)
-    return rc;
+    return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_fail_closes_on_perm_state_cleanup_fault ()) != 0)
-    return rc;
-  return 0;
+    return wyl_test_normalize_exit_status (rc);
+  return wyl_test_normalize_exit_status (0);
 }

@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 #endif
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -892,25 +893,25 @@ main (int argc, char **argv)
   program_path = argv[0];
   if (argc == 3 && g_strcmp0 (argv[1], CHILD_MODE) == 0) {
 #ifndef G_OS_WIN32
-    return child_hold_lease (argv[2]) ? 0 : 1;
+    return wyl_test_normalize_exit_status (child_hold_lease (argv[2]) ? 0 : 1);
 #else
-    return 77;
+    return wyl_test_normalize_exit_status (77);
 #endif
   }
   if (argc == 3 && g_strcmp0 (argv[1], REVERSE_ARTIFACT_RUNTIME_MODE) == 0) {
 #if !defined(G_OS_WIN32) && defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-    return run_reverse_child (argv[2], REVERSE_ARTIFACT_RUNTIME,
-               STDOUT_FILENO);
+    return wyl_test_normalize_exit_status (run_reverse_child (argv[2], REVERSE_ARTIFACT_RUNTIME,
+               STDOUT_FILENO));
 #else
-    return 77;
+    return wyl_test_normalize_exit_status (77);
 #endif
   }
   if (argc == 3 && g_strcmp0 (argv[1], REVERSE_RUNTIME_POLICY_MODE) == 0) {
 #if !defined(G_OS_WIN32) && defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-    return run_reverse_child (argv[2], REVERSE_RUNTIME_POLICY,
-               STDOUT_FILENO);
+    return wyl_test_normalize_exit_status (run_reverse_child (argv[2], REVERSE_RUNTIME_POLICY,
+               STDOUT_FILENO));
 #else
-    return 77;
+    return wyl_test_normalize_exit_status (77);
 #endif
   }
   g_test_init (&argc, &argv, NULL);
@@ -924,5 +925,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/publication-lock-matrix/reverse-runtime-policy",
       test_reverse_runtime_policy);
 #endif
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

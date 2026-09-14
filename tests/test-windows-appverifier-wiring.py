@@ -199,7 +199,7 @@ def require_straight_line(source: str, contract: str) -> None:
 
 def validate_secure_temp_fixture(source: str) -> None:
     source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    if source_digest != "c213bbcf99b68c8901a55e59c43249d8efe4ce8be9eb186a543dd9fa0cfe259a":
+    if source_digest != "f1135efb4423a27d0ec2f638d6e9a4d08ab8d33a6a0e25ca834eba3a41ca8821":
         raise FixtureContractError(
             "secure fixture changed outside its reviewed full-source allowlist"
         )
@@ -226,7 +226,7 @@ def validate_secure_temp_fixture(source: str) -> None:
         "test_secure_temp_child_lifecycle (void)":
             "b3e7a35f64937ee241ff79f7785e315c887c1ccc6983c557309c2a94721ab90b",
         "main (int argc, char **argv)":
-            "5d4ef1f5bc55a843efa25188c5f9ed5f63c3656a56f72c4a4eb9fcee4145774e",
+            "322ed0506c58c308e7bd89235c197cd47857f14d3e3ee8c1c7a4dffd14694752",
     }
     for signature, expected_digest in expected_bodies.items():
         canonical = " ".join(function_body(active, signature).split())
@@ -299,7 +299,11 @@ def validate_secure_temp_fixture(source: str) -> None:
     if (
         len(re.findall(r"\breturn\b", main_code)) != 1
         or len(re.findall(r"\bg_test_run\s*\(", main_code)) != 1
-        or re.search(r"\breturn\s+g_test_run\s*\(\s*\)\s*;", main_code)
+        or re.search(
+            r"\breturn\s+wyl_test_normalize_exit_status\s*\(\s*"
+            r"g_test_run\s*\(\s*\)\s*\)\s*;",
+            main_code,
+        )
         is None
     ):
         raise FixtureContractError("main must terminate only through g_test_run")
@@ -308,7 +312,8 @@ def validate_secure_temp_fixture(source: str) -> None:
         (
             r"\bg_test_init\s*\(",
             r"\bg_test_add_func\s*\(",
-            r"\breturn\s+g_test_run\s*\(",
+            r"\breturn\s+wyl_test_normalize_exit_status\s*\(\s*"
+            r"g_test_run\s*\(",
         ),
         "secure fixture main",
     )

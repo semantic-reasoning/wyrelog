@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -1540,7 +1541,7 @@ test_darwin_evidence_encrypted_immediate_publication (void)
     wyl_policy_store_t *store = NULL;
     if (open_encrypted_policy_store (g_getenv (env_path), g_getenv (env_key),
         &store) != WYRELOG_E_OK)
-      _Exit (81);
+      WYL_TEST__EXIT(81);
     gboolean outer_transaction = g_getenv (env_outer) != NULL;
     if (outer_transaction)
       exec_ok (wyl_policy_store_get_db (store),
@@ -1551,7 +1552,7 @@ test_darwin_evidence_encrypted_immediate_publication (void)
         wyl_policy_store_graph_provisioning_set_darwin_evidence (store,
             g_getenv (env_operation), evidence, &mutation);
     g_bytes_unref (evidence);
-    _Exit (outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :
+    WYL_TEST__EXIT(outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :
         (rc == WYRELOG_E_OK
         && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82));
   }
@@ -2779,7 +2780,7 @@ provisioning_migration_crash_gate (gpointer data,
 {
   if (stage == (WylPolicyGraphAuthorityMigrationFailStage)
       GPOINTER_TO_INT (data))
-    _Exit (73);
+    WYL_TEST__EXIT(73);
 }
 
 static void
@@ -2798,11 +2799,11 @@ test_provisioning_migration_process_crashes (void)
         open_encrypted_policy_store (path, key_path, &store) :
         wyl_policy_store_open (path, &store);
     if (rc != WYRELOG_E_OK)
-      _Exit (74);
+      WYL_TEST__EXIT(74);
     wyl_policy_store_graph_authority_migration_gate (store,
         provisioning_migration_crash_gate, GINT_TO_POINTER (stage));
     (void) wyl_policy_store_create_schema (store);
-    _Exit (75);
+    WYL_TEST__EXIT(75);
   }
 
   static const struct
@@ -4875,5 +4876,5 @@ main (int argc, char **argv)
       test_relation_activation_fsm_is_fail_closed);
   g_test_add_func ("/policy/graph-authority/relation-activation-typed-api",
       test_relation_activation_typed_api);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

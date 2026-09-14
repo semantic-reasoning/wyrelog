@@ -14,6 +14,7 @@
  *   WYL_LOG_ERROR  (level 1) -> active, arguments evaluated
  *   WYL_LOG_CRITICAL         -> always active (bypasses ceiling)
  */
+#include "test-exit-status.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -131,7 +132,7 @@ test_critical_bypasses_ceiling (void)
     const gchar *tmpdir = g_getenv ("WYL_TEST_CRITICAL_TMPDIR");
     g_autofree gchar *marker =
         g_build_filename (tmpdir ? tmpdir : g_get_tmp_dir (),
-        "wyl-critical-bypass-marker", NULL);
+            "wyl-critical-bypass-marker", NULL);
 
     g_unsetenv ("WYL_LOG_FILE");
     g_setenv ("WYL_LOG", "*:none", TRUE);
@@ -192,5 +193,5 @@ main (int argc, char **argv)
   g_test_add_func ("/wyl-log/ceiling/critical-aborts-process",
       test_critical_aborts_process);
 
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

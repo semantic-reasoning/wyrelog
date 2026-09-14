@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -4789,20 +4790,20 @@ int
 main (int argc, char **argv)
 {
   if (argc == 4 && strcmp (argv[1], "--win-lease-child") == 0)
-    return run_lease_child (argv[2], argv[3]);
+    return wyl_test_normalize_exit_status (run_lease_child (argv[2], argv[3]));
   if (argc == 5 && strcmp (argv[1], "--win-temp-token-child") == 0)
-    return run_temp_token_child (argv[2], argv[3], argv[4]);
+    return wyl_test_normalize_exit_status (run_temp_token_child (argv[2], argv[3], argv[4]));
   g_test_init (&argc, &argv, NULL);
   for (gsize i = 0; i < G_N_ELEMENTS (win_guarded_cases); i++)
     g_test_add (win_guarded_cases[i].path, WinFaultGuard,
         &win_guarded_cases[i], win_fault_guard_set_up, win_fault_guard_run,
         win_fault_guard_tear_down);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
 #else
 int
 main (void)
 {
-  return 77;
+  return wyl_test_normalize_exit_status (77);
 }
 #endif
