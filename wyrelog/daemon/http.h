@@ -95,6 +95,10 @@ typedef struct
   gboolean body_oversize;
   const gchar *body_json;
   gsize body_len;
+  /* Request-scoped cleanup observation for secret-wipe regression tests. */
+  const gchar *secret_cleanup_expected;
+  gboolean *secret_cleanup_matched;
+  gboolean *secret_cleanup_zeroed;
 } WylDaemonServiceTokenRequest;
 typedef struct
 {
