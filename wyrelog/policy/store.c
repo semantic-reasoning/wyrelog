@@ -167,6 +167,9 @@ struct wyl_policy_store_t
   gboolean encrypted;
   gboolean key_materialized;
   gboolean suppress_close_persist;
+  /* Set only by an exclusive owner during retryable close. Store APIs reject
+   * new work while previously borrowed SQLite statements may be completed. */
+  gint close_pending;
   /* Opened under a maintenance-exclusive lease: persist-on-close re-verifies
    * the pinned store-file identity before writing, failing closed on a
    * substitution performed after the lease was taken (unit-1 deferred gate). */
@@ -200,6 +203,9 @@ struct wyl_policy_store_t
   gpointer darwin_evidence_gate_data;
 #ifdef WYL_TEST_HANDLE_SEAMS
   WylPolicySnapshotFinishFailStage snapshot_finish_fail_once;
+  void (*image_release_observer) (const guint8 *image, gsize capacity,
+      gpointer data);
+  gpointer image_release_observer_data;
 #endif
   guint64 next_service_authority_transaction_id;
   WylPolicyAuthorityTransactionFailStage
@@ -290,13 +296,19 @@ policy_store_terminal_gate (wyl_policy_store_t *store)
 {
   if (store == NULL)
     return WYRELOG_E_INVALID;
+  if (g_atomic_int_get (&store->close_pending))
+    return WYRELOG_E_BUSY;
   return (wyrelog_error_t) g_atomic_int_get (&store->terminal_result);
 }
 
 static wyrelog_error_t
 policy_store_runtime_writer_begin (wyl_policy_store_t *store)
 {
-  if (store == NULL || store->runtime_lease == NULL) {
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  if (g_atomic_int_get (&store->close_pending))
+    return WYRELOG_E_BUSY;
+  if (store->runtime_lease == NULL) {
     return WYRELOG_E_OK;
   }
   if (store->runtime_writer_depth == 0) {
@@ -3110,6 +3122,24 @@ policy_store_zero_key_material (wyl_policy_store_t *store)
   sodium_memzero (store->encryption_key, sizeof store->encryption_key);
   sodium_memzero (store->encryption_key_id, sizeof store->encryption_key_id);
   store->key_materialized = FALSE;
+}
+
+static void
+policy_store_release_deserialized_image (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->deserialized_image == NULL)
+    return;
+  guint8 *image = store->deserialized_image;
+  gsize capacity = store->deserialized_image_capacity;
+  sodium_memzero (image, capacity);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (store->image_release_observer != NULL)
+    store->image_release_observer (image, capacity,
+        store->image_release_observer_data);
+#endif
+  sqlite3_free (image);
+  store->deserialized_image = NULL;
+  store->deserialized_image_capacity = 0;
 }
 
 static void
@@ -7504,10 +7534,10 @@ decrypt_policy_store_from_bytes (wyl_policy_store_t *store,
   if (sqlite3_deserialize (store->db, "main", plaintext,
       (sqlite3_int64) plaintext_len, (sqlite3_int64) plaintext_capacity,
       0) != SQLITE_OK) {
-    sqlite3_close (store->db);
-    store->db = NULL;
-    sodium_memzero (plaintext, plaintext_capacity);
-    sqlite3_free (plaintext);
+    /* Keep ownership explicit until the caller synchronously closes this
+     * connection. Even a rejected deserialize must not outlive its buffer. */
+    store->deserialized_image = plaintext;
+    store->deserialized_image_capacity = plaintext_capacity;
     return WYRELOG_E_POLICY;
   }
   store->deserialized_image = plaintext;
@@ -7883,13 +7913,6 @@ persist_policy_store_encrypted_with_identity (wyl_policy_store_t *store,
     return rc;
   return publish_policy_store_encrypted (store, encrypted, encrypted_len,
              rotation_runtime, NULL, out_identity, out_durable);
-}
-
-static wyrelog_error_t
-persist_policy_store_encrypted (wyl_policy_store_t *store)
-{
-  return persist_policy_store_encrypted_with_identity (store, NULL, NULL,
-             NULL);
 }
 
 static wyrelog_error_t graph_authority_migration_checkpoint
@@ -9276,15 +9299,6 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
       != WYRELOG_E_OK) {
-    sqlite3_close (self->db);
-    self->db = NULL;
-    if (self->deserialized_image != NULL) {
-      sodium_memzero (self->deserialized_image,
-          self->deserialized_image_capacity);
-      sqlite3_free (self->deserialized_image);
-      self->deserialized_image = NULL;
-      self->deserialized_image_capacity = 0;
-    }
     rc = WYRELOG_E_POLICY;
     goto fail;
   }
@@ -9323,49 +9337,83 @@ wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
   return wyl_policy_store_open_with_options (&opts, out_store);
 }
 
-void
-wyl_policy_store_close (wyl_policy_store_t *store)
+wyrelog_error_t
+wyl_policy_store_try_close (wyl_policy_store_t **store_io)
 {
+  if (store_io == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = *store_io;
   if (store == NULL)
-    return;
+    return WYRELOG_E_OK;
+
+  g_autofree guint8 *staged_encrypted = NULL;
+  gsize staged_encrypted_len = 0;
+  wyrelog_error_t persistence_rc = WYRELOG_E_OK;
+  gboolean persist = FALSE;
   if (store->db != NULL) {
-    /* A maintenance-exclusive store re-verifies the pinned store-file identity
-     * before persisting so an offline remediation never writes its encrypted
-     * image over a file substituted after the lease was taken; the deferred
-     * unit-1 gate fails closed by skipping the persist. */
-    gboolean persist = store->encrypted && !store->suppress_close_persist
-        && g_atomic_int_get (&store->terminal_result) == WYRELOG_E_OK;
-    if (persist && store->maintenance_exclusive && store->lease != NULL
-        && wyl_policy_store_lease_verify_store_identity (store->lease)
-        != WYRELOG_E_OK)
-      persist = FALSE;
-    /* Identity is now confirmed; drop the pinned store-file handle so the
-     * atomic replace can rename the fresh image onto the canonical name on
-     * platforms where an open target handle would otherwise block it. */
-    if (persist && store->maintenance_exclusive && store->lease != NULL)
-      wyl_policy_store_lease_release_store_pin (store->lease);
-    if (persist && persist_policy_store_encrypted (store) != WYRELOG_E_OK)
+    /* The owner must quiesce store operations before close. Once pending, new
+     * store APIs reject work, while already-held SQLite statements remain
+     * usable so their owners can finish and retry close. */
+    g_atomic_int_set (&store->close_pending, TRUE);
+
+    if (sqlite3_next_stmt (store->db, NULL) != NULL)
+      return WYRELOG_E_BUSY;
+
+    gboolean terminal =
+        g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK;
+    gboolean autocommit = sqlite3_get_autocommit (store->db);
+    if (!autocommit && !terminal)
+      return WYRELOG_E_BUSY;
+    /* A terminal store must never publish a possibly uncommitted transaction;
+     * successful sqlite3_close() rolls it back while releasing the image. */
+    persist = store->encrypted && !store->suppress_close_persist && !terminal
+        && autocommit;
+    if (persist && store->encrypted) {
+      persistence_rc = prepare_policy_store_encrypted (store,
+              store->encryption_key, store->encryption_key_id,
+              &staged_encrypted, &staged_encrypted_len);
+      if (persistence_rc != WYRELOG_E_OK)
+        persist = FALSE;
+    }
+
+    /* Do not change the authorizer or interrupt extant statements on a BUSY
+     * close. The close-pending owner contract and terminal gate prevent new
+     * store work; the caller releases existing non-statement resources before
+     * retrying. */
+    int close_rc = sqlite3_close (store->db);
+    if (close_rc != SQLITE_OK) {
+      if (close_rc == SQLITE_BUSY || close_rc == SQLITE_LOCKED)
+        return WYRELOG_E_BUSY;
+      return WYRELOG_E_IO;
+    }
+    store->db = NULL;
+    policy_store_release_deserialized_image (store);
+
+    if (persist && staged_encrypted != NULL) {
+      /* Verify identity and release the pin only after SQLite has closed; a
+       * busy retry therefore has no irreversible filesystem side effects. */
+      if (store->maintenance_exclusive && store->lease != NULL
+          && wyl_policy_store_lease_verify_store_identity (store->lease)
+          != WYRELOG_E_OK) {
+        persist = FALSE;
+      } else {
+        if (store->maintenance_exclusive && store->lease != NULL)
+          wyl_policy_store_lease_release_store_pin (store->lease);
+        gboolean replaced = FALSE;
+        gboolean durable = FALSE;
+        wyrelog_error_t publish_rc = publish_policy_store_encrypted (store,
+                staged_encrypted, staged_encrypted_len, NULL, &replaced, NULL,
+                &durable);
+        if (publish_rc == WYRELOG_E_OK && !replaced)
+          publish_rc = WYRELOG_E_INTERNAL;
+        (void) durable; /* The publisher logs a post-replacement durability warning. */
+        if (publish_rc != WYRELOG_E_OK)
+          persistence_rc = publish_rc;
+      }
+    }
+    if (persistence_rc != WYRELOG_E_OK)
       WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
           "encrypted policy store close could not publish its image");
-    sqlite3_progress_handler (store->db, 0, NULL, NULL);
-    (void) sqlite3_set_authorizer (store->db, NULL, NULL);
-    sqlite3 *closing_db = store->db;
-    int close_rc = sqlite3_close (closing_db);
-    store->db = NULL;
-    /* sqlite3_close_v2() may defer destruction while a caller-owned statement
-     * remains.  In that case the deserialize buffer must outlive the store;
-     * deliberately leak the secret allocation rather than free memory SQLite
-     * can still read.  Normal users finalize statements before close. */
-    gboolean image_released = close_rc == SQLITE_OK;
-    if (!image_released)
-      (void) sqlite3_close_v2 (closing_db);
-    if (image_released && store->deserialized_image != NULL) {
-      sodium_memzero (store->deserialized_image,
-          store->deserialized_image_capacity);
-      sqlite3_free (store->deserialized_image);
-      store->deserialized_image = NULL;
-      store->deserialized_image_capacity = 0;
-    }
     if (store->encrypted) {
 #ifndef G_OS_WIN32
       if (store->canonical_dirfd >= 0 && store->work_basename != NULL)
@@ -9376,6 +9424,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
 #endif
     }
   }
+  if (store->db == NULL)
+    policy_store_release_deserialized_image (store);
 #ifndef G_OS_WIN32
   if (store->lease == NULL && store->canonical_dirfd >= 0) {
     close (store->canonical_dirfd);
@@ -9402,17 +9452,54 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_mutex_clear (&store->service_domain_gate_mutex);
   g_mutex_clear (&store->service_lifecycle_mutex);
   g_rec_mutex_clear (&store->graph_authority_mutex);
+  *store_io = NULL;
   g_free (store);
+  return persistence_rc;
+}
+
+void
+wyl_policy_store_close (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return;
+  wyl_policy_store_t *owner = store;
+  wyrelog_error_t rc = wyl_policy_store_try_close (&owner);
+  if (owner != NULL)
+    g_error ("policy store cleanup requires retry after close failure (%d)",
+        rc);
 }
 
 sqlite3 *
 wyl_policy_store_get_db (wyl_policy_store_t *store)
 {
   if (store == NULL
+      || g_atomic_int_get (&store->close_pending)
       || g_atomic_int_get (&store->terminal_result) != WYRELOG_E_OK)
     return NULL;
   return store->db;
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_policy_store_set_image_release_observer_for_test (wyl_policy_store_t *store,
+    WylPolicyStoreImageReleaseObserver observer, gpointer data)
+{
+  if (store == NULL || g_atomic_int_get (&store->close_pending))
+    return;
+  store->image_release_observer = observer;
+  store->image_release_observer_data = data;
+}
+
+gboolean
+wyl_policy_store_deserialized_image_digest_for_test (wyl_policy_store_t *store,
+    guint8 out_digest[32])
+{
+  if (store == NULL || out_digest == NULL || store->deserialized_image == NULL)
+    return FALSE;
+  return crypto_hash_sha256 (out_digest, store->deserialized_image,
+             store->deserialized_image_capacity) == 0;
+}
+#endif
 
 static wyrelog_error_t
 bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root,
@@ -11184,8 +11271,14 @@ graph_provisioning_classify_fresh_image (wyl_policy_store_t *store,
           (&authenticated, canonical_bytes, canonical_len);
     sodium_memzero (authenticated.encryption_key,
         sizeof authenticated.encryption_key);
-    if (decrypt_rc != WYRELOG_E_OK)
+    if (decrypt_rc != WYRELOG_E_OK) {
+      if (authenticated.db != NULL
+          && sqlite3_close (authenticated.db) == SQLITE_OK) {
+        authenticated.db = NULL;
+        policy_store_release_deserialized_image (&authenticated);
+      }
       return decrypt_rc;
+    }
     verifier = authenticated.db;
     authenticated_image = authenticated.deserialized_image;
     authenticated_image_capacity = authenticated.deserialized_image_capacity;
@@ -11211,7 +11304,8 @@ graph_provisioning_classify_fresh_image (wyl_policy_store_t *store,
     int deserialize = sqlite3_deserialize (verifier, "main", image,
             image_size, image_size, SQLITE_DESERIALIZE_FREEONCLOSE);
     if (deserialize != SQLITE_OK) {
-      sqlite3_free (image);
+      /* SQLITE_DESERIALIZE_FREEONCLOSE transfers ownership even when
+       * sqlite3_deserialize() reports failure. */
       sqlite3_close (verifier);
       return WYRELOG_E_IO;
     }
@@ -28080,6 +28174,14 @@ wyl_policy_store_read_snapshot_begin (wyl_policy_store_t *store,
   snapshot->store = store;
   snapshot->owner = g_thread_self ();
   snapshot->locked = TRUE;
+
+  if (g_atomic_int_get (&store->close_pending)) {
+    sqlite3_mutex_leave (mutex);
+    *snapshot = (WylPolicyStoreReadSnapshot) {
+      0
+    };
+    return WYRELOG_E_BUSY;
+  }
 
   /* Never join a transaction opened by another store operation. The held
    * connection mutex closes the autocommit-check/BEGIN race. */

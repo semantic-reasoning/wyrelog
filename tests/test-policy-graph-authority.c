@@ -2398,6 +2398,16 @@ test_provisioning_migration_terminalizes_rollback_failure (void)
 }
 
 static void
+assert_policy_image_zeroized_for_test (const guint8 *image, gsize capacity,
+    gpointer data)
+{
+  guint *release_count = data;
+  for (gsize i = 0; i < capacity; i++)
+    g_assert_cmpuint (image[i], ==, 0);
+  (*release_count)++;
+}
+
+static void
 test_encrypted_provisioning_migration_publication (void)
 {
   for (guint predecessor = 0; predecessor < 2; predecessor++) {
@@ -2438,18 +2448,46 @@ test_encrypted_provisioning_migration_publication (void)
             WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_ENCRYPTED_PUBLICATION);
       g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
           fail_publication == 0 ? WYRELOG_E_OK : WYRELOG_E_IO);
+      if (fail_publication == 0)
+        g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+            "INSERT INTO wyrelog_config(config_key, config_value, updated_at) "
+            "VALUES('issue_1107_close_retry', 'written-after-busy', "
+            "unixepoch());", -1, &held_statement, NULL), ==, SQLITE_OK);
       if (fail_publication != 0) {
         g_assert_cmpint (wyl_policy_store_terminal_result (store), ==,
             WYRELOG_E_IO);
         g_assert_null (wyl_policy_store_get_db (store));
       }
-      g_clear_pointer (&store, wyl_policy_store_close);
-      if (held_statement != NULL)
-        g_assert_cmpint (sqlite3_finalize (held_statement), ==, SQLITE_OK);
+      guint image_release_count = 0;
+      wyl_policy_store_set_image_release_observer_for_test (store,
+          assert_policy_image_zeroized_for_test, &image_release_count);
+      guint8 image_digest_before[32];
+      guint8 image_digest_after[32];
+      g_assert_true (wyl_policy_store_deserialized_image_digest_for_test
+            (store, image_digest_before));
+      g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_BUSY);
+      g_assert_nonnull (store);
+      g_assert_null (wyl_policy_store_get_db (store));
+      g_assert_true (wyl_policy_store_deserialized_image_digest_for_test
+            (store, image_digest_after));
+      g_assert_cmpmem (image_digest_before, sizeof image_digest_before,
+          image_digest_after, sizeof image_digest_after);
+      if (fail_publication == 0)
+        g_assert_cmpint (sqlite3_step (held_statement), ==, SQLITE_DONE);
+      g_assert_cmpint (sqlite3_finalize (held_statement), ==, SQLITE_OK);
+      held_statement = NULL;
+      g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_OK);
+      g_assert_null (store);
+      g_assert_cmpuint (image_release_count, ==, 1);
 
       g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
           ==, WYRELOG_E_OK);
       db = wyl_policy_store_get_db (store);
+      if (fail_publication == 0)
+        g_assert_cmpint (scalar_int64 (db,
+            "SELECT count(*) FROM wyrelog_config WHERE "
+            "config_key='issue_1107_close_retry' AND "
+            "config_value='written-after-busy';"), ==, 1);
       g_assert_cmpint (scalar_int64 (db,
           "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
           "WHERE name='darwin_operation_evidence';"), ==,
@@ -2465,6 +2503,102 @@ test_encrypted_provisioning_migration_publication (void)
       cleanup_store_path (root, path);
     }
   }
+}
+
+static void
+test_encrypted_policy_store_deferred_close_blob (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autofree gchar *key_path = g_build_filename (root, "policy.key", NULL);
+  g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock", NULL);
+  g_assert_true (write_policy_key (key_path));
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TABLE issue_1107_blob_close (id INTEGER PRIMARY KEY, "
+      "payload BLOB); INSERT INTO issue_1107_blob_close VALUES (1, x'0102');",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+
+  sqlite3_blob *blob = NULL;
+  g_assert_cmpint (sqlite3_blob_open (db, "main", "issue_1107_blob_close",
+      "payload", 1, 0, &blob), ==, SQLITE_OK);
+  guint image_release_count = 0;
+  wyl_policy_store_set_image_release_observer_for_test (store,
+      assert_policy_image_zeroized_for_test, &image_release_count);
+  guint8 image_digest_before[32];
+  guint8 image_digest_after[32];
+  g_assert_true (wyl_policy_store_deserialized_image_digest_for_test
+        (store, image_digest_before));
+
+  /* No prepared statement is outstanding here, so close reaches SQLite after
+   * staging ciphertext. Its open BLOB forces synchronous close to return BUSY;
+   * that staged copy must be discarded without releasing the image. */
+  g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_BUSY);
+  g_assert_nonnull (store);
+  g_assert_null (wyl_policy_store_get_db (store));
+  g_assert_true (wyl_policy_store_deserialized_image_digest_for_test
+        (store, image_digest_after));
+  g_assert_cmpmem (image_digest_before, sizeof image_digest_before,
+      image_digest_after, sizeof image_digest_after);
+  g_assert_cmpuint (image_release_count, ==, 0);
+  g_assert_cmpint (sqlite3_blob_close (blob), ==, SQLITE_OK);
+
+  g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_OK);
+  g_assert_null (store);
+  g_assert_cmpuint (image_release_count, ==, 1);
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM issue_1107_blob_close WHERE id=1 "
+      "AND payload=x'0102';"), ==, 1);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  (void) g_remove (key_path);
+  (void) g_remove (lock_path);
+  cleanup_store_path (root, path);
+}
+
+static void
+test_encrypted_policy_store_deferred_close_transaction (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autofree gchar *key_path = g_build_filename (root, "policy.key", NULL);
+  g_autofree gchar *lock_path = g_strconcat (path, ".wyrelog-lock", NULL);
+  g_assert_true (write_policy_key (key_path));
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_BUSY);
+  g_assert_nonnull (store);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_BUSY);
+  /* The pre-existing transaction can still be rolled back to drain close. */
+  wyl_policy_store_rollback_mutation (store);
+  WylPolicyStoreReadSnapshot snapshot = { 0 };
+  g_assert_cmpint (wyl_policy_store_read_snapshot_begin (store, &snapshot),
+      ==, WYRELOG_E_BUSY);
+  g_assert_false (snapshot.active);
+  g_assert_cmpint (wyl_policy_store_try_close (&store), ==, WYRELOG_E_OK);
+  g_assert_null (store);
+
+  g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
+      ==, WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  (void) g_remove (key_path);
+  (void) g_remove (lock_path);
+  cleanup_store_path (root, path);
 }
 
 typedef struct
@@ -4663,6 +4797,10 @@ main (int argc, char **argv)
       test_provisioning_migration_terminalizes_rollback_failure);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-encrypted",
       test_encrypted_provisioning_migration_publication);
+  g_test_add_func ("/policy/graph-authority/deferred-close-blob",
+      test_encrypted_policy_store_deferred_close_blob);
+  g_test_add_func ("/policy/graph-authority/deferred-close-transaction",
+      test_encrypted_policy_store_deferred_close_transaction);
   g_test_add_func ("/policy/graph-authority/provisioning-maintenance-identity",
       test_encrypted_maintenance_migration_identity_gate);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-crash",

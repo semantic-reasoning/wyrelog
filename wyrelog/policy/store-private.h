@@ -70,6 +70,14 @@ typedef enum
 
 void wyl_policy_store_read_snapshot_finish_fail_once_for_test
   (wyl_policy_store_t * store, WylPolicySnapshotFinishFailStage stage);
+
+typedef void (*WylPolicyStoreImageReleaseObserver)
+  (const guint8 *image, gsize capacity, gpointer data);
+void wyl_policy_store_set_image_release_observer_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreImageReleaseObserver observer,
+    gpointer data);
+gboolean wyl_policy_store_deserialized_image_digest_for_test
+  (wyl_policy_store_t *store, guint8 out_digest[32]);
 #endif
 
 typedef enum
@@ -740,7 +748,8 @@ typedef enum
 
 /* service_cvk_runtime is copied by value during open. Callback functions and
  * data are borrowed, not owned: their code and data context must remain valid
- * and callable until wyl_policy_store_close() has returned. */
+ * and callable until the store has successfully closed. A BUSY result from
+ * wyl_policy_store_try_close() retains the store and these borrowed callbacks. */
 
 /* KeyProvider configuration and ownership:
  *
@@ -1521,6 +1530,17 @@ wyrelog_error_t wyl_policy_store_rotation_recovery_status (const gchar * path,
  * a no-op; an ambiguous or contradictory state fails closed without writes. */
 wyrelog_error_t wyl_policy_store_rotation_recover (const gchar * path,
     const wyl_policy_rotation_recovery_factory_t * factory);
+/* Retryable close for owners that may have SQLite resources outstanding.
+ * The caller must first quiesce concurrent store operations. On
+ * SQLITE_BUSY/non-OK SQLite close, the store and image remain owned by the
+ * caller; already-borrowed statements may be completed/released before retry,
+ * and an already-open transaction may be committed or rolled back, but new
+ * store operations, mutations, transactions, or SQLite resources may not be
+ * acquired. The pointer is set to NULL once SQLite closes, even if encrypted
+ * publication subsequently reports an error. */
+wyrelog_error_t wyl_policy_store_try_close (wyl_policy_store_t **store_io);
+/* Cleanup convenience for scopes whose owner guarantees no SQLite resources
+ * remain. Use try_close() explicitly when a busy result must be retried. */
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);

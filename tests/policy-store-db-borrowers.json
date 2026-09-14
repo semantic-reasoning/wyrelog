@@ -1,0 +1,70 @@
+{
+  "raw_db_borrowers": {
+  "tests/check-service-permission-closure-seed.c": 2,
+  "tests/test-audit-emit.c": 15,
+  "tests/test-daemon-checks-noaudit.c": 3,
+  "tests/test-daemon-checks.c": 2,
+  "tests/test-daemon-http-decide.c": 5,
+  "tests/test-daemon-http-facts.c": 1,
+  "tests/test-daemon-service-credential-handoff.c": 1,
+  "tests/test-fact-graph-seal.c": 9,
+  "tests/test-fact-provisioning-run.c": 15,
+  "tests/test-fact-reconcile-move.c": 2,
+  "tests/test-fact-replay.c": 3,
+  "tests/test-fact-store-forget-transaction-provision-helper.c": 1,
+  "tests/test-fact-store-provisioned.c": 3,
+  "tests/test-handle-engine-pair.c": 3,
+  "tests/test-login-projection.c": 3,
+    "tests/test-policy-graph-authority.c": 84,
+  "tests/test-policy-service-namespace.c": 4,
+  "tests/test-policy-store-lease.c": 2,
+  "tests/test-policy-store-service-cvk.c": 12,
+  "tests/test-policy-store-service-schema.c": 43,
+  "tests/test-policy-store-totp.c": 2,
+  "tests/test-policy-store.c": 47,
+  "tests/test-service-auth-coordination.c": 24,
+  "tests/test-service-credential-domain.c": 1,
+  "tests/test-service-credential-operation-coordinator-execute.c": 1,
+  "tests/test-service-credential-operation-coordinator-handoff.c": 1,
+  "tests/test-service-credential-operation-coordinator-retirement.c": 1,
+  "tests/test-service-credential-operation-fence.c": 15,
+  "tests/test-service-exchange-intention-store.c": 14,
+  "tests/test-service-exchange-projector.c": 1,
+  "tests/test-service-permission-maintenance.c": 3,
+  "tests/test-service-permission-receipt.c": 2,
+  "tests/test-service-principal-domain.c": 5,
+    "tests/test-wyctl-mfa.c": 1
+  },
+  "store_close_sites": {
+    "tests/check-service-credential-store-inspect.c": 1,
+    "tests/check-service-permission-closure-seed.c": 3,
+    "tests/test-fact-graph-seal.c": 1,
+    "tests/test-policy-graph-authority.c": 4,
+    "tests/test-policy-service-namespace.c": 5,
+    "tests/test-policy-store-lease.c": 23,
+    "tests/test-policy-store-service-cvk.c": 45,
+    "tests/test-policy-store-toctou.c": 12,
+    "tests/test-service-permission-maintenance.c": 8,
+    "tests/test-service-principal-domain.c": 2,
+    "tests/test-wyctl-key.c": 1,
+    "tests/test-wyctl-mfa.c": 1,
+    "wyrelog/policy/service-permission-maintenance-private.c": 1,
+    "wyrelog/policy/store-private.h": 1,
+    "wyrelog/policy/store.c": 15,
+    "wyrelog/wyctl/wyctl.c": 2,
+    "wyrelog/wyl-handle.c": 2
+  },
+  "lifetime_tests": {
+    "test_encrypted_provisioning_migration_publication": [
+      "wyl_policy_store_try_close (&store)",
+      "sqlite3_step (held_statement)",
+      "sqlite3_finalize (held_statement)",
+      "image_release_count, ==, 1"
+    ],
+    "test_encrypted_policy_store_deferred_close_blob": [
+      "sqlite3_blob_close (blob)",
+      "wyl_policy_store_try_close (&store)",
+      "image_release_count, ==, 1"
+    ]
+  }
+}
