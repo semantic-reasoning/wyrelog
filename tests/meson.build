@@ -3466,12 +3466,18 @@ bearer_resolver_structure_guard = find_program(
 test('check-daemon-bearer-resolver-structure',
   bearer_resolver_structure_guard,
   args : [meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c'],
+  # Lexes all of http.c, so its cost tracks that file's size: 19s on a fast
+  # Linux box at 16833 lines, and past meson's 30s default on Windows.
+  timeout : 180,
 )
 test('check-daemon-bearer-resolver-structure-self-test', python3,
   args : [
     meson.current_source_dir() / 'test-daemon-bearer-resolver-structure.py',
     bearer_resolver_structure_guard.full_path(),
   ],
+  # Runs the guard repeatedly over mutated copies, so it costs a multiple of
+  # the guard itself: 23s locally.
+  timeout : 300,
 )
 
 service_auth_write_terminal_owners_guard = find_program(
