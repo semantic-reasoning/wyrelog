@@ -381,6 +381,11 @@ main (void)
 #ifdef WYL_HAS_FACT_STORE
   if (grant_fact_authority (handle, "wyctl-policy-admin") != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (103);
+  if (wyl_policy_store_grant_role_membership (
+        wyl_handle_get_policy_store (handle), "wyctl-policy-admin",
+        "wr.system_admin", WYL_TENANT_DEFAULT) != WYRELOG_E_OK ||
+      wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return wyl_test_normalize_exit_status (104);
 #endif
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
@@ -487,6 +492,34 @@ main (void)
     NULL,
   };
   assert_wyctl_ok (graph_create_argv);
+
+  gchar *fact_quota_configure_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--limit", "2",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (fact_quota_configure_argv,
+      "tenant=__wr_default dimension=graph_count limit=2 committed=1 pending=0");
+  gchar *fact_quota_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (fact_quota_status_argv,
+      "tenant=__wr_default dimension=graph_count limit=2 committed=1 pending=0");
 
   gchar *schema_register_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,

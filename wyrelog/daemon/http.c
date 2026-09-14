@@ -701,7 +701,8 @@ typedef enum
   X (OPERATION_RECONCILE, operation_reconcile) \
   X (OPERATION_RECOVER, operation_recover) \
   X (MFA_CONFIRM, mfa_confirm) \
-  X (SELF_ARM, self_arm)
+  X (SELF_ARM, self_arm) \
+  X (FACT_QUOTA_CONFIGURE, fact_quota_configure)
 
 typedef enum
 {
@@ -7333,6 +7334,12 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
+static gboolean authorize_guarded_session_action (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
+    const gchar *action, const gchar *resource,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code, gchar **out_actor);
+
 static void
 facts_status_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -7401,6 +7408,107 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
+}
+
+static void
+facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+#ifndef WYL_HAS_FACT_STORE
+  (void) server;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+  return;
+#else
+  WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  const gchar *method = soup_server_message_get_method (msg);
+  if (g_strcmp0 (method, "GET") != 0 && g_strcmp0 (method, "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *tenant = query != NULL
+      ? g_hash_table_lookup (query, "tenant") : NULL;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400, "invalid_fact_quota_request");
+    return;
+  }
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+      "wr.sys.admin", tenant, "fact_quota_auth_required",
+      "invalid_fact_quota_auth", "fact_quota_denied",
+      "fact_quota_auth_failed", &actor))
+    return;
+
+  if (g_strcmp0 (method, "POST") == 0) {
+    const gchar *limit_arg = query != NULL
+        ? g_hash_table_lookup (query, "limit") : NULL;
+    gint64 limit = -1;
+    if (limit_arg == NULL || !parse_int64_query_param (limit_arg, &limit)
+        || limit < 0) {
+      set_json_error (msg, 400, "invalid_fact_quota_request");
+      return;
+    }
+    wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+            WYL_DAEMON_POLICY_WRITE_OWNER_FACT_QUOTA_CONFIGURE, &write);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_set_graph_quota_limit (write.store, tenant,
+              (guint64) limit);
+    if (rc == WYRELOG_E_INVALID) {
+      set_json_error (msg, 400, "invalid_fact_quota_request");
+      return;
+    }
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      set_json_error (msg, 404, "tenant_invalid");
+      return;
+    }
+    if (rc == WYRELOG_E_CONFLICT) {
+      set_json_error (msg, 409, "fact_quota_limit_below_usage");
+      return;
+    }
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_quota_configuration_failed");
+      return;
+    }
+    if (wyl_daemon_policy_write_finalize_for_response (msg, 200,
+        "success") != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "policy_write_cleanup_failed");
+      return;
+    }
+  }
+
+  WylPolicyGraphQuotaStatus status = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_get_graph_quota_status (ctx->handle != NULL
+          ? wyl_handle_get_policy_store (ctx->handle) : NULL, tenant, &status);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
+        rc == WYRELOG_E_NOT_FOUND ? "tenant_invalid" : "fact_quota_status_failed");
+    return;
+  }
+
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"dimension\":\"graph_count\",\"limit\":");
+  if (status.has_limit)
+    g_string_append_printf (body, "%" G_GUINT64_FORMAT, status.hard_limit);
+  else
+    g_string_append (body, "null");
+  g_string_append_printf (body,
+      ",\"committed\":%" G_GUINT64_FORMAT
+      ",\"pending\":%" G_GUINT64_FORMAT "}", status.committed,
+      status.pending);
+  (void) actor;
+  gsize body_len = body->len;
+  g_autofree gchar *body_data = g_string_free (
+    g_steal_pointer (&body), FALSE);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_TAKE, g_steal_pointer (&body_data), body_len);
+#endif
 }
 
 static void
@@ -11313,6 +11421,34 @@ set_graph_mutation_json (SoupServerMessage *msg, const gchar *tenant,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+#ifdef WYL_HAS_FACT_STORE
+static void
+set_graph_quota_exceeded_json (SoupServerMessage *msg,
+    const WylPolicyGraphQuotaStatus *status)
+{
+  if (status == NULL || !status->has_limit) {
+    set_json_error (msg, 500, "fact_quota_status_failed");
+    return;
+  }
+  guint64 observed = status->committed + status->pending;
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 429,
+      "fact_quota_exceeded") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  g_autoptr (GString) body = g_string_new (
+    "{\"error\":\"fact_quota_exceeded\","
+    "\"dimension\":\"graph_count\",\"limit\":");
+  g_string_append_printf (body, "%" G_GUINT64_FORMAT
+      ",\"observed\":%" G_GUINT64_FORMAT "}", status->hard_limit,
+      observed);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 429, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+#endif
+
 static void
 graph_create_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -11365,6 +11501,8 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE, &write);
+  gboolean quota_exceeded = FALSE;
+  WylPolicyGraphQuotaStatus quota_status = { 0 };
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   /* Crash-safe provisioning create: reserve the graph authority + operation
    * record atomically, then drive the filesystem construction to ACTIVE.  A
@@ -11372,16 +11510,22 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
    */
   if (rc == WYRELOG_E_OK) {
     gchar op_uuid[WYL_ID_STRING_BUF];
-    rc = wyl_policy_store_create_fact_graph_provisioning (write.store, &opts,
-            NULL, op_uuid);
+    rc = wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+          (write.store, &opts, NULL, op_uuid, &quota_exceeded,
+            &quota_status);
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_provisioning_recover (write.store, op_uuid,
               ctx->fact_root, NULL);
   }
 #else
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_create_fact_graph (write.store, &opts, NULL);
+    rc = wyl_policy_store_create_fact_graph_with_quota_result (write.store,
+            &opts, NULL, &quota_exceeded, &quota_status);
 #endif
+  if (quota_exceeded) {
+    set_graph_quota_exceeded_json (msg, &quota_status);
+    return;
+  }
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -16957,6 +17101,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/status",
       facts_status_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/facts/quota",
+      facts_quota_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,

@@ -3260,6 +3260,279 @@ test_tenant_state_constraints (void)
 }
 
 static void
+test_graph_quota_store_api (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-a", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-b", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+
+  WylPolicyGraphQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store, "quota-a",
+      &status), ==, WYRELOG_E_OK);
+  g_assert_false (status.has_limit);
+  g_assert_cmpuint (status.committed, ==, 0);
+  g_assert_cmpuint (status.pending, ==, 0);
+
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store, "quota-a", 2),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store, "quota-b", 7),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store, "quota-a",
+      G_MAXUINT64), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
+      "quota-missing", 1), ==, WYRELOG_E_NOT_FOUND);
+
+  exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,created_at,updated_at) VALUES "
+      "('quota-a','existing','file:///existing','/existing',1,'quota-a',1,1);");
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store, "quota-a",
+      &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.hard_limit, ==, 2);
+  g_assert_cmpuint (status.committed, ==, 1);
+  g_assert_cmpuint (status.pending, ==, 0);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store, "quota-b",
+      &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.hard_limit, ==, 7);
+  g_assert_cmpuint (status.committed, ==, 0);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store, "quota-a", 0),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store, "quota-a",
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.hard_limit, ==, 2);
+  g_assert_cmpuint (status.committed, ==, 1);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store, "quota-b", 0),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store, "quota-b",
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.hard_limit, ==, 0);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-missing", &status), ==, WYRELOG_E_NOT_FOUND);
+}
+
+static void
+remove_quota_test_tree (const gchar *path)
+{
+  g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
+  if (dir != NULL) {
+    const gchar *name = NULL;
+    while ((name = g_dir_read_name (dir)) != NULL) {
+      g_autofree gchar *child = g_build_filename (path, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR))
+        remove_quota_test_tree (child);
+      else
+        (void) g_remove (child);
+    }
+  }
+  (void) g_rmdir (path);
+}
+
+static void
+test_graph_quota_reservation_survives_reopen (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *fact_root = g_dir_make_tmp (
+    "wyl-graph-quota-reopen-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (fact_root);
+
+  wyl_policy_store_open_options_t open_opts = {.path = store_path};
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-reopen",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-zero",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
+      "quota-reopen", 1), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
+      "quota-zero", 0), ==, WYRELOG_E_OK);
+
+  wyl_policy_fact_graph_create_options_t opts = {
+    .tenant_id = "quota-reopen",
+    .graph_id = "pending",
+    .fact_root = fact_root,
+    .schema_version = 1,
+    .owner_scope = "quota-reopen",
+  };
+  gchar first_op[WYL_ID_STRING_BUF] = { 0 };
+  gboolean quota_exceeded = TRUE;
+  g_assert_cmpint
+    (wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+        (store, &opts, NULL, first_op, &quota_exceeded, NULL), ==,
+      WYRELOG_E_OK);
+  g_assert_false (quota_exceeded);
+  g_assert_cmpstr (first_op, !=, "");
+  WylFactGraphDirectory pending_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
+      fact_root, "quota-reopen", "pending", FALSE, &pending_directory),
+      ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_directory_clear (&pending_directory);
+  WylPolicyGraphQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-reopen", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.committed, ==, 0);
+  g_assert_cmpuint (status.pending, ==, 1);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-reopen", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending, ==, 1);
+
+  gchar resumed_op[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint
+    (wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+        (store, &opts, NULL, resumed_op, &quota_exceeded, NULL), ==,
+      WYRELOG_E_OK);
+  g_assert_false (quota_exceeded);
+  g_assert_cmpstr (resumed_op, ==, first_op);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-reopen", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending, ==, 1);
+
+  wyl_policy_fact_graph_create_options_t over_limit = opts;
+  over_limit.graph_id = "blocked";
+  gchar blocked_op[WYL_ID_STRING_BUF] = { 0 };
+  quota_exceeded = FALSE;
+  g_assert_cmpint
+    (wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+        (store, &over_limit, NULL, blocked_op, &quota_exceeded, NULL),
+      ==, WYRELOG_E_POLICY);
+  g_assert_true (quota_exceeded);
+  g_assert_cmpstr (blocked_op, ==, "");
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-reopen", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending, ==, 1);
+  g_assert_cmpuint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graphs WHERE tenant_id='quota-reopen';"),
+      ==, 1);
+  WylFactGraphDirectory blocked_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
+      fact_root, "quota-reopen", "blocked", FALSE, &blocked_directory),
+      ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_directory_clear (&blocked_directory);
+
+  wyl_policy_fact_graph_create_options_t zero_limit = opts;
+  zero_limit.tenant_id = "quota-zero";
+  zero_limit.owner_scope = "quota-zero";
+  zero_limit.graph_id = "zero-limit";
+  quota_exceeded = FALSE;
+  g_assert_cmpint
+    (wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+        (store, &zero_limit, NULL, blocked_op, &quota_exceeded, NULL),
+      ==, WYRELOG_E_POLICY);
+  g_assert_true (quota_exceeded);
+  WylFactGraphDirectory zero_limit_directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store,
+      fact_root, "quota-zero", "zero-limit", FALSE,
+      &zero_limit_directory), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_directory_clear (&zero_limit_directory);
+
+  /* The fallback create path commits a durable quota reservation before
+   * touching the filesystem. A failure and store reopen keep one pending
+   * operation, which an identical retry resumes rather than double-counting. */
+  created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-fallback",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
+      "quota-fallback", 1), ==, WYRELOG_E_OK);
+  g_autofree gchar *blocking_file = g_build_filename (fact_root,
+          "not-a-directory", NULL);
+  g_autofree gchar *fallback_root = g_build_filename (blocking_file,
+          "facts", NULL);
+  g_assert_true (g_file_set_contents (blocking_file, "x", 1, &error));
+  g_assert_no_error (error);
+  wyl_policy_fact_graph_create_options_t fallback_opts = {
+    .tenant_id = "quota-fallback",
+    .graph_id = "recover-me",
+    .fact_root = fallback_root,
+    .schema_version = 1,
+    .owner_scope = "quota-fallback",
+  };
+  gboolean fallback_quota_exceeded = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
+        (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), !=,
+      WYRELOG_E_OK);
+  g_assert_false (fallback_quota_exceeded);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-fallback", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.committed, ==, 0);
+  g_assert_cmpuint (status.pending, ==, 1);
+  g_autofree gchar *fallback_operation = scalar_text
+        (wyl_policy_store_get_db (store),
+          "SELECT operation_uuid FROM fact_graph_create_reservations "
+          "WHERE tenant_id='quota-fallback' AND graph_id='recover-me';");
+  g_assert_nonnull (fallback_operation);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *reopened_operation = scalar_text
+        (wyl_policy_store_get_db (store),
+          "SELECT operation_uuid FROM fact_graph_create_reservations "
+          "WHERE tenant_id='quota-fallback' AND graph_id='recover-me';");
+  g_assert_cmpstr (reopened_operation, ==, fallback_operation);
+  g_assert_cmpint (g_remove (blocking_file), ==, 0);
+  g_assert_cmpint (g_mkdir (blocking_file, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (fallback_root, 0700), ==, 0);
+  g_autofree gchar *changed_config_root = g_build_filename (fact_root,
+          "facts-after-restart", NULL);
+  g_assert_cmpint (g_mkdir (changed_config_root, 0700), ==, 0);
+  fallback_opts.fact_root = changed_config_root;
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
+        (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-fallback", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending, ==, 1);
+  /* The store binds to one fact root at startup. Restore the root under which
+   * the durable request was admitted before retrying that reservation. */
+  fallback_opts.fact_root = fallback_root;
+  g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
+        (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), ==,
+      WYRELOG_E_OK);
+  g_assert_false (fallback_quota_exceeded);
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "quota-fallback", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.committed, ==, 1);
+  g_assert_cmpuint (status.pending, ==, 0);
+  g_assert_cmpuint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graph_create_reservations "
+      "WHERE tenant_id='quota-fallback';"), ==, 0);
+  g_autofree gchar *resumed_storage_path = scalar_text
+        (wyl_policy_store_get_db (store),
+          "SELECT storage_path FROM fact_graphs WHERE tenant_id='quota-fallback' "
+          "AND graph_id='recover-me';");
+  g_assert_nonnull (resumed_storage_path);
+  g_assert_true (g_str_has_prefix (resumed_storage_path, fallback_root));
+  g_assert_false (g_str_has_prefix (resumed_storage_path, changed_config_root));
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+  remove_quota_test_tree (fact_root);
+}
+
+static void
 test_tenant_sealed_generation_overflow (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -4828,6 +5101,11 @@ main (int argc, char **argv)
       test_graph_identity_and_state_constraints);
   g_test_add_func ("/policy/graph-authority/tenant-state-constraints",
       test_tenant_state_constraints);
+  g_test_add_func ("/policy/graph-authority/graph-quota-store-api",
+      test_graph_quota_store_api);
+  g_test_add_func
+    ("/policy/graph-authority/graph-quota-reservation-reopen",
+      test_graph_quota_reservation_survives_reopen);
   g_test_add_func ("/policy/graph-authority/tenant-sealed-overflow",
       test_tenant_sealed_generation_overflow);
   g_test_add_func ("/policy/graph-authority/integer-domain-constraints",

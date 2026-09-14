@@ -849,6 +849,8 @@ static const gchar *const required_tables[] = {
   "fact_graph_relations",
   "fact_graph_relation_columns",
   "fact_graph_query_allowlist",
+  "fact_tenant_quota_limits",
+  "fact_graph_create_reservations",
   "fact_namespaces",
   "fact_relation_schemas",
   "fact_relation_schema_columns",
@@ -12326,6 +12328,27 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       ");"
       "CREATE INDEX IF NOT EXISTS idx_fact_graphs_tenant "
       "  ON fact_graphs (tenant_id);"
+      "CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits ("
+      "  tenant_id TEXT NOT NULL,"
+      "  dimension TEXT NOT NULL CHECK (dimension = 'graph_count'),"
+      "  hard_limit INTEGER NOT NULL CHECK ("
+      "    typeof(hard_limit) = 'integer' AND hard_limit >= 0),"
+      "  updated_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (tenant_id, dimension),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_graph_create_reservations ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  operation_uuid TEXT NOT NULL UNIQUE,"
+      "  request_digest TEXT NOT NULL CHECK (length(request_digest) = 64),"
+      "  fact_root TEXT NOT NULL,"
+      "  storage_path TEXT NOT NULL,"
+      "  storage_uri TEXT NOT NULL,"
+      "  created_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (tenant_id, graph_id),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
       "CREATE TABLE IF NOT EXISTS fact_reconcile_journal ("
       "  op_uuid TEXT PRIMARY KEY,"
       "  tenant_id TEXT NOT NULL,"
@@ -13426,6 +13449,155 @@ validate_fact_graph_options (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_policy_store_set_graph_quota_limit (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint64 hard_limit)
+{
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || hard_limit > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, tenant_id, &exists);
+  if (rc != WYRELOG_E_OK || !exists) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_NOT_FOUND;
+  }
+  WylPolicyGraphQuotaStatus current = { 0 };
+  rc = wyl_policy_store_get_graph_quota_status (store, tenant_id, &current);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  if (hard_limit < current.committed + current.pending) {
+    wyl_policy_store_rollback_mutation (store);
+    return WYRELOG_E_CONFLICT;
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO fact_tenant_quota_limits "
+          "(tenant_id, dimension, hard_limit, updated_at) "
+          "VALUES (?, 'graph_count', ?, unixepoch()) "
+          "ON CONFLICT(tenant_id, dimension) DO UPDATE SET "
+          "hard_limit=excluded.hard_limit, updated_at=excluded.updated_at;",
+          &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 2, (sqlite3_int64) hard_limit)
+      != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_graph_quota_status (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyGraphQuotaStatus *out_status)
+{
+  if (store == NULL || store->db == NULL || out_status == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_status = (WylPolicyGraphQuotaStatus) { 0 };
+
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT q.hard_limit, "
+          "(SELECT COUNT(*) FROM fact_graphs AS g WHERE "
+          "g.tenant_id=t.tenant_id AND g.lifecycle_state='provisioning') + "
+          "(SELECT COUNT(*) FROM fact_graph_create_reservations AS r WHERE "
+          "r.tenant_id=t.tenant_id), "
+          "(SELECT COUNT(*) FROM fact_graphs AS g WHERE "
+          "g.tenant_id=t.tenant_id AND g.lifecycle_state!='provisioning') "
+          "FROM tenants AS t "
+          "LEFT JOIN fact_tenant_quota_limits AS q "
+          "ON q.tenant_id=t.tenant_id AND q.dimension='graph_count' "
+          "WHERE t.tenant_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    out_status->has_limit = sqlite3_column_type (stmt, 0) != SQLITE_NULL;
+    if (out_status->has_limit)
+      out_status->hard_limit = (guint64) sqlite3_column_int64 (stmt, 0);
+    out_status->pending = (guint64) sqlite3_column_int64 (stmt, 1);
+    out_status->committed = (guint64) sqlite3_column_int64 (stmt, 2);
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW ? WYRELOG_E_OK :
+         step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+}
+
+/* Called only after beginning the same SQLite mutation that will admit the
+ * graph. BEGIN IMMEDIATE serializes competing admissions across store handles
+ * and processes, so this read cannot race another successful create. */
+static wyrelog_error_t
+fact_graph_quota_admission_check (wyl_policy_store_t *store,
+    const gchar *tenant_id, gboolean *out_exceeded,
+    WylPolicyGraphQuotaStatus *out_status)
+{
+  if (out_exceeded != NULL)
+    *out_exceeded = FALSE;
+  if (out_status != NULL)
+    *out_status = (WylPolicyGraphQuotaStatus) { 0 };
+  WylPolicyGraphQuotaStatus status = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_get_graph_quota_status (store,
+          tenant_id, &status);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (out_status != NULL)
+    *out_status = status;
+  if (status.has_limit
+      && (status.pending >= status.hard_limit
+      || status.committed >= status.hard_limit - status.pending)) {
+    if (out_exceeded != NULL)
+      *out_exceeded = TRUE;
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+describe_fact_graph_storage (const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_path, gchar **out_storage_uri)
+{
+  if (opts == NULL || out_storage_path == NULL || out_storage_uri == NULL)
+    return WYRELOG_E_INVALID;
+  *out_storage_path = NULL;
+  *out_storage_uri = NULL;
+  WylFactGraphLocator locator = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
+          opts->tenant_id, opts->graph_id);
+  g_autofree gchar *path = rc == WYRELOG_E_OK
+      ? wyl_fact_graph_locator_descriptive_path (opts->fact_root, &locator)
+      : NULL;
+  wyl_fact_graph_locator_clear (&locator);
+  if (rc == WYRELOG_E_OK && path == NULL)
+    rc = WYRELOG_E_NOMEM;
+  g_autofree gchar *uri = rc == WYRELOG_E_OK
+      ? g_filename_to_uri (path, NULL, NULL) : NULL;
+  if (rc == WYRELOG_E_OK && uri == NULL)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    *out_storage_path = g_steal_pointer (&path);
+    *out_storage_uri = g_steal_pointer (&uri);
+  }
+  return rc;
+}
+
 static wyrelog_error_t
 materialize_fact_graph_storage (wyl_policy_store_t *store,
     const wyl_policy_fact_graph_create_options_t *opts,
@@ -13440,21 +13612,9 @@ materialize_fact_graph_storage (wyl_policy_store_t *store,
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory (store,
           opts->fact_root, opts->tenant_id, opts->graph_id, TRUE, &directory);
-  g_autofree gchar *graph_path = NULL;
-  if (rc == WYRELOG_E_OK) {
-    graph_path = wyl_fact_graph_directory_descriptive_path (&directory);
-    if (graph_path == NULL)
-      rc = WYRELOG_E_NOMEM;
-  }
-  g_autofree gchar *uri = rc == WYRELOG_E_OK ?
-      g_filename_to_uri (graph_path, NULL, NULL) : NULL;
-  if (uri == NULL)
-    rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
-
-  if (rc == WYRELOG_E_OK) {
-    *out_storage_path = g_steal_pointer (&graph_path);
-    *out_storage_uri = g_steal_pointer (&uri);
-  }
+  if (rc == WYRELOG_E_OK)
+    rc = describe_fact_graph_storage (opts, out_storage_path,
+            out_storage_uri);
   wyl_fact_graph_directory_clear (&directory);
   return rc;
 }
@@ -13602,12 +13762,160 @@ insert_fact_graph_query_metadata (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
-wyrelog_error_t
-wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
-    const wyl_policy_fact_graph_create_options_t *opts, gchar **out_storage_uri)
+static void
+fact_graph_request_digest_append_string (GString *canonical,
+    const gchar *value)
+{
+  gsize length = value != NULL ? strlen (value) : 0;
+  g_string_append_printf (canonical, "S%" G_GSIZE_FORMAT ":", length);
+  if (length != 0)
+    g_string_append_len (canonical, value, (gssize) length);
+}
+
+static gchar *
+fact_graph_create_request_digest
+  (const wyl_policy_fact_graph_create_options_t *opts,
+    const gchar *storage_path, const gchar *storage_uri)
+{
+  g_autoptr (GString) canonical = g_string_new ("fact-graph-create-v1;");
+  fact_graph_request_digest_append_string (canonical, opts->tenant_id);
+  fact_graph_request_digest_append_string (canonical, opts->graph_id);
+  fact_graph_request_digest_append_string (canonical, opts->fact_root);
+  fact_graph_request_digest_append_string (canonical, storage_path);
+  fact_graph_request_digest_append_string (canonical, storage_uri);
+  fact_graph_request_digest_append_string (canonical, opts->owner_scope);
+  g_string_append_printf (canonical, "V%u;R%" G_GSIZE_FORMAT ";",
+      opts->schema_version, opts->n_relations);
+  for (gsize i = 0; i < opts->n_relations; i++) {
+    const wyl_policy_fact_graph_relation_t *relation = &opts->relations[i];
+    fact_graph_request_digest_append_string (canonical,
+        relation->relation_name);
+    g_string_append_printf (canonical, "C%" G_GSIZE_FORMAT ";",
+        relation->n_columns);
+    for (gsize j = 0; j < relation->n_columns; j++) {
+      fact_graph_request_digest_append_string (canonical,
+          relation->columns[j].column_name);
+      fact_graph_request_digest_append_string (canonical,
+          relation->columns[j].column_type);
+    }
+  }
+  g_string_append_printf (canonical, "Q%" G_GSIZE_FORMAT ";",
+      opts->n_queries);
+  for (gsize i = 0; i < opts->n_queries; i++) {
+    const wyl_policy_fact_graph_query_t *query = &opts->queries[i];
+    fact_graph_request_digest_append_string (canonical, query->query_name);
+    fact_graph_request_digest_append_string (canonical, query->relation_name);
+    fact_graph_request_digest_append_string (canonical,
+        query->required_permission_id);
+    g_string_append_printf (canonical, "M%u;", query->max_rows);
+  }
+  return g_compute_checksum_for_string (G_CHECKSUM_SHA256, canonical->str,
+             (gssize) canonical->len);
+}
+
+static wyrelog_error_t
+fact_graph_create_reservation_read (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, gboolean *out_found,
+    gchar **out_operation_uuid, gchar **out_request_digest)
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  if (out_operation_uuid != NULL)
+    *out_operation_uuid = NULL;
+  if (out_request_digest != NULL)
+    *out_request_digest = NULL;
+  if (store == NULL || out_found == NULL || out_operation_uuid == NULL
+      || out_request_digest == NULL)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT operation_uuid,request_digest "
+          "FROM fact_graph_create_reservations "
+          "WHERE tenant_id=? AND graph_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *operation_uuid = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *request_digest = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (operation_uuid == NULL || request_digest == NULL)
+      rc = WYRELOG_E_IO;
+    else {
+      *out_operation_uuid = g_strdup (operation_uuid);
+      *out_request_digest = g_strdup (request_digest);
+      *out_found = TRUE;
+    }
+  } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_graph_create_reservation_insert (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const gchar *operation_uuid, const gchar *request_digest,
+    const gchar *storage_path, const gchar *storage_uri)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "INSERT INTO fact_graph_create_reservations "
+          "(tenant_id,graph_id,operation_uuid,request_digest,fact_root,"
+          "storage_path,storage_uri,created_at) "
+          "VALUES (?,?,?,?,?,?,?,unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, opts->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, opts->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, operation_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 4, request_digest) != WYRELOG_E_OK
+      || bind_text (stmt, 5, opts->fact_root) != WYRELOG_E_OK
+      || bind_text (stmt, 6, storage_path) != WYRELOG_E_OK
+      || bind_text (stmt, 7, storage_uri) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_graph_create_reservation_delete (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    const gchar *operation_uuid, const gchar *request_digest)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "DELETE FROM fact_graph_create_reservations WHERE tenant_id=? "
+          "AND graph_id=? AND operation_uuid=? AND request_digest=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, operation_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 4, request_digest) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_CONFLICT;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+policy_store_create_fact_graph_internal (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_uri, gboolean *out_quota_exceeded,
+    WylPolicyGraphQuotaStatus *out_quota_status)
 {
   if (out_storage_uri != NULL)
     *out_storage_uri = NULL;
+  if (out_quota_exceeded != NULL)
+    *out_quota_exceeded = FALSE;
+  if (out_quota_status != NULL)
+    *out_quota_status = (WylPolicyGraphQuotaStatus) { 0 };
 
   wyrelog_error_t rc = validate_fact_graph_options (store, opts);
   if (rc != WYRELOG_E_OK)
@@ -13630,6 +13938,16 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   if (!tenant_active)
     return WYRELOG_E_POLICY;
 
+  g_autofree gchar *storage_path = NULL;
+  g_autofree gchar *storage_uri = NULL;
+  rc = describe_fact_graph_storage (opts, &storage_path, &storage_uri);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *request_digest = fact_graph_create_request_digest (opts,
+          storage_path, storage_uri);
+  if (request_digest == NULL)
+    return WYRELOG_E_NOMEM;
+
   gboolean graph_exists = FALSE;
   gboolean graph_sealed = FALSE;
   rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
@@ -13639,27 +13957,45 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   if (graph_exists || graph_sealed)
     return WYRELOG_E_POLICY;
 
-  g_autofree gchar *storage_path = NULL;
-  g_autofree gchar *storage_uri = NULL;
-  rc = materialize_fact_graph_storage (store, opts, &storage_path,
-          &storage_uri);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
-  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
-    const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
-    rc = insert_fact_graph_relation_metadata (store, opts, rel);
-    for (gsize j = 0; rc == WYRELOG_E_OK && j < rel->n_columns; j++)
-      rc = insert_fact_graph_column_metadata (store, opts, rel, j);
+  graph_exists = FALSE;
+  graph_sealed = FALSE;
+  rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
+          &graph_exists, &graph_sealed);
+  if (rc != WYRELOG_E_OK || graph_exists || graph_sealed) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
   }
-  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
-    rc = insert_fact_graph_query_metadata (store, opts, &opts->queries[i]);
 
+  gboolean reservation_found = FALSE;
+  g_autofree gchar *operation_uuid = NULL;
+  g_autofree gchar *stored_digest = NULL;
+  rc = fact_graph_create_reservation_read (store, opts->tenant_id,
+          opts->graph_id, &reservation_found, &operation_uuid, &stored_digest);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  if (reservation_found) {
+    if (g_strcmp0 (request_digest, stored_digest) != 0) {
+      wyl_policy_store_rollback_mutation (store);
+      return WYRELOG_E_POLICY;
+    }
+  } else {
+    rc = fact_graph_quota_admission_check (store, opts->tenant_id,
+            out_quota_exceeded, out_quota_status);
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_store_rollback_mutation (store);
+      return rc;
+    }
+    g_autofree gchar *new_operation_uuid = g_uuid_string_random ();
+    rc = fact_graph_create_reservation_insert (store, opts,
+            new_operation_uuid, request_digest, storage_path, storage_uri);
+    if (rc == WYRELOG_E_OK)
+      operation_uuid = g_strdup (new_operation_uuid);
+  }
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
@@ -13668,9 +14004,83 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  /* The durable reservation above owns the quota slot before this can create
+   * a directory. If materialization fails or the process stops, a retry with
+   * the identical request resumes this same operation UUID. */
+  g_autofree gchar *materialized_path = NULL;
+  g_autofree gchar *materialized_uri = NULL;
+  rc = materialize_fact_graph_storage (store, opts, &materialized_path,
+          &materialized_uri);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strcmp0 (storage_path, materialized_path) != 0
+      || g_strcmp0 (storage_uri, materialized_uri) != 0)
+    return WYRELOG_E_POLICY;
+
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean still_reserved = FALSE;
+  g_autofree gchar *current_operation_uuid = NULL;
+  g_autofree gchar *current_digest = NULL;
+  rc = fact_graph_create_reservation_read (store, opts->tenant_id,
+          opts->graph_id, &still_reserved, &current_operation_uuid,
+          &current_digest);
+  if (rc == WYRELOG_E_OK && (!still_reserved
+      || g_strcmp0 (operation_uuid, current_operation_uuid) != 0
+      || g_strcmp0 (request_digest, current_digest) != 0))
+    rc = WYRELOG_E_CONFLICT;
+  graph_exists = FALSE;
+  graph_sealed = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
+            &graph_exists, &graph_sealed);
+  if (rc == WYRELOG_E_OK && (graph_exists || graph_sealed))
+    rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
+    const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
+    rc = insert_fact_graph_relation_metadata (store, opts, rel);
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < rel->n_columns; j++)
+      rc = insert_fact_graph_column_metadata (store, opts, rel, j);
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
+    rc = insert_fact_graph_query_metadata (store, opts, &opts->queries[i]);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_graph_create_reservation_delete (store, opts->tenant_id,
+            opts->graph_id, operation_uuid, request_digest);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   if (out_storage_uri != NULL)
     *out_storage_uri = g_strdup (storage_uri);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_uri)
+{
+  return policy_store_create_fact_graph_internal (store, opts,
+             out_storage_uri, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_policy_store_create_fact_graph_with_quota_result (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_uri, gboolean *out_quota_exceeded,
+    WylPolicyGraphQuotaStatus *out_quota_status)
+{
+  if (out_quota_exceeded == NULL)
+    return WYRELOG_E_INVALID;
+  return policy_store_create_fact_graph_internal (store, opts,
+             out_storage_uri, out_quota_exceeded, out_quota_status);
 }
 
 wyrelog_error_t
@@ -16781,15 +17191,20 @@ wyl_policy_store_graph_provisioning_prepare (wyl_policy_store_t *store,
   return wyl_policy_store_graph_provisioning_read (store, op_uuid, out_record);
 }
 
-wyrelog_error_t
-wyl_policy_store_create_fact_graph_provisioning (wyl_policy_store_t *store,
+static wyrelog_error_t
+policy_store_create_fact_graph_provisioning_internal (wyl_policy_store_t *store,
     const wyl_policy_fact_graph_create_options_t *opts, gchar **out_storage_uri,
-    gchar *out_op_uuid)
+    gchar *out_op_uuid, gboolean *out_quota_exceeded,
+    WylPolicyGraphQuotaStatus *out_quota_status)
 {
   if (out_storage_uri != NULL)
     *out_storage_uri = NULL;
   if (out_op_uuid != NULL)
     out_op_uuid[0] = '\0';
+  if (out_quota_exceeded != NULL)
+    *out_quota_exceeded = FALSE;
+  if (out_quota_status != NULL)
+    *out_quota_status = (WylPolicyGraphQuotaStatus) { 0 };
   if (store == NULL || out_op_uuid == NULL)
     return WYRELOG_E_INVALID;
 
@@ -16849,16 +17264,32 @@ wyl_policy_store_create_fact_graph_provisioning (wyl_policy_store_t *store,
     return WYRELOG_E_OK;
   }
 
-  g_autofree gchar *storage_path = NULL;
-  g_autofree gchar *storage_uri = NULL;
-  rc = materialize_fact_graph_storage (store, opts, &storage_path,
-          &storage_uri);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  graph_exists = FALSE;
+  graph_sealed = FALSE;
+  rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
+          &graph_exists, &graph_sealed);
+  if (rc != WYRELOG_E_OK || graph_exists || graph_sealed) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
+  }
+  rc = fact_graph_quota_admission_check (store, opts->tenant_id,
+          out_quota_exceeded, out_quota_status);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+
+  g_autofree gchar *storage_path = NULL;
+  g_autofree gchar *storage_uri = NULL;
+  rc = describe_fact_graph_storage (opts, &storage_path,
+          &storage_uri);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
 
   rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
@@ -16914,6 +17345,29 @@ wyl_policy_store_create_fact_graph_provisioning (wyl_policy_store_t *store,
   if (out_storage_uri != NULL)
     *out_storage_uri = g_strdup (storage_uri);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_create_fact_graph_provisioning (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts, gchar **out_storage_uri,
+    gchar *out_op_uuid)
+{
+  return policy_store_create_fact_graph_provisioning_internal (store, opts,
+             out_storage_uri, out_op_uuid, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+  (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_uri, gchar *out_op_uuid,
+    gboolean *out_quota_exceeded,
+    WylPolicyGraphQuotaStatus *out_quota_status)
+{
+  if (out_quota_exceeded == NULL)
+    return WYRELOG_E_INVALID;
+  return policy_store_create_fact_graph_provisioning_internal (store, opts,
+             out_storage_uri, out_op_uuid, out_quota_exceeded, out_quota_status);
 }
 
 static gboolean

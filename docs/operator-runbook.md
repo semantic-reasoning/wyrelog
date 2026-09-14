@@ -1151,6 +1151,37 @@ for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
 done
 ```
 
+Graph-count admission can be bounded independently of fact bytes and rows. Only
+a principal with system-administrator authority (`wr.system_admin`) may read or
+change a tenant's quota. Configure a limit and inspect its usage before creating
+graphs:
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact quota configure \
+  --tenant "$TENANT" --limit 100 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(date +%s)" --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" fact quota status \
+  --tenant "$TENANT" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(date +%s)" --guard-loc-class trusted --guard-risk 29
+```
+
+The status reports `limit`, `committed`, and `pending`; secure provisioning
+rows and fallback graph-create reservations count as pending against the same
+limit and remain reserved across daemon restarts. Retrying the identical graph
+create resumes its durable operation. The retry must use the same fact root;
+the policy store binds to one root, so restore the original daemon root if it
+was changed while a reservation is pending. A limit of `0` denies all new
+graph creates. A requested limit below current committed-plus-pending usage is
+refused with HTTP `409` and
+`error=fact_quota_limit_below_usage`; existing graphs are never removed. At
+capacity, `POST /graphs/create` returns HTTP `429` with
+`error=fact_quota_exceeded`, `dimension=graph_count`, `limit`, and `observed`,
+before graph artifacts are created. This first quota dimension limits graph
+count only; it does not limit per-graph fact rows or bytes.
+
 Run the graph, schema, fact, and query commands through `wyctl`:
 
 ```sh
@@ -1395,8 +1426,8 @@ keys together, not on either one alone:
 So a retry loop that mints a fresh `batch_id` *and* a fresh
 `idempotency_key` each attempt is not replaying -- it is appending a new
 tombstone every time, and each one is charged. (Minting only one of the two
-does not append at all; by the rule above it is refused `409`.) No cap is
-enforced on that today; quota policy is issue #553.
+does not append at all; by the rule above it is refused `409`.) The graph-count
+quota described above does not cap fact rows, bytes, or mutation batches.
 
 `logical_byte_delta` measures the request, not the effect. It sizes each value
 by that value's own type, so it is not a byte count of the payload: fixed-width

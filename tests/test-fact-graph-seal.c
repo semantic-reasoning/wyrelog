@@ -211,6 +211,13 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
       WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
       &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  /* Without the secure provisioning runner, the test advances the authority
+   * row itself.  Mirror the runner's filesystem step so later tests that open
+   * facts.duckdb exercise a materialized graph rather than only metadata. */
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store, root,
+      tenant_id, graph_id, TRUE, &directory), ==, WYRELOG_E_OK);
+  wyl_fact_graph_directory_clear (&directory);
 #endif
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},

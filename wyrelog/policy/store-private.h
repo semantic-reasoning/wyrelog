@@ -2386,9 +2386,32 @@ wyrelog_error_t wyl_policy_store_classify_tenant_create_bundle
     WylPolicyTenantCreateBundleState * out_state);
 wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
     wyl_policy_tenant_cb cb, gpointer user_data);
+typedef struct
+{
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 committed;
+  guint64 pending;
+} WylPolicyGraphQuotaStatus;
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);
+/* The quota-aware forms set @out_quota_exceeded only for the graph-count
+ * admission refusal (which also returns WYRELOG_E_POLICY). They check and
+ * admit under one SQLite write transaction, before creating graph artifacts. */
+wyrelog_error_t wyl_policy_store_create_fact_graph_with_quota_result
+  (wyl_policy_store_t * store,
+    const wyl_policy_fact_graph_create_options_t * opts,
+    gchar ** out_storage_uri, gboolean * out_quota_exceeded,
+    WylPolicyGraphQuotaStatus * out_quota_status);
+/* An absent graph-count limit means unlimited. A configured limit of zero
+ * denies all new graph admissions. Pending includes secure provisioning rows
+ * and fallback create reservations; committed excludes both populations. */
+wyrelog_error_t wyl_policy_store_set_graph_quota_limit
+  (wyl_policy_store_t * store, const gchar * tenant_id, guint64 hard_limit);
+wyrelog_error_t wyl_policy_store_get_graph_quota_status
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyGraphQuotaStatus * out_status);
 /* Create a graph as a crash-safe provisioning operation: inserts the metadata
  * and reserves the graph authority (moving it to provisioning) in one atomic
  * mutation, then returns the reservation's operation UUID so the caller can
@@ -2401,6 +2424,12 @@ wyrelog_error_t wyl_policy_store_create_fact_graph_provisioning
   (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri, gchar * out_op_uuid);
+wyrelog_error_t wyl_policy_store_create_fact_graph_provisioning_with_quota_result
+  (wyl_policy_store_t * store,
+    const wyl_policy_fact_graph_create_options_t * opts,
+    gchar ** out_storage_uri, gchar * out_op_uuid,
+    gboolean * out_quota_exceeded,
+    WylPolicyGraphQuotaStatus * out_quota_status);
 wyrelog_error_t wyl_policy_store_foreach_fact_graph (wyl_policy_store_t *
     store, const gchar * tenant_id, wyl_policy_fact_graph_cb cb,
     gpointer user_data);

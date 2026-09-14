@@ -106,6 +106,16 @@ typedef struct
 typedef struct
 {
   gchar *tenant;
+  gchar *limit_arg;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactQuotaOptions;
+
+typedef struct
+{
+  gchar *tenant;
   gchar *graph;
   gchar *namespace_id;
   gchar *relation;
@@ -286,6 +296,20 @@ wyctl_fact_schema_options_clear (WyctlFactSchemaOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactSchemaOptions,
     wyctl_fact_schema_options_clear);
+
+static void
+wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->limit_arg, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactQuotaOptions,
+    wyctl_fact_quota_options_clear);
 
 static void
 wyctl_fact_put_options_clear (WyctlFactPutOptions *opts)
@@ -2103,6 +2127,106 @@ run_fact_schema (const WyctlOptions *global_opts, gint argc, gchar **argv)
 }
 
 static int
+run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
+    gint argc, gchar **argv)
+{
+  g_auto (WyctlFactQuotaOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
+     "Maximum graph count (0 denies graph creation)", "N"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING,
+     &opts.access_token_file, "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_loc_class, "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (
+    configure ? "- wyrelog fact quota configure" :
+    "- wyrelog fact quota status");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact quota argument: %s\n", argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (
+    global_opts->daemon_url, global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg = wyctl_resolve_uint_option_as_string (
+    global_opts->timeout_ms_arg, global_opts->settings,
+    "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file = wyctl_resolve_string_option (
+    opts.access_token_file, global_opts->settings, "access-token-file");
+  if (configure && opts.limit_arg == NULL) {
+    g_printerr ("wyctl: missing --limit\n");
+    return 2;
+  }
+  gint64 parsed_limit = 0;
+  if (configure && !parse_nonnegative_int64 (opts.limit_arg, &parsed_limit)) {
+    g_printerr ("wyctl: invalid --limit\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  WylClientFactQuotaStatus status = { 0 };
+  wyrelog_error_t rc = configure
+      ? wyl_client_fact_quota_configure (client, tenant,
+          (guint64) parsed_limit, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &status)
+      : wyl_client_fact_quota_status (client, tenant, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &status);
+  int exit_rc = fact_remote_exit (client,
+          configure ? "fact quota configure" : "fact quota status", rc,
+          "fact_quota_failed");
+  if (exit_rc == 0)
+    g_print ("tenant=%s dimension=graph_count limit=", status.tenant_id);
+  if (exit_rc == 0) {
+    if (status.has_limit)
+      g_print ("%" G_GUINT64_FORMAT, status.hard_limit);
+    else
+      g_print ("unlimited");
+    g_print (" committed=%" G_GUINT64_FORMAT " pending=%" G_GUINT64_FORMAT
+        "\n", status.committed, status.pending);
+  }
+  wyl_client_fact_quota_status_clear (&status);
+  return exit_rc;
+}
+
+static int
+run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing fact quota command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "configure") == 0)
+    return run_fact_quota (global_opts, TRUE, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_fact_quota (global_opts, FALSE, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown fact quota command: %s\n", argv[1]);
+  return 2;
+}
+
+static int
 run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -2111,6 +2235,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "schema") == 0)
     return run_fact_schema (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "quota") == 0)
+    return run_fact_quota_command (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "put") == 0)
     return run_fact_put (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "retract") == 0)
