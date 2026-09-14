@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Hold the structure guard's definition lexer to the pattern it replaced.
+r"""Hold the structure guard's definition lexer to the pattern it replaced.
 
 `function_span` used to find every definition the guard pins with a single
 regex whose prefix opened on a variable-length class.  `re` had no literal to
-scan for, so it retried the lazy prefix at every offset of a 500KB `http.c`:
+scan for, so it retried the lazy prefix at every offset of a 623KB `http.c`:
 0.45s per lookup, 38 lookups per run, and a cost that grew with the file until
 the guard and its self-test both ran past meson's 30s default on the Windows
 job (#1080).  The replacement anchors on the function name and checks the same
@@ -15,12 +15,24 @@ characters still produces the same verdict on that corpus; the guard's run
 against the real `http.c` only notices a disagreement that happens to fall on
 one of the 28 names it pins.  So this file keeps the old pattern as an oracle.
 
+`name` is a C identifier in every call the guard makes, and the two
+formulations are only equivalent for one: both rely on the prefix's trailing
+`\s+` to reject a name that is a suffix of a longer identifier, which a name
+containing whitespace or punctuation would not get.
+
+When `function_span` has to change shape for a reason of its own -- a
+declaration form it cannot parse today -- replace this test.  Editing the
+oracle until it agrees turns the comparison into a tautology, which is the one
+failure mode it cannot report.
+
 The fixed corpus below documents the shapes that separate the two
 formulations.  It is not what proves them equal: the case that actually
 separated them -- an unbalanced, semicolon-free parameter run, where the old
 pattern's `[^;]*?` swallows a later definition and `finditer`'s non-overlap
 then hides it -- was found by fuzzing, and no hand-written corpus here had it.
-The generative sweep is the assertion; the corpus is the documentation.
+Every mutation of `function_span` that changes behaviour now dies on a corpus
+case, because the shapes the sweep found were folded back into it; the sweep
+stays as the tripwire for the next shape nobody thought of.
 """
 
 from __future__ import annotations
@@ -129,7 +141,12 @@ CORPUS = (
 TOKENS = ("foo", "bar", "(", ")", "{", "}", ";", "*", ",", "=", "&",
           "int", "static", "wyrelog_error_t", " ", "  ", "\t", "\n")
 FUZZ_SEED = 1080
-FUZZ_CASES = 60000
+# A standing tripwire, not a search: the one shape this sweep found that the
+# corpus lacked is now a corpus case, and every mutation of function_span that
+# changes behaviour dies on a corpus case rather than here.  Sized to stay
+# cheap on the Windows job, where this file has meson's 30s default and no
+# multiplier is permitted.
+FUZZ_CASES = 10000
 
 
 def compare(guard, label, source, name, static_only, failures):
