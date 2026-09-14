@@ -1372,7 +1372,7 @@ test('policy-store', test_policy_store,
 test_policy_graph_authority = executable('test-policy-graph-authority',
   'test-policy-graph-authority.c',
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
+  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, sodium_dep],
 )
 
 # The two 19-stage migration matrices took 43.22s and 35.19s on Windows,
@@ -1384,6 +1384,9 @@ test('policy-graph-authority', test_policy_graph_authority,
           '-s', '/policy/graph-authority/windows-provisioning-migration'],
   timeout : 90,
   is_parallel : host_machine.system() != 'windows',
+)
+test('policy-store-close-ownership', python3,
+  args : files('test-policy-store-close-ownership.py'),
 )
 test('policy-graph-authority-pre-windows-provisioning-migration', test_policy_graph_authority,
   args : ['-p', '/policy/graph-authority/pre-windows-provisioning-migration'],
