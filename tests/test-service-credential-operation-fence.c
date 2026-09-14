@@ -80,7 +80,15 @@ open_provisioned_handle (void)
   };
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture.handle),
       ==, WYRELOG_E_OK);
-  return g_steal_pointer (&fixture.handle);
+  /* Only .handle escapes; the five paths belong to this fixture, and
+   * wyl_handle_open_with_options has copied what it needs from them. */
+  WylHandle *handle = g_steal_pointer (&fixture.handle);
+  g_free (fixture.dir);
+  g_free (fixture.db_path);
+  g_free (fixture.audit_path);
+  g_free (fixture.key_path);
+  g_free (fixture.key_spec);
+  return handle;
 }
 
 /* Mirrors tests/test-service-exchange-intention-store.c's fixture: prepares

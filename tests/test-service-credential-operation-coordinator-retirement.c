@@ -158,6 +158,7 @@ test_guarded_begin_fresh_replay_and_collision (void)
     (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
         (fixture.handle, &fixture.storage, &fixture.anchor, &request, NULL,
       &result), ==, WYRELOG_E_CONFLICT);
+  g_free (request.destination);
   request.destination = g_steal_pointer (&original_destination);
   wyl_service_credential_operation_guarded_begin_result_clear (&result);
   wyl_service_credential_operation_coordinator_request_clear (&request);

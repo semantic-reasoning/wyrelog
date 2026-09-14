@@ -91,7 +91,8 @@ fuzz_template_loading (guint32 seed)
   for (guint i = 0; i < 64; i++) {
     record_seed (seed + 1000 + i);
     g_autoptr (GError) err = NULL;
-    gchar *tmp = g_dir_make_tmp ("wyl-fuzz-template-XXXXXX", &err);
+    g_autofree gchar *tmp =
+        g_dir_make_tmp ("wyl-fuzz-template-XXXXXX", &err);
     if (tmp == NULL)
       return 20;
     g_autofree gchar *bootstrap = make_payload (&state, 192);

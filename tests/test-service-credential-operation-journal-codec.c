@@ -94,6 +94,7 @@ test_publication_planned_roundtrip (void)
   input.publication_receipt_version = 1;
   input.reservation_id = g_strdup ("reservation");
   input.stage_basename = g_strdup ("stage");
+  g_free (input.publication_receipt_id);
   input.publication_receipt_id = g_strdup ("receipt-protocol-id");
   g_assert_cmpstr (input.stage_identity, ==, "");
   g_assert_true (wyl_service_credential_operation_record_is_valid (&input));
