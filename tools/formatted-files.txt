@@ -61,6 +61,7 @@ tests/test-fact-tenant-admission.c
 tests/test-fsm-principal.c
 tests/test-grant-req.c
 tests/test-handle-id.c
+tests/test-hardening-fuzz.c
 tests/test-jwt.c
 tests/test-lobac-partial-delta.c
 tests/test-login-req.c
@@ -76,7 +77,10 @@ tests/test-service-credential-operation-coordinator-execute.c
 tests/test-service-credential-operation-coordinator-handoff.c
 tests/test-service-credential-operation-coordinator-journal.c
 tests/test-service-credential-operation-coordinator-retirement.c
+tests/test-service-credential-operation-fence.c
+tests/test-service-credential-operation-journal-codec.c
 tests/test-service-credential-operation-root.h
+tests/test-service-credential-operation-storage.c
 tests/test-service-decision-authority.c
 tests/test-service-exchange-private.c
 tests/test-session-id.c
