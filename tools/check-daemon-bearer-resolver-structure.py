@@ -21,7 +21,7 @@ def function_span(source: str, name: str, static_only: bool = False) -> tuple[in
     # Anchored on the name, which is a literal, rather than searching the whole
     # file with a pattern that opens on a variable-length class.  The latter
     # gave re nothing to scan for, so it retried the lazy prefix at every
-    # offset of a 500KB http.c: 0.45s per lookup, 38 lookups, and a cost that
+    # offset of a 623KB http.c: 0.45s per lookup, 38 lookups, and a cost that
     # grew with the file until this guard and its self-test both ran past
     # meson's 30s default on the Windows job (#1080).  The prefix and the
     # signature are still the same two subpatterns, now applied to a bounded
@@ -43,13 +43,18 @@ def function_span(source: str, name: str, static_only: bool = False) -> tuple[in
             continue
         head_end = hit.start()
         head_start = head_end
-        # Bounded by the run in front of the name, not by the file: 15 to 541
-        # characters per pinned name in http.c, where the longest run of these
-        # characters anywhere is 1801.  The bound is on C-shaped input, not on
-        # any input -- a name preceded by a very long masked comment costs a
-        # scan of that whole comment.  Do not "simplify" this to
-        # re.compile(r"[\w\s*]*\Z").search(source, 0, head_end): it answers
-        # the same and is slower still on exactly that input.
+        # Bounded by the run in front of the name rather than by the file: 0
+        # to 1771 characters over the 134 occurrences a run of this guard
+        # scans in http.c, where the longest such run anywhere is 1801.
+        #
+        # This loop is not the term to watch.  prefix.search below retries its
+        # lazy [\w\s*]*? at every word character of the window, so the cost is
+        # quadratic in how *word-dense* the window is: a 20000-character
+        # word-dense run costs 5.27s there against 0.007s here.  What keeps it
+        # cheap on C is that punctuation severs these runs -- the widest
+        # window in http.c holds 14 word characters -- and that masked()
+        # leaves comments as spaces, so a 400KB one stays linear at 0.15s.
+        # Capping this loop would leave that term untouched.
         while head_start > 0 and PREFIX_CHAR.match(source[head_start - 1]):
             head_start -= 1
         head = prefix.search(source, head_start, head_end)
