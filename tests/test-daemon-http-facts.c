@@ -1675,6 +1675,140 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 24;
 
+  /* The relation accepts a first schema version of any positive value. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *first_v2_query = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=shop&relation=first_v2&"
+          "schema_version=2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          first_v2_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 240;
+
+  /* A later version is rejected even before any facts have been appended. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *empty_schema_query = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=shop&relation=empty&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          empty_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 241;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *empty_evolution_query = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=shop&relation=empty&"
+          "schema_version=2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          empty_evolution_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"schema_already_registered\"") == NULL)
+    return 242;
+  gboolean schema_exists = FALSE;
+  if (wyl_policy_store_fact_relation_schema_exists
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+      "shop", "empty", 2, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 243;
+
+  /* Even an exact repeat is a typed conflict once the relation is registered.
+   * Stage a hidden v2 internally to prove the public rule does not mistake an
+   * activation-owned row for permission to register it again. */
+  const wyl_policy_fact_relation_schema_column_t staged_columns[] = {
+    {"order_id", "symbol", TRUE, TRUE},
+    {"amount", "int64", TRUE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t staged_schema = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 2,
+    .relation_visible = FALSE,
+    .columns = staged_columns,
+    .n_columns = G_N_ELEMENTS (staged_columns),
+  };
+  if (wyl_policy_store_register_fact_relation_schema
+        (wyl_handle_get_policy_store (handle), &staged_schema) != WYRELOG_E_OK)
+    return 244;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *staged_version_query = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
+          "schema_version=2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          staged_version_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"schema_already_registered\"") == NULL)
+    return 245;
+  if (wyl_policy_store_fact_relation_schema_exists
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+      "shop", "orders", 2, &schema_exists) != WYRELOG_E_OK
+      || !schema_exists)
+    return 246;
+
+  /* Exact repeats are also rejected before reaching the store duplicate path. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"schema_already_registered\"") == NULL)
+    return 247;
+
+  /* The query allowlist has a graph-wide query-name key. A collision from a
+   * distinct relation is a client conflict, not an internal-server error. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *query_name_collision = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=other&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          query_name_collision, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409
+      || strstr (body, "\"schema_registration_conflict\"") == NULL)
+    return 248;
+  schema_exists = TRUE;
+  if (wyl_policy_store_fact_relation_schema_exists
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+      "other", "orders", 1, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 249;
+  sqlite3_stmt *rollback_stmt = NULL;
+  sqlite3 *policy_db = wyl_policy_store_get_db
+        (wyl_handle_get_policy_store (handle));
+  const gchar *rollback_sql =
+      "SELECT "
+      " (SELECT count(*) FROM fact_namespaces WHERE tenant_id='__wr_default'"
+      "  AND graph_id='orders' AND namespace_id='other') +"
+      " (SELECT count(*) FROM fact_relation_schemas WHERE tenant_id='__wr_default'"
+      "  AND graph_id='orders' AND namespace_id='other'"
+      "  AND relation_name='orders' AND schema_version=1) +"
+      " (SELECT count(*) FROM fact_relation_schema_columns WHERE tenant_id='__wr_default'"
+      "  AND graph_id='orders' AND namespace_id='other'"
+      "  AND relation_name='orders' AND schema_version=1) +"
+      " (SELECT count(*) FROM fact_relation_query_allowlist WHERE tenant_id='__wr_default'"
+      "  AND graph_id='orders' AND namespace_id='other'"
+      "  AND relation_name='orders' AND schema_version=1),"
+      " (SELECT count(*) FROM fact_relation_query_allowlist WHERE tenant_id='__wr_default'"
+      "  AND graph_id='orders' AND namespace_id='shop' AND relation_name='orders'"
+      "  AND schema_version=1 AND query_name='orders');";
+  if (sqlite3_prepare_v2 (policy_db, rollback_sql, -1, &rollback_stmt, NULL)
+      != SQLITE_OK)
+    return 250;
+  gint rollback_step = sqlite3_step (rollback_stmt);
+  gboolean rollback_is_clean = rollback_step == SQLITE_ROW
+      && sqlite3_column_int64 (rollback_stmt, 0) == 0
+      && sqlite3_column_int64 (rollback_stmt, 1) == 1;
+  sqlite3_finalize (rollback_stmt);
+  if (!rollback_is_clean)
+    return 251;
+
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_schema_query = g_strdup_printf
         ("tenant=%s&graph=orders&namespace=shop&relation=bad&"
@@ -1743,6 +1877,25 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || materialization_state
       != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED)
     return 276;
+
+  /* The same conflict remains typed after the relation contains facts. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *evolution_with_facts_query = g_strdup_printf
+        ("tenant=%s&graph=orders&namespace=shop&relation=orders&"
+          "schema_version=3&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          evolution_with_facts_query, admin_token, schema_body, &status,
+          &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"schema_already_registered\"") == NULL)
+    return 28;
+  schema_exists = TRUE;
+  if (wyl_policy_store_fact_relation_schema_exists
+        (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+      "shop", "orders", 3, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 29;
 
   /* Nullable schema metadata is accepted, but NULL values cannot be encoded
    * in the logical tuple store. Refuse before creating a durable batch. */

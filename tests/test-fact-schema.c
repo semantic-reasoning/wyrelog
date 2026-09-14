@@ -113,9 +113,59 @@ check_relation_schema_registration_and_validation (void)
   };
   wyl_policy_fact_relation_schema_options_t opts = make_order_schema (columns,
           G_N_ELEMENTS (columns), queries, G_N_ELEMENTS (queries));
+  gboolean schema_exists = TRUE;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 0, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 101;
   if (wyl_policy_store_register_fact_relation_schema (store, &opts)
       != WYRELOG_E_OK)
     return 11;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 0, &schema_exists) != WYRELOG_E_OK
+      || !schema_exists)
+    return 102;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 1, &schema_exists) != WYRELOG_E_OK
+      || !schema_exists)
+    return 103;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 2, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 104;
+
+  /* Internal callers retain versioned metadata for the staged activation
+   * workflow. The public HTTP route imposes the one-registration policy. */
+  wyl_policy_fact_relation_schema_options_t staged_opts = opts;
+  staged_opts.schema_version = 2;
+  staged_opts.relation_visible = FALSE;
+  staged_opts.queries = NULL;
+  staged_opts.n_queries = 0;
+  if (wyl_policy_store_register_fact_relation_schema (store, &staged_opts)
+      != WYRELOG_E_OK)
+    return 105;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 2, &schema_exists) != WYRELOG_E_OK
+      || !schema_exists)
+    return 106;
+
+  /* A query-name uniqueness collision is an expected conflict, and the
+   * registration transaction must leave no schema metadata behind. */
+  const wyl_policy_fact_relation_schema_query_t collision_query[] = {
+    {"orders_by_status", "wr.fact.read", 1000},
+  };
+  wyl_policy_fact_relation_schema_options_t collision_opts =
+      make_order_schema (columns, G_N_ELEMENTS (columns), collision_query,
+          G_N_ELEMENTS (collision_query));
+  collision_opts.namespace_id = "other";
+  collision_opts.relation_name = "different_orders";
+  if (wyl_policy_store_register_fact_relation_schema (store, &collision_opts)
+      != WYRELOG_E_CONFLICT)
+    return 107;
+  if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "other", "different_orders", 1, &schema_exists)
+      != WYRELOG_E_OK || schema_exists)
+    return 108;
 
   const wyl_policy_fact_relation_schema_column_t nullable_columns[] = {
     {"value", "int64", TRUE, TRUE},
@@ -209,7 +259,7 @@ check_relation_schema_registration_and_validation (void)
     return 161;
 
   bad_batch = good_batch;
-  bad_batch.schema_version = 2;
+  bad_batch.schema_version = 3;
   if (wyl_fact_schema_validate_batch (store, &bad_batch, NULL)
       != WYRELOG_E_NOT_FOUND)
     return 17;
