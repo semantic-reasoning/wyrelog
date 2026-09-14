@@ -1,11 +1,11 @@
 {
-  "aggregate": "a23c541eb38829162d84c2e6bdee72b2ddf2a0bdbaedd0d6b9ed034b69c5bffc",
+  "aggregate": "e40de245bd4b56b5f7cf8ccaeb380391c539b0da7229aff340e884c2e7302131",
   "directives": {
     "count": 523,
     "sha256": "c3ee5df454c14dd1dbddf9c46bab6bbb0bef39c9e4f229edd6bb862cffe63cb6"
   },
   "functions": {
-    "direct_permission_mutation_handler": "33208c9f51ef0dffbf52506d9529f78200c61667d7ce16f9b55c3ce8670ab467",
+    "direct_permission_mutation_handler": "029b8875cfc10f5b184ada7ac0fb03fba2d7a573e09519c1f308174484e335d0",
     "ensure_policy_permission_exists": "9a12fb60ed4158b55ac94f121d3eed9817d0c851069cf1d9aa36287952906d5f",
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
     "facts_route_handler": "7bf7edabf849226d19f395ed5e63168903fa0be3c9d87fbd109a33beb32291e6",
@@ -17,13 +17,13 @@
     "mutate_tenant_lifecycle_publication": "26dd679c7632772e4b848ff98e6f8833433f49667a8f5ee0a7bdda2564e903b6",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
-    "policy_permission_transition_handler": "fbbe4bb20f8259e6ae42aaeeb9838f8e9a8a5106e33a354e088f3ecfa859784f",
+    "policy_permission_transition_handler": "bd748a383e98c431ece13ae4a2f1e41c02a1825458a72ea089000d7dd31e9a91",
     "policy_role_grant_handler": "dc65e4712f0cf0f334b7e1aa23cb8c20bbd3c16607b46dcd5deb358becf1bdc7",
     "policy_role_revoke_handler": "e3acff4dec329c9ffe946248a53d6058f136f6591942a9adef6b71df12bdddf4",
     "policy_write_acquire_fault_hit_count": "2605b465d8d8e648c155cb9f2e6d3c6e6fe877657fdc60ae6b4cb4bad0211f9b",
     "policy_write_record_finalize_snapshot": "bde07c783dfc29508642b1d11c83c5a21fe6e798e530ba5272149dd0e72c9e75",
     "policy_write_record_non_http_finalize_snapshot": "6fbafe96a8d4657ad901624aaeb121d7f64cee8d26211e91524bfebffc9cd427",
-    "role_membership_mutation_handler": "2486a836969c153c0e38a47d0f22928325320eba93e74ef6c0ec485a32c250de",
+    "role_membership_mutation_handler": "b3de96a368c5ad8e300d0ef26605dd08babd14b1887587745960f1fe58d20f13",
     "schema_register_handler": "cca2dcf77243a09eb507e04101679eb0bed4f2bf0c343cf0226726ab600734e8",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
@@ -32,6 +32,7 @@
     "set_graph_mutation_json": "2998f2e32e7e0c62f5fee43854b7e88402141e32ddabe5e1969e25b55cd86ecd",
     "set_json_error": "c07b4fa386e9cb51e5a41f1a53b126f02d89b326862d2dc66f63804f41858c34",
     "set_json_ok": "57cc5536a5000743d78da3f3cabfe4c625ed60132516fd73082121020dee2256",
+    "set_policy_mutation_ok_json": "e14bd579458e52aada4704a1e124a1adae53a4abe705d0f137f5130768d4218b",
     "set_schema_ok_json": "6c18fa976ffe032a659dd49635ec31a33dcb5a9c47b4dd18465276dc26149f32",
     "set_tenant_mutation_json": "f167a0efcff9bb2d342b6b8332a0ab446006ed9b5b31bba3a63432ea2b137fde",
     "tenant_create_durable_bundle": "b203b90ec04cfd8a62e5419834806a63b232fec59d8f721934367592880261d5",

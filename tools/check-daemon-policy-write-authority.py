@@ -23,7 +23,7 @@ FUNCTIONS = (
     "wyl_daemon_http_fail_next_policy_write_acquire_for_test",
     "wyl_daemon_policy_write_finalize_for_response",
     "wyl_daemon_policy_write_prepare_success_response",
-    "set_json_error", "set_json_ok",
+    "set_json_error", "set_json_ok", "set_policy_mutation_ok_json",
     "set_tenant_mutation_json", "set_graph_mutation_json",
     "set_schema_ok_json", "set_fact_op_json",
     "mutate_tenant_lifecycle_publication",
