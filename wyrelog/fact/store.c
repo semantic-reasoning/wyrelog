@@ -3273,6 +3273,33 @@ wyl_fact_store_forget_pending_count (wyl_fact_store_t *store,
 }
 
 wyrelog_error_t
+wyl_fact_store_has_durable_batches (wyl_fact_store_t *store,
+    gboolean *out_has_batches)
+{
+  if (out_has_batches != NULL)
+    *out_has_batches = FALSE;
+  if (store == NULL || store->conn == NULL || out_has_batches == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  duckdb_result result = { 0 };
+  if (duckdb_query (store->conn, "SELECT COUNT(*) FROM fact_batches;",
+      &result) != DuckDBSuccess || duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    wyl_fact_store_connection_session_end (&session);
+    return WYRELOG_E_IO;
+  }
+  *out_has_batches = duckdb_value_int64 (&result, 0, 0) > 0;
+  duckdb_destroy_result (&result);
+  wyl_fact_store_connection_session_end (&session);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_fact_store_forget_reconcile (wyl_fact_store_t *store,
     const gchar *expected_tenant_id, const gchar *expected_graph_id,
     wyrelog_error_t (*checkpoint) (const gchar *, gpointer),

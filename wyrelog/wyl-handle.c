@@ -2573,11 +2573,21 @@ fact_graph_materialization_materialized_best_effort (WylHandle *self,
   if (wyl_handle_policy_store_pin_current (self, &policy) != WYRELOG_E_OK)
     return;
 
+  const WylPolicyGraphMaterializationState expected_states[] = {
+    WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+    WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN,
+    WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+  };
   WylPolicyAuthorityMutationResult result;
-  (void) wyl_policy_store_transition_fact_graph_materialization (policy,
-      graph_info->tenant_id, graph_info->graph_id,
-      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
-      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result);
+  for (gsize i = 0; i < G_N_ELEMENTS (expected_states); i++) {
+    if (wyl_policy_store_transition_fact_graph_materialization (policy,
+        graph_info->tenant_id, graph_info->graph_id, expected_states[i],
+        WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result)
+        == WYRELOG_E_OK
+        && (result == WYL_POLICY_AUTHORITY_MUTATION_APPLIED
+        || result == WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY))
+      break;
+  }
   wyl_handle_policy_store_unpin (self, policy);
 }
 
