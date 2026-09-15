@@ -303,7 +303,7 @@ def _eval_integer_node(node: ast.AST,
       and node.func.id == "wyl_test_normalize_exit_status"
       and len(node.args) == 1 and not node.keywords):
     values = _eval_integer_node(node.args[0], bindings)
-    return {1 if value != 0 and value % 256 == 0 else value
+    return {1 if value != 0 else 0
         for value in values}
   if isinstance(node, ast.Name) and node.id in bindings:
     return set(bindings[node.id])
@@ -424,7 +424,8 @@ def has_top_level_operator(expression: str) -> bool:
 def _status_normalizer_argument(expression: str) -> str | None:
   """Return the argument when expression is exactly the status sanitizer."""
   expression = _outer_parens(expression.strip())
-  match = re.match(r"wyl_test_normalize_exit_status\s*\(", expression)
+  match = re.match(
+      r"wyl_test_normalize_exit_status(?:_named)?\s*\(", expression)
   if match is None:
     return None
   opening = expression.find("(", match.start(), match.end())
@@ -434,7 +435,18 @@ def _status_normalizer_argument(expression: str) -> str | None:
     return None
   if expression[closing + 1:].strip():
     return None
-  return expression[opening + 1:closing].strip()
+  arguments = expression[opening + 1:closing].strip()
+  if expression[match.start():].startswith("wyl_test_normalize_exit_status_named"):
+    depth = 0
+    for index, character in enumerate(arguments):
+      if character == "(":
+        depth += 1
+      elif character == ")":
+        depth -= 1
+      elif character == "," and depth == 0:
+        return arguments[index + 1:].strip()
+    return None
+  return arguments
 
 
 def _status_normalizer_contract_valid(root: Path) -> bool:
@@ -446,11 +458,11 @@ def _status_normalizer_contract_valid(root: Path) -> bool:
     return False
   normalized = " ".join(mask_noncode(header).split())
   return re.search(
-      r"\bstatic\s+inline\s+int\s+wyl_test_normalize_exit_status\s*"
-      r"\(\s*int\s+status\s*\)\s*\{\s*#ifndef\s+_WIN32\s+"
-      r"if\s*\(\s*status\s*!=\s*0\s*&&\s*status\s*%\s*256\s*"
-      r"==\s*0\s*\)\s*return\s+1\s*;\s*#endif\s+"
-      r"return\s+status\s*;\s*\}", normalized) is not None
+      r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
+      r"\([^)]*\)\s*\{.*?if\s*\(\s*status\s*==\s*0\s*\)\s*"
+      r"return\s+0\s*;.*?return\s+1\s*;\s*\}.*?"
+      r"#define\s+wyl_test_normalize_exit_status\s*\([^)]*\)\s*.*?"
+      r"wyl_test_report_exit_status", normalized) is not None
 
 
 def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
@@ -723,7 +735,7 @@ def _known_call_result(expression: str,
     values = summaries.get(direct_call.group(1))
     if values is None:
       return None
-    return {1 if value != 0 and value % 256 == 0 else value
+    return {1 if value != 0 else 0
         for value in values}
   direct_call = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*\(\s*\)\s*",
       expression)
