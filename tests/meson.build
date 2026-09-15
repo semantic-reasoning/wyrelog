@@ -3688,6 +3688,17 @@ test('exit-status-truncation-self-test', python3,
 # Each variant main of test-daemon-http-decide.c must be able to name the check
 # that failed.  The exit status is 8 bits and that file carries codes well
 # above 255, so the status alone cannot do it (#1062).
+# A check defined in test-daemon-http-decide.c and called from nowhere runs
+# nothing, and nothing failed when that happened: check_raw_login_contract
+# lost its only caller in 5e9c2c85 and took seven /auth/refresh contract
+# checks with it for two months (#1113).  Reachability is the property; the
+# variant-diag guard below covers a different one.
+decide_reachability = files('test-decide-check-reachability.py')
+test('decide-check-reachability', python3,
+  args : [decide_reachability, meson.project_source_root()])
+test('decide-check-reachability-self-test', python3,
+  args : [decide_reachability, '--self-test', meson.project_source_root()])
+
 test('variant-diag-coverage', python3,
   args : [files('test-variant-diag-coverage.py'),
     meson.project_source_root()])
