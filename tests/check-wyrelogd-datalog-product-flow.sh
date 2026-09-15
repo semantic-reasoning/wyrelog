@@ -299,6 +299,67 @@ create_graph_schema_and_facts() {
   fi
 }
 
+retract_fact_row() {
+  # No wyctl subcommand for retract yet (#1121), so drive the schema-backed
+  # HTTP route the runbook documents.  Python rather than curl: this script
+  # already depends on $PYTHON and does not depend on curl.
+  token_file=$1
+  graph=$2
+  order_id=$3
+  amount=$4
+  "$PYTHON" - "$BASE_URL" "$token_file" "$graph" "$order_id" "$amount" <<'RETRACT'
+import json
+import sys
+import urllib.request
+
+base_url, token_file, graph, order_id, amount = sys.argv[1:6]
+token = open(token_file, encoding="utf-8").read().strip()
+body = ("order_id\tamount\r\n%s\t%s\r\n" % (order_id, amount)).encode()
+query = (
+    "tenant=__wr_default&namespace=shop&schema_version=1"
+    "&batch_id=%s-retract-1&idempotency_key=%s-retract-1"
+    "&guard_timestamp=123&guard_loc_class=trusted&guard_risk=29"
+    % (graph, graph)
+)
+url = "%s/facts/__wr_default/%s/orders:retract?%s" % (
+    base_url.rstrip("/"), graph, query)
+request = urllib.request.Request(url, data=body, method="POST")
+request.add_header("Authorization", "Bearer " + token)
+request.add_header("Content-Type", "text/tab-separated-values")
+with urllib.request.urlopen(request) as response:
+    payload = json.loads(response.read().decode("utf-8"))
+    if response.status != 200 or not payload.get("committed"):
+        raise SystemExit("retract did not commit: %s" % payload)
+RETRACT
+}
+
+assert_query_missing() {
+  # A 200 from the retract proves the tombstone was written, not that the row
+  # stopped being visible.  Only the query proves the effect (#1052).
+  token_file=$1
+  graph=$2
+  order_id=$3
+  output="$TMPDIR/$graph-query-after-retract.json"
+  "$WYCTL" --daemon-url "$BASE_URL" datalog query \
+    --tenant __wr_default \
+    --graph "$graph" \
+    --query 'orders(O,A)' \
+    --output json \
+    --limit 10 \
+    --access-token-file "$token_file" \
+    --guard-timestamp 123 \
+    --guard-loc-class trusted \
+    --guard-risk 29 >"$output"
+  "$PYTHON" - "$output" "$order_id" <<'MISSING'
+import json
+import sys
+body = json.loads(open(sys.argv[1], encoding="utf-8").read())
+present = [row for row in body.get("rows", []) if row.get("O") == sys.argv[2]]
+if present:
+    raise SystemExit("retracted row still queryable: %s" % present)
+MISSING
+}
+
 assert_query_row() {
   token_file=$1
   graph=$2
@@ -435,10 +496,16 @@ assert_query_row "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
 
+# The documented flow ends in deletion, so exercise it: retract orders-a's
+# only row, prove it stops being queryable, and prove orders-b is untouched.
+retract_fact_row "$TOKEN_FILE" orders-a order-a 42
+assert_query_missing "$TOKEN_FILE" orders-a order-a
+assert_query_row "$TOKEN_FILE" orders-b order-b 7
+
 stop_daemon
 start_daemon
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
-assert_query_row "$TOKEN_FILE" orders-a order-a 42
+assert_query_missing "$TOKEN_FILE" orders-a order-a
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
 

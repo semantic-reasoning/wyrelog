@@ -1174,6 +1174,37 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
+The flow ends in deletion, so retract the row and prove it is gone. There is
+no `wyctl fact retract` yet (tracked in #1121), so this step uses the
+schema-backed HTTP route directly. The body is TSV, and the values must match
+the row being retracted:
+
+```sh
+printf 'order_id\tamount\r\no-1\t42\r\n' >/tmp/orders-retract.tsv
+curl -fsS -X POST \
+  -H "Authorization: Bearer $(cat "$TOKEN")" \
+  -H 'Content-Type: text/tab-separated-values' \
+  --data-binary @/tmp/orders-retract.tsv \
+  "$BASE_URL/facts/$TENANT/$GRAPH/orders:retract?tenant=$TENANT&namespace=shop&schema_version=1&batch_id=orders-r1&idempotency_key=orders-r1&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+
+wyctl --daemon-url "$BASE_URL" datalog query \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --query 'orders(O,A)' --output json --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+The retract answers `200` with `"committed":true` and
+`"mutation_class":"committed_ready"`. The query after it returns no rows: the
+tombstone shadows `orders("o-1",42)`, and the original append row is not
+deleted in place.
+
+**A 200 is not proof the row is gone.** Retract answers the same way whether
+or not it matched anything -- the write path never reads the relation, so it
+cannot know -- so the query above is the step that establishes the effect.
+`tests/check-wyrelogd-datalog-product-flow.sh` asserts exactly that, and
+asserts an unrelated graph's row survives.
+
 Fact mutation is schema-registered: append, retract, and forget operate only on
 relations registered through `fact schema register`. The daemon does not support
 raw Datalog atom deletion endpoints such as `DELETE /api/facts/fact(1)` or
