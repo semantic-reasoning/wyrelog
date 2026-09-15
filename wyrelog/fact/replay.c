@@ -126,6 +126,8 @@ wyl_fact_graph_state_name (wyl_fact_graph_state_t state)
       return "forget_incomplete";
     case WYL_FACT_GRAPH_STATE_SEALED:
       return "sealed";
+    case WYL_FACT_GRAPH_STATE_EMPTY:
+      return "empty";
   }
   /* No default arm: -Wswitch then names a state added without a string.  It
    * is a warning rather than an error here (werror is off), so it does not
@@ -689,6 +691,11 @@ resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
   wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory (policy,
           fact_root, graph_info->tenant_id, graph_info->graph_id, FALSE,
           &directory);
+  /* A graph directory is durable provisioning evidence.  A missing directory
+   * means storage is unavailable; only a present directory with no database
+   * file is the expected lazy, pre-first-append state. */
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_IO;
   gint fd = -1;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
@@ -1191,6 +1198,10 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
        * below needs and which foreach_status needs to report the graph at
        * all. */
       summary.graphs_sealed++;
+    else if (graph_rc == WYRELOG_E_NOT_FOUND)
+      /* A provisioned graph with no materialized store is expected during
+       * lazy startup; it is represented as EMPTY, not replay degradation. */
+      ;
     else
       summary.graphs_degraded++;
     /* The forget probe and the engine builder open the same store with

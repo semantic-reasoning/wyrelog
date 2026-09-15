@@ -2777,6 +2777,8 @@ legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
    * reporting the impossible-looking ready/queryable:false pair. */
   if (status->admission != WYL_FACT_GRAPH_ADMISSION_OPEN)
     return WYL_FACT_GRAPH_STATE_SEALED;
+  if (status->state == WYL_FACT_GRAPH_RUNTIME_EMPTY)
+    return WYL_FACT_GRAPH_STATE_EMPTY;
   if (status->state == WYL_FACT_GRAPH_RUNTIME_READY
       || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
       && status->queryable
@@ -2828,6 +2830,7 @@ fact_graph_runtime_status_cb (const WylFactGraphRuntimeStatus *runtime_status,
     /* Sealed is a lifecycle state, not a failure, so it does not name an
      * error class any more than ready does. */
     .last_error_class = (state == WYL_FACT_GRAPH_STATE_READY
+        || state == WYL_FACT_GRAPH_STATE_EMPTY
         || state == WYL_FACT_GRAPH_STATE_SEALED) ? NULL
         : (gchar *) wyl_fact_graph_state_name (state),
     /* Narrowed here rather than in the runtime status, which deliberately
