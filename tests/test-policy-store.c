@@ -6692,7 +6692,7 @@ check_store_fact_graph_materialization_state (void)
   if (wyl_policy_store_transition_fact_graph_materialization (store,
       "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN,
       WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result) != WYRELOG_E_OK
-      || result != WYL_POLICY_AUTHORITY_MUTATION_STALE)
+      || result != WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION)
     return 9831;
   if (wyl_policy_store_transition_fact_graph_materialization (store,
       "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
