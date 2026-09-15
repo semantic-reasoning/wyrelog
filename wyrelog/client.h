@@ -50,6 +50,7 @@ typedef enum
   WYL_CLIENT_FACT_GRAPH_STATE_STORE_UNAVAILABLE,
   WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE,
   WYL_CLIENT_FACT_GRAPH_STATE_SEALED,
+  WYL_CLIENT_FACT_GRAPH_STATE_EMPTY,
 } WylClientFactGraphState;
 
 typedef enum
@@ -86,6 +87,7 @@ typedef struct
   guint64 graphs_total;
   guint64 graphs_ready;
   guint64 graphs_degraded;
+  guint64 graphs_provisioned;
   guint64 graphs_sealed;
   WylClientFactGraphStatus *graphs;
   gsize n_graphs;

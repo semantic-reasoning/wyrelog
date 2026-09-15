@@ -918,6 +918,11 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
       entry->publication_active = FALSE;
       g_cond_broadcast (&entry->drain_cond);
     }
+  } else if (rc == WYRELOG_E_NOT_FOUND && entry->current == NULL) {
+    /* A provisioned graph may not have a lazy store until its first append.
+     * Keep that normal lifecycle state distinct from an actual replay error. */
+    entry->state = WYL_FACT_GRAPH_RUNTIME_EMPTY;
+    entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
   } else {
     entry->state = entry->current == NULL
         ? WYL_FACT_GRAPH_RUNTIME_DEGRADED : WYL_FACT_GRAPH_RUNTIME_READY_STALE;

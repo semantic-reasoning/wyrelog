@@ -12,6 +12,7 @@ typedef struct
   guint total;
   guint ready;
   guint degraded;
+  guint provisioned;
   guint sealed;
 } FactStatusJsonCtx;
 
@@ -75,6 +76,9 @@ append_graph_status_json (const wyl_fact_graph_status_t *status,
     ctx->sealed++;
   else if (status->state == WYL_FACT_GRAPH_STATE_READY)
     ctx->ready++;
+  else if (status->state == WYL_FACT_GRAPH_STATE_EMPTY)
+    /* Provisioning a graph before its first write is healthy and expected. */
+    ctx->provisioned++;
   else
     ctx->degraded++;
 
@@ -123,8 +127,8 @@ wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs,
   append_json_string (body, status);
   g_string_append_printf (body,
       ",\"graphs_total\":%u,\"graphs_ready\":%u,\"graphs_degraded\":%u"
-      ",\"graphs_sealed\":%u",
-      ctx.total, ctx.ready, ctx.degraded, ctx.sealed);
+      ",\"graphs_provisioned\":%u,\"graphs_sealed\":%u",
+      ctx.total, ctx.ready, ctx.degraded, ctx.provisioned, ctx.sealed);
   if (include_graphs) {
     g_string_append (body, ",\"graphs\":[");
     if (graphs != NULL)
