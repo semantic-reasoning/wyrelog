@@ -101,7 +101,7 @@ static gint
 send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *path, const gchar *query, const gchar *access_token,
     const gchar *request_body, guint *out_status, gchar **out_body,
-    gchar **out_request_id)
+    gchar **out_request_id, gchar **out_retry_after)
 {
   g_autofree gchar *uri = build_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -131,6 +131,9 @@ send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar
   if (out_request_id != NULL)
     *out_request_id = g_strdup (soup_message_headers_get_one (
               soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id"));
+  if (out_retry_after != NULL)
+    *out_retry_after = g_strdup (soup_message_headers_get_one (
+              soup_message_get_response_headers (msg), "Retry-After"));
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -144,7 +147,7 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *request_body, guint *out_status, gchar **out_body)
 {
   return send_raw_with_request_id (session, method, base_url, path, query,
-             access_token, request_body, out_status, out_body, NULL);
+             access_token, request_body, out_status, out_body, NULL, NULL);
 }
 
 typedef struct
@@ -416,6 +419,35 @@ read_fact_projection_row_count (const gchar *fact_root,
     return 303;
   *out_count = count;
   return 0;
+}
+
+static gint
+read_write_rate_tokens (sqlite3 *db, const gchar *tenant, gboolean *out_exists,
+    guint64 *out_tokens)
+{
+  sqlite3_stmt *statement = NULL;
+  if (out_exists != NULL)
+    *out_exists = FALSE;
+  if (out_tokens != NULL)
+    *out_tokens = 0;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT tokens FROM fact_tenant_write_rate_state WHERE tenant_id=?;",
+      -1, &statement, NULL) != SQLITE_OK)
+    return 1;
+  if (sqlite3_bind_text (statement, 1, tenant, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (statement);
+    return 2;
+  }
+  int step_rc = sqlite3_step (statement);
+  if (step_rc == SQLITE_ROW) {
+    if (out_exists != NULL)
+      *out_exists = TRUE;
+    if (out_tokens != NULL)
+      *out_tokens = (guint64) sqlite3_column_int64 (statement, 0);
+  }
+  sqlite3_finalize (statement);
+  return step_rc == SQLITE_ROW || step_rc == SQLITE_DONE ? 0 : 3;
 }
 
 static gint
@@ -2652,7 +2684,8 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = send_raw_with_request_id (session, "DELETE", base_url,
           "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
           "{\"batch_id\":\"batch-1\",\"operator\":\"spoofed-operator\","
-          "\"reason\":\"gdpr-erasure\"}", &status, &body, &forget_request_id);
+          "\"reason\":\"gdpr-erasure\"}", &status, &body, &forget_request_id,
+          NULL);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
@@ -2689,7 +2722,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
       "{\"batch_id\":\"forget-audit-failed\",\"operator\":\"spoofed-operator\","
       "\"reason\":\"audit-failure-test\"}", &status, &body,
-      &failed_forget_request_id), ==, 0);
+      &failed_forget_request_id, NULL), ==, 0);
   g_assert_cmpuint (status, ==, 500);
   g_assert_nonnull (strstr (body, "\"fact_forget_audit_failed\""));
   g_assert_nonnull (strstr (body, "\"purged\":true"));
@@ -3036,6 +3069,139 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     g_printerr ("recovered mutation was not committed_ready: %s\n", body);
     return 523;
   }
+
+  WylPolicyFactQuotaConfig write_rate_config = {
+    .has_limit = TRUE,
+    .rate_per_second = 1,
+    .burst = 3,
+  };
+  if (wyl_policy_store_set_fact_quota_config (store, WYL_TENANT_DEFAULT,
+      WYL_POLICY_FACT_QUOTA_WRITE_RATE, &write_rate_config) != WYRELOG_E_OK)
+    return 524;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+      "DELETE FROM fact_tenant_write_rate_state WHERE tenant_id='"
+      "__wr_default';", NULL, NULL, NULL) != SQLITE_OK)
+    return 5241;
+  g_autofree gchar *rate_graph_query = g_strdup_printf
+        ("tenant=%s&graph=rate&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          rate_graph_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200)
+    return 525;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *rate_schema_query = g_strdup_printf
+        ("tenant=%s&graph=rate&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          rate_schema_query, admin_token,
+          "column_name\tcolumn_type\tnullable\tvisible\n"
+          "value\tstring\tfalse\ttrue\n", &status, &body);
+  if (rc != 0 || status != 200)
+    return 526;
+  g_clear_pointer (&body, g_free);
+  const gchar *rate_append_path = "/facts/__wr_default/rate/orders:append";
+  const gchar *rate_bad_query = "tenant=__wr_default&namespace=shop&"
+      "schema_version=1&batch_id=rate-bad&idempotency_key=rate-bad&"
+      FACT_GUARD;
+  rc = send_raw (session, "POST", base_url, rate_append_path,
+          rate_bad_query, admin_token, "wrong\twidth\textra\n", &status, &body);
+  if (rc != 0 || status != 400)
+    return 527;
+  g_clear_pointer (&body, g_free);
+  gboolean rate_state_exists = FALSE;
+  guint64 rate_tokens = 0;
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || rate_state_exists)
+    return 5270;
+  rc = send_raw (session, "POST", base_url, rate_append_path,
+          rate_bad_query, NULL, "value\nunauthenticated\n", &status, &body);
+  if (rc != 0 || status != 401)
+    return 5271;
+  g_clear_pointer (&body, g_free);
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || rate_state_exists)
+    return 52711;
+  const gchar *forged_tenant_query = "tenant=tenant-b&namespace=shop&"
+      "schema_version=1&batch_id=rate-forged&idempotency_key=rate-forged&"
+      FACT_GUARD;
+  rc = send_raw (session, "POST", base_url, rate_append_path,
+          forged_tenant_query, admin_token, "value\nforged\n", &status, &body);
+  if (rc != 0 || status != 403)
+    return 5272;
+  g_clear_pointer (&body, g_free);
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || rate_state_exists)
+    return 52721;
+  const gchar *rate_good_query = "tenant=__wr_default&namespace=shop&"
+      "schema_version=1&batch_id=rate-good&idempotency_key=rate-good&"
+      FACT_GUARD;
+  rc = send_raw (session, "POST", base_url, rate_append_path,
+          rate_good_query, admin_token, "value\nrate-good\n", &status, &body);
+  if (rc != 0 || status != 200)
+    return 528;
+  g_clear_pointer (&body, g_free);
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || !rate_state_exists || rate_tokens != 2)
+    return 5280;
+  const gchar *rate_retract_query = "tenant=__wr_default&namespace=shop&"
+      "schema_version=1&batch_id=rate-retract&idempotency_key=rate-retract&"
+      FACT_GUARD;
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/rate/orders:retract", rate_retract_query,
+          admin_token, "value\nrate-good\n", &status, &body);
+  if (rc != 0 || status != 200)
+    return 5281;
+  g_clear_pointer (&body, g_free);
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || !rate_state_exists || rate_tokens != 1)
+    return 52811;
+  const gchar *rate_second_query = "tenant=__wr_default&namespace=shop&"
+      "schema_version=1&batch_id=rate-second&idempotency_key=rate-second&"
+      FACT_GUARD;
+  rc = send_raw (session, "POST", base_url, rate_append_path,
+          rate_second_query, admin_token, "value\nrate-second\n", &status, &body);
+  if (rc != 0 || status != 200)
+    return 5282;
+  g_clear_pointer (&body, g_free);
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || !rate_state_exists || rate_tokens != 0)
+    return 52821;
+  g_autofree gchar *freeze_rate_state = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
+          "last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='%s';", g_get_real_time () + G_USEC_PER_SEC,
+          WYL_TENANT_DEFAULT);
+  if (sqlite3_exec (wyl_policy_store_get_db (store), freeze_rate_state, NULL,
+      NULL, NULL) != SQLITE_OK)
+    return 5281;
+  const gchar *rate_excess_query = "tenant=__wr_default&namespace=shop&"
+      "schema_version=1&batch_id=rate-excess&idempotency_key=rate-excess&"
+      FACT_GUARD;
+  g_autofree gchar *retry_after = NULL;
+  rc = send_raw_with_request_id (session, "POST", base_url, rate_append_path,
+          rate_excess_query, admin_token, "value\nrate-excess\n", &status, &body,
+          NULL, &retry_after);
+  if (rc != 0 || status != 429
+      || strstr (body, "\"error\":\"fact_quota_exceeded\"") == NULL
+      || strstr (body, "\"dimension\":\"write_rate\"") == NULL
+      || g_strcmp0 (retry_after, "1") != 0) {
+    g_printerr ("write-rate response rc=%d status=%u retry=%s body=%s\n", rc,
+        status, retry_after != NULL ? retry_after : "(null)",
+        body != NULL ? body : "(null)");
+    return 529;
+  }
+  if (check_fact_batch_absent (fact_root, "rate", "rate-excess") != 0)
+    return 5291;
+  if (read_write_rate_tokens (wyl_policy_store_get_db (store),
+      WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
+      || !rate_state_exists || rate_tokens != 0)
+    return 5292;
 
   return 0;
 }
