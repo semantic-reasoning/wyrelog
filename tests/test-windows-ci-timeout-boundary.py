@@ -48,8 +48,90 @@ SERIALIZED_AGGREGATES = (
     ("policy-graph-authority-pre-windows-provisioning-migration", 90),
     ("policy-graph-authority-windows-provisioning-migration", 90),
     ("fact-store", 60),
-    ("fact-graph-seal", 60),
+    ("fact-graph-seal", 90),
 )
+# Hosted windows-2025 / clang-cl measurements from the normal full-suite
+# matrix.  Each row records the slowest observed run, the selected ceiling,
+# and the runs that supplied the spread.  Keep this ledger beside the ceiling
+# table: changing a deadline without stating the measurement that moved it is
+# exactly the regression this guard is meant to prevent.
+MEASUREMENT_EVIDENCE = {
+    "policy-graph-authority": {
+        "runner": "windows-2025",
+        "compiler": "clang-cl",
+        "matrices": (
+            "fact_store=disabled, secure_bridge=disabled, duckdb_source=prebuilt",
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        ),
+        "command": "meson test -C builddir --suite wyrelog --logbase testlog-fullsuite",
+        "durations_seconds": (35.52, 9.68),
+        "spread_seconds": 25.84,
+        "max_seconds": 35.52,
+        "ceiling": 90,
+        "runs": (34870495011, 34875727837),
+    },
+    "policy-graph-authority-pre-windows-provisioning-migration": {
+        "runner": "windows-2025",
+        "compiler": "clang-cl",
+        "matrices": (
+            "fact_store=disabled, secure_bridge=disabled, duckdb_source=prebuilt",
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        ),
+        "command": "meson test -C builddir --suite wyrelog --logbase testlog-fullsuite",
+        "durations_seconds": (14.51, 6.78),
+        "spread_seconds": 7.73,
+        "max_seconds": 14.51,
+        "ceiling": 90,
+        "runs": (34870495011, 34875727837),
+    },
+    "policy-graph-authority-windows-provisioning-migration": {
+        "runner": "windows-2025",
+        "compiler": "clang-cl",
+        "matrices": (
+            "fact_store=disabled, secure_bridge=disabled, duckdb_source=prebuilt",
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        ),
+        "command": "meson test -C builddir --suite wyrelog --logbase testlog-fullsuite",
+        "durations_seconds": (13.21, 7.26),
+        "spread_seconds": 5.95,
+        "max_seconds": 13.21,
+        "ceiling": 90,
+        "runs": (34870495011, 34875727837),
+    },
+    "fact-store": {
+        "runner": "windows-2025",
+        "compiler": "clang-cl",
+        "matrices": (
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        ),
+        "command": "meson test -C builddir --suite wyrelog --logbase testlog-fullsuite",
+        "durations_seconds": (19.83, 21.14),
+        "spread_seconds": 1.31,
+        "max_seconds": 21.14,
+        "ceiling": 60,
+        "runs": (34870495011, 34884205946),
+    },
+    "fact-graph-seal": {
+        "runner": "windows-2025",
+        "compiler": "clang-cl",
+        "matrices": (
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+            "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        ),
+        "command": "meson test -C builddir --suite wyrelog --logbase testlog-fullsuite",
+        "durations_seconds": (22.94, 54.21),
+        "spread_seconds": 31.27,
+        "max_seconds": 54.21,
+        "timeout_samples": ({
+            "run": 34865958498,
+            "seconds": 60.13,
+            "matrix": "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        },),
+        "ceiling": 90,
+        "runs": (34863749796, 34875792111),
+    },
+}
 POLICY_SELECTIONS = {
     "policy-graph-authority": [
         "-s", "/policy/graph-authority/pre-windows-provisioning-migration",
@@ -190,6 +272,31 @@ def validate_repository(root: Path,
     if f"test('{test_name}'" not in meson:
       errors.append(f"Meson test is not registered: {test_name}")
   for test_name, ceiling in SERIALIZED_AGGREGATES:
+    evidence = MEASUREMENT_EVIDENCE.get(test_name)
+    if evidence is None:
+      errors.append(f"{test_name} has no Windows measurement evidence")
+    elif (evidence["ceiling"] != ceiling
+          or evidence["max_seconds"] > ceiling
+          or len(evidence["runs"]) < 2
+          or not evidence["runner"]
+          or not evidence["compiler"]
+          or len(evidence["matrices"]) != len(evidence["runs"])
+          or not evidence["command"]
+          or len(evidence["durations_seconds"]) != len(evidence["runs"])
+          or any(duration <= 0 for duration in evidence["durations_seconds"])
+          or ("timeout_samples" in evidence
+              and not evidence["timeout_samples"])
+          or any(sample["run"] <= 0 or sample["seconds"] <= 0
+                 or sample["seconds"] > evidence["ceiling"]
+                 or sample["run"] in evidence["runs"]
+                 or sample["matrix"] not in evidence["matrices"]
+                 for sample in evidence.get("timeout_samples", ()))
+          or max(evidence["durations_seconds"]) != evidence["max_seconds"]
+          or round(max(evidence["durations_seconds"])
+                   - min(evidence["durations_seconds"]), 2)
+          != evidence["spread_seconds"]):
+      errors.append(
+          f"{test_name} ceiling lacks repeated measured headroom evidence")
     # Match to the closing paren at the registration's own indent.  A
     # non-greedy [^)] stops inside host_machine.system() and silently cuts
     # the entry short before is_parallel.
