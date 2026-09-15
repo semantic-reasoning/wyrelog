@@ -335,6 +335,23 @@ late_exact_mutant += exact_path_check
 if late_exact_mutant.index(exact_path_check) < late_exact_mutant.index(exact_callback):
     fail("ordering guard accepted late exact-path negative mutant")
 
+# The parsed service credential is live secret material.  Its successful-parse
+# owner must transfer it out of the ordinary GStrv so every later return uses
+# the zeroing sensitive-string cleanup instead of g_strfreev.
+service_token_exchange = function_body(
+    "service_token_exchange_core_with_authority")
+if re.search(
+        r'g_auto\s*\(WylSensitiveServiceTokenSecret\)\s+'
+        r'credential_secret\s*=\s*\{\s*0\s*\}',
+        service_token_exchange) is None:
+    fail("service-token secret must have a wiping owner")
+if "credential_secret.value = g_steal_pointer (&values[1]);" \
+        not in service_token_exchange:
+    fail("service-token secret must be detached from the GStrv owner")
+if "service_token_exchange_prepare (ctx, credential_id,\n          credential_secret.value," \
+        not in service_token_exchange:
+    fail("service-token exchange must use the wiping secret owner")
+
 for forbidden in (
     "/operation-status",
     "/service-credential-operations/status",
