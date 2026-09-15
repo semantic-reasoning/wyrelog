@@ -4790,9 +4790,9 @@ int
 main (int argc, char **argv)
 {
   if (argc == 4 && strcmp (argv[1], "--win-lease-child") == 0)
-    return wyl_test_normalize_exit_status (run_lease_child (argv[2], argv[3]));
+    WYL_TEST_EXIT (run_lease_child (argv[2], argv[3]));
   if (argc == 5 && strcmp (argv[1], "--win-temp-token-child") == 0)
-    return wyl_test_normalize_exit_status (run_temp_token_child (argv[2], argv[3], argv[4]));
+    WYL_TEST_EXIT (run_temp_token_child (argv[2], argv[3], argv[4]));
   g_test_init (&argc, &argv, NULL);
   for (gsize i = 0; i < G_N_ELEMENTS (win_guarded_cases); i++)
     g_test_add (win_guarded_cases[i].path, WinFaultGuard,

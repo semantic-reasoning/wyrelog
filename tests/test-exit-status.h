@@ -55,4 +55,12 @@ wyl_test_report_exit_status (const char *file, const char *function,
 #define WYL_TEST_EXIT(status_expression) _exit (status_expression)
 #endif
 
+/* meson reads 77 from the process status as SKIP, so a skip is a protocol
+ * value and not a failure identity: it must reach the runner intact, which
+ * means leaving through a termination primitive rather than through main's
+ * normalizer.  Nullary on purpose -- with no argument there is nothing to
+ * route a failure code through, so this cannot become a way around the rule
+ * that every main return is one failure bit. */
+#define WYL_TEST_SKIP() _exit (77)
+
 #endif
