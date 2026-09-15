@@ -299,6 +299,38 @@ create_graph_schema_and_facts() {
   fi
 }
 
+retract_fact() {
+  token_file=$1
+  graph=$2
+  order_id=$3
+  amount=$4
+  batch_id=$5
+  idempotency_key=$6
+  tsv="$TMPDIR/$graph-retract.tsv"
+  printf 'order_id\tamount\n%s\t%s\n' "$order_id" "$amount" >"$tsv"
+  result=$("$WYCTL" --daemon-url "$BASE_URL" fact retract \
+    --tenant __wr_default \
+    --graph "$graph" \
+    --namespace shop \
+    --relation orders \
+    --schema-version 1 \
+    --batch-id "$batch_id" \
+    --idempotency-key "$idempotency_key" \
+    --format tsv \
+    --input "$tsv" \
+    --access-token-file "$token_file" \
+    --guard-timestamp 123 \
+    --guard-loc-class trusted \
+    --guard-risk 29)
+  # `inserted` means a tombstone batch was committed and not replayed; it is
+  # never evidence that a row matched (#1027).  assert_query_absent below is
+  # the postcondition that proves the removal.
+  if [ "$result" != "inserted" ]; then
+    echo "unexpected fact retract result for $graph: $result" >&2
+    exit 1
+  fi
+}
+
 assert_query_row() {
   token_file=$1
   graph=$2
@@ -325,6 +357,39 @@ body = json.loads(text)
 expected = {"O": sys.argv[2], "A": int(sys.argv[3])}
 if expected not in body.get("rows", []):
     raise SystemExit(f"missing {expected}: {body}")
+PY
+}
+
+assert_query_absent() {
+  token_file=$1
+  graph=$2
+  order_id=$3
+  amount=$4
+  output="$TMPDIR/$graph-query-absent.json"
+  "$WYCTL" --daemon-url "$BASE_URL" datalog query \
+    --tenant __wr_default \
+    --graph "$graph" \
+    --query 'orders(O,A)' \
+    --output json \
+    --limit 10 \
+    --access-token-file "$token_file" \
+    --guard-timestamp 123 \
+    --guard-loc-class trusted \
+    --guard-risk 29 >"$output"
+  "$PYTHON" - "$output" "$order_id" "$amount" <<'PY'
+import json
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+if "storage_path" in text or "facts.duckdb" in text:
+    raise SystemExit("query response leaked storage details")
+body = json.loads(text)
+# Without this the assertion passes vacuously on any body that simply has no
+# rows key, which would hide a query that answered nothing at all.
+if "rows" not in body:
+    raise SystemExit(f"query response had no rows key: {body}")
+for row in body["rows"]:
+    if row == {"O": sys.argv[2], "A": int(sys.argv[3])}:
+        raise SystemExit(f"retracted row remained: {body}")
 PY
 }
 
@@ -433,12 +498,15 @@ create_graph_schema_and_facts "$TOKEN_FILE" orders-a order-a 42
 create_graph_schema_and_facts "$TOKEN_FILE" orders-b order-b 7
 assert_query_row "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
+retract_fact "$TOKEN_FILE" orders-a order-a 42 orders-a-retract orders-a-retract
+assert_query_absent "$TOKEN_FILE" orders-a order-a 42
+assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
 
 stop_daemon
 start_daemon
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
-assert_query_row "$TOKEN_FILE" orders-a order-a 42
+assert_query_absent "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
 
@@ -478,9 +546,12 @@ start_daemon
 # one, so mint it before the probe rather than after (#1031).
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
 READY_GRAPH=$(assert_fact_status "$TOKEN_FILE" degraded)
+# The corruption step clobbers the first store in sorted path order, and the
+# base32hex graph components preserve that order, so orders-a is always the
+# degraded graph today and this arm is defensive rather than reached.
 case "$READY_GRAPH" in
   orders-a)
-    assert_query_row "$TOKEN_FILE" orders-a order-a 42
+    assert_query_absent "$TOKEN_FILE" orders-a order-a 42
     ;;
   orders-b)
     assert_query_row "$TOKEN_FILE" orders-b order-b 7
