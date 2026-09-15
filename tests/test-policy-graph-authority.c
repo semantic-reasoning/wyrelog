@@ -5205,6 +5205,228 @@ test_fact_write_rate_quota_persists (void)
   cleanup_store_path (store_root, store_path);
 }
 
+static void
+rate_admission_secure_wipe (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  memset (ptr, 0, size);
+}
+
+static gpointer
+rate_admission_secure_alloc (gpointer data, gsize size)
+{
+  (void) data;
+  return g_malloc (size);
+}
+
+static int
+rate_admission_secure_lock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  (void) ptr;
+  (void) size;
+  return 0;
+}
+
+static int
+rate_admission_secure_unlock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  (void) ptr;
+  (void) size;
+  return 0;
+}
+
+static void
+rate_admission_secure_free (gpointer data, gpointer ptr)
+{
+  (void) data;
+  g_free (ptr);
+}
+
+static int
+rate_admission_fill_random (gpointer data, guint8 *out, gsize len)
+{
+  (void) data;
+  memset (out, 0, len);
+  return 0;
+}
+
+static gint64
+rate_admission_now (gpointer data)
+{
+  return *(gint64 *) data;
+}
+
+static void
+test_fact_write_rate_admission_clock_remainder (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  gint64 now_us = G_USEC_PER_SEC;
+  wyl_policy_store_cvk_runtime_t runtime = {
+    .secure_alloc = rate_admission_secure_alloc,
+    .secure_lock = rate_admission_secure_lock,
+    .secure_wipe = rate_admission_secure_wipe,
+    .secure_unlock = rate_admission_secure_unlock,
+    .secure_free = rate_admission_secure_free,
+    .fill_random = rate_admission_fill_random,
+    .now_us = rate_admission_now,
+    .data = &now_us,
+  };
+  wyl_policy_store_open_options_t open_opts = {
+    .path = store_path,
+    .service_cvk_runtime = &runtime,
+  };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-clock",
+      &created), ==, WYRELOG_E_OK);
+  WylPolicyFactQuotaConfig config = {
+    .has_limit = TRUE,
+    .rate_per_second = 2,
+    .burst = 3,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-clock", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  WylPolicyFactWriteRateAdmission admission = { 0 };
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 2);
+  now_us += 250000;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 1);
+  now_us += 250000;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 1);
+  now_us -= 500000;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 0);
+  exec_ok (wyl_policy_store_get_db (store),
+      "UPDATE fact_tenant_write_rate_state SET tokens=99,"
+      "last_refill_at=1000000 WHERE tenant_id='rate-clock';");
+  now_us = G_USEC_PER_SEC;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 2);
+  exec_rejected (wyl_policy_store_get_db (store),
+      "UPDATE fact_tenant_write_rate_state SET refill_remainder=-1 "
+      "WHERE tenant_id='rate-clock';");
+  exec_rejected (wyl_policy_store_get_db (store),
+      "UPDATE fact_tenant_write_rate_state SET last_refill_at=-1 "
+      "WHERE tenant_id='rate-clock';");
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+}
+
+static void
+test_fact_write_rate_admission_persists_and_bounds (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-admit",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  WylPolicyFactQuotaConfig config = {
+    .has_limit = TRUE,
+    .rate_per_second = 1,
+    .burst = 2,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-admit", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  WylPolicyFactWriteRateAdmission admission = { 0 };
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_assert_true (admission.configured);
+  g_assert_true (admission.admitted);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 1);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_assert_true (admission.admitted);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 0);
+  g_autofree gchar *fractional_state = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
+          "refill_remainder=0,last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='rate-admit';", g_get_real_time () - 1500000);
+  exec_ok (wyl_policy_store_get_db (store), fractional_state);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_assert_true (admission.admitted);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 0);
+
+  config.rate_per_second = 2;
+  config.burst = 3;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-admit", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_autofree gchar *boundary_state = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
+          "refill_remainder=0,last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='rate-admit';", g_get_real_time () - G_USEC_PER_SEC);
+  exec_ok (wyl_policy_store_get_db (store), boundary_state);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_assert_true (admission.admitted);
+  g_assert_cmpuint (admission.remaining_tokens, ==, 1);
+
+  config.rate_per_second = G_MAXINT64;
+  config.burst = G_MAXINT64;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-admit", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *maximum_state = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
+          "refill_remainder=999999,last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='rate-admit';", g_get_real_time () - 1000001);
+  exec_ok (wyl_policy_store_get_db (store), maximum_state);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_assert_true (admission.admitted);
+  g_assert_cmpuint (admission.remaining_tokens, ==, G_MAXINT64 - 1);
+
+  config.rate_per_second = 1;
+  config.burst = 2;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-admit", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_OK);
+  g_autofree gchar *freeze_state = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET tokens=0,last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='rate-admit';", g_get_real_time () + G_USEC_PER_SEC);
+  exec_ok (wyl_policy_store_get_db (store), freeze_state);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_POLICY);
+  g_assert_true (admission.configured);
+  g_assert_false (admission.admitted);
+  g_assert_cmpuint (admission.retry_after_us, >, 0);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-admit", &admission), ==, WYRELOG_E_POLICY);
+  g_assert_false (admission.admitted);
+  cleanup_store_path (store_root, store_path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -5288,6 +5510,10 @@ main (int argc, char **argv)
       test_graph_quota_store_api);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-quota-persists",
       test_fact_write_rate_quota_persists);
+  g_test_add_func ("/policy/graph-authority/fact-write-rate-admission",
+      test_fact_write_rate_admission_persists_and_bounds);
+  g_test_add_func ("/policy/graph-authority/fact-write-rate-admission-clock",
+      test_fact_write_rate_admission_clock_remainder);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);
