@@ -12211,6 +12211,20 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  gboolean any_schema_exists = FALSE;
+  rc = wyl_policy_store_fact_relation_schema_exists (write.store, tenant,
+          graph, namespace_id, relation, 0, &any_schema_exists);
+  if (rc != WYRELOG_E_OK) {
+    schema_columns_clear (columns, n_columns);
+    set_json_error (msg, 500, "schema_register_failed");
+    return;
+  }
+  if (any_schema_exists) {
+    schema_columns_clear (columns, n_columns);
+    set_json_error (msg, 409, "schema_already_registered");
+    return;
+  }
+
   wyl_policy_fact_relation_schema_query_t schema_query = {
     .query_name = relation,
     .required_permission_id = "wr.datalog.query",
@@ -12236,6 +12250,10 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc == WYRELOG_E_NOT_FOUND) {
     set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (rc == WYRELOG_E_CONFLICT) {
+    set_json_error (msg, 409, "schema_registration_conflict");
     return;
   }
   if (rc != WYRELOG_E_OK) {
