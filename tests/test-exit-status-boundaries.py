@@ -222,12 +222,25 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
           + r"\s*\(\s*status_expression\s*\)\s*$",
           windows_branch) is None:
         errors.append(f"{macro} Windows pass-through definition changed")
+  # A search with .*? between the clauses only proves the text is present,
+  # not that it is reached: a body that returns the status verbatim and leaves
+  # `return 1;` behind as dead code satisfied it, so the whole family stayed
+  # green against a normalizer turned into a complete no-op.  Pin the body
+  # exactly, the way the WYL_TEST_EXIT macros below are already pinned.
   normalizer = re.search(
       r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
-      r"\([^)]*\)\s*\{.*?if\s*\(\s*status\s*==\s*0\s*\)\s*"
-      r"return\s+0\s*;.*?return\s+1\s*;\s*\}", flattened)
+      r"\([^)]*\)\s*\{([^{}]*)\}", flattened)
   if normalizer is None:
     errors.append("POSIX normalizer does not map each nonzero status to 1")
+  else:
+    ordered_normalizer = (
+        r"\s*if\s*\(\s*status\s*==\s*0\s*\)\s*return\s+0\s*;\s*"
+        r"\(\s*void\s*\)\s*fprintf\s*\(\s*stderr\s*,\s*,\s*file\s*,"
+        r"\s*function\s*,\s*line\s*,\s*status\s*\)\s*;\s*"
+        r"\(\s*void\s*\)\s*fflush\s*\(\s*stderr\s*\)\s*;\s*"
+        r"return\s+1\s*;\s*")
+    if re.fullmatch(ordered_normalizer, normalizer.group(1)) is None:
+      errors.append("POSIX normalizer does not map each nonzero status to 1")
   normalizer_definitions = list(re.finditer(
       r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
       r"\([^)]*\)\s*\{", flattened))
@@ -690,6 +703,38 @@ def self_test(root: Path) -> list[str]:
       errors.append(f"sanitizer mutation setup failed: {label}")
     elif not _validate_header_text(mutant):
       errors.append(f"sanitizer mutation survived: {label}")
+  # These name the error they must provoke.  A mutation that merely turns the
+  # gate red proves nothing about which check caught it -- the normalizer
+  # bypass below went undetected for as long as it did because every existing
+  # mutant targets a macro, so "some error appeared" was never the normalizer's
+  # error.
+  named_mutations = (
+      ("normalizer returns the status verbatim",
+          "  (void) fflush (stderr);\n  return 1;",
+          "  (void) fflush (stderr);\n  if (status != 0)\n"
+          "    return status;\n  return 1;",
+          "POSIX normalizer does not map each nonzero status to 1"),
+      ("skip primitive takes an argument",
+          "#define WYL_TEST_SKIP() _exit (77)",
+          "#define WYL_TEST_SKIP(status_expression) _exit (status_expression)",
+          "WYL_TEST_SKIP is not the nullary 77 skip primitive"),
+      ("skip primitive yields a status other than 77",
+          "#define WYL_TEST_SKIP() _exit (77)",
+          "#define WYL_TEST_SKIP() _exit (78)",
+          "WYL_TEST_SKIP is not the nullary 77 skip primitive"),
+  )
+  for label, before, after, expected in named_mutations:
+    mutant = header.replace(before, after, 1)
+    if mutant == header:
+      errors.append(f"sanitizer mutation setup failed: {label}")
+      continue
+    reported = _validate_header_text(mutant)
+    if not reported:
+      errors.append(f"sanitizer mutation survived: {label}")
+    elif expected not in reported:
+      errors.append(f"sanitizer mutation died on the wrong check: {label}: "
+          f"expected {expected!r}, got {reported!r}")
+
   capture = "WYL_TEST_EXIT_CAPTURE_NAME (__LINE__)"
   guard_start = f"    if ({capture} != 0"
   reordered = header.replace(guard_start,
