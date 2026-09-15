@@ -261,7 +261,7 @@
   {
     "api": "_exit",
     "expression": "lease_helper_main (argc, argv)",
-    "line": 1399,
+    "line": 1404,
     "path": "tests/test-policy-store-lease.c",
     "platform": "posix-normalized-wrapper"
   },
