@@ -9751,6 +9751,56 @@ static const WylGraphAuthorityColumn fact_reconcile_evidence_columns[] = {
    "ALTER TABLE fact_reconcile_journal ADD COLUMN source_digest BLOB"},
 };
 
+/* The graph-count quota table predates the typed quota boundary.  Rebuild it
+ * once when an older store is opened so graph count and write rate share one
+ * durable, dimension-keyed authority table.  This runs inside the schema
+ * transaction, therefore a failed copy cannot publish a half-migrated table. */
+static wyrelog_error_t
+migrate_fact_quota_table (wyl_policy_store_t *store)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(fact_tenant_quota_limits);",
+      -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  gboolean typed = FALSE;
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+        "rate_per_second") == 0)
+      typed = TRUE;
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (typed)
+    return WYRELOG_E_OK;
+
+  return exec_sql (store->db,
+             "ALTER TABLE fact_tenant_quota_limits RENAME TO "
+             "fact_tenant_quota_limits_legacy;"
+             "CREATE TABLE fact_tenant_quota_limits ("
+             "  tenant_id TEXT NOT NULL,"
+             "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count','write_rate')),"
+             "  hard_limit INTEGER CHECK (hard_limit IS NULL OR "
+             "    (typeof(hard_limit)='integer' AND hard_limit >= 0)),"
+             "  rate_per_second INTEGER CHECK (rate_per_second IS NULL OR "
+             "    (typeof(rate_per_second)='integer' AND rate_per_second > 0)),"
+             "  burst INTEGER CHECK (burst IS NULL OR "
+             "    (typeof(burst)='integer' AND burst > 0)),"
+             "  updated_at INTEGER NOT NULL,"
+             "  CHECK ((dimension='graph_count' AND hard_limit IS NOT NULL AND "
+             "    rate_per_second IS NULL AND burst IS NULL) OR "
+             "    (dimension='write_rate' AND hard_limit IS NULL AND "
+             "    rate_per_second IS NOT NULL AND burst IS NOT NULL)),"
+             "  PRIMARY KEY (tenant_id, dimension),"
+             "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id));"
+             "INSERT INTO fact_tenant_quota_limits "
+             "(tenant_id,dimension,hard_limit,updated_at) "
+             "SELECT tenant_id,dimension,hard_limit,updated_at "
+             "FROM fact_tenant_quota_limits_legacy;"
+             "DROP TABLE fact_tenant_quota_limits_legacy;");
+}
+
 static const WylGraphAuthorityColumn fact_graph_provisioning_evidence_columns[] = {
   {"fact_graph_provisioning", "windows_operation_evidence_version", "INTEGER",
    FALSE, NULL, NULL, NULL},
@@ -12330,10 +12380,18 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON fact_graphs (tenant_id);"
       "CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits ("
       "  tenant_id TEXT NOT NULL,"
-      "  dimension TEXT NOT NULL CHECK (dimension = 'graph_count'),"
-      "  hard_limit INTEGER NOT NULL CHECK ("
-      "    typeof(hard_limit) = 'integer' AND hard_limit >= 0),"
+      "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate')),"
+      "  hard_limit INTEGER CHECK (hard_limit IS NULL OR ("
+      "    typeof(hard_limit) = 'integer' AND hard_limit >= 0)),"
+      "  rate_per_second INTEGER CHECK (rate_per_second IS NULL OR ("
+      "    typeof(rate_per_second) = 'integer' AND rate_per_second > 0)),"
+      "  burst INTEGER CHECK (burst IS NULL OR ("
+      "    typeof(burst) = 'integer' AND burst > 0)),"
       "  updated_at INTEGER NOT NULL,"
+      "  CHECK ((dimension = 'graph_count' AND hard_limit IS NOT NULL AND "
+      "    rate_per_second IS NULL AND burst IS NULL) OR "
+      "    (dimension = 'write_rate' AND hard_limit IS NULL AND "
+      "    rate_per_second IS NOT NULL AND burst IS NOT NULL)),"
       "  PRIMARY KEY (tenant_id, dimension),"
       "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
       ");"
@@ -12663,6 +12721,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
     return rc;
   }
   rc = exec_sql (store->db, ddl);
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_fact_quota_table (store);
   if (rc == WYRELOG_E_OK)
     rc = graph_authority_migration_checkpoint (store,
             WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL);
@@ -13539,6 +13599,138 @@ wyl_policy_store_get_graph_quota_status (wyl_policy_store_t *store,
   sqlite3_finalize (stmt);
   return step_rc == SQLITE_ROW ? WYRELOG_E_OK :
          step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_set_fact_write_rate_quota (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint64 rate_per_second, guint64 burst)
+{
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || rate_per_second == 0 || burst == 0
+      || rate_per_second > G_MAXINT64 || burst > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, tenant_id, &exists);
+  if (rc != WYRELOG_E_OK || !exists) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_NOT_FOUND;
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO fact_tenant_quota_limits "
+          "(tenant_id,dimension,rate_per_second,burst,updated_at) "
+          "VALUES (?,'write_rate',?,?,unixepoch()) "
+          "ON CONFLICT(tenant_id,dimension) DO UPDATE SET "
+          "rate_per_second=excluded.rate_per_second,burst=excluded.burst,"
+          "updated_at=excluded.updated_at;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2,
+      (sqlite3_int64) rate_per_second) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 3,
+      (sqlite3_int64) burst) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_fact_write_rate_quota (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactWriteRateQuotaStatus *out_status)
+{
+  if (store == NULL || store->db == NULL || out_status == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_status = (WylPolicyFactWriteRateQuotaStatus) { 0 };
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT q.rate_per_second,q.burst FROM tenants AS t LEFT JOIN "
+          "fact_tenant_quota_limits AS q ON q.tenant_id=t.tenant_id "
+          "AND q.dimension='write_rate' "
+          "WHERE t.tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    out_status->has_limit = sqlite3_column_type (stmt, 0) != SQLITE_NULL;
+    if (out_status->has_limit) {
+      out_status->rate_per_second = (guint64) sqlite3_column_int64 (stmt, 0);
+      out_status->burst = (guint64) sqlite3_column_int64 (stmt, 1);
+    }
+  }
+  sqlite3_finalize (stmt);
+  return rc != WYRELOG_E_OK ? rc :
+         step_rc == SQLITE_ROW ? WYRELOG_E_OK :
+         step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactQuotaDimension dimension,
+    const WylPolicyFactQuotaConfig *config)
+{
+  if (config == NULL)
+    return WYRELOG_E_INVALID;
+  if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
+    if (!config->has_limit || config->hard_limit > G_MAXINT64)
+      return WYRELOG_E_INVALID;
+    return wyl_policy_store_set_graph_quota_limit (store, tenant_id,
+               config->hard_limit);
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_WRITE_RATE) {
+    if (!config->has_limit || config->rate_per_second == 0
+        || config->burst == 0
+        || config->rate_per_second > G_MAXINT64
+        || config->burst > G_MAXINT64)
+      return WYRELOG_E_INVALID;
+    return wyl_policy_store_set_fact_write_rate_quota (store, tenant_id,
+               config->rate_per_second, config->burst);
+  }
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_fact_quota_config (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactQuotaDimension dimension,
+    WylPolicyFactQuotaConfig *out_config)
+{
+  if (out_config == NULL)
+    return WYRELOG_E_INVALID;
+  *out_config = (WylPolicyFactQuotaConfig) { 0 };
+  if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
+    WylPolicyGraphQuotaStatus status = { 0 };
+    wyrelog_error_t rc = wyl_policy_store_get_graph_quota_status (store,
+            tenant_id, &status);
+    if (rc == WYRELOG_E_OK) {
+      out_config->has_limit = status.has_limit;
+      out_config->hard_limit = status.hard_limit;
+    }
+    return rc;
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_WRITE_RATE) {
+    WylPolicyFactWriteRateQuotaStatus status = { 0 };
+    wyrelog_error_t rc = wyl_policy_store_get_fact_write_rate_quota (store,
+            tenant_id, &status);
+    if (rc == WYRELOG_E_OK) {
+      out_config->has_limit = status.has_limit;
+      out_config->rate_per_second = status.rate_per_second;
+      out_config->burst = status.burst;
+    }
+    return rc;
+  }
+  return WYRELOG_E_INVALID;
 }
 
 /* Called only after beginning the same SQLite mutation that will admit the

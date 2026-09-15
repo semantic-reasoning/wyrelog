@@ -434,10 +434,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid
 -- committed but whose safe filesystem materialization has not completed.
 CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     tenant_id  TEXT NOT NULL,
-    dimension  TEXT NOT NULL CHECK (dimension = 'graph_count'),
-    hard_limit INTEGER NOT NULL CHECK (
-        typeof(hard_limit) = 'integer' AND hard_limit >= 0),
+    dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate')),
+    hard_limit INTEGER CHECK (
+        hard_limit IS NULL OR (typeof(hard_limit) = 'integer' AND hard_limit >= 0)),
+    rate_per_second INTEGER CHECK (
+        rate_per_second IS NULL OR (typeof(rate_per_second) = 'integer' AND rate_per_second > 0)),
+    burst INTEGER CHECK (
+        burst IS NULL OR (typeof(burst) = 'integer' AND burst > 0)),
     updated_at INTEGER NOT NULL,
+    CHECK ((dimension = 'graph_count' AND hard_limit IS NOT NULL
+            AND rate_per_second IS NULL AND burst IS NULL)
+        OR (dimension = 'write_rate' AND hard_limit IS NULL
+            AND rate_per_second IS NOT NULL AND burst IS NOT NULL)),
     PRIMARY KEY (tenant_id, dimension),
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
 );
