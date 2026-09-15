@@ -850,6 +850,7 @@ static const gchar *const required_tables[] = {
   "fact_graph_relation_columns",
   "fact_graph_query_allowlist",
   "fact_tenant_quota_limits",
+  "fact_tenant_write_rate_state",
   "fact_graph_create_reservations",
   "fact_namespaces",
   "fact_relation_schemas",
@@ -12395,6 +12396,16 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  PRIMARY KEY (tenant_id, dimension),"
       "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
       ");"
+      "CREATE TABLE IF NOT EXISTS fact_tenant_write_rate_state ("
+      "  tenant_id TEXT PRIMARY KEY,"
+      "  tokens INTEGER NOT NULL CHECK (tokens >= 0),"
+      "  refill_remainder INTEGER NOT NULL CHECK ("
+      "    refill_remainder BETWEEN 0 AND 999999),"
+      "  last_refill_at INTEGER NOT NULL CHECK (last_refill_at >= 0),"
+      "  rate_per_second INTEGER NOT NULL CHECK (rate_per_second > 0),"
+      "  burst INTEGER NOT NULL CHECK (burst > 0),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
       "CREATE TABLE IF NOT EXISTS fact_graph_create_reservations ("
       "  tenant_id TEXT NOT NULL,"
       "  graph_id TEXT NOT NULL,"
@@ -13674,6 +13685,238 @@ wyl_policy_store_get_fact_write_rate_quota (wyl_policy_store_t *store,
   return rc != WYRELOG_E_OK ? rc :
          step_rc == SQLITE_ROW ? WYRELOG_E_OK :
          step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+}
+
+static guint64
+fact_write_rate_fractional_tokens (guint64 rate_per_second,
+    guint64 elapsed_remainder, guint64 previous_remainder,
+    guint64 *out_remainder)
+{
+  /* Compute (rate * elapsed_remainder + previous_remainder) / 1e6
+   * without multiplying two large values. The quotient from the integral
+   * portion of rate is already in token units; only the sub-second product
+   * needs to be divided by the scale. */
+  const guint64 scale = G_USEC_PER_SEC;
+  guint64 whole_tokens = (rate_per_second / scale) * elapsed_remainder;
+  guint64 fractional = (rate_per_second % scale) * elapsed_remainder
+      + previous_remainder;
+  guint64 tokens = whole_tokens + fractional / scale;
+  if (out_remainder != NULL)
+    *out_remainder = fractional % scale;
+  return tokens;
+}
+
+static guint64
+fact_write_rate_retry_after_us (guint64 rate_per_second,
+    guint64 remainder)
+{
+  const guint64 scale = G_USEC_PER_SEC;
+  /* ceil((1 - remainder/scale) / rate_per_second * scale). */
+  guint64 numerator = (scale - remainder) * scale;
+  guint64 retry = numerator / rate_per_second;
+  if (numerator % rate_per_second != 0)
+    retry++;
+  return retry == 0 ? 1 : retry;
+}
+
+static wyrelog_error_t
+fact_write_rate_transaction_begin (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+  if (rc != WYRELOG_E_OK)
+    (void) policy_store_runtime_writer_end (store);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_write_rate_transaction_commit (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
+  if (rc != WYRELOG_E_OK)
+    (void) exec_sql (store->db, "ROLLBACK;");
+  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (rc == WYRELOG_E_OK && lease_rc != WYRELOG_E_OK) {
+    /* COMMIT is the linearization point. Do not report a durable debit as a
+     * retryable failure: callers would issue the request again and consume a
+     * second token. The writer lease remains conservatively held and the
+     * normal store lifecycle will recover it. */
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "fact write-rate admission committed but writer lease cleanup failed");
+  }
+  return rc;
+}
+
+static void
+fact_write_rate_transaction_rollback (wyl_policy_store_t *store)
+{
+  (void) exec_sql (store->db, "ROLLBACK;");
+  (void) policy_store_runtime_writer_end (store);
+}
+
+wyrelog_error_t
+wyl_policy_store_admit_fact_write_rate (wyl_policy_store_t *store,
+    const gchar *authenticated_tenant_id,
+    WylPolicyFactWriteRateAdmission *out_admission)
+{
+  if (store == NULL || store->db == NULL || out_admission == NULL
+      || !wyl_policy_store_tenant_id_is_valid (authenticated_tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_admission = (WylPolicyFactWriteRateAdmission) { 0 };
+
+  wyrelog_error_t rc = fact_write_rate_transaction_begin (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylPolicyFactWriteRateQuotaStatus config = { 0 };
+  rc = wyl_policy_store_get_fact_write_rate_quota (store,
+          authenticated_tenant_id, &config);
+  if (rc != WYRELOG_E_OK) {
+    fact_write_rate_transaction_rollback (store);
+    return rc;
+  }
+  out_admission->configured = config.has_limit;
+  if (!config.has_limit) {
+    out_admission->admitted = TRUE;
+    rc = fact_write_rate_transaction_commit (store);
+    if (rc != WYRELOG_E_OK)
+      *out_admission = (WylPolicyFactWriteRateAdmission) { 0 };
+    return rc;
+  }
+
+  gint64 now_signed = store->service_cvk_runtime.now_us
+        (store->service_cvk_runtime.data);
+  if (now_signed < 0) {
+    fact_write_rate_transaction_rollback (store);
+    return WYRELOG_E_INVALID;
+  }
+  guint64 now = (guint64) now_signed;
+  guint64 tokens = 0;
+  guint64 remainder = 0;
+  guint64 last_refill_at = 0;
+  guint64 stored_rate = 0;
+  guint64 stored_burst = 0;
+  gboolean state_exists = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT tokens,refill_remainder,last_refill_at,"
+          "rate_per_second,burst FROM fact_tenant_write_rate_state "
+          "WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, authenticated_tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    state_exists = TRUE;
+    sqlite3_int64 raw_tokens = sqlite3_column_int64 (stmt, 0);
+    sqlite3_int64 raw_remainder = sqlite3_column_int64 (stmt, 1);
+    sqlite3_int64 raw_last_refill_at = sqlite3_column_int64 (stmt, 2);
+    sqlite3_int64 raw_rate = sqlite3_column_int64 (stmt, 3);
+    sqlite3_int64 raw_burst = sqlite3_column_int64 (stmt, 4);
+    if (raw_tokens < 0 || raw_remainder < 0
+        || raw_remainder >= (sqlite3_int64) G_USEC_PER_SEC
+        || raw_last_refill_at < 0 || raw_rate <= 0 || raw_burst <= 0) {
+      /* Treat an externally corrupted state row as absent. The next branch
+       * reinitializes it to the configured burst instead of converting a
+       * negative value to a huge guint64 and freezing the bucket. */
+      state_exists = FALSE;
+    } else {
+      tokens = (guint64) raw_tokens;
+      remainder = (guint64) raw_remainder;
+      last_refill_at = (guint64) raw_last_refill_at;
+      stored_rate = (guint64) raw_rate;
+      stored_burst = (guint64) raw_burst;
+    }
+  } else if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    fact_write_rate_transaction_rollback (store);
+    return rc;
+  }
+
+  if (!state_exists || stored_rate != config.rate_per_second
+      || stored_burst != config.burst) {
+    tokens = config.burst;
+    remainder = 0;
+    last_refill_at = now;
+  } else {
+    tokens = MIN (tokens, config.burst);
+    remainder = MIN (remainder, G_USEC_PER_SEC - 1);
+    guint64 elapsed = now > last_refill_at ? now - last_refill_at : 0;
+    guint64 elapsed_seconds = elapsed / G_USEC_PER_SEC;
+    guint64 elapsed_remainder = elapsed % G_USEC_PER_SEC;
+    guint64 capacity = config.burst - tokens;
+    if (elapsed_seconds > capacity
+        / config.rate_per_second) {
+      tokens = config.burst;
+      remainder = 0;
+    } else {
+      guint64 whole_added = elapsed_seconds * config.rate_per_second;
+      guint64 fractional_remainder = 0;
+      guint64 fractional_added = fact_write_rate_fractional_tokens
+            (config.rate_per_second,
+              elapsed_remainder, remainder, &fractional_remainder);
+      /* Compare each component before adding: whole_added can be near
+       * G_MAXINT64 while the fractional component is nonzero. */
+      if (whole_added >= capacity
+          || fractional_added >= capacity - whole_added) {
+        tokens = config.burst;
+        remainder = 0;
+      } else {
+        tokens += whole_added + fractional_added;
+        remainder = fractional_remainder;
+      }
+    }
+    last_refill_at = now > last_refill_at ? now : last_refill_at;
+  }
+
+  if (tokens > 0) {
+    tokens--;
+    out_admission->admitted = TRUE;
+    out_admission->remaining_tokens = tokens;
+    out_admission->retry_after_us = 0;
+  } else {
+    out_admission->admitted = FALSE;
+    out_admission->remaining_tokens = 0;
+    out_admission->retry_after_us = fact_write_rate_retry_after_us
+          (config.rate_per_second, remainder);
+  }
+
+  rc = prepare_stmt (store->db,
+          "INSERT INTO fact_tenant_write_rate_state "
+          "(tenant_id,tokens,refill_remainder,last_refill_at,"
+          "rate_per_second,burst) VALUES (?,?,?,?,?,?) "
+          "ON CONFLICT(tenant_id) DO UPDATE SET tokens=excluded.tokens,"
+          "refill_remainder=excluded.refill_remainder,"
+          "last_refill_at=excluded.last_refill_at,"
+          "rate_per_second=excluded.rate_per_second,burst=excluded.burst;",
+          &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, authenticated_tenant_id);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 2, (sqlite3_int64) tokens) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 3, (sqlite3_int64) remainder) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 4, (sqlite3_int64) last_refill_at)
+      != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 5,
+      (sqlite3_int64) config.rate_per_second) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) config.burst)
+      != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_write_rate_transaction_commit (store);
+  else
+    fact_write_rate_transaction_rollback (store);
+  if (rc != WYRELOG_E_OK)
+    *out_admission = (WylPolicyFactWriteRateAdmission) { 0 };
+  else if (!out_admission->admitted)
+    rc = WYRELOG_E_POLICY;
+  return rc;
 }
 
 wyrelog_error_t
