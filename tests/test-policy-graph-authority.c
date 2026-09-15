@@ -3501,12 +3501,21 @@ test_graph_quota_reservation_survives_reopen (void)
           "facts", NULL);
   g_assert_true (g_file_set_contents (blocking_file, "x", 1, &error));
   g_assert_no_error (error);
+  const wyl_policy_fact_graph_column_t fallback_columns[] = {
+    {.column_name = "value", .column_type = "int64"},
+  };
+  const wyl_policy_fact_graph_relation_t fallback_relations[] = {
+    {.relation_name = "items", .columns = fallback_columns,
+     .n_columns = G_N_ELEMENTS (fallback_columns)},
+  };
   wyl_policy_fact_graph_create_options_t fallback_opts = {
     .tenant_id = "quota-fallback",
     .graph_id = "recover-me",
     .fact_root = fallback_root,
     .schema_version = 1,
     .owner_scope = "quota-fallback",
+    .relations = fallback_relations,
+    .n_relations = G_N_ELEMENTS (fallback_relations),
   };
   gboolean fallback_quota_exceeded = FALSE;
   g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
@@ -3531,6 +3540,33 @@ test_graph_quota_reservation_survives_reopen (void)
           "SELECT operation_uuid FROM fact_graph_create_reservations "
           "WHERE tenant_id='quota-fallback' AND graph_id='recover-me';");
   g_assert_cmpstr (reopened_operation, ==, fallback_operation);
+  /* Some platform resolvers register the materialized directory as a legacy
+   * graph row before the policy-store retry. Reproduce that state on hosts
+   * whose resolver does not, so the durable reservation resume path is
+   * covered independently of filesystem implementation details. */
+  gboolean injected_legacy_row = FALSE;
+  if (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graphs WHERE tenant_id='quota-fallback' "
+      "AND graph_id='recover-me';") == 0) {
+    g_autofree gchar *legacy_path = scalar_text
+          (wyl_policy_store_get_db (store),
+            "SELECT storage_path FROM fact_graph_create_reservations "
+            "WHERE tenant_id='quota-fallback' AND graph_id='recover-me';");
+    g_autofree gchar *legacy_uri = scalar_text
+          (wyl_policy_store_get_db (store),
+            "SELECT storage_uri FROM fact_graph_create_reservations "
+            "WHERE tenant_id='quota-fallback' AND graph_id='recover-me';");
+    g_autofree gchar *legacy_sql = g_strdup_printf (
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,created_at,updated_at) VALUES "
+      "('quota-fallback','recover-me','%s','%s',1,'quota-fallback',"
+      "unixepoch(),unixepoch());", legacy_uri, legacy_path);
+    exec_ok (wyl_policy_store_get_db (store), legacy_sql);
+    exec_ok (wyl_policy_store_get_db (store),
+        "INSERT INTO fact_graph_relations (tenant_id,graph_id,relation_name,"
+        "arity) VALUES ('quota-fallback','recover-me','stale',1);");
+    injected_legacy_row = TRUE;
+  }
   g_assert_cmpint (g_remove (blocking_file), ==, 0);
   g_assert_cmpint (g_mkdir (blocking_file, 0700), ==, 0);
   g_assert_cmpint (g_mkdir (fallback_root, 0700), ==, 0);
@@ -3547,6 +3583,14 @@ test_graph_quota_reservation_survives_reopen (void)
   /* The store binds to one fact root at startup. Restore the root under which
    * the durable request was admitted before retrying that reservation. */
   fallback_opts.fact_root = fallback_root;
+  if (injected_legacy_row) {
+    g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
+          (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), ==,
+        WYRELOG_E_CONFLICT);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DELETE FROM fact_graph_relations WHERE tenant_id='quota-fallback' "
+        "AND graph_id='recover-me' AND relation_name='stale';");
+  }
   g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
         (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), ==,
       WYRELOG_E_OK);
@@ -3558,6 +3602,15 @@ test_graph_quota_reservation_survives_reopen (void)
   g_assert_cmpuint (scalar_int64 (wyl_policy_store_get_db (store),
       "SELECT count(*) FROM fact_graph_create_reservations "
       "WHERE tenant_id='quota-fallback';"), ==, 0);
+  g_assert_cmpuint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graph_relations WHERE "
+      "tenant_id='quota-fallback' AND graph_id='recover-me' AND "
+      "relation_name='items' AND arity=1;"), ==, 1);
+  g_assert_cmpuint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_graph_relation_columns WHERE "
+      "tenant_id='quota-fallback' AND graph_id='recover-me' AND "
+      "relation_name='items' AND column_name='value' AND "
+      "column_type='int64';"), ==, 1);
   g_autofree gchar *resumed_storage_path = scalar_text
         (wyl_policy_store_get_db (store),
           "SELECT storage_path FROM fact_graphs WHERE tenant_id='quota-fallback' "

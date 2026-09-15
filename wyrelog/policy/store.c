@@ -13905,6 +13905,77 @@ fact_graph_create_reservation_delete (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
+fact_graph_child_metadata_exists (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, gboolean *out_exists)
+{
+  if (store == NULL || store->db == NULL || tenant_id == NULL
+      || graph_id == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+  *out_exists = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT EXISTS (SELECT 1 FROM fact_graph_relations "
+      "WHERE tenant_id=? AND graph_id=? UNION ALL "
+      "SELECT 1 FROM fact_graph_relation_columns "
+      "WHERE tenant_id=? AND graph_id=? UNION ALL "
+      "SELECT 1 FROM fact_graph_query_allowlist "
+      "WHERE tenant_id=? AND graph_id=?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  for (int index = 1; rc == WYRELOG_E_OK && index <= 6; index += 2) {
+    rc = bind_text (stmt, index, tenant_id);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, index + 1, graph_id);
+  }
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW)
+    *out_exists = sqlite3_column_int (stmt, 0) != 0;
+  else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_graph_existing_resume_compatible (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const gchar *storage_path, const gchar *storage_uri, gboolean *out_ok)
+{
+  if (store == NULL || opts == NULL || storage_path == NULL
+      || storage_uri == NULL || out_ok == NULL)
+    return WYRELOG_E_INVALID;
+  *out_ok = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT storage_uri,storage_path,schema_version,owner_scope,"
+      "lifecycle_state,sealed FROM fact_graphs WHERE tenant_id=? "
+      "AND graph_id=? LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, opts->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, opts->graph_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    const gchar *existing_uri = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *existing_path = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *existing_owner = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *lifecycle = (const gchar *) sqlite3_column_text (stmt, 4);
+    *out_ok = existing_uri != NULL && existing_path != NULL
+        && existing_owner != NULL && lifecycle != NULL
+        && g_strcmp0 (existing_uri, storage_uri) == 0
+        && g_strcmp0 (existing_path, storage_path) == 0
+        && sqlite3_column_int64 (stmt, 2) == opts->schema_version
+        && g_strcmp0 (existing_owner, opts->owner_scope) == 0
+        && g_strcmp0 (lifecycle, "legacy_unclassified") == 0
+        && sqlite3_column_int (stmt, 5) == 0;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
 policy_store_create_fact_graph_internal (wyl_policy_store_t *store,
     const wyl_policy_fact_graph_create_options_t *opts,
     gchar **out_storage_uri, gboolean *out_quota_exceeded,
@@ -13954,8 +14025,30 @@ policy_store_create_fact_graph_internal (wyl_policy_store_t *store,
           &graph_exists, &graph_sealed);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (graph_exists || graph_sealed)
+  /* A failed fallback materialization can leave the resolver's legacy graph
+   * row behind while its durable reservation remains the source of truth.
+   * That row is resumable only when the request digest matches; an unrelated
+   * existing graph or a sealed graph remains a conflict. */
+  gboolean reservation_found = FALSE;
+  g_autofree gchar *operation_uuid = NULL;
+  g_autofree gchar *stored_digest = NULL;
+  rc = fact_graph_create_reservation_read (store, opts->tenant_id,
+          opts->graph_id, &reservation_found, &operation_uuid, &stored_digest);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (graph_sealed || (graph_exists && !reservation_found))
     return WYRELOG_E_POLICY;
+  if (reservation_found && g_strcmp0 (request_digest, stored_digest) != 0)
+    return WYRELOG_E_POLICY;
+  if (graph_exists && reservation_found) {
+    gboolean compatible = FALSE;
+    rc = fact_graph_existing_resume_compatible (store, opts, storage_path,
+            storage_uri, &compatible);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!compatible)
+      return WYRELOG_E_CONFLICT;
+  }
 
   rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
@@ -13964,19 +14057,36 @@ policy_store_create_fact_graph_internal (wyl_policy_store_t *store,
   graph_sealed = FALSE;
   rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
           &graph_exists, &graph_sealed);
-  if (rc != WYRELOG_E_OK || graph_exists || graph_sealed) {
+  if (rc != WYRELOG_E_OK || graph_sealed) {
     wyl_policy_store_rollback_mutation (store);
     return rc != WYRELOG_E_OK ? rc : WYRELOG_E_POLICY;
   }
 
-  gboolean reservation_found = FALSE;
-  g_autofree gchar *operation_uuid = NULL;
-  g_autofree gchar *stored_digest = NULL;
+  /* Re-read under the mutation transaction.  The first read is only an early
+   * conflict fast path; this read owns the admission decision. */
+  reservation_found = FALSE;
+  g_clear_pointer (&operation_uuid, g_free);
+  g_clear_pointer (&stored_digest, g_free);
   rc = fact_graph_create_reservation_read (store, opts->tenant_id,
           opts->graph_id, &reservation_found, &operation_uuid, &stored_digest);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
+  }
+  if (rc == WYRELOG_E_OK && graph_exists && !reservation_found) {
+    /* A competing graph appeared after the fast-path read.  Fail before
+     * quota admission or filesystem materialization; otherwise this request
+     * would leave a reservation behind even though the graph is already
+     * owned by another create operation. */
+    wyl_policy_store_rollback_mutation (store);
+    return WYRELOG_E_CONFLICT;
+  }
+  if (rc == WYRELOG_E_OK && graph_exists && reservation_found) {
+    gboolean compatible = FALSE;
+    rc = fact_graph_existing_resume_compatible (store, opts, storage_path,
+            storage_uri, &compatible);
+    if (rc == WYRELOG_E_OK && !compatible)
+      rc = WYRELOG_E_CONFLICT;
   }
   if (reservation_found) {
     if (g_strcmp0 (request_digest, stored_digest) != 0) {
@@ -14035,10 +14145,28 @@ policy_store_create_fact_graph_internal (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
             &graph_exists, &graph_sealed);
-  if (rc == WYRELOG_E_OK && (graph_exists || graph_sealed))
+  if (rc == WYRELOG_E_OK && (graph_sealed
+      || (graph_exists && !still_reserved)))
     rc = WYRELOG_E_CONFLICT;
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK && graph_exists && still_reserved) {
+    /* Materialization may have caused a platform resolver to register the
+     * graph row. Revalidate the complete legacy-row contract in this final
+     * transaction before consuming the reservation. */
+    gboolean compatible = FALSE;
+    rc = fact_graph_existing_resume_compatible (store, opts, storage_path,
+            storage_uri, &compatible);
+    if (rc == WYRELOG_E_OK && !compatible)
+      rc = WYRELOG_E_CONFLICT;
+  }
+  if (rc == WYRELOG_E_OK && !graph_exists)
     rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
+  if (rc == WYRELOG_E_OK && graph_exists) {
+    gboolean child_metadata_exists = FALSE;
+    rc = fact_graph_child_metadata_exists (store, opts->tenant_id,
+            opts->graph_id, &child_metadata_exists);
+    if (rc == WYRELOG_E_OK && child_metadata_exists)
+      rc = WYRELOG_E_CONFLICT;
+  }
   for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
     const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
     rc = insert_fact_graph_relation_metadata (store, opts, rel);
