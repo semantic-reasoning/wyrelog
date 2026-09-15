@@ -11533,6 +11533,36 @@ set_graph_quota_exceeded_json (SoupServerMessage *msg,
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
 }
+
+static void
+set_fact_write_rate_quota_exceeded_json (SoupServerMessage *msg,
+    const WylPolicyFactWriteRateAdmission *admission)
+{
+  if (admission == NULL || !admission->configured) {
+    set_json_error (msg, 500, "fact_quota_status_failed");
+    return;
+  }
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 429,
+      "fact_quota_exceeded") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  if (admission->retry_after_us > 0) {
+    guint64 retry_after_seconds = (admission->retry_after_us
+        + G_USEC_PER_SEC - 1) / G_USEC_PER_SEC;
+    g_autofree gchar *retry_after = g_strdup_printf ("%" G_GUINT64_FORMAT,
+            retry_after_seconds);
+    soup_message_headers_replace (soup_server_message_get_response_headers
+          (msg), "Retry-After", retry_after);
+  }
+  g_autoptr (GString) body = g_string_new (
+    "{\"error\":\"fact_quota_exceeded\","
+    "\"dimension\":\"write_rate\"}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 429, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
 #endif
 
 static void
@@ -13178,10 +13208,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylDaemonHttpContext *ctx = user_data;
   g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
+  g_auto (WylDaemonAuthContext) auth_context = { 0 };
   g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
+  if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
       "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
-      "fact_denied", "fact_auth_failed", &actor))
+      "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
+      NULL, NULL))
     return;
 
   const gchar *fail_code =
@@ -13268,6 +13300,21 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     schema_columns_clear (schema_columns, n_loaded);
     fact_rows_clear (rows, n_rows);
     set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+
+  WylPolicyFactWriteRateAdmission rate_admission = { 0 };
+  rc = wyl_policy_store_admit_fact_write_rate (write.store, auth_context.tenant,
+          &rate_admission);
+  if (rc == WYRELOG_E_POLICY || rc != WYRELOG_E_OK) {
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    if (rc == WYRELOG_E_POLICY)
+      set_fact_write_rate_quota_exceeded_json (msg, &rate_admission);
+    else
+      set_json_error (msg, 500, "fact_quota_admission_failed");
     return;
   }
 

@@ -2399,6 +2399,13 @@ typedef struct
   guint64 rate_per_second;
   guint64 burst;
 } WylPolicyFactWriteRateQuotaStatus;
+typedef struct
+{
+  gboolean configured;
+  gboolean admitted;
+  guint64 remaining_tokens;
+  guint64 retry_after_us;
+} WylPolicyFactWriteRateAdmission;
 typedef enum
 {
   WYL_POLICY_FACT_QUOTA_GRAPH_COUNT = 0,
@@ -2436,6 +2443,12 @@ wyrelog_error_t wyl_policy_store_set_fact_write_rate_quota
 wyrelog_error_t wyl_policy_store_get_fact_write_rate_quota
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyFactWriteRateQuotaStatus * out_status);
+/* Atomically refill and consume one token for an authenticated tenant. The
+ * policy-store write transaction serializes admissions across handles and
+ * processes. An absent write-rate limit is unlimited and returns admitted. */
+wyrelog_error_t wyl_policy_store_admit_fact_write_rate
+  (wyl_policy_store_t * store, const gchar * authenticated_tenant_id,
+    WylPolicyFactWriteRateAdmission * out_admission);
 /* The generic dimension API is the shared quota boundary. The graph-specific
  * functions above remain compatibility wrappers for existing callers. The
  * caller must resolve and authorize tenant_id from the authenticated server
