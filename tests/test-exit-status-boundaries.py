@@ -18,11 +18,12 @@ SITES_MANIFEST = "tests/test-exit-status-sites.json"
 SUPPORT_SOURCES = {"tests/test-exit-status-termination.c"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp"}
 EXIT_CALL = re.compile(
-    r"\b(WYL_TEST__EXIT|WYL_TEST_EXIT|ExitProcess|TerminateProcess|"
+    r"\b(WYL_TEST__EXIT|WYL_TEST_EXIT|WYL_TEST_SKIP|ExitProcess|TerminateProcess|"
     r"_Exit|_exit|quick_exit|exit)\s*\(")
 SANITIZER_BINDING = re.compile(
     r"(?m)^[ \t]*#[ \t]*(?:define|undef)[ \t]+"
-    r"(?:wyl_test_normalize_exit_status|WYL_TEST__EXIT|WYL_TEST_EXIT)\b")
+    r"(?:wyl_test_normalize_exit_status|WYL_TEST__EXIT|WYL_TEST_EXIT"
+    r"|WYL_TEST_SKIP)\b")
 INCLUDE_DIRECTIVE = re.compile(
     r"^\s*#\s*include\s*([\"<])([^\">]+)[\">]")
 CONDITIONAL_DIRECTIVE = re.compile(
@@ -199,6 +200,16 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
       r"WYL_TEST_EXIT_CAPTURE_NAME_I\s*\(line\)\s*$", scanned)
   if capture_helper_i is None or capture_helper is None:
     errors.append("header capture-name helpers do not match the validated form")
+  skip_directives = list(re.finditer(
+      r"(?m)^[ \t]*#[ \t]*(define|undef)[ \t]+WYL_TEST_SKIP\b", scanned))
+  if len(skip_directives) != 1 or skip_directives[0].group(1) != "define":
+    errors.append("header has unexpected bindings for WYL_TEST_SKIP")
+  # Nullary by contract.  An argument would make this a second way to return an
+  # arbitrary status from main, which is the rule the normalizer exists to keep.
+  if re.search(r"(?m)^#define\s+WYL_TEST_SKIP\s*\(\s*\)\s+_exit\s*\(\s*77\s*\)\s*$",
+      scanned) is None:
+    errors.append("WYL_TEST_SKIP is not the nullary 77 skip primitive")
+
   windows_else = re.search(r"(?m)^#else\s*$", scanned)
   if windows_else is None:
     errors.append("header is missing the Windows pass-through branch")
@@ -556,11 +567,12 @@ def validate_repository(root: Path) -> list[str]:
         + SITES_MANIFEST)
   if returns["source_count"] != 160 or returns["main_definitions"] != 167:
     errors.append("main census changed; review and update the inventory")
-  if (len(sites) != 70
-      or sum(site["api"] == "_exit" for site in sites) != 49
+  if (len(sites) != 74
+      or sum(site["api"] == "_exit" for site in sites) != 52
       or sum(site["api"] == "_Exit" for site in sites) != 13
       or sum(site["api"] == "ExitProcess" for site in sites) != 2
-      or sum(site["api"] == "TerminateProcess" for site in sites) != 6):
+      or sum(site["api"] == "TerminateProcess" for site in sites) != 6
+      or sum(site["api"] == "WYL_TEST_SKIP" for site in sites) != 1):
     errors.append("direct termination API census changed unexpectedly")
   errors.extend(_validate_header(root))
   return errors

@@ -52,7 +52,7 @@ main (void)
   gint rc;
 
   if (g_getenv ("WYL_TEST_LOBAC_PARTIAL_DELTA") == NULL)
-    return wyl_test_normalize_exit_status (77);
+    WYL_TEST_SKIP ();
 
   if ((rc = check_role_permission_partial_exec ()) != 0)
     return wyl_test_normalize_exit_status (rc);

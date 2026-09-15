@@ -1285,7 +1285,9 @@ fork_exec_helper (const gchar *path)
     char *const argv[] = { test_lease_self_path, (char *) LEASE_HELPER_ARG,
                            (char *) path, (char *) "--oneshot", NULL};
     execve (test_lease_self_path, argv, environ);
-    WYL_TEST_EXIT(74);
+    /* Not 74: lease_helper_main already uses 74 for a failed store open,
+     * and a failed execve must not be mistaken for one. */
+    WYL_TEST_EXIT (75);
   }
   int status = 0;
   g_assert_cmpint (waitpid (child, &status, 0), ==, child);
@@ -1394,7 +1396,7 @@ main (int argc, char **argv)
   if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
     g_error ("policy-store lease test has no executable path");
   if (argc >= 2 && g_strcmp0 (argv[1], LEASE_HELPER_ARG) == 0)
-    return wyl_test_normalize_exit_status (lease_helper_main (argc, argv));
+    WYL_TEST_EXIT (lease_helper_main (argc, argv));
 
   test_lease_self_path = g_canonicalize_filename (argv[0], NULL);
   if (test_lease_self_path == NULL || !g_path_is_absolute (test_lease_self_path)
