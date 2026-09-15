@@ -213,6 +213,14 @@ typedef enum
 
 typedef enum
 {
+  WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN,
+  WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+  WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+  WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED,
+} WylPolicyGraphMaterializationState;
+
+typedef enum
+{
   WYL_POLICY_GRAPH_ERROR_NONE,
   WYL_POLICY_GRAPH_ERROR_PATH,
   WYL_POLICY_GRAPH_ERROR_IDENTITY,
@@ -223,6 +231,11 @@ typedef enum
   WYL_POLICY_GRAPH_ERROR_RECOVERY,
   WYL_POLICY_GRAPH_ERROR_INTERNAL,
 } WylPolicyGraphErrorClass;
+
+const gchar *wyl_policy_graph_materialization_state_name
+  (WylPolicyGraphMaterializationState state);
+gboolean wyl_policy_graph_materialization_state_parse (const gchar *value,
+    WylPolicyGraphMaterializationState *out_state);
 
 typedef enum
 {
@@ -443,6 +456,7 @@ typedef struct
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
   WylPolicyGraphErrorClass last_error_class;
+  WylPolicyGraphMaterializationState materialization_state;
   gboolean has_store_identity;
   gboolean sealed_compatibility;
 } WylPolicyGraphAuthorityRecord;
@@ -459,6 +473,14 @@ wyrelog_error_t wyl_policy_store_list_tenant_authorities
 wyrelog_error_t wyl_policy_store_read_graph_authority
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, WylPolicyGraphAuthorityRecord ** out_record);
+wyrelog_error_t wyl_policy_store_read_fact_graph_materialization
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphMaterializationState *out_state);
+wyrelog_error_t wyl_policy_store_transition_fact_graph_materialization
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphMaterializationState expected_state,
+    WylPolicyGraphMaterializationState target_state,
+    WylPolicyAuthorityMutationResult *out_result);
 wyrelog_error_t wyl_policy_store_list_graph_authorities
   (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
