@@ -1328,6 +1328,11 @@ spawn_holder (const gchar *path, GDataInputStream **out_stdout)
   g_assert_nonnull (process);
   *out_stdout =
       g_data_input_stream_new (g_subprocess_get_stdout_pipe (process));
+  /* The helper writes READY through stdio, which is a text stream on Windows,
+   * so the line arrives as CRLF there.  The default newline type is LF only,
+   * which would leave the CR on the line and fail the compare below. */
+  g_data_input_stream_set_newline_type (*out_stdout,
+      G_DATA_STREAM_NEWLINE_TYPE_ANY);
   gsize len = 0;
   gchar *line = g_data_input_stream_read_line (*out_stdout, &len, NULL, &error);
   g_assert_no_error (error);
