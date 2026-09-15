@@ -262,7 +262,13 @@ def check(path: Path) -> list[str]:
                 )
             decide_start, decide_end = function_span(source, "decide_handler")
             decide_body = source[decide_start:decide_end]
-            if len(re.findall(r"\bdecide_reply_finish\s*\(", decide_body)) != 6:
+            # 15, not 6: 4f25ae2b added the admin cross-subject inspection
+            # arms and later work added more, each answering through the
+            # checked finish path.  The count is a tripwire that makes a new
+            # arm visible, not the invariant -- the invariant is the
+            # set_json_error ban below, which still holds, and which is what
+            # actually proves no arm bypasses the finalizer.
+            if len(re.findall(r"\bdecide_reply_finish\s*\(", decide_body)) != 15:
                 errors.append(
                     "every post-resolution /decide result must use decide_reply_finish"
                 )
