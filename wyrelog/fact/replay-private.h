@@ -64,6 +64,10 @@ typedef enum
    * restores from fields the seal never wrote.  Appended for the reason
    * above. */
   WYL_FACT_GRAPH_STATE_SEALED,
+  /* The graph is provisioned but has no published engine because its lazy
+   * store has not received a first append.  This is a normal lifecycle state,
+   * not a storage failure. */
+  WYL_FACT_GRAPH_STATE_EMPTY,
 } wyl_fact_graph_state_t;
 
 typedef struct

@@ -660,21 +660,26 @@ check_fact_status_codec (void)
     {"store_unavailable", WYL_CLIENT_FACT_GRAPH_STATE_STORE_UNAVAILABLE},
     {"forget_incomplete", WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE},
     {"sealed", WYL_CLIENT_FACT_GRAPH_STATE_SEALED},
+    {"empty", WYL_CLIENT_FACT_GRAPH_STATE_EMPTY},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (current_states); i++) {
     gboolean ready = current_states[i].state ==
         WYL_CLIENT_FACT_GRAPH_STATE_READY;
     gboolean sealed = current_states[i].state ==
         WYL_CLIENT_FACT_GRAPH_STATE_SEALED;
+    gboolean empty = current_states[i].state ==
+        WYL_CLIENT_FACT_GRAPH_STATE_EMPTY;
     g_autofree gchar *document = g_strdup_printf
           ("{\"status\":\"%s\",\"graphs_total\":1,"
             "\"graphs_ready\":%u,\"graphs_degraded\":%u,"
-            "\"graphs_sealed\":%u,\"graphs\":[{"
+            "\"graphs_provisioned\":%u,\"graphs_sealed\":%u,"
+            "\"graphs\":[{"
             "\"tenant_id\":\"tenant-a\",\"graph_id\":\"g\","
             "\"state\":\"%s\",\"queryable\":false,"
             "\"last_error_class\":null}]}",
-            ready || sealed ? "ready" : "degraded", ready ? 1u : 0u,
-            !ready && !sealed ? 1u : 0u, sealed ? 1u : 0u,
+            ready || sealed || empty ? "ready" : "degraded",
+            ready ? 1u : 0u, !ready && !sealed && !empty ? 1u : 0u,
+            empty ? 1u : 0u, sealed ? 1u : 0u,
             current_states[i].name);
     if (wyl_client_fact_status_decode (document, strlen (document), &status)
         != WYRELOG_E_OK

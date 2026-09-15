@@ -467,6 +467,7 @@ typedef struct
   guint total;
   guint ready;
   guint unavailable;
+  guint empty;
   wyl_fact_graph_state_t last_state;
   gboolean saw_tenant_a_ready;
   gboolean saw_tenant_a_stale;
@@ -483,6 +484,8 @@ fact_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
     probe->ready++;
   if (status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE)
     probe->unavailable++;
+  if (status->state == WYL_FACT_GRAPH_STATE_EMPTY)
+    probe->empty++;
   if (g_strcmp0 (status->tenant_id, "tenant-a") == 0
       && g_strcmp0 (status->graph_id, "orders") == 0
       && status->state == WYL_FACT_GRAPH_STATE_READY
@@ -3493,6 +3496,84 @@ sealed_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
 }
 
 static void
+test_provisioned_graph_reports_empty_not_degraded (void)
+{
+  TEST ("a provisioned graph with no facts reports empty, not degraded");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-empty-status-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
+        WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    create_graph_with_schema (policy, root, "tenant-a", "broken");
+    g_autofree gchar *broken_dir = lookup_graph_storage_path (policy,
+            "tenant-a", "broken");
+    /* A graph directory that disappears is an actual unavailable-store
+     * condition, unlike the intentionally present empty directory above. */
+    g_assert_cmpint (g_rmdir (broken_dir), ==, 0);
+  }
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 2);
+  g_assert_cmpuint (probe.ready, ==, 0);
+  g_assert_cmpuint (probe.unavailable, ==, 1);
+  g_assert_cmpuint (probe.empty, ==, 1);
+
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE, NULL);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
+  g_assert_nonnull (strstr (json,
+      "\"state\":\"empty\",\"queryable\":false,"
+      "\"last_error_class\":null"));
+  g_assert_nonnull (strstr (json, "\"graphs_total\":2"));
+  g_assert_nonnull (strstr (json, "\"graphs_ready\":0"));
+  g_assert_nonnull (strstr (json, "\"graphs_degraded\":1"));
+  g_assert_nonnull (strstr (json, "\"graphs_provisioned\":1"));
+
+  /* The first append materializes the store and follows the existing ready
+   * path; the unavailable sibling remains degraded. */
+  g_clear_object (&handle);
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  FactStatusProbe after_append = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &after_append), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after_append.ready, ==, 1);
+  g_assert_cmpuint (after_append.empty, ==, 0);
+  g_assert_cmpuint (after_append.unavailable, ==, 1);
+  g_autofree gchar *ready_json = wyl_daemon_fact_status_json (handle, TRUE,
+          NULL);
+  g_assert_nonnull (strstr (ready_json, "\"graphs_ready\":1"));
+  g_assert_nonnull (strstr (ready_json, "\"graphs_provisioned\":0"));
+
+  remove_tree (root);
+}
+
+static void
 test_closed_graph_reports_sealed_not_ready (void)
 {
   g_autoptr (GError) error = NULL;
@@ -4593,6 +4674,8 @@ main (int argc, char **argv)
       test_forget_state_survives_retire_and_recreate);
   g_test_add_func ("/fact-replay/status-not-ready-while-erasure-outstanding",
       test_status_is_not_ready_while_an_erasure_is_outstanding);
+  g_test_add_func ("/fact-replay/provisioned-graph-reports-empty",
+      test_provisioned_graph_reports_empty_not_degraded);
   g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
       test_boot_converges_forget_on_sealed_graph);
   g_test_add_func

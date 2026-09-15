@@ -1202,6 +1202,8 @@ fact_graph_state_from_name (const gchar *name)
     return WYL_CLIENT_FACT_GRAPH_STATE_FORGET_INCOMPLETE;
   if (g_strcmp0 (name, "sealed") == 0)
     return WYL_CLIENT_FACT_GRAPH_STATE_SEALED;
+  if (g_strcmp0 (name, "empty") == 0)
+    return WYL_CLIENT_FACT_GRAPH_STATE_EMPTY;
   return WYL_CLIENT_FACT_GRAPH_STATE_UNKNOWN;
 }
 
@@ -1306,7 +1308,8 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
   JsonCursor cursor = { document, document_len, 0 };
   WylClientFactStatus parsed = { 0 };
   gboolean seen_status = FALSE, seen_total = FALSE, seen_ready = FALSE;
-  gboolean seen_degraded = FALSE, seen_sealed = FALSE, seen_graphs = FALSE;
+  gboolean seen_degraded = FALSE, seen_provisioned = FALSE;
+  gboolean seen_sealed = FALSE, seen_graphs = FALSE;
   GArray *graphs = g_array_new (FALSE, TRUE,
           sizeof (WylClientFactGraphStatus));
   g_array_set_clear_func (graphs,
@@ -1342,6 +1345,11 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
       if (seen_sealed || !parse_uint64 (&cursor, &parsed.graphs_sealed))
         goto invalid;
       seen_sealed = TRUE;
+    } else if (g_strcmp0 (key, "graphs_provisioned") == 0) {
+      if (seen_provisioned
+          || !parse_uint64 (&cursor, &parsed.graphs_provisioned))
+        goto invalid;
+      seen_provisioned = TRUE;
     } else if (g_strcmp0 (key, "graphs") == 0) {
       if (seen_graphs || !take (&cursor, '['))
         goto invalid;
@@ -1384,8 +1392,13 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
       || parsed.graphs_ready > G_MAXUINT64 - parsed.graphs_degraded
       || parsed.graphs_ready + parsed.graphs_degraded
       > G_MAXUINT64 - parsed.graphs_sealed
-      || parsed.graphs_total != parsed.graphs_ready + parsed.graphs_degraded
+      || parsed.graphs_total < parsed.graphs_ready + parsed.graphs_degraded
       + parsed.graphs_sealed
+      || (seen_provisioned
+      && (parsed.graphs_total < parsed.graphs_ready + parsed.graphs_degraded
+      + parsed.graphs_sealed
+      || parsed.graphs_total - parsed.graphs_ready - parsed.graphs_degraded
+      - parsed.graphs_sealed != parsed.graphs_provisioned))
       || (seen_graphs && graphs->len != parsed.graphs_total)
       || (parsed.status == WYL_CLIENT_FACT_STATUS_READY
       && parsed.graphs_degraded != 0)
@@ -1396,7 +1409,7 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
     goto invalid;
 
   if (seen_graphs) {
-    guint64 ready = 0, degraded = 0, sealed = 0;
+    guint64 ready = 0, degraded = 0, sealed = 0, empty = 0;
     for (gsize i = 0; i < graphs->len; i++) {
       WylClientFactGraphStatus *graph = &g_array_index (graphs,
               WylClientFactGraphStatus, i);
@@ -1404,11 +1417,15 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
         ready++;
       else if (graph->state == WYL_CLIENT_FACT_GRAPH_STATE_SEALED)
         sealed++;
+      else if (graph->state == WYL_CLIENT_FACT_GRAPH_STATE_EMPTY)
+        empty++;
       else
         degraded++;
     }
     if (ready != parsed.graphs_ready || sealed != parsed.graphs_sealed
-        || degraded != parsed.graphs_degraded)
+        || degraded != parsed.graphs_degraded
+        || (seen_provisioned && parsed.graphs_provisioned != empty)
+        || parsed.graphs_total != ready + degraded + sealed + empty)
       goto invalid;
   }
 
