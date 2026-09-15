@@ -1088,6 +1088,18 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (admin_token == NULL || deny_token == NULL)
     return 13;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean tenant_b_created = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-b", &tenant_b_created)
+      != WYRELOG_E_OK)
+    return 131;
+  WylPolicyFactQuotaConfig tenant_b_quota = {
+    .has_limit = TRUE,
+    .rate_per_second = 3,
+    .burst = 4,
+  };
+  if (wyl_policy_store_set_fact_quota_config (store, "tenant-b",
+      WYL_POLICY_FACT_QUOTA_WRITE_RATE, &tenant_b_quota) != WYRELOG_E_OK)
+    return 132;
 
   /* Graph-management capability alone must not expose quota controls. */
   guint quota_status = 0;
@@ -1141,6 +1153,15 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         quota_status, quota_body != NULL ? quota_body : "(null)");
     return 18;
   }
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *graph_get_legacy_limit_query = g_strdup_printf (
+    "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          graph_get_legacy_limit_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"graph_count\"") == NULL)
+    return 181;
   WylClientFactQuotaStatus quota_client_status = { 0 };
   if (wyl_client_fact_quota_status (admin_client, WYL_TENANT_DEFAULT,
       0, "trusted", 0, &quota_client_status) != WYRELOG_E_OK ||
@@ -1150,6 +1171,209 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 19;
   }
   wyl_client_fact_quota_status_clear (&quota_client_status);
+
+  /* Write-rate configuration uses the same guarded endpoint but a distinct
+   * typed response and storage dimension. */
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_configure_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_configure_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"write_rate\"") == NULL
+      || strstr (quota_body, "\"rate_per_second\":7") == NULL
+      || strstr (quota_body, "\"burst\":11") == NULL)
+    return 191;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_status_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          rate_status_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"rate_per_second\":7") == NULL
+      || strstr (quota_body, "\"burst\":11") == NULL)
+    return 192;
+  g_clear_pointer (&quota_body, g_free);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+      "DROP TABLE fact_tenant_quota_limits;", NULL, NULL, NULL) != SQLITE_OK)
+    return 1920;
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          quota_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 500
+      || strstr (quota_body, "\"fact_quota_status_failed\"") == NULL)
+    return 19201;
+  g_clear_pointer (&quota_body, g_free);
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 19202;
+  WylPolicyFactQuotaConfig restore_graph_quota = {
+    .has_limit = TRUE,
+    .hard_limit = 1000,
+  };
+  WylPolicyFactQuotaConfig restore_rate_quota = {
+    .has_limit = TRUE,
+    .rate_per_second = 7,
+    .burst = 11,
+  };
+  if (wyl_policy_store_set_fact_quota_config (store, WYL_TENANT_DEFAULT,
+      WYL_POLICY_FACT_QUOTA_GRAPH_COUNT, &restore_graph_quota) != WYRELOG_E_OK
+      || wyl_policy_store_set_fact_quota_config (store, WYL_TENANT_DEFAULT,
+      WYL_POLICY_FACT_QUOTA_WRITE_RATE, &restore_rate_quota) != WYRELOG_E_OK)
+    return 19203;
+  if (wyl_policy_store_set_fact_quota_config (store, "tenant-b",
+      WYL_POLICY_FACT_QUOTA_WRITE_RATE, &tenant_b_quota) != WYRELOG_E_OK)
+    return 19204;
+  g_autofree gchar *rate_max_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=%" G_GUINT64_FORMAT
+    "&burst=%" G_GUINT64_FORMAT "&%s", WYL_TENANT_DEFAULT,
+    (guint64) G_MAXINT64, (guint64) G_MAXINT64, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_max_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 1921;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_overflow_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=9223372036854775808"
+    "&burst=11&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_overflow_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 1922;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *burst_overflow_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&"
+    "burst=9223372036854775808&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          burst_overflow_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 1924;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_restore_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_restore_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 1923;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_invalid_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=0&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_invalid_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400
+      || strstr (quota_body, "\"invalid_fact_quota_request\"") == NULL)
+    return 193;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_mixed_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=11&limit=9&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_mixed_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400
+      || strstr (quota_body, "\"invalid_fact_quota_request\"") == NULL)
+    return 194;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *unknown_dimension_query = g_strdup_printf (
+    "tenant=%s&dimension=unknown&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          unknown_dimension_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400
+      || strstr (quota_body, "\"invalid_fact_quota_request\"") == NULL)
+    return 195;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_negative_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=-1&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_negative_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 196;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_non_numeric_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=NaN&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_non_numeric_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 197;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_get_mixed_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=11&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          rate_get_mixed_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 198;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_burst_zero_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=0&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_burst_zero_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 199;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_burst_negative_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=-1&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_burst_negative_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 200;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_burst_non_numeric_query = g_strdup_printf (
+    "tenant=%s&dimension=write_rate&rate_per_second=7&burst=NaN&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_burst_non_numeric_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 400)
+    return 201;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_cross_tenant_query = g_strdup_printf (
+    "tenant=tenant-b&dimension=write_rate&%s", FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          rate_cross_tenant_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 403
+      || strstr (quota_body, "\"tenant_denied\"") == NULL) {
+    g_printerr ("write-rate cross-tenant mismatch rc=%d status=%u body=%s\n",
+        quota_rc, quota_status, quota_body != NULL ? quota_body : "(null)");
+    return 202;
+  }
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *rate_cross_tenant_post_query = g_strdup_printf (
+    "tenant=tenant-b&dimension=write_rate&rate_per_second=99&burst=99&%s",
+    FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_cross_tenant_post_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 403
+      || strstr (quota_body, "\"tenant_denied\"") == NULL)
+    return 203;
+  WylPolicyFactQuotaConfig cross_status = { 0 };
+  wyrelog_error_t cross_status_rc = wyl_policy_store_get_fact_quota_config
+        (store, "tenant-b", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &cross_status);
+  if (cross_status_rc != WYRELOG_E_OK || !cross_status.has_limit
+      || cross_status.rate_per_second != 3 || cross_status.burst != 4) {
+    g_printerr ("cross quota state rc=%d has=%d rate=%" G_GUINT64_FORMAT
+        " burst=%" G_GUINT64_FORMAT "\n", cross_status_rc,
+        cross_status.has_limit, cross_status.rate_per_second,
+        cross_status.burst);
+    return 2031;
+  }
+  g_clear_pointer (&quota_body, g_free);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          rate_status_query, NULL, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 401
+      || strstr (quota_body, "\"fact_quota_auth_required\"") == NULL)
+    return 204;
+  g_clear_pointer (&quota_body, g_free);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          rate_restore_query, NULL, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 401
+      || strstr (quota_body, "\"fact_quota_auth_required\"") == NULL)
+    return 205;
 
   check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
 
