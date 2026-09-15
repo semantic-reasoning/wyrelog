@@ -887,14 +887,11 @@ test_boot_reestablishes_admission_from_the_durable_seal (void)
   (void) wyl_fact_replay_policy_graphs (policy, root, manager, &summary);
 
   /* Sealing is a decision, not a fault.  Before this the sealed graph landed
-   * in graphs_degraded and reported schema_mismatch to an operator.
-   *
-   * degraded is 1, and it is the OTHER graph: this fixture writes no fact
-   * store to disk, so an unsealed graph's engine build legitimately fails.
-   * That is what makes the pair discriminating -- without the hook both
-   * graphs land in degraded and graphs_sealed stays zero. */
+   * in graphs_degraded and reported schema_mismatch to an operator.  The
+   * unsealed graph has NEVER materialized a store, so its missing store is
+   * the expected lazy-startup EMPTY result rather than a degradation. */
   g_assert_cmpuint (summary.graphs_sealed, ==, 1);
-  g_assert_cmpuint (summary.graphs_degraded, ==, 1);
+  g_assert_cmpuint (summary.graphs_degraded, ==, 0);
 
   WylFactGraphRuntimeStatus sealed = status_of (manager, "tenant-a",
           "sealed-graph");

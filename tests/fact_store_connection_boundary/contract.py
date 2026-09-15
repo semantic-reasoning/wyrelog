@@ -15,7 +15,7 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (45, 365, 4, 3),
+    "wyrelog/fact/store.c": (47, 370, 4, 3),
     "wyrelog/fact/compound.c": (0, 123, 14, 0),
     "wyrelog/fact/replay.c": (0, 32, 2, 0),
 }
@@ -48,6 +48,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "wyl_fact_store_connection_session_get": 1,
         "wyl_fact_store_create_schema": 2,
         "wyl_fact_store_ensure_projection": 1,
+        "wyl_fact_store_has_durable_batches": 2,
         "wyl_fact_store_open": 4,
         "wyl_fact_store_open_identified": 4,
         "wyl_fact_store_retract_by_batch_id": 1,
@@ -104,6 +105,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "wyl_fact_store_append_batch_delta": 10,
         "wyl_fact_store_close": 2,
         "wyl_fact_store_ensure_projection": 1,
+        "wyl_fact_store_has_durable_batches": 5,
         "wyl_fact_store_open": 2,
         "wyl_fact_store_open_identified": 2,
         "wyl_fact_store_retract_by_batch_id": 11,
@@ -595,7 +597,7 @@ def validate(files: dict[str, str]) -> None:
                         f"connection session pointer forwarded to helper: {path}: {name}"
                     )
     expected_calls = {
-        "wyrelog/fact/store.c": (14, 4, 16),
+        "wyrelog/fact/store.c": (15, 4, 18),
         "wyrelog/fact/compound.c": (5, 5, 7),
         "wyrelog/fact/replay.c": (3, 2, 3),
     }
