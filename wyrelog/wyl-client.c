@@ -1848,6 +1848,139 @@ wyl_client_fact_quota_configure (WylClient *client, const gchar *tenant,
              guard_timestamp, guard_loc_class, guard_risk, out_status);
 }
 
+void
+wyl_client_fact_write_rate_quota_status_clear
+  (WylClientFactWriteRateQuotaStatus *status)
+{
+  if (status == NULL)
+    return;
+  g_clear_pointer (&status->tenant_id, g_free);
+  *status = (WylClientFactWriteRateQuotaStatus) { 0 };
+}
+
+static gboolean
+client_fact_write_rate_nullable_uint64 (const gchar *data, gsize size,
+    const gchar *member, gboolean *out_is_null, guint64 *out_value)
+{
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\":", member);
+  const gchar *start = g_strstr_len (data, (gssize) size, needle);
+  if (start == NULL)
+    return FALSE;
+  start += strlen (needle);
+  const gchar *limit = data + size;
+  while (start < limit && g_ascii_isspace (*start))
+    start++;
+  if ((gsize) (limit - start) >= 4 && strncmp (start, "null", 4) == 0) {
+    if (start + 4 < limit && start[4] != ',' && start[4] != '}'
+        && !g_ascii_isspace (start[4]))
+      return FALSE;
+    if (out_is_null != NULL)
+      *out_is_null = TRUE;
+    return TRUE;
+  }
+  guint64 value = 0;
+  if (!parse_simple_json_uint64_member (data, size, member, &value)
+      || value > G_MAXINT64)
+    return FALSE;
+  if (out_is_null != NULL)
+    *out_is_null = FALSE;
+  if (out_value != NULL)
+    *out_value = value;
+  return TRUE;
+}
+
+static wyrelog_error_t
+client_fact_write_rate_quota_decode (const gchar *data, gsize size,
+    const gchar *expected_tenant,
+    WylClientFactWriteRateQuotaStatus *out_status)
+{
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size,
+          "tenant_id");
+  g_autofree gchar *dimension = parse_simple_json_string_member (data, size,
+          "dimension");
+  gboolean rate_null = FALSE;
+  gboolean burst_null = FALSE;
+  guint64 rate = 0;
+  guint64 burst = 0;
+  if (g_strcmp0 (tenant, expected_tenant) != 0
+      || g_strcmp0 (dimension, "write_rate") != 0
+      || !client_fact_write_rate_nullable_uint64 (data, size,
+      "rate_per_second", &rate_null, &rate)
+      || !client_fact_write_rate_nullable_uint64 (data, size, "burst",
+      &burst_null, &burst)
+      || rate_null != burst_null)
+    return WYRELOG_E_IO;
+  if (!rate_null && (rate == 0 || burst == 0))
+    return WYRELOG_E_IO;
+  out_status->has_limit = !rate_null;
+  out_status->rate_per_second = rate;
+  out_status->burst = burst;
+  out_status->tenant_id = g_steal_pointer (&tenant);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+client_fact_write_rate_quota_request (WylClient *client,
+    const gchar *tenant, gboolean configure, guint64 rate_per_second,
+    guint64 burst, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactWriteRateQuotaStatus *out_status)
+{
+  if (out_status == NULL || (configure && (rate_per_second == 0 || burst == 0
+      || rate_per_second > G_MAXINT64 || burst > G_MAXINT64)))
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_write_rate_quota_status_clear (out_status);
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *uri = configure
+      ? g_strdup_printf ("%s/facts/quota?%s&dimension=write_rate&"
+          "rate_per_second=%" G_GUINT64_FORMAT "&burst=%" G_GUINT64_FORMAT,
+          base_url, guard_query, rate_per_second, burst)
+      : g_strdup_printf ("%s/facts/quota?%s&dimension=write_rate", base_url,
+          guard_query);
+  g_autoptr (SoupMessage) message = soup_message_new (configure ? "POST" : "GET",
+          uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_POLICY && client->last_http_status == 409
+        ? WYRELOG_E_CONFLICT : rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  return client_fact_write_rate_quota_decode (data, size, tenant, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_write_rate_quota_status (WylClient *client, const gchar *tenant,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactWriteRateQuotaStatus *out_status)
+{
+  return client_fact_write_rate_quota_request (client, tenant, FALSE, 0, 0,
+             guard_timestamp, guard_loc_class, guard_risk, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_write_rate_quota_configure (WylClient *client,
+    const gchar *tenant, guint64 rate_per_second, guint64 burst,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactWriteRateQuotaStatus *out_status)
+{
+  return client_fact_write_rate_quota_request (client, tenant, TRUE,
+             rate_per_second, burst, guard_timestamp, guard_loc_class, guard_risk,
+             out_status);
+}
+
 static gboolean
 client_guard_args_are_valid (gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk)

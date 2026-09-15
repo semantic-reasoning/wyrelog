@@ -1194,6 +1194,26 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || strstr (quota_body, "\"rate_per_second\":7") == NULL
       || strstr (quota_body, "\"burst\":11") == NULL)
     return 192;
+  WylClientFactWriteRateQuotaStatus write_rate_client_status = { 0 };
+  if (wyl_client_fact_write_rate_quota_status (admin_client,
+      WYL_TENANT_DEFAULT, 123, "trusted", 0, &write_rate_client_status)
+      != WYRELOG_E_OK || !write_rate_client_status.has_limit
+      || write_rate_client_status.rate_per_second != 7
+      || write_rate_client_status.burst != 11) {
+    wyl_client_fact_write_rate_quota_status_clear (&write_rate_client_status);
+    return 1921;
+  }
+  wyl_client_fact_write_rate_quota_status_clear (&write_rate_client_status);
+  if (wyl_client_fact_write_rate_quota_configure (admin_client,
+      WYL_TENANT_DEFAULT, 8, 12, 123, "trusted", 0,
+      &write_rate_client_status) != WYRELOG_E_OK
+      || !write_rate_client_status.has_limit
+      || write_rate_client_status.rate_per_second != 8
+      || write_rate_client_status.burst != 12) {
+    wyl_client_fact_write_rate_quota_status_clear (&write_rate_client_status);
+    return 1922;
+  }
+  wyl_client_fact_write_rate_quota_status_clear (&write_rate_client_status);
   g_clear_pointer (&quota_body, g_free);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
       "DROP TABLE fact_tenant_quota_limits;", NULL, NULL, NULL) != SQLITE_OK)

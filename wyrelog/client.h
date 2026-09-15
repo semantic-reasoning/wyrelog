@@ -105,6 +105,14 @@ typedef struct
 
 typedef struct
 {
+  gchar *tenant_id;
+  gboolean has_limit;
+  guint64 rate_per_second;
+  guint64 burst;
+} WylClientFactWriteRateQuotaStatus;
+
+typedef struct
+{
   gchar *subject_id;
   gchar *display_name;
   gchar *state;
@@ -485,6 +493,16 @@ wyrelog_error_t wyl_client_fact_quota_configure (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactQuotaStatus * out_status);
 void wyl_client_fact_quota_status_clear (WylClientFactQuotaStatus * status);
+wyrelog_error_t wyl_client_fact_write_rate_quota_status (WylClient * client,
+    const gchar * tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactWriteRateQuotaStatus * out_status);
+wyrelog_error_t wyl_client_fact_write_rate_quota_configure (WylClient * client,
+    const gchar * tenant, guint64 rate_per_second, guint64 burst,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactWriteRateQuotaStatus * out_status);
+void wyl_client_fact_write_rate_quota_status_clear
+  (WylClientFactWriteRateQuotaStatus * status);
 wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
