@@ -2393,6 +2393,24 @@ typedef struct
   guint64 committed;
   guint64 pending;
 } WylPolicyGraphQuotaStatus;
+typedef struct
+{
+  gboolean has_limit;
+  guint64 rate_per_second;
+  guint64 burst;
+} WylPolicyFactWriteRateQuotaStatus;
+typedef enum
+{
+  WYL_POLICY_FACT_QUOTA_GRAPH_COUNT = 0,
+  WYL_POLICY_FACT_QUOTA_WRITE_RATE,
+} WylPolicyFactQuotaDimension;
+typedef struct
+{
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 rate_per_second;
+  guint64 burst;
+} WylPolicyFactQuotaConfig;
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);
@@ -2412,6 +2430,25 @@ wyrelog_error_t wyl_policy_store_set_graph_quota_limit
 wyrelog_error_t wyl_policy_store_get_graph_quota_status
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyGraphQuotaStatus * out_status);
+wyrelog_error_t wyl_policy_store_set_fact_write_rate_quota
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    guint64 rate_per_second, guint64 burst);
+wyrelog_error_t wyl_policy_store_get_fact_write_rate_quota
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyFactWriteRateQuotaStatus * out_status);
+/* The generic dimension API is the shared quota boundary. The graph-specific
+ * functions above remain compatibility wrappers for existing callers. The
+ * caller must resolve and authorize tenant_id from the authenticated server
+ * context before invoking these private APIs; tenant_id is never an
+ * authorization mechanism by itself. */
+wyrelog_error_t wyl_policy_store_set_fact_quota_config
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyFactQuotaDimension dimension,
+    const WylPolicyFactQuotaConfig * config);
+wyrelog_error_t wyl_policy_store_get_fact_quota_config
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyFactQuotaDimension dimension,
+    WylPolicyFactQuotaConfig * out_config);
 /* Create a graph as a crash-safe provisioning operation: inserts the metadata
  * and reserves the graph authority (moving it to provisioning) in one atomic
  * mutation, then returns the reservation's operation UUID so the caller can

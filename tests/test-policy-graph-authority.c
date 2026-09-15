@@ -5114,6 +5114,97 @@ test_relation_activation_typed_api (void)
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND);
 }
 
+static void
+test_fact_write_rate_quota_persists (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = {.path = store_path};
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-persist",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  /* Replace the typed table with the predecessor shape before reopening.
+   * This exercises the actual schema upgrade and preserves a legacy graph
+   * limit while adding the write-rate columns. */
+  exec_ok (wyl_policy_store_get_db (store),
+      "DROP TABLE fact_tenant_quota_limits;"
+      "CREATE TABLE fact_tenant_quota_limits ("
+      "tenant_id TEXT NOT NULL, dimension TEXT NOT NULL CHECK "
+      "(dimension='graph_count'), hard_limit INTEGER NOT NULL CHECK "
+      "(typeof(hard_limit)='integer' AND hard_limit >= 0), "
+      "updated_at INTEGER NOT NULL, PRIMARY KEY(tenant_id,dimension), "
+      "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id));"
+      "INSERT INTO fact_tenant_quota_limits "
+      "VALUES ('rate-persist','graph_count',19,unixepoch());");
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  exec_rejected (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_tenant_quota_limits "
+      "(tenant_id,dimension,rate_per_second,burst,updated_at) "
+      "VALUES ('rate-persist','write_rate',0,1,unixepoch());");
+  WylPolicyFactQuotaConfig config = {
+    .has_limit = TRUE,
+    .rate_per_second = 7,
+    .burst = 11,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  WylPolicyFactQuotaConfig status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &status), ==,
+      WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.rate_per_second, ==, 7);
+  g_assert_cmpuint (status.burst, ==, 11);
+  WylPolicyGraphQuotaStatus graph_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_graph_quota_status (store,
+      "rate-persist", &graph_status), ==, WYRELOG_E_OK);
+  g_assert_true (graph_status.has_limit);
+  g_assert_cmpuint (graph_status.hard_limit, ==, 19);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  status = (WylPolicyFactQuotaConfig) { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &status), ==,
+      WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.rate_per_second, ==, 7);
+  g_assert_cmpuint (status.burst, ==, 11);
+  config.rate_per_second = 0;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_INVALID);
+  config.rate_per_second = 7;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "missing-rate-tenant", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_NOT_FOUND);
+  config.rate_per_second = G_MAXINT64;
+  config.burst = G_MAXINT64;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_OK);
+  config.rate_per_second = G_MAXINT64 + (guint64) 1;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_INVALID);
+  config.rate_per_second = G_MAXINT64;
+  config.burst = G_MAXINT64 + (guint64) 1;
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      "rate-persist", WYL_POLICY_FACT_QUOTA_WRITE_RATE, &config), ==,
+      WYRELOG_E_INVALID);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -5195,6 +5286,8 @@ main (int argc, char **argv)
       test_tenant_state_constraints);
   g_test_add_func ("/policy/graph-authority/graph-quota-store-api",
       test_graph_quota_store_api);
+  g_test_add_func ("/policy/graph-authority/fact-write-rate-quota-persists",
+      test_fact_write_rate_quota_persists);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);
