@@ -1336,7 +1336,7 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
   if (rc == WYRELOG_E_OK) {
     WylFactStoreTransaction migration = { 0 };
     rc = wyl_fact_store_transaction_begin (&session,
-            WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION, &migration);
+            WYL_FACT_STORE_TRANSACTION_SCHEMA_MIGRATION, &migration);
     if (rc == WYRELOG_E_OK)
       rc = exec_sql (store->conn,
               "ALTER TABLE fact_forget_audit ADD COLUMN IF NOT EXISTS "

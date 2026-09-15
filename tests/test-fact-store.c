@@ -2334,7 +2334,7 @@ forget_attribution_migration_fault (WylFactStoreTransactionTestKind kind,
     WylFactStoreTransactionTestPhase phase, gpointer user_data)
 {
   guint *failures = user_data;
-  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION
+  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_SCHEMA_MIGRATION
       && phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT) {
     (*failures)++;
     return WYRELOG_E_IO;

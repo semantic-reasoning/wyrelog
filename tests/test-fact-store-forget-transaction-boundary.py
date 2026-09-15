@@ -447,6 +447,7 @@ def validate(files: dict[str, str]) -> None:
         "WylFactStoreTransactionTestPhase",
         "WylFactStoreTransactionTestHook",
         "wyl_fact_store_test_set_transaction_hook",
+        "WYL_FACT_STORE_TRANSACTION_TEST_SCHEMA_MIGRATION",
         "WYL_FACT_STORE_TRANSACTION_TEST_FORGET_STATE_MIGRATION",
     ):
         if token not in generic_seam:
