@@ -17340,6 +17340,59 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
 
+  /* Seed a credential in the administrator's authenticated tenant so the
+   * cross-subject probe exercises tenant ownership, not just principal
+   * existence. */
+  wyl_service_credential_issue_result_t decide_probe_issued = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:tenant-a:worker",
+      WYL_TENANT_DEFAULT, "human-principal-admin",
+      "00000000000000000000000000000000", CONTRACT_FUTURE_EXPIRES_AT_US,
+      &decide_probe_issued) != WYRELOG_E_OK) {
+    wyl_service_credential_issue_result_clear (&decide_probe_issued);
+    rc = 2181;
+    goto cleanup;
+  }
+  wyl_service_credential_issue_result_clear (&decide_probe_issued);
+
+  /* A human administrator may inspect an existing service subject through
+   * /decide.  The target decision itself is deliberately denied here; the
+   * 200 response proves that caller authority is checked independently of the
+   * target subject and that the target is not treated as a bearer. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+      "svc:tenant-a:worker", "wr.service_principal.manage", session_token,
+      NULL, access_token, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"decision\":0") == NULL) {
+    rc = 2180;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+      "svc:tenant-a:missing", "wr.service_principal.manage", session_token,
+      NULL, access_token, &status, &body) != 0
+      || status != 403 || strstr (body, "\"decide_denied\"") == NULL) {
+    rc = 2182;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+      "svc:bad/subject", "wr.service_principal.manage", session_token,
+      NULL, access_token, &status, &body) != 0
+      || status != 400 || strstr (body, "\"invalid_decide_request\"") == NULL) {
+    rc = 2183;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_decide_bearer (session, "POST", base_url,
+      "svc:tenant-a:worker", "wr.service_principal.manage", session_token,
+      "tenant=tenant-a", access_token, &status, &body) != 0
+      || status != 403 || strstr (body, "tenant_denied") == NULL) {
+    rc = 2184;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_bearer (session, "GET", base_url,
       "/service-principals", query, access_token, NULL, &status,

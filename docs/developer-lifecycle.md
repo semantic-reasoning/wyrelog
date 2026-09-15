@@ -339,6 +339,14 @@ held, so retaining for them would turn every service-bearer management request
 into `WYRELOG_E_BUSY`. Human decisions keep using the public `wyl_decide()`
 path.
 
+`POST /decide` permits a human bearer holding
+`wr.service_principal.manage` to inspect a same-tenant `svc:` subject. A service
+bearer remains self-subject only, and human subjects remain self-subject only.
+The caller's management permission is checked before the target decision, so a
+failed check does not reveal the target's policy result. The legacy
+`session_token` query parameter contains the policy scope, such as the
+credential tenant, rather than the bearer token.
+
 `tools/check-daemon-bearer-resolver-structure.py` pins both halves: the retain
 mode at each of the six call sites, and the shape of the retained lease itself
 -- `service_lease` is assigned in exactly one place, its address reaches

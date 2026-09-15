@@ -861,11 +861,16 @@ is no alternate service-only resolver.
 
 Authorization is evaluated live at `/decide`, so a zero-role token is provably
 inert until a role is granted, and revoking that role makes the same token inert
-again immediately.
+again immediately. A human administrator holding
+`wr.service_principal.manage` may also inspect a same-tenant `svc:` subject;
+service bearers remain self-subject only, and other cross-subject requests are
+denied. The legacy `session_token` query parameter carries the policy scope (the
+tenant), not the bearer token.
 
 ```
-# Fresh service token, no role yet: DENY.
-POST /decide  { subject: svc:svc-app, action: wr.stream.read, tenant: tenant-a }
+# Fresh service token, no role yet: DENY. An admin can inspect this subject too.
+POST /decide?user=svc:svc-app&perm=wr.stream.read&tenant=tenant-a&session_token=tenant-a
+  Authorization: Bearer <service-or-authorized-admin-token>
   -> decision=0 (deny)
 
 # A human admin grants a workload-safe, tenant-scoped role.
@@ -874,7 +879,8 @@ POST /policy/roles/grant  { subject: svc:svc-app, role: <workload-safe role>,
                                                  guard context)
 
 # Same unexpired token, re-evaluated: ALLOW.
-POST /decide  { subject: svc:svc-app, action: wr.stream.read, tenant: tenant-a }
+POST /decide?user=svc:svc-app&perm=wr.stream.read&tenant=tenant-a&session_token=tenant-a
+  Authorization: Bearer <service-or-authorized-admin-token>
   -> decision=1 (allow)
 
 # The human revokes the grant.
@@ -883,7 +889,9 @@ POST /policy/roles/revoke  { subject: svc:svc-app, role: <workload-safe role>,
                                                  guard context)
 
 # Same token again: DENY. No token reissue, no cache flush.
-POST /decide  ...  -> decision=0 (deny)
+POST /decide?user=svc:svc-app&perm=wr.stream.read&tenant=tenant-a&session_token=tenant-a
+  Authorization: Bearer <service-or-authorized-admin-token>
+  -> decision=0 (deny)
 ```
 
 The grant/revoke flips the result of the *same* unexpired token because `/decide`
