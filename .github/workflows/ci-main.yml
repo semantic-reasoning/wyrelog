@@ -8,9 +8,14 @@ on:
 permissions:
   contents: read
 
+# This workflow only ever runs on refs/heads/main, so there is no stale head to
+# supersede: cancelling means the merged commit is never verified.  A full run
+# takes 34-110 minutes against a merge cadence of 5-13, so cancellation was the
+# steady state -- 18 of 30 runs -- and it also relabelled observed job failures
+# under a run conclusion of "cancelled".  Let runs queue instead.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
