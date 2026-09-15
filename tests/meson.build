@@ -1871,11 +1871,11 @@ if get_option('enable_fact_store').allowed()
   )
 
   # Serialized on Windows for the reason given above the fact-store
-  # aggregate.  Running parallel on the runner this test has reported as
-  # much as 51 seconds against its 60-second deadline, and then expired at
-  # 60 with no assertion failure.  Serialized on the same runner class it
-  # costs 9.11 seconds, so most of what that deadline read was the queue
-  # rather than the test.
+  # aggregate.  The slowest repeated windows-2025/clang-cl measurement was
+  # 60.13 seconds before timing out (run 34865958498; run 34863749796 was
+  # 22.94 seconds), so the 90-second deadline leaves 29.87 seconds of stated
+  # headroom.  The earlier 51-second sample was also a queue-contended run,
+  # not an assertion failure.
   #
   # Do not read a future expiry here as this test's own cost without
   # checking three things first.  One is the same run's other serialized
@@ -1896,7 +1896,7 @@ if get_option('enable_fact_store').allowed()
   # regression can enter the band from below -- is a per-case regression,
   # and neither of the first two checks will show it.
   test('fact-graph-seal', test_fact_graph_seal,
-    timeout : 60,
+    timeout : 90,
     is_parallel : host_machine.system() != 'windows',
   )
 
