@@ -414,6 +414,9 @@ CREATE TABLE IF NOT EXISTS fact_graphs (
     last_error_class TEXT NOT NULL DEFAULT 'none'
         CHECK (last_error_class IN ('none', 'path', 'identity', 'format',
             'schema', 'open', 'replay', 'recovery', 'internal')),
+    materialization_state TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (materialization_state IN ('unknown', 'never', 'pending',
+            'materialized')),
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL,
     sealed_at      INTEGER,

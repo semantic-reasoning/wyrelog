@@ -9706,6 +9706,14 @@ static const WylGraphAuthorityColumn graph_authority_columns[] = {
     "('none','path','identity','format','schema','open','replay',"
     "'recovery','internal'))"
   },
+  {
+    "fact_graphs", "materialization_state", "TEXT", TRUE, "'unknown'",
+    "CHECK(materialization_state IN ('unknown','never','pending',"
+    "'materialized'))",
+    "ALTER TABLE fact_graphs ADD COLUMN materialization_state TEXT NOT NULL "
+    "DEFAULT 'unknown' CHECK (materialization_state IN ('unknown','never',"
+    "'pending','materialized'))"
+  },
 };
 
 /* These are nullable only to migrate already-created journals without
@@ -12307,6 +12315,9 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  last_error_class TEXT NOT NULL DEFAULT 'none' CHECK "
       "    (last_error_class IN ('none', 'path', 'identity', 'format', "
       "      'schema', 'open', 'replay', 'recovery', 'internal')),"
+      "  materialization_state TEXT NOT NULL DEFAULT 'unknown' CHECK "
+      "    (materialization_state IN ('unknown', 'never', 'pending', "
+      "'materialized')),"
       "  created_at INTEGER NOT NULL,"
       "  updated_at INTEGER NOT NULL,"
       "  sealed_at INTEGER,"
@@ -13491,8 +13502,8 @@ insert_fact_graph_metadata (wyl_policy_store_t *store,
   static const gchar *sql =
       "INSERT INTO fact_graphs "
       "(tenant_id, graph_id, storage_uri, storage_path, schema_version, "
-      " owner_scope, sealed, created_at, updated_at) "
-      "VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch());";
+      " owner_scope, sealed, materialization_state, created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, 0, 'never', unixepoch(), unixepoch());";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -14131,6 +14142,41 @@ graph_lifecycle_state_name (WylPolicyGraphLifecycleState state)
   return NULL;
 }
 
+const gchar *
+wyl_policy_graph_materialization_state_name
+  (WylPolicyGraphMaterializationState state)
+{
+  switch (state) {
+    case WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN:
+      return "unknown";
+    case WYL_POLICY_GRAPH_MATERIALIZATION_NEVER:
+      return "never";
+    case WYL_POLICY_GRAPH_MATERIALIZATION_PENDING:
+      return "pending";
+    case WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED:
+      return "materialized";
+  }
+  return NULL;
+}
+
+gboolean
+wyl_policy_graph_materialization_state_parse (const gchar *value,
+    WylPolicyGraphMaterializationState *out_state)
+{
+  if (out_state == NULL)
+    return FALSE;
+  for (WylPolicyGraphMaterializationState state =
+      WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+      state <= WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED; state++) {
+    if (g_strcmp0 (value,
+        wyl_policy_graph_materialization_state_name (state)) == 0) {
+      *out_state = state;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 static gboolean
 graph_error_class_parse (const gchar *value,
     WylPolicyGraphErrorClass *out_error_class)
@@ -14272,7 +14318,8 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
   }
   if (sqlite3_column_type (stmt, 7) != SQLITE_INTEGER
       || sqlite3_column_type (stmt, 8) != SQLITE_INTEGER
-      || sqlite3_column_type (stmt, 9) != SQLITE_TEXT)
+      || sqlite3_column_type (stmt, 9) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 10) != SQLITE_TEXT)
     return WYRELOG_E_POLICY;
   gboolean has_identity = sqlite3_column_type (stmt, 4) != SQLITE_NULL;
   if (has_identity != (sqlite3_column_type (stmt, 5) != SQLITE_NULL)
@@ -14291,6 +14338,8 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
   const gchar *store_uuid = has_identity ?
       (const gchar *) sqlite3_column_text (stmt, 4) : NULL;
   const gchar *error_name = (const gchar *) sqlite3_column_text (stmt, 9);
+  const gchar *materialization_name =
+      (const gchar *) sqlite3_column_text (stmt, 10);
   gint64 format_version = has_identity ? sqlite3_column_int64 (stmt, 5) : 0;
   gint64 path_encoding_version =
       has_identity ? sqlite3_column_int64 (stmt, 6) : 0;
@@ -14298,6 +14347,7 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
   gint64 reconciliation_generation = sqlite3_column_int64 (stmt, 8);
   WylPolicyGraphLifecycleState state;
   WylPolicyGraphErrorClass error_class;
+  WylPolicyGraphMaterializationState materialization_state;
   if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
       || !fact_graph_customer_name_is_valid (graph_id)
       || (sealed != 0 && sealed != 1) || format_version < 0
@@ -14305,6 +14355,8 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
       || reconciliation_generation < 0
       || !graph_lifecycle_state_parse (state_name, &state)
       || !graph_error_class_parse (error_name, &error_class)
+      || !wyl_policy_graph_materialization_state_parse (materialization_name,
+      &materialization_state)
       || (has_identity
       != (state != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED))
       || (has_identity && !graph_store_uuid_is_canonical (store_uuid))
@@ -14327,6 +14379,7 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
   record->lifecycle_generation = (guint64) lifecycle_generation;
   record->reconciliation_generation = (guint64) reconciliation_generation;
   record->last_error_class = error_class;
+  record->materialization_state = materialization_state;
   record->has_store_identity = has_identity;
   record->sealed_compatibility = sealed != 0;
   *out_record = record;
@@ -14339,7 +14392,25 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
 #define GRAPH_AUTHORITY_SELECT_COLUMNS                                       \
   "tenant_id,graph_id,sealed,lifecycle_state,store_uuid,format_version,"    \
   "path_encoding_version,lifecycle_generation,reconciliation_generation,"  \
-  "last_error_class"
+  "last_error_class,materialization_state"
+
+typedef struct
+{
+  gboolean owns_transaction;
+  gboolean active;
+  gboolean locked;
+} GraphAuthorityMutationFrame;
+
+static wyrelog_error_t graph_authority_mutation_begin
+  (wyl_policy_store_t *store, GraphAuthorityMutationFrame *frame);
+static wyrelog_error_t graph_authority_mutation_complete
+  (wyl_policy_store_t *store, GraphAuthorityMutationFrame *frame,
+    wyrelog_error_t body_rc);
+static wyrelog_error_t graph_authority_mutation_checkpoint
+  (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMutationFailStage stage);
+static wyrelog_error_t authority_update_step (wyl_policy_store_t *store,
+    sqlite3_stmt *stmt, gboolean allow_unique_constraint, gboolean *out_applied);
 
 wyrelog_error_t
 wyl_policy_store_read_tenant_authority (wyl_policy_store_t *store,
@@ -14430,6 +14501,130 @@ wyl_policy_store_read_graph_authority (wyl_policy_store_t *store,
   sqlite3_finalize (stmt);
   g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_fact_graph_materialization (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphMaterializationState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+  if (store == NULL || store->db == NULL || out_state == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT materialization_state FROM fact_graphs "
+          "WHERE tenant_id=? AND graph_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (!wyl_policy_graph_materialization_state_parse (name, out_state))
+      rc = WYRELOG_E_POLICY;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+static gboolean
+graph_materialization_transition_is_legal
+  (WylPolicyGraphMaterializationState from,
+    WylPolicyGraphMaterializationState to)
+{
+  return (from == WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN
+         && (to == WYL_POLICY_GRAPH_MATERIALIZATION_NEVER
+         || to == WYL_POLICY_GRAPH_MATERIALIZATION_PENDING))
+         || (from == WYL_POLICY_GRAPH_MATERIALIZATION_NEVER
+         && (to == WYL_POLICY_GRAPH_MATERIALIZATION_PENDING
+         || to == WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED))
+         || (from == WYL_POLICY_GRAPH_MATERIALIZATION_PENDING
+         && to == WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED);
+}
+
+wyrelog_error_t
+wyl_policy_store_transition_fact_graph_materialization
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphMaterializationState expected_state,
+    WylPolicyGraphMaterializationState target_state,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  const gchar *expected_name =
+      wyl_policy_graph_materialization_state_name (expected_state);
+  const gchar *target_name =
+      wyl_policy_graph_materialization_state_name (target_state);
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || expected_name == NULL || target_name == NULL)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (expected_state == target_state) {
+    WylPolicyGraphMaterializationState current;
+    wyrelog_error_t read_rc =
+        wyl_policy_store_read_fact_graph_materialization (store, tenant_id,
+            graph_id, &current);
+    if (read_rc == WYRELOG_E_NOT_FOUND)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    else if (read_rc == WYRELOG_E_OK && current == expected_state)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+    else if (read_rc != WYRELOG_E_OK)
+      return read_rc;
+    return WYRELOG_E_OK;
+  }
+  if (!graph_materialization_transition_is_legal (expected_state,
+      target_state))
+    return WYRELOG_E_OK;
+
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  gboolean applied = FALSE;
+  rc = prepare_stmt (store->db,
+          "UPDATE fact_graphs SET materialization_state=?,updated_at=unixepoch() "
+          "WHERE tenant_id=? AND graph_id=? AND materialization_state=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
+      || bind_text (stmt, 2, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, expected_name) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+            WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    WylPolicyGraphMaterializationState current;
+    wyrelog_error_t read_rc =
+        wyl_policy_store_read_fact_graph_materialization (store, tenant_id,
+            graph_id, &current);
+    if (read_rc == WYRELOG_E_NOT_FOUND)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    else if (read_rc != WYRELOG_E_OK)
+      rc = read_rc;
+    else if (current == target_state)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+    else
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
 }
 
 wyrelog_error_t
@@ -14578,13 +14773,6 @@ graph_authority_sqlite_error (int sqlite_rc)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
 }
-
-typedef struct
-{
-  gboolean owns_transaction;
-  gboolean active;
-  gboolean locked;
-} GraphAuthorityMutationFrame;
 
 static wyrelog_error_t
 graph_authority_mutation_checkpoint (wyl_policy_store_t *store,

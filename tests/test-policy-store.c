@@ -6622,6 +6622,109 @@ check_store_provisions_fact_graph (void)
   return 0;
 }
 
+static gint
+check_store_fact_graph_materialization_state (void)
+{
+  static const gchar *const names[] = {
+    "unknown", "never", "pending", "materialized",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+    WylPolicyGraphMaterializationState state;
+    if (!wyl_policy_graph_materialization_state_parse (names[i], &state)
+        || g_strcmp0 (wyl_policy_graph_materialization_state_name (state),
+        names[i]) != 0)
+      return 976;
+  }
+  WylPolicyGraphMaterializationState invalid_state;
+  if (wyl_policy_graph_materialization_state_parse ("invalid",
+      &invalid_state) || wyl_policy_graph_materialization_state_name (
+        (WylPolicyGraphMaterializationState) 99) != NULL)
+    return 977;
+
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-facts-materialization-XXXXXX", &error);
+  if (root == NULL)
+    return 978;
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 979;
+
+  const wyl_policy_fact_graph_column_t columns[] = {
+    {"subject", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    {"site.node", columns, G_N_ELEMENTS (columns)},
+  };
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-main", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
+      != WYRELOG_E_OK)
+    return 980;
+
+  WylPolicyGraphMaterializationState state;
+  if (wyl_policy_store_read_fact_graph_materialization (store, "tenant-a",
+      "graph-main", &state) != WYRELOG_E_OK
+      || state != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER)
+    return 981;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  if (wyl_policy_store_read_graph_authority (store, "tenant-a", "graph-main",
+      &authority) != WYRELOG_E_OK || authority == NULL
+      || authority->materialization_state
+      != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER) {
+    wyl_policy_graph_authority_record_free (authority);
+    return 982;
+  }
+  wyl_policy_graph_authority_record_free (authority);
+
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
+    return 983;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION)
+    return 9831;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_STALE)
+    return 984;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main", WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
+    return 985;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main",
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY)
+    return 986;
+  if (wyl_policy_store_transition_fact_graph_materialization (store,
+      "tenant-a", "graph-main",
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING, &result) != WYRELOG_E_OK
+      || result != WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION)
+    return 987;
+  if (wyl_policy_store_read_fact_graph_materialization (store, "tenant-a",
+      "graph-main", &state) != WYRELOG_E_OK
+      || state != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED)
+    return 988;
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  return cleanup_fact_graph_root (root) ? 0 : 989;
+}
+
 int
 main (void)
 {
@@ -6640,6 +6743,8 @@ main (void)
   if ((rc = check_store_manages_fact_graph_registry ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_provisions_fact_graph ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_store_fact_graph_materialization_state ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_seals_fact_graph_registry ()) != 0)
     return wyl_test_normalize_exit_status (rc);
