@@ -2541,6 +2541,46 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   return rc;
 }
 
+static void
+fact_graph_materialization_pending_best_effort (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info)
+{
+  wyl_policy_store_t *policy = NULL;
+  if (wyl_handle_policy_store_pin_current (self, &policy) != WYRELOG_E_OK)
+    return;
+
+  WylPolicyGraphMaterializationState current;
+  if (wyl_policy_store_read_fact_graph_materialization (policy,
+      graph_info->tenant_id, graph_info->graph_id, &current) != WYRELOG_E_OK
+      || (current != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER
+      && current != WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN)) {
+    wyl_handle_policy_store_unpin (self, policy);
+    return;
+  }
+  WylPolicyAuthorityMutationResult result;
+  (void) wyl_policy_store_transition_fact_graph_materialization (policy,
+      graph_info->tenant_id, graph_info->graph_id,
+      current,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING, &result);
+  wyl_handle_policy_store_unpin (self, policy);
+}
+
+static void
+fact_graph_materialization_materialized_best_effort (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info)
+{
+  wyl_policy_store_t *policy = NULL;
+  if (wyl_handle_policy_store_pin_current (self, &policy) != WYRELOG_E_OK)
+    return;
+
+  WylPolicyAuthorityMutationResult result;
+  (void) wyl_policy_store_transition_fact_graph_materialization (policy,
+      graph_info->tenant_id, graph_info->graph_id,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result);
+  wyl_handle_policy_store_unpin (self, policy);
+}
+
 wyrelog_error_t
 wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -2558,6 +2598,11 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
       || out_inserted == NULL || out_outcome == NULL)
     return WYRELOG_E_INVALID;
 
+  /* Materialization evidence is deliberately best-effort.  PENDING is
+   * written before the first durable mutation, but marker failures must never
+   * turn a valid fact mutation into a precommit failure. */
+  fact_graph_materialization_pending_best_effort (self, graph_info);
+
   /* Step 1: the store commit is the linearization point. */
   wyl_fact_commit_delta_t delta;
   wyl_fact_commit_delta_init (&delta);
@@ -2574,6 +2619,11 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
 
   if (rc != WYRELOG_E_OK)
     return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
+
+  /* The fact commit is durable now.  Marker persistence is deliberately
+   * decoupled from the mutation result; a failure leaves the fact committed
+   * and can be repaired by later observation/reconciliation. */
+  fact_graph_materialization_materialized_best_effort (self, graph_info);
 
   /* Step 3: post-commit targeted refresh of this graph only.  A failure here
    * is committed-but-degraded, never a commit failure. */

@@ -1233,6 +1233,13 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = check_fact_projection_batch_rows (fact_root, "orders", "batch-1", 1);
   if (rc != 0)
     return rc;
+  WylPolicyGraphMaterializationState materialization_state;
+  if (wyl_policy_store_read_fact_graph_materialization (
+        wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT, "orders",
+        &materialization_state) != WYRELOG_E_OK
+      || materialization_state
+      != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED)
+    return 276;
 
   /* Nullable schema metadata is accepted, but NULL values cannot be encoded
    * in the logical tuple store. Refuse before creating a durable batch. */
