@@ -3412,11 +3412,36 @@ typedef struct
   gchar *key_id;
   gchar *token;
   gint64 now;
+  SoupServer *server;
+  gchar registry_sid[WYL_ID_STRING_BUF];
+  gchar registry_jti[WYL_ID_STRING_BUF];
+  gchar registry_credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  gchar registry_tenant[64];
+  gchar registry_subject[128];
+  guint64 registry_generation;
+  gboolean registry_reserved;
+  gboolean session_stored;
+  gboolean access_token_stored;
 } ServiceResolverFixture;
 
 static void
 service_resolver_fixture_clear (ServiceResolverFixture *fixture)
 {
+  if (fixture->server != NULL) {
+    gboolean changed = FALSE;
+    if (fixture->registry_reserved)
+      (void) wyl_daemon_http_service_registry_transition_for_test
+        (fixture->server, fixture->registry_sid, fixture->registry_jti,
+          fixture->registry_credential, fixture->registry_generation,
+          fixture->registry_subject, fixture->registry_tenant,
+          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed);
+    if (fixture->session_stored)
+      (void) wyl_daemon_http_remove_session_for_test (fixture->server,
+          fixture->sid);
+    if (fixture->access_token_stored)
+      (void) wyl_daemon_http_remove_access_token_for_test (fixture->server,
+          fixture->jti);
+  }
   g_clear_pointer (&fixture->key_id, g_free);
   g_clear_pointer (&fixture->token, g_free);
 }
@@ -3431,6 +3456,7 @@ service_resolver_fixture_init_tenant_credential (SoupServer *server,
     const gchar *subject_id)
 {
   memset (fixture, 0, sizeof *fixture);
+  fixture->server = server;
   g_strlcpy (fixture->subject, subject_id, sizeof fixture->subject);
   wyl_id_t sid = WYL_ID_NIL, jti = WYL_ID_NIL;
   wyl_id_t other_sid = WYL_ID_NIL, other_jti = WYL_ID_NIL;
@@ -3473,15 +3499,19 @@ service_resolver_fixture_init_tenant_credential (SoupServer *server,
   };
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_new_service_detached (&descriptor, &session)
-      != WYRELOG_E_OK
-      || !wyl_daemon_http_replace_session_for_test (server, fixture->sid,
-      session)
-      || !wyl_daemon_http_store_service_access_token_for_test (server,
+      != WYRELOG_E_OK)
+    return FALSE;
+  if (!wyl_daemon_http_replace_session_for_test (server, fixture->sid,
+      session))
+    return FALSE;
+  fixture->session_stored = TRUE;
+  if (!wyl_daemon_http_store_service_access_token_for_test (server,
       fixture->jti, fixture->sid, descriptor.subject_id,
       descriptor.tenant_id, fixture->key_id, fixture->now + 300,
       WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential,
       credential_generation, FALSE))
     return FALSE;
+  fixture->access_token_stored = TRUE;
   const gchar *reg_sid = registry_mismatch == 1 ? fixture->other_sid
       : fixture->sid;
   const gchar *reg_jti = registry_mismatch == 2 ? fixture->other_jti
@@ -3494,12 +3524,23 @@ service_resolver_fixture_init_tenant_credential (SoupServer *server,
       : descriptor.subject_id;
   const gchar *reg_tenant = registry_mismatch == 6 ? "tenant-other"
       : descriptor.tenant_id;
+  g_strlcpy (fixture->registry_sid, reg_sid, sizeof fixture->registry_sid);
+  g_strlcpy (fixture->registry_jti, reg_jti, sizeof fixture->registry_jti);
+  g_strlcpy (fixture->registry_credential, reg_cred,
+      sizeof fixture->registry_credential);
+  g_strlcpy (fixture->registry_subject, reg_subject,
+      sizeof fixture->registry_subject);
+  g_strlcpy (fixture->registry_tenant, reg_tenant,
+      sizeof fixture->registry_tenant);
+  fixture->registry_generation = reg_generation;
   gboolean changed = FALSE;
   if (registry_state >= 0
       && wyl_daemon_http_service_registry_transition_for_test (server,
       reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
       WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_OK)
     return FALSE;
+  if (registry_state >= 0)
+    fixture->registry_reserved = TRUE;
   if (registry_state >= WYL_SERVICE_AUTH_ACTIVE
       && wyl_daemon_http_service_registry_transition_for_test (server,
       reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
@@ -3639,10 +3680,13 @@ service_auth_invalidation_wait_writer_queued (SoupServer *server)
 static gboolean
 check_service_auth_invalidator_contract (SoupServer *server)
 {
-  ServiceResolverFixture pending = { 0 };
+  g_auto (ServiceResolverFixture) pending = { 0 };
+  gboolean initialized = FALSE;
+  gboolean ok = FALSE;
   if (!service_resolver_fixture_init (server, &pending,
       WYL_SERVICE_AUTH_PENDING, 0))
     return FALSE;
+  initialized = TRUE;
 
   ServiceAuthInvalidationCall pending_call = {
     .server = server,
@@ -3655,11 +3699,53 @@ check_service_auth_invalidator_contract (SoupServer *server)
   };
   if (pending_call.invalidation.kind !=
       WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL)
-    return FALSE;
+    goto cleanup;
   if (wyl_daemon_http_invalidate_service_auth_for_test (server, NULL,
       &pending_call.result) != WYRELOG_E_INVALID)
-    return FALSE;
-  return TRUE;
+    goto cleanup;
+  if (wyl_daemon_http_invalidate_service_auth_for_test (server,
+      &pending_call.invalidation, &pending_call.result) != WYRELOG_E_OK
+      || pending_call.result.matched != 1
+      || pending_call.result.transitioned != 1
+      || !service_resolver_expect (server, &pending, pending.token, FALSE))
+    goto cleanup;
+  WylServiceAuthRevokeResult no_match = { 0 };
+  WylDaemonServiceAuthInvalidation no_match_invalidation =
+      service_auth_invalidation_no_match (&pending,
+          WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL);
+  if (wyl_daemon_http_invalidate_service_auth_for_test (server,
+      &no_match_invalidation, &no_match) != WYRELOG_E_OK
+      || no_match.matched != 0 || no_match.transitioned != 0)
+    goto cleanup;
+  pending_call.result = (WylServiceAuthRevokeResult) { 0 };
+  if (wyl_daemon_http_invalidate_service_auth_for_test (server,
+      &pending_call.invalidation, &pending_call.result) != WYRELOG_E_OK
+      || pending_call.result.matched != 1
+      || pending_call.result.transitioned != 0)
+    goto cleanup;
+  ok = TRUE;
+
+cleanup:
+  if (initialized) {
+    gboolean removed = FALSE;
+    if (wyl_daemon_http_service_registry_transition_for_test (server,
+        pending.sid, pending.jti, pending.credential, 9,
+        WYL_TEST_SERVICE_RESOLVER_SUBJECT, "__wr_default",
+        WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &removed) != WYRELOG_E_OK
+        || !removed)
+      ok = FALSE;
+    else
+      pending.registry_reserved = FALSE;
+    if (!wyl_daemon_http_remove_session_for_test (server, pending.sid))
+      ok = FALSE;
+    else
+      pending.session_stored = FALSE;
+    if (!wyl_daemon_http_remove_access_token_for_test (server, pending.jti))
+      ok = FALSE;
+    else
+      pending.access_token_stored = FALSE;
+  }
+  return ok;
 }
 
 static gchar *
@@ -23835,6 +23921,12 @@ service_variant_checks (int argc, char **argv)
         resolver_authority_reason, maintenance_ticks_pre_suspend,
         maintenance_ticks_drained);
     result = 2663;
+    goto cleanup;
+  }
+  gint service_auth_invalidator_rc =
+      check_service_auth_invalidator_contract (http.server);
+  if (!service_auth_invalidator_rc) {
+    result = 2667;
     goto cleanup;
   }
   gint service_resolver_rc = check_service_bearer_resolver_contract
