@@ -106,7 +106,10 @@ typedef struct
 typedef struct
 {
   gchar *tenant;
+  gchar *dimension;
   gchar *limit_arg;
+  gchar *rate_per_second_arg;
+  gchar *burst_arg;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
   gchar *guard_loc_class;
@@ -301,7 +304,10 @@ static void
 wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
 {
   g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->dimension, g_free);
   g_clear_pointer (&opts->limit_arg, g_free);
+  g_clear_pointer (&opts->rate_per_second_arg, g_free);
+  g_clear_pointer (&opts->burst_arg, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
   g_clear_pointer (&opts->guard_timestamp_arg, g_free);
   g_clear_pointer (&opts->guard_loc_class, g_free);
@@ -2134,8 +2140,14 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   g_auto (WyctlFactQuotaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"dimension", 0, 0, G_OPTION_ARG_STRING, &opts.dimension,
+     "Quota dimension (graph_count or write_rate)", "DIMENSION"},
     {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
      "Maximum graph count (0 denies graph creation)", "N"},
+    {"rate-per-second", 0, 0, G_OPTION_ARG_STRING,
+     &opts.rate_per_second_arg, "Fact writes per second", "N"},
+    {"burst", 0, 0, G_OPTION_ARG_STRING, &opts.burst_arg,
+     "Fact write burst", "N"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING,
      &opts.access_token_file, "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
@@ -2168,14 +2180,41 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
           global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file = wyctl_resolve_string_option (
     opts.access_token_file, global_opts->settings, "access-token-file");
-  if (configure && opts.limit_arg == NULL) {
-    g_printerr ("wyctl: missing --limit\n");
+  const gchar *dimension = opts.dimension != NULL ? opts.dimension :
+      "graph_count";
+  if (g_strcmp0 (dimension, "graph_count") != 0
+      && g_strcmp0 (dimension, "write_rate") != 0) {
+    g_printerr ("wyctl: invalid --dimension\n");
     return 2;
   }
   gint64 parsed_limit = 0;
-  if (configure && !parse_nonnegative_int64 (opts.limit_arg, &parsed_limit)) {
-    g_printerr ("wyctl: invalid --limit\n");
-    return 2;
+  gint64 parsed_rate = 0;
+  gint64 parsed_burst = 0;
+  if (g_strcmp0 (dimension, "graph_count") == 0) {
+    if (opts.rate_per_second_arg != NULL || opts.burst_arg != NULL
+        || (configure && opts.limit_arg == NULL)) {
+      g_printerr ("wyctl: graph_count requires --limit and rejects rate options\n");
+      return 2;
+    }
+    if (configure && !parse_nonnegative_int64 (opts.limit_arg, &parsed_limit)) {
+      g_printerr ("wyctl: invalid --limit\n");
+      return 2;
+    }
+  } else {
+    if (opts.limit_arg != NULL || (!configure
+        && (opts.rate_per_second_arg != NULL || opts.burst_arg != NULL))
+        || (configure && (opts.rate_per_second_arg == NULL
+        || opts.burst_arg == NULL))) {
+      g_printerr ("wyctl: write_rate requires --rate-per-second and --burst\n");
+      return 2;
+    }
+    if (configure && (!parse_nonnegative_int64 (opts.rate_per_second_arg,
+        &parsed_rate) || !parse_nonnegative_int64 (opts.burst_arg,
+        &parsed_burst) || parsed_rate <= 0 || parsed_burst <= 0
+        || parsed_rate > G_MAXINT64 || parsed_burst > G_MAXINT64)) {
+      g_printerr ("wyctl: invalid write-rate quota\n");
+      return 2;
+    }
   }
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
@@ -2188,18 +2227,38 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   if (client_rc != 0)
     return client_rc;
   WylClientFactQuotaStatus status = { 0 };
-  wyrelog_error_t rc = configure
-      ? wyl_client_fact_quota_configure (client, tenant,
-          (guint64) parsed_limit, guard_timestamp, opts.guard_loc_class,
-          guard_risk, &status)
-      : wyl_client_fact_quota_status (client, tenant, guard_timestamp,
-          opts.guard_loc_class, guard_risk, &status);
+  WylClientFactWriteRateQuotaStatus write_rate_status = { 0 };
+  wyrelog_error_t rc;
+  if (g_strcmp0 (dimension, "write_rate") == 0) {
+    rc = configure
+        ? wyl_client_fact_write_rate_quota_configure (client, tenant,
+            (guint64) parsed_rate, (guint64) parsed_burst, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &write_rate_status)
+        : wyl_client_fact_write_rate_quota_status (client, tenant,
+            guard_timestamp, opts.guard_loc_class, guard_risk,
+            &write_rate_status);
+  } else {
+    rc = configure
+        ? wyl_client_fact_quota_configure (client, tenant,
+            (guint64) parsed_limit, guard_timestamp, opts.guard_loc_class,
+            guard_risk, &status)
+        : wyl_client_fact_quota_status (client, tenant, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &status);
+  }
   int exit_rc = fact_remote_exit (client,
           configure ? "fact quota configure" : "fact quota status", rc,
           "fact_quota_failed");
-  if (exit_rc == 0)
+  if (exit_rc == 0 && g_strcmp0 (dimension, "write_rate") == 0) {
+    g_print ("tenant=%s dimension=write_rate rate_per_second=",
+        write_rate_status.tenant_id);
+    if (write_rate_status.has_limit) {
+      g_print ("%" G_GUINT64_FORMAT " burst=%" G_GUINT64_FORMAT "\n",
+          write_rate_status.rate_per_second, write_rate_status.burst);
+    } else {
+      g_print ("unlimited burst=unlimited\n");
+    }
+  } else if (exit_rc == 0) {
     g_print ("tenant=%s dimension=graph_count limit=", status.tenant_id);
-  if (exit_rc == 0) {
     if (status.has_limit)
       g_print ("%" G_GUINT64_FORMAT, status.hard_limit);
     else
@@ -2208,6 +2267,7 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
         "\n", status.committed, status.pending);
   }
   wyl_client_fact_quota_status_clear (&status);
+  wyl_client_fact_write_rate_quota_status_clear (&write_rate_status);
   return exit_rc;
 }
 
