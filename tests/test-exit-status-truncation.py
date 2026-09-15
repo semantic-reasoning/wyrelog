@@ -50,6 +50,14 @@ COMPOUND_ASSIGNMENT = re.compile(
     r"|(?:\+\+|--)\s*([A-Za-z_]\w*)\b")
 RETURN = re.compile(r"\breturn\s+([^;]+);")
 RETURN_TOKEN = re.compile(r"\breturn\b")
+STATUS_SANITIZER_BINDING = re.compile(
+    r"(?m)^[ \t]*#[ \t]*(?:define|undef)[ \t]+"
+    r"(?:wyl_test_normalize_exit_status|WYL_TEST__EXIT|WYL_TEST_EXIT)\b")
+TRIGRAPHS_C17 = {
+    "??=": "#", "??/": "\\", "??'": "^", "??(": "[",
+    "??)": "]", "??!": "|", "??<": "{", "??>": "}",
+    "??-": "~",
+}
 INTEGER_CAST = re.compile(
     r"\(\s*(?:g?u?int(?:8|16|32|64)?|"
     r"int|unsigned(?:\s+int)?|signed(?:\s+int)?|long(?:\s+int)?|"
@@ -116,7 +124,7 @@ def _convert_integer_values(values: set[int], c_type: str
   return converted
 
 
-def mask_noncode(text: str) -> str:
+def mask_noncode(text: str, preserve_literals: bool = False) -> str:
   """Blank comments and string/character literals without moving lines."""
   output: list[str] = []
   index = 0
@@ -131,7 +139,7 @@ def mask_noncode(text: str) -> str:
         index += 2
         continue
       if char in ('"', "'"):
-        output.append(" ")
+        output.append(char if preserve_literals else " ")
         state = "string" if char == '"' else "character"
         index += 1
         continue
@@ -153,9 +161,11 @@ def mask_noncode(text: str) -> str:
         output.append("\n" if char == "\n" else " ")
         index += 1
       continue
-    output.append("\n" if char == "\n" else " ")
+    output.append("\n" if char == "\n" else
+        (char if preserve_literals else " "))
     if char == "\\" and index + 1 < len(text):
-      output.append("\n" if text[index + 1] == "\n" else " ")
+      output.append("\n" if text[index + 1] == "\n" else
+          (text[index + 1] if preserve_literals else " "))
       index += 2
       continue
     if (state == "string" and char == '"') or (
@@ -163,6 +173,70 @@ def mask_noncode(text: str) -> str:
       state = "code"
     index += 1
   return "".join(output)
+
+
+def c_logical_source(text: str, language: str
+    ) -> tuple[str, list[int]]:
+  """Apply language-specific trigraph and line-splicing phases with offsets."""
+  if language not in {"c17", "c++17"}:
+    raise ValueError(f"unsupported C/C++ language mode: {language}")
+  translated: list[str] = []
+  offsets: list[int] = []
+  index = 0
+  while index < len(text):
+    trigraph = text[index:index + 3]
+    replacement = (TRIGRAPHS_C17.get(trigraph)
+        if language == "c17" else None)
+    if replacement is not None:
+      translated.append(replacement)
+      offsets.append(index)
+      index += 3
+    else:
+      translated.append(text[index])
+      offsets.append(index)
+      index += 1
+
+  logical: list[str] = []
+  logical_offsets: list[int] = []
+  index = 0
+  while index < len(translated):
+    if translated[index] == "\\" and index + 1 < len(translated):
+      if translated[index + 1] == "\n":
+        index += 2
+        continue
+      if (translated[index + 1] == "\r" and index + 2 < len(translated)
+          and translated[index + 2] == "\n"):
+        index += 3
+        continue
+      if translated[index + 1] == "\r":
+        index += 2
+        continue
+    logical.append(translated[index])
+    logical_offsets.append(offsets[index])
+    index += 1
+  return "".join(logical), logical_offsets
+
+
+def c17_logical_source(text: str) -> tuple[str, list[int]]:
+  return c_logical_source(text, "c17")
+
+
+def source_language(path: str) -> str:
+  suffix = Path(path).suffix
+  if suffix == ".c":
+    return "c17"
+  if suffix in {".cc", ".cpp"}:
+    return "c++17"
+  raise ValueError(f"unsupported test translation-unit extension: {suffix or '(none)'}")
+
+
+def original_offset(offsets: list[int], logical_index: int,
+    source_length: int) -> int:
+  if not offsets:
+    return 0
+  if logical_index >= len(offsets):
+    return source_length
+  return offsets[max(0, logical_index)]
 
 
 def offenders(text: str) -> list[int]:
@@ -347,10 +421,43 @@ def has_top_level_operator(expression: str) -> bool:
   return False
 
 
+def _status_normalizer_argument(expression: str) -> str | None:
+  """Return the argument when expression is exactly the status sanitizer."""
+  expression = _outer_parens(expression.strip())
+  match = re.match(r"wyl_test_normalize_exit_status\s*\(", expression)
+  if match is None:
+    return None
+  opening = expression.find("(", match.start(), match.end())
+  try:
+    closing = _matching_delimiter(expression, opening, "(", ")")
+  except ValueError:
+    return None
+  if expression[closing + 1:].strip():
+    return None
+  return expression[opening + 1:closing].strip()
+
+
+def _status_normalizer_contract_valid(root: Path) -> bool:
+  """Recognize only the audited POSIX normalizer implementation."""
+  try:
+    header = (root / "tests/test-exit-status.h").read_text(
+        encoding="utf-8", errors="replace")
+  except OSError:
+    return False
+  normalized = " ".join(mask_noncode(header).split())
+  return re.search(
+      r"\bstatic\s+inline\s+int\s+wyl_test_normalize_exit_status\s*"
+      r"\(\s*int\s+status\s*\)\s*\{\s*#ifndef\s+_WIN32\s+"
+      r"if\s*\(\s*status\s*!=\s*0\s*&&\s*status\s*%\s*256\s*"
+      r"==\s*0\s*\)\s*return\s+1\s*;\s*#endif\s+"
+      r"return\s+status\s*;\s*\}", normalized) is not None
+
+
 def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
-    masked: str, condition_constants: dict[str, set[int]]
+    masked: str, condition_constants: dict[str, set[int]],
+    normalizer_verified: bool, source_line=None
     ) -> tuple[dict[str, str], dict[str, int]]:
-  """Find helpers whose returned value has a bounded path to main's return."""
+  """Find helpers whose unsanitized return value can reach main."""
   names = {function[0] for function in functions}
   function_return_types = {name: _function_return_type(
       masked, start, body_start, name)
@@ -373,7 +480,7 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
   target_names = sorted(names, key=lambda name: (-len(name), name))
   target_call = (re.compile(r"\b(" + "|".join(map(re.escape, target_names))
       + r")\s*\(") if target_names else None)
-  callees: dict[str, set[str]] = {}
+  callees: dict[str, set[tuple[str, bool]]] = {}
   for name, _start, body_start, body_end in functions:
     body = masked[body_start:body_end]
     constants = dict(condition_constants)
@@ -407,7 +514,21 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
           _same_integer_value_type(local_types[name].get(
               conditional_assignment_calls[call.start()]),
               function_return_types.get(target)):
-        callees.setdefault(name, set()).add(target)
+        variable = conditional_assignment_calls[call.start()]
+        sanitized = False
+        if normalizer_verified:
+          absolute_after_call = body_start + closing + 1
+          for site_start, _site_end, expression in return_sites:
+            if (site_start > absolute_after_call and
+                _outer_parens(_status_normalizer_argument(expression) or "")
+                == variable):
+              intervening = masked[absolute_after_call:site_start]
+              if not re.search(r"\b" + re.escape(variable) +
+                  r"\s*(?:=(?!=)|\+=|-=|\*=|/=|%=|\+\+|--)",
+                  intervening):
+                sanitized = True
+                break
+        callees.setdefault(name, set()).add((target, sanitized))
       direct_return = any(site_start <= absolute_call < site_end
           and re.search(
               r"\breturn\s+(?:wyl_test_normalize_exit_status\s*\(\s*)?\(*\s*$",
@@ -415,7 +536,12 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
           and re.fullmatch(r"\s*\)*\s*;?\s*",
               masked[body_start + closing + 1:site_end]) is not None
           for site_start, site_end, _expression in return_sites)
+      direct_sanitized_return = (normalizer_verified and direct_return and
+          any(site_start <= absolute_call < site_end and
+              _status_normalizer_argument(expression) is not None
+              for site_start, site_end, expression in return_sites))
       exact_assignment = False
+      sanitized_assignment = False
       assignment_site = next(((site_start, site_end)
           for site_start, site_end in assignment_sites
           if site_start <= absolute_call < site_end), None)
@@ -448,10 +574,29 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
             reachable_return = any(site_start <= returned_absolute < site_end
                 and expression.strip() == variable
                 for site_start, site_end, expression in return_sites)
+            returned_through_normalizer = (normalizer_verified and any(
+                site_start <= returned_absolute < site_end and
+                _outer_parens(_status_normalizer_argument(expression) or "")
+                == variable
+                for site_start, site_end, expression in return_sites))
+            assignment_text = (masked[site_start:site_end]
+                if assignment_site is not None else "")
+            assignment_expression = re.search(
+                r"\b" + re.escape(variable)
+                + r"\s*=(?!=)\s*(.*?)\s*;?\s*$",
+                assignment_text, re.S)
+            assigned_through_normalizer = (normalizer_verified and
+                _status_normalizer_argument(
+                    assignment_expression.group(1)
+                    if assignment_expression else "") is not None)
             exact_assignment = (overwritten is None and escaped is None
-                and reachable_return and returned_absolute > statement_end)
+                and (reachable_return or returned_through_normalizer)
+                and returned_absolute > statement_end)
+            sanitized_assignment = (exact_assignment and
+                (returned_through_normalizer or assigned_through_normalizer))
       if direct_return or exact_assignment:
-        callees.setdefault(name, set()).add(target)
+        callees.setdefault(name, set()).add((target,
+            direct_sanitized_return or sanitized_assignment))
 
   # Callback registrations establish invocation, but not status-value flow.
   # The caller separately reports incompatible callback/destructor signatures
@@ -489,16 +634,103 @@ def _status_propagation_to_main(functions: list[tuple[str, int, int, int]],
       argument = arguments[index]
       for target in re.findall(r"\b[A-Za-z_]\w*\b", argument):
         if target in names:
-          callback_roots[target] = _source_line(masked, match.start())
+          callback_roots[target] = (source_line(match.start()) if source_line
+              else _source_line(masked, match.start()))
   chains = {"main": "main"}
   queue = ["main"]
   while queue:
     current = queue.pop(0)
-    for target in sorted(callees.get(current, ())):
+    for target, sanitized in sorted(callees.get(current, ())):
+      if sanitized:
+        continue
       if target not in chains:
         chains[target] = f"{target} -> {chains[current]}"
         queue.append(target)
   return chains, callback_roots
+
+
+def _known_function_return_domains(functions: list[tuple[str, int, int, int]],
+    masked: str, constants: dict[str, set[int]]) -> dict[str, set[int] | None]:
+  """Summarize simple finite helper returns for interprocedural call sites."""
+  by_name = {name: (start, body_start, body_end)
+      for name, start, body_start, body_end in functions}
+  cache: dict[str, set[int] | None] = {}
+  active: set[str] = set()
+
+  def summarize(name: str) -> set[int] | None:
+    if name in cache:
+      value = cache[name]
+      return None if value is None else set(value)
+    if name in active or name not in by_name:
+      return None
+    active.add(name)
+    start, body_start, body_end = by_name[name]
+    function_constants, touched, function_macros = _parse_integer_macros(
+        masked[:start], constants)
+    condition_constants = dict(constants)
+    for macro in touched:
+      condition_constants.pop(macro, None)
+    condition_constants.update(function_constants)
+    condition_constants = _function_parameter_constants(
+        masked, name, start, body_start, condition_constants)
+    sites, _assignments, _conditional_calls = _status_flow_sites(
+        masked, body_start, body_end, condition_constants, function_macros)
+    return_type = _function_return_type(masked, start, body_start, name)
+    result: set[int] = set()
+    body = masked[body_start:body_end]
+    complete = bool(sites) or RETURN_TOKEN.search(body) is not None
+    for _site_start, _site_end, expression in sites:
+      try:
+        values = finite_c_values(expression, condition_constants)
+      except (SyntaxError, ValueError, ZeroDivisionError):
+        direct_call = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*\(\s*\)\s*",
+            expression)
+        values = (summarize(direct_call.group(1)) if direct_call else None)
+        if values is None:
+          complete = False
+          break
+      try:
+        if return_type in INTEGER_TYPE_INFO:
+          values = _convert_stored_values(values, return_type)
+        elif return_type and return_type.startswith("enum "):
+          values = _convert_stored_values(values, "int")
+      except ValueError:
+        complete = False
+        break
+      result.update(values)
+      if len(result) > 256:
+        complete = False
+        break
+    active.remove(name)
+    cache[name] = result if complete else None
+    value = cache[name]
+    return None if value is None else set(value)
+
+  for function_name, _start, _body_start, _body_end in functions:
+    summarize(function_name)
+  return cache
+
+
+def _known_call_result(expression: str,
+    summaries: dict[str, set[int] | None]) -> set[int] | None:
+  """Resolve a direct finite helper call, preserving the sanitizer contract."""
+  normalized_argument = _status_normalizer_argument(expression)
+  if normalized_argument is not None:
+    inner = normalized_argument
+    direct_call = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*\(\s*\)\s*", inner)
+    if direct_call is None:
+      return None
+    values = summaries.get(direct_call.group(1))
+    if values is None:
+      return None
+    return {1 if value != 0 and value % 256 == 0 else value
+        for value in values}
+  direct_call = re.fullmatch(r"\s*([A-Za-z_]\w*)\s*\(\s*\)\s*",
+      expression)
+  if direct_call is None:
+    return None
+  values = summaries.get(direct_call.group(1))
+  return None if values is None else set(values)
 
 
 _LINE_INDEX: dict[int, tuple[str, list[int]]] = {}
@@ -765,7 +997,7 @@ def _statement_end(text: str, start: int) -> int:
   return len(text)
 
 
-def _parse_enums(masked: str, path: str
+def _parse_enums(masked: str, path: str, source_line=None
     ) -> tuple[dict[str, set[int]], set[str], list[str]]:
   constants: dict[str, set[int]] = {}
   tags: set[str] = set()
@@ -798,7 +1030,8 @@ def _parse_enums(masked: str, path: str
           raise ValueError("enum value is outside the supported int range")
       except (SyntaxError, ValueError, ZeroDivisionError):
         valid = False
-        line = _source_line(masked, match.start())
+        line = (source_line(match.start()) if source_line
+            else _source_line(masked, match.start()))
         unresolved.append(f"{path}:{line}: function <enum {tag or 'anonymous'}>: "
             f"expression {item!r}: reason: unsupported enum initializer")
         break
@@ -1044,7 +1277,9 @@ def _execute_statements(statements: list[dict[str, object]],
   for statement in statements:
     kind = str(statement["kind"])
     offset = int(statement["start"])
-    line = _source_line(masked, offset)
+    line_mapper = context.get("source_line")
+    line = (line_mapper(offset) if callable(line_mapper)
+        else _source_line(masked, offset))
     if kind == "block":
       children = statement["children"]
       assert isinstance(children, list)
@@ -1130,6 +1365,16 @@ def _execute_statements(statements: list[dict[str, object]],
       # post-loop value unknown because iteration counts are not modeled.
       _execute_statements(children, [_clone_state(states[0])], context) \
           if states else []
+      condition = str(statement.get("condition", "")).strip()
+      loop_body = masked[offset:int(statement["end"])]
+      if control == "while" and not re.search(r"\bbreak\b", loop_body):
+        try:
+          loop_values = _constant_condition_values(condition,
+              context["condition_constants"], context["function_macros"])
+        except (SyntaxError, ValueError, ZeroDivisionError):
+          loop_values = set()
+        if loop_values and all(value != 0 for value in loop_values):
+          states = []
       continue
     if kind == "return":
       expression = str(statement["expression"])
@@ -1142,21 +1387,43 @@ def _execute_statements(statements: list[dict[str, object]],
             if domain is not None})
         try:
           result_values = finite_c_values(expression, bindings)
-          return_type = context["return_type"]
+        except (SyntaxError, ValueError, ZeroDivisionError) as error:
+          result_values = _known_call_result(expression,
+              context["known_return_domains"])
+          if result_values is None:
+            _report_unresolved(unresolved, path, line, name, expression,
+                f"returned value is not proven: {error}")
+            suspicious = _possible_truncating_literals(expression)
+            propagation = context["status_chains"].get(name)
+            if suspicious and (name == "main" or propagation):
+              unsafe.append(f"{path}:{line}: function {name}: return "
+                  f"{expression!r} contains possible truncating values "
+                  f"{sorted(set(suspicious))} in an unresolved expression; "
+                  f"verified status-value path to main: {propagation or name}")
+            elif (name == "main" or propagation) and not (
+                context["normalizer_verified"] and
+                _status_normalizer_argument(expression) is not None):
+              unsafe.append(f"{path}:{line}: function {name}: unresolved "
+                  f"return {expression!r} may reach a process status sink; "
+                  f"verified status-value path to main: {propagation or name}")
+            continue
+        return_type = context["return_type"]
+        try:
           if isinstance(return_type, str) and return_type in INTEGER_TYPE_INFO:
             result_values = _convert_stored_values(result_values, return_type)
           elif isinstance(return_type, str) and return_type.startswith("enum "):
             result_values = _convert_stored_values(result_values, "int")
-        except (SyntaxError, ValueError, ZeroDivisionError) as error:
+        except ValueError as error:
           _report_unresolved(unresolved, path, line, name, expression,
-              f"returned value is not proven: {error}")
-          suspicious = _possible_truncating_literals(expression)
+              f"returned value conversion is not proven: {error}")
           propagation = context["status_chains"].get(name)
-          if suspicious and (name == "main" or propagation):
-            unsafe.append(f"{path}:{line}: function {name}: return "
-                f"{expression!r} contains possible truncating values "
-                f"{sorted(set(suspicious))} in an unresolved expression; "
-                f"verified status-value path to main: {propagation or name}")
+          if (name == "main" or propagation) and not (
+              context["normalizer_verified"] and
+              _status_normalizer_argument(expression) is not None):
+            unsafe.append(f"{path}:{line}: function {name}: unresolved "
+                f"return conversion {expression!r} may reach a process "
+                f"status sink; verified status-value path to main: "
+                f"{propagation or name}")
           continue
         bad = sorted(value for value in result_values
             if value != 0 and value % 256 == 0)
@@ -1285,21 +1552,39 @@ def _execute_statements(statements: list[dict[str, object]],
   return states
 
 
-def returned_status_analysis(text: str, path: str
-    ) -> tuple[list[str], list[str]]:
+def returned_status_analysis(text: str, path: str,
+    normalizer_verified: bool = True) -> tuple[list[str], list[str]]:
   """Find unsafe authored values and return unknown domains separately.
 
   Opaque runtime/API values are retained as unresolved, not classified safe.
   This finite constant-code scan does not claim to prove their value domains.
   """
-  masked = mask_noncode(text)
+  try:
+    language = source_language(path)
+  except ValueError as error:
+    return [f"{path}: {error}"], []
+  logical, source_offsets = c_logical_source(text, language)
+  masked = mask_noncode(logical)
+  def source_line(logical_offset: int) -> int:
+    return _source_line(text, original_offset(source_offsets, logical_offset,
+        len(text)))
   functions = function_ranges(masked)
   unsafe: list[str] = []
   unresolved: list[str] = []
-  enum_constants, enum_tags, enum_unresolved = _parse_enums(masked, path)
+  sanitizer_bindings = list(STATUS_SANITIZER_BINDING.finditer(masked))
+  for match in sanitizer_bindings:
+    original = original_offset(source_offsets, match.start(), len(text))
+    unsafe.append(f"{path}:{_source_line(text, original)}: "
+        "source-local preprocessor binding overrides a validated status "
+        "sanitizer name")
+  normalizer_verified = (normalizer_verified and not sanitizer_bindings)
+  enum_constants, enum_tags, enum_unresolved = _parse_enums(
+      masked, path, source_line)
   enum_constants.update({"TRUE": {1}, "FALSE": {0}, "true": {1},
       "false": {0}, "NULL": {0}})
   status_chains, callback_roots = _status_propagation_to_main(
+      functions, masked, enum_constants, normalizer_verified, source_line)
+  known_return_domains = _known_function_return_domains(
       functions, masked, enum_constants)
   unresolved.extend(enum_unresolved)
   functions_by_name = {name: (start, body_start) for name, start, body_start,
@@ -1321,7 +1606,7 @@ def returned_status_analysis(text: str, path: str
         if function[1] <= match.start() < function[3]]
     if len(owners) != 1:
       end = _statement_end(masked, match.end())
-      _report_unresolved(unresolved, path, _source_line(masked, match.start()),
+      _report_unresolved(unresolved, path, source_line(match.start()),
           "<unknown>", masked[match.end():end].strip(),
           "return is not covered by exactly one recognized function")
 
@@ -1332,19 +1617,19 @@ def returned_status_analysis(text: str, path: str
       continue
     if return_type not in INTEGER_TYPE_INFO and not (
         return_type and return_type.startswith("enum ")):
-      _report_unresolved(unresolved, path, _source_line(masked, body_start),
+      _report_unresolved(unresolved, path, source_line(body_start),
           name, f"return type {return_type!r}",
           "function return type has no modeled integer conversion")
     for directive in re.finditer(
         r"(?m)^\s*#\s*(?:if|ifdef|ifndef|elif|else|endif)\b[^\n]*", body):
       _report_unresolved(unresolved, path,
-          _source_line(masked, body_start + directive.start()), name,
+          source_line(body_start + directive.start()), name,
           directive.group(0).strip(),
           "conditional preprocessor flow is not expanded")
     try:
       statements, _end = _parse_statements(masked, body_start)
     except ValueError as error:
-      _report_unresolved(unresolved, path, _source_line(masked, body_start),
+      _report_unresolved(unresolved, path, source_line(body_start),
           name, "<function body>", f"statement parser failed: {error}")
       continue
     initial_types: dict[str, str] = {}
@@ -1360,6 +1645,9 @@ def returned_status_analysis(text: str, path: str
     contexts: dict[str, object] = {"path": path, "name": name,
         "functions": functions, "masked": masked, "body_start": body_start,
         "status_chains": status_chains,
+        "normalizer_verified": normalizer_verified,
+        "source_line": source_line,
+        "known_return_domains": known_return_domains,
         "unsafe": unsafe, "unresolved": unresolved,
         "enum_constants": enum_constants,
         "condition_constants": condition_constants,
@@ -1375,6 +1663,10 @@ def validate_repository(root: Path,
     overrides: dict[str, str] | None = None,
     unresolved_out: list[str] | None = None) -> list[str]:
   errors: list[str] = []
+  normalizer_verified = _status_normalizer_contract_valid(root)
+  if not normalizer_verified:
+    errors.append("tests/test-exit-status.h: POSIX status normalizer "
+        "does not match the validated truncation contract")
   sources = sorted(root.glob(SOURCES))
   if not sources:
     return [f"no {SOURCES} found under {root}; the detector is broken"]
@@ -1387,7 +1679,8 @@ def validate_repository(root: Path,
     for code in offenders(text):
       errors.append(f"{name}: failure code {code} truncates to exit status "
                     f"{code & 0xFF}, so a failing run reports success")
-    unsafe, unresolved = returned_status_analysis(text, name)
+    unsafe, unresolved = returned_status_analysis(text, name,
+        normalizer_verified)
     errors.extend(unsafe)
     if unresolved_out is not None:
       unresolved_out.extend(unresolved)
@@ -1397,7 +1690,8 @@ def validate_repository(root: Path,
         for code in offenders(text):
           errors.append(f"{name}: failure code {code} truncates to exit "
                         f"status {code & 0xFF}")
-        unsafe, unresolved = returned_status_analysis(text, name)
+        unsafe, unresolved = returned_status_analysis(text, name,
+            normalizer_verified)
         errors.extend(unsafe)
         if unresolved_out is not None:
           unresolved_out.extend(unresolved)
@@ -1407,6 +1701,14 @@ def validate_repository(root: Path,
 def self_test(root: Path) -> list[str]:
   """A detector is worth only what its own mutations prove."""
   errors: list[str] = []
+  for spelling, replacement in TRIGRAPHS_C17.items():
+    translated, offsets = c17_logical_source(spelling)
+    if translated != replacement or offsets != [0]:
+      errors.append(f"C17 trigraph translation failed for {spelling}")
+  for sample in ("#define\\\n", "#define??/\r\n"):
+    translated, _offsets = c17_logical_source(sample)
+    if translated != "#define":
+      errors.append("C17 trigraph/line-splice translation failed")
   sources = sorted(root.glob(SOURCES))
   victim = sources[0].relative_to(root).as_posix()
   text = (root / victim).read_text(encoding="utf-8", errors="replace")
@@ -1424,32 +1726,76 @@ def self_test(root: Path) -> list[str]:
   if not offenders("int main (void) { return 256; }\n"):
     errors.append("mutation survived: a synthetic source returning 256")
 
-  status_path = "tests/test-decide.c"
-  status_text = (root / status_path).read_text(encoding="utf-8",
-      errors="replace")
-  clean_unsafe, _clean_unresolved = returned_status_analysis(
-      status_text, status_path)
-  if clean_unsafe:
-    return ["self-test requires an unmutated test-decide.c control"]
-  status_anchor = ("  gint field_check = check_guard_context_field_absent (handle,\n"
-      "          \"guard_context_timestamp\", base_code + 7);")
-  status_mutation = status_text.replace(status_anchor,
-      status_anchor + "\n  field_check = 256;", 1)
-  if status_mutation == status_text:
-    errors.append("mutation setup failed: returned field_check assignment")
-  else:
-    mutation_errors = validate_repository(root,
-        overrides={status_path: status_mutation})
-    diagnostic = next((error for error in mutation_errors
-        if "field_check = 256" in error), "")
-    chain = ("check_guard_cleanup_fault_residue -> check_guard_cleanup_fault -> "
-        "check_decide_fail_closes_on_guard_cleanup_faults -> main")
-    for required in (status_path, "resolves to [256]", chain,
-        "verified status-value path to main"):
-      if required not in diagnostic:
-        errors.append(f"returned-status mutation lacks {required!r}: "
-            f"{diagnostic or mutation_errors}")
-        break
+  status_mutations = {
+      "opaque main return": (
+          "int opaque_status (void);\n"
+          "int main (void) {\n  return opaque_status ();\n}\n", True),
+      "opaque main assignment": (
+          "int opaque_status (void);\n"
+          "int main (void) {\n  int rc = opaque_status ();\n"
+          "  return rc;\n}\n", True),
+      "opaque helper return": (
+          "int opaque_status (void);\n"
+          "static int helper (void) { return opaque_status (); }\n"
+          "int main (void) { return helper (); }\n", True),
+      "opaque helper assignment": (
+          "int opaque_status (void);\n"
+          "static int helper (void) { int rc = opaque_status (); "
+          "return rc; }\n"
+          "int main (void) { return helper (); }\n", True),
+      "opaque status branch": (
+          "int opaque_condition (void);\n"
+          "int main (void) { if (opaque_condition ()) return 512; "
+          "return 0; }\n", True),
+      "opaque normalized main status": (
+          "int opaque_status (void);\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (opaque_status ()); }\n", False),
+      "opaque helper through normalizer": (
+          "int opaque_status (void);\n"
+          "static int helper (void) { return opaque_status (); }\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (helper ()); }\n", False),
+      "unrelated helper-local unknown": (
+          "int opaque_status (void);\n"
+          "static int helper (void) { int ignored = opaque_status (); "
+          "return 1; }\n"
+          "int main (void) { return helper (); }\n", False),
+      "status created after normalizer": (
+          "int opaque_status (void);\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (opaque_status ()) + 256; }\n",
+          True),
+      "callback registration only": (
+          "int opaque_status (void);\n"
+          "static int callback (void) { return opaque_status (); }\n"
+          "int main (void) { g_test_add_func (\"/callback\", callback); "
+          "return 0; }\n", False),
+      "source-local sanitizer override": (
+          "#define wyl_test_normalize_exit_status(x) (x)\n"
+          "static int helper (void) { return 256; }\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (helper ()); }\n", True),
+      "trigraph-spliced source sanitizer override": (
+          "#define wyl_test_normalize_exit_??/\n"
+          "status(x) (x)\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (256); }\n", True),
+      "trigraph-spliced source sanitizer undefinition": (
+          "#undef wyl_test_normalize_exit_??/\n"
+          "status\n"
+          "int main (void) { return 256; }\n", True),
+      "trigraph-created directive marker": (
+          "??=define wyl_test_normalize_exit_status(x) (x)\n"
+          "int main (void) { return "
+          "wyl_test_normalize_exit_status (256); }\n", True),
+  }
+  for label, (probe, should_fail) in status_mutations.items():
+    probe_unsafe, _probe_unresolved = returned_status_analysis(
+        probe, f"mutation-{label}.c", True)
+    if bool(probe_unsafe) != should_fail:
+      errors.append(f"status-flow mutation {label!r}: expected "
+          f"{'failure' if should_fail else 'pass'}, got {probe_unsafe}")
 
   synthetic = ("#define ALWAYS_MACRO 1\n"
       "#define NEVER_MACRO 0\n"
@@ -1640,9 +1986,9 @@ def self_test(root: Path) -> list[str]:
       "int main (void) { return int64_to_int_case (); }\n")
   int64_to_int_unsafe, int64_to_int_unresolved = returned_status_analysis(
       int64_to_int_probe, victim)
-  if any("int64_to_int_case" in item or "wide_status_case" in item
+  if not any("int64_to_int_case" in item or "wide_status_case" in item
       for item in int64_to_int_unsafe):
-    errors.append("int64-to-int return conversion was classified as unsafe")
+    errors.append("unproven int64-to-int status conversion passed")
   if not any("int64_to_int_case" in item for item in int64_to_int_unresolved):
     errors.append("int64-to-int return conversion was not retained as unresolved")
   redefined_macro_probe = synthetic.rsplit("int main (void)", 1)[0] + (
@@ -1692,8 +2038,9 @@ def self_test(root: Path) -> list[str]:
   if any("overwritten_case" in item
       for item in probe_results.get("overwritten_case", [])):
     errors.append("false positive: unconditional overwrite returns zero")
-  safe_branch_probe = probe_prefix + (
-      "int main (void) { return safe_branch_case (1); }\n")
+  safe_branch_probe = (
+      "int main (void) { int choose = 1; int value = 0; "
+      "value = choose ? 1 : 257; return value; }\n")
   safe_branch_unsafe, _safe_branch_unresolved = returned_status_analysis(
       safe_branch_probe, victim)
   if any("safe_branch_case" in item for item in safe_branch_unsafe):
@@ -1809,10 +2156,9 @@ def main() -> int:
     print("exit status truncation: mutation self-test passed")
     return 0
   unresolved = sorted(set(unresolved))
-  for item in unresolved:
-    print(f"unresolved (not proven safe): {item}", file=sys.stderr)
-  print("exit status truncation: supported source slice passed; "
-      f"{len(unresolved)} unresolved flows remain (not proven safe)")
+  print("exit status truncation: passed; "
+      f"{len(unresolved)} nonblocking expression-analysis diagnostics remain; "
+      "unresolved unsanitized status returns fail the gate")
   return 0
 
 

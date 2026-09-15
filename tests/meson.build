@@ -2011,6 +2011,7 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     'test-secure-duckdb-artifact-contract.cc',
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_dep],
+    override_options : ['cpp_std=c++17'],
   )
   test('secure-duckdb-artifact-contract',
     test_secure_duckdb_artifact_contract)
@@ -3697,7 +3698,11 @@ test('variant-diag-coverage', python3,
 test('exit-status-boundaries', python3,
   args : [files('test-exit-status-boundaries.py'),
     meson.project_source_root()],
-  timeout : 120,
+  # The repository-wide source and include scan takes about 49s on Linux and
+  # exceeded 120s on the Windows full-suite runners under normal contention
+  # (run 34916678396). Keep the test bounded while leaving measured headroom;
+  # this is a test deadline, not a workflow timeout multiplier.
+  timeout : 180,
 )
 test('exit-status-boundaries-self-test', python3,
   args : [
@@ -3722,6 +3727,7 @@ if enable_secure_duckdb_bridge_opt.enabled()
     'test-exit-status-nested-lambda',
     'fixtures/test-exit-status-nested-lambda.cpp',
     link_language : 'cpp',
+    override_options : ['cpp_std=c++17'],
   )
   test('exit-status-nested-lambda', exit_status_nested_lambda)
 
@@ -3731,6 +3737,7 @@ if enable_secure_duckdb_bridge_opt.enabled()
       'fixtures/test-exit-status-nested-lambda.cpp',
       cpp_args : ['-DWYL_TEST_OUTER_RETURN_MUTATION'],
       link_language : 'cpp',
+      override_options : ['cpp_std=c++17'],
     )
     test('exit-status-nested-lambda-outer-mutation', python3,
       args : [files('test-exit-status-main-mutation.py'),

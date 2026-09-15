@@ -212,21 +212,21 @@
   {
     "api": "_Exit",
     "expression": "73",
-    "line": 2649,
+    "line": 2783,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "74",
-    "line": 2668,
+    "line": 2802,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "75",
-    "line": 2672,
+    "line": 2806,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
