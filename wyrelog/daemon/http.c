@@ -4274,6 +4274,14 @@ static wyrelog_error_t service_token_exchange_core_with_authority
 static wyrelog_error_t copy_access_token_secret (WylDaemonHttpContext * ctx,
     guint8 out_secret[WYL_DAEMON_JWT_KEY_LEN]);
 static void attach_request_id_header (SoupServerMessage * msg);
+static gboolean authorize_guarded_session_action_extended
+  (SoupServer *server, SoupServerMessage *msg, GHashTable *query,
+    WylDaemonHttpContext *ctx, const gchar *action, const gchar *resource,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code,
+    WylDaemonAuthContext *out_auth, gchar **out_actor, WylSession **out_session,
+    gint64 *out_guard_timestamp, gchar **out_guard_loc_class,
+    gint64 *out_guard_risk);
 
 #ifdef WYL_HAS_AUDIT
 typedef struct
@@ -7436,27 +7444,78 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, "invalid_fact_quota_request");
     return;
   }
-  g_autofree gchar *actor = NULL;
-  if (!authorize_guarded_session_action (server, msg, query, ctx,
-      "wr.sys.admin", tenant, "fact_quota_auth_required",
-      "invalid_fact_quota_auth", "fact_quota_denied",
-      "fact_quota_auth_failed", &actor))
-    return;
-
-  if (g_strcmp0 (method, "POST") == 0) {
-    const gchar *limit_arg = query != NULL
-        ? g_hash_table_lookup (query, "limit") : NULL;
-    gint64 limit = -1;
-    if (limit_arg == NULL || !parse_int64_query_param (limit_arg, &limit)
-        || limit < 0) {
+  const gchar *dimension_arg = query != NULL
+      ? g_hash_table_lookup (query, "dimension") : NULL;
+  WylPolicyFactQuotaDimension dimension =
+      WYL_POLICY_FACT_QUOTA_GRAPH_COUNT;
+  if (dimension_arg != NULL) {
+    if (g_strcmp0 (dimension_arg, "graph_count") == 0)
+      dimension = WYL_POLICY_FACT_QUOTA_GRAPH_COUNT;
+    else if (g_strcmp0 (dimension_arg, "write_rate") == 0)
+      dimension = WYL_POLICY_FACT_QUOTA_WRITE_RATE;
+    else {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
+    }
+  }
+  if (g_strcmp0 (method, "GET") == 0 && query != NULL
+      && (g_hash_table_lookup (query, "rate_per_second") != NULL
+      || g_hash_table_lookup (query, "burst") != NULL
+      || (dimension == WYL_POLICY_FACT_QUOTA_WRITE_RATE
+      && g_hash_table_lookup (query, "limit") != NULL))) {
+    set_json_error (msg, 400, "invalid_fact_quota_request");
+    return;
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+      "wr.sys.admin", tenant, "fact_quota_auth_required",
+      "invalid_fact_quota_auth", "fact_quota_denied",
+      "fact_quota_auth_failed", &auth, &actor, NULL, NULL, NULL, NULL))
+    return;
+  const gchar *auth_tenant = auth.tenant;
+  if (!wyl_policy_store_tenant_id_is_valid (auth_tenant)) {
+    set_json_error (msg, 403, "fact_quota_denied");
+    return;
+  }
+
+  if (g_strcmp0 (method, "POST") == 0) {
+    WylPolicyFactQuotaConfig config = { .has_limit = TRUE };
+    if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
+      const gchar *limit_arg = query != NULL
+          ? g_hash_table_lookup (query, "limit") : NULL;
+      gint64 limit = -1;
+      if (limit_arg == NULL || !parse_int64_query_param (limit_arg, &limit)
+          || limit < 0 || (query != NULL
+          && (g_hash_table_lookup (query, "rate_per_second") != NULL
+          || g_hash_table_lookup (query, "burst") != NULL))) {
+        set_json_error (msg, 400, "invalid_fact_quota_request");
+        return;
+      }
+      config.hard_limit = (guint64) limit;
+    } else {
+      const gchar *rate_arg = query != NULL
+          ? g_hash_table_lookup (query, "rate_per_second") : NULL;
+      const gchar *burst_arg = query != NULL
+          ? g_hash_table_lookup (query, "burst") : NULL;
+      gint64 rate = -1;
+      gint64 burst = -1;
+      if (rate_arg == NULL || burst_arg == NULL
+          || !parse_int64_query_param (rate_arg, &rate)
+          || !parse_int64_query_param (burst_arg, &burst)
+          || rate <= 0 || burst <= 0 || (query != NULL
+          && g_hash_table_lookup (query, "limit") != NULL)) {
+        set_json_error (msg, 400, "invalid_fact_quota_request");
+        return;
+      }
+      config.rate_per_second = (guint64) rate;
+      config.burst = (guint64) burst;
     }
     wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_FACT_QUOTA_CONFIGURE, &write);
     if (rc == WYRELOG_E_OK)
-      rc = wyl_policy_store_set_graph_quota_limit (write.store, tenant,
-              (guint64) limit);
+      rc = wyl_policy_store_set_fact_quota_config (write.store, auth_tenant,
+              dimension, &config);
     if (rc == WYRELOG_E_INVALID) {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
@@ -7480,9 +7539,20 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
     }
   }
 
-  WylPolicyGraphQuotaStatus status = { 0 };
-  wyrelog_error_t rc = wyl_policy_store_get_graph_quota_status (ctx->handle != NULL
-          ? wyl_handle_get_policy_store (ctx->handle) : NULL, tenant, &status);
+  WylPolicyFactQuotaConfig config = { 0 };
+  WylPolicyGraphQuotaStatus graph_status = { 0 };
+  wyrelog_error_t rc;
+  if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
+    rc = wyl_policy_store_get_graph_quota_status
+          (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
+            auth_tenant, &graph_status);
+    config.has_limit = graph_status.has_limit;
+    config.hard_limit = graph_status.hard_limit;
+  } else {
+    rc = wyl_policy_store_get_fact_quota_config
+          (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
+            auth_tenant, dimension, &config);
+  }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
         rc == WYRELOG_E_NOT_FOUND ? "tenant_invalid" : "fact_quota_status_failed");
@@ -7490,16 +7560,32 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
-  append_json_string (body, tenant);
-  g_string_append (body, ",\"dimension\":\"graph_count\",\"limit\":");
-  if (status.has_limit)
-    g_string_append_printf (body, "%" G_GUINT64_FORMAT, status.hard_limit);
-  else
-    g_string_append (body, "null");
-  g_string_append_printf (body,
-      ",\"committed\":%" G_GUINT64_FORMAT
-      ",\"pending\":%" G_GUINT64_FORMAT "}", status.committed,
-      status.pending);
+  append_json_string (body, auth_tenant);
+  if (dimension == WYL_POLICY_FACT_QUOTA_WRITE_RATE) {
+    g_string_append (body,
+        ",\"dimension\":\"write_rate\",\"rate_per_second\":");
+    if (config.has_limit)
+      g_string_append_printf (body, "%" G_GUINT64_FORMAT,
+          config.rate_per_second);
+    else
+      g_string_append (body, "null");
+    g_string_append (body, ",\"burst\":");
+    if (config.has_limit)
+      g_string_append_printf (body, "%" G_GUINT64_FORMAT, config.burst);
+    else
+      g_string_append (body, "null");
+    g_string_append_c (body, '}');
+  } else {
+    g_string_append (body, ",\"dimension\":\"graph_count\",\"limit\":");
+    if (config.has_limit)
+      g_string_append_printf (body, "%" G_GUINT64_FORMAT, config.hard_limit);
+    else
+      g_string_append (body, "null");
+    g_string_append_printf (body,
+        ",\"committed\":%" G_GUINT64_FORMAT
+        ",\"pending\":%" G_GUINT64_FORMAT "}", graph_status.committed,
+        graph_status.pending);
+  }
   (void) actor;
   gsize body_len = body->len;
   g_autofree gchar *body_data = g_string_free (
