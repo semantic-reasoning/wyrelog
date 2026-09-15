@@ -202,6 +202,7 @@ wyrelog/daemon/fact-status.h
 wyrelog/daemon/http-body-limit-private.c
 wyrelog/daemon/http-body-limit-private.h
 wyrelog/daemon/http-guards-private.c
+wyrelog/daemon/http-guards-private.h
 wyrelog/daemon/http.c
 wyrelog/daemon/http.h
 wyrelog/daemon/options.h

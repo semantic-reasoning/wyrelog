@@ -5267,7 +5267,8 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
     {"credential_id", 4096, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"credential_secret", 16384, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_dup_strict_json_object
         (request->body_json, request->body_len, fields, G_N_ELEMENTS (fields),
           values);
@@ -7690,7 +7691,8 @@ profile_events_ingest_core (WylDaemonProfile profile, gboolean transport_ok,
     {"event", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"timestamp_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_INT64},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_dup_strict_json_object (body, body_len, fields,
       G_N_ELEMENTS (fields), values)) {
     *out_status = 400;
@@ -8857,7 +8859,8 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     {"destination", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_request_body_dup_strict_json_object
         (msg, 4096, fields, G_N_ELEMENTS (fields), values);
   if (!parsed || g_strcmp0 (values[0], "1") != 0
@@ -9088,7 +9091,8 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
     {"destination", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_request_body_dup_strict_json_object
         (msg, 4096, fields, G_N_ELEMENTS (fields), values);
   if (!parsed || g_strcmp0 (values[0], "1") != 0
@@ -9177,7 +9181,8 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
      WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields,
       G_N_ELEMENTS (fields), values)
       || g_strcmp0 (values[0], "1") != 0
@@ -9422,7 +9427,8 @@ service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
     {"subject_id", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"display_name", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_dup_strict_json_object (request_body->data,
       (gsize) request_body->length, fields,
       G_N_ELEMENTS (fields), values)) {
@@ -9592,7 +9598,8 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
      WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  g_auto (WylDaemonHttpSensitiveStrv) values =
+      g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields,
       G_N_ELEMENTS (fields), values)
       || g_strcmp0 (values[0], "1") != 0
@@ -11047,7 +11054,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
      WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  g_auto (GStrv) retirement_values = NULL;
+  g_auto (WylDaemonHttpSensitiveStrv) retirement_values = NULL;
   if (sealing) {
     retirement_values = g_new0 (gchar *, G_N_ELEMENTS (retirement_fields) + 1);
     if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
@@ -16098,7 +16105,8 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       {"refresh_token", WYL_ID_STRING_BUF - 1,
        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     };
-    g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+    g_auto (WylDaemonHttpSensitiveStrv) values =
+        g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
     if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
         fields, G_N_ELEMENTS (fields), values) || values[0][0] == '\0') {
       set_json_error (msg, 400, "invalid_refresh_request");

@@ -18,19 +18,25 @@ typedef struct
   WylDaemonHttpStrictJsonFieldKind kind;
 } WylDaemonHttpStrictJsonField;
 
+typedef gchar **WylDaemonHttpSensitiveStrv;
+
+void wyl_daemon_http_sensitive_strv_free (WylDaemonHttpSensitiveStrv values);
+G_DEFINE_AUTO_CLEANUP_FREE_FUNC (WylDaemonHttpSensitiveStrv,
+    wyl_daemon_http_sensitive_strv_free, NULL);
+
 gboolean wyl_daemon_http_socket_addresses_are_actual_loopback
-    (const GSocketAddress * local, const GSocketAddress * peer);
+  (const GSocketAddress * local, const GSocketAddress * peer);
 gboolean wyl_daemon_http_message_has_actual_loopback_transport
-    (SoupServerMessage * msg);
+  (SoupServerMessage * msg);
 
 void wyl_daemon_http_clear_strv (gchar ** values, gsize n_values);
 
 gboolean wyl_daemon_http_dup_strict_json_object
-    (const gchar * json, gsize json_len,
+  (const gchar * json, gsize json_len,
     const WylDaemonHttpStrictJsonField * fields, gsize n_fields,
     gchar ** out_values);
 gboolean wyl_daemon_http_request_body_dup_strict_json_object
-    (SoupServerMessage * msg, gsize max_len,
+  (SoupServerMessage * msg, gsize max_len,
     const WylDaemonHttpStrictJsonField * fields, gsize n_fields,
     gchar ** out_values);
 

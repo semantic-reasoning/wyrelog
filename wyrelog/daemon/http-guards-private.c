@@ -192,6 +192,18 @@ wyl_daemon_http_clear_strv (gchar **values, gsize n_values)
   clear_values (values, n_values);
 }
 
+void
+wyl_daemon_http_sensitive_strv_free (WylDaemonHttpSensitiveStrv values)
+{
+  if (values == NULL)
+    return;
+  for (gsize i = 0; values[i] != NULL; i++) {
+    sodium_memzero (values[i], strlen (values[i]));
+    g_free (values[i]);
+  }
+  g_free (values);
+}
+
 static gboolean
 value_is_valid_utf8_and_bounded (const gchar *value, gsize len, gsize max_len)
 {
