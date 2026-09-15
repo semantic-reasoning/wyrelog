@@ -17428,6 +17428,15 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
 
+  /* The service variant does not inherit tenant-a from the audit fixture.
+   * Register it explicitly so the following cross-tenant assertion exercises
+   * tenant ownership and cannot fail merely on tenant existence. */
+  if (wyl_daemon_http_configure_tenant_for_test (http.server, "tenant-a", TRUE,
+      FALSE) != WYRELOG_E_OK) {
+    rc = 2179;
+    goto cleanup;
+  }
+
   /* Seed a credential in the administrator's authenticated tenant so the
    * cross-subject probe exercises tenant ownership, not just principal
    * existence. */
@@ -17514,11 +17523,6 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
 
-  if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-      "tenant-a", &tenant_created) != WYRELOG_E_OK || !tenant_created) {
-    rc = 1986;
-    goto cleanup;
-  }
   if (!wyl_daemon_http_seed_mfa_human_session_for_test (http.server,
       session_token, "human-principal-admin", WYL_TENANT_DEFAULT)) {
     rc = 1988;
