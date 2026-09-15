@@ -1424,7 +1424,10 @@ main (int argc, char **argv)
       test_early_error_releases_lease);
   g_test_add_func ("/policy-store-lease/lock-symlink",
       test_lock_symlink_rejected);
-  g_test_add_func ("/policy-store-lease/subprocess-crash",
+  /* Not "/subprocess-crash": GLib reserves any path containing "/subprocess"
+   * for g_test_trap_subprocess() children and silently declines to run it, so
+   * under the old name this test never executed and the binary still exited 0. */
+  g_test_add_func ("/policy-store-lease/child-crash",
       test_subprocess_busy_crash_and_reacquire);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
