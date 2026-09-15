@@ -2771,6 +2771,143 @@ commit_one_mutation (WylHandle *handle, wyl_policy_store_t *policy,
              out_outcome);
 }
 
+static WylPolicyGraphMaterializationState
+fact_graph_materialization_state (wyl_policy_store_t *policy,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  WylPolicyGraphMaterializationState state =
+      WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+  g_assert_cmpint (wyl_policy_store_read_fact_graph_materialization (policy,
+      tenant_id, graph_id, &state), ==, WYRELOG_E_OK);
+  return state;
+}
+
+static void
+test_commit_fact_mutation_materialization_markers (void)
+{
+  TEST ("fact mutation records pending then materialized evidence");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-materialization-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  g_assert_cmpint (fact_graph_materialization_state (policy, "tenant-a",
+      "orders"), ==, WYL_POLICY_GRAPH_MATERIALIZATION_NEVER);
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation (handle, policy, "tenant-a", "orders",
+      "materialization-1", "materialization-key-1", &inserted, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_assert_cmpint (fact_graph_materialization_state (policy, "tenant-a",
+      "orders"), ==, WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED);
+  g_clear_object (&handle);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+static void
+test_failed_fact_mutation_does_not_materialize (void)
+{
+  TEST ("a failed fact mutation never records materialized evidence");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-materialization-failed-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  gboolean inserted = TRUE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation_op (handle, policy, "tenant-a", "orders",
+      "materialization-failed-1", "materialization-failed-key-1",
+      WYL_FACT_STORE_OP_ASSERT, "order-failed",
+      WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT, NULL, &inserted, &outcome), !=,
+      WYRELOG_E_OK);
+  g_assert_false (inserted);
+  g_assert_cmpint (fact_graph_materialization_state (policy, "tenant-a",
+      "orders"), ==, WYL_POLICY_GRAPH_MATERIALIZATION_PENDING);
+  g_assert_cmpint (fact_graph_materialization_state (policy, "tenant-a",
+      "orders"), !=, WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED);
+  g_clear_object (&handle);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
+static void
+test_materialization_marker_failure_preserves_commit (void)
+{
+  TEST ("marker failure does not turn a durable fact commit into failure");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-materialization-marker-fault-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *handle_policy = wyl_handle_get_policy_store (handle);
+  WylPolicyAuthorityMutationResult transition =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
+        (handle_policy, "tenant-a", "orders",
+      WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING, &transition), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (transition, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  wyl_policy_store_graph_authority_mutation_fail_once (handle_policy,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  g_assert_cmpint (commit_one_mutation (handle, handle_policy, "tenant-a", "orders",
+      "materialization-marker-fault-1", "materialization-marker-fault-key-1",
+      &inserted, &outcome), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  g_assert_cmpint (fact_graph_materialization_state (handle_policy, "tenant-a",
+      "orders"), ==, WYL_POLICY_GRAPH_MATERIALIZATION_PENDING);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 /* Issue #546: the internal mutation entry point commits, then refreshes only
  * the graph it committed to.  This is the append/retract path the acceptance
  * criteria are actually written about -- the direct-refresh test above cannot
@@ -4485,6 +4622,12 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_is_isolated);
   g_test_add_func ("/fact-replay/mutation-commits-and-refreshes",
       test_handle_commit_fact_mutation_refreshes_only_its_graph);
+  g_test_add_func ("/fact-replay/mutation-materialization-markers",
+      test_commit_fact_mutation_materialization_markers);
+  g_test_add_func ("/fact-replay/mutation-failed-not-materialized",
+      test_failed_fact_mutation_does_not_materialize);
+  g_test_add_func ("/fact-replay/mutation-marker-failure-preserves-commit",
+      test_materialization_marker_failure_preserves_commit);
   g_test_add_func ("/fact-replay/mutation-isolation-concurrent",
       test_mutation_isolation_is_concurrent);
   g_test_add_func ("/fact-replay/mutation-precommit-failed-is-isolated",
