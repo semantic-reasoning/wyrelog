@@ -16242,6 +16242,22 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+typedef struct
+{
+  gboolean found;
+} DecideServiceCredentialOwnership;
+
+static wyrelog_error_t
+decide_service_credential_ownership_cb
+  (const wyl_policy_service_credential_info_t *credential, gpointer user_data)
+{
+  DecideServiceCredentialOwnership *ownership = user_data;
+  if (credential == NULL || ownership == NULL)
+    return WYRELOG_E_INVALID;
+  ownership->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
 static void
 decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -16309,12 +16325,95 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     decide_reply_finish (msg, ctx, &auth, tenant_status, tenant_error, NULL);
     return;
   }
-  if (g_strcmp0 (auth.actor, user) != 0) {
+  gboolean cross_subject_service_query = g_str_has_prefix (user, "svc:")
+      && !auth.service_authenticated && g_strcmp0 (auth.actor, user) != 0;
+  if (g_strcmp0 (auth.actor, user) != 0 && !cross_subject_service_query) {
     decide_reply_finish (msg, ctx, &auth, 403, "decide_denied", NULL);
     return;
   }
 
   WylHandle *handle = ctx->handle;
+  if (cross_subject_service_query) {
+    /* Only a human bearer holding the service-principal management permission
+     * may inspect a service subject.  Check the caller at the same policy
+     * scope carried by session_token, before evaluating or exposing the target
+     * decision.  Service bearers and non-service subjects remain self-only. */
+    g_autoptr (wyl_decide_req_t) authority_req = wyl_decide_req_new ();
+    g_autoptr (wyl_decide_resp_t) authority_resp = wyl_decide_resp_new ();
+    if (authority_req == NULL || authority_resp == NULL) {
+      decide_reply_finish (msg, ctx, &auth, 500, "decide_failed", NULL);
+      return;
+    }
+    wyl_decide_req_set_subject_id (authority_req, auth.actor);
+    wyl_decide_req_set_action (authority_req,
+        "wr.service_principal.manage");
+    wyl_decide_req_set_resource_id (authority_req, session_token);
+    wyl_decide_req_set_request_id (authority_req,
+        ensure_request_id_header (msg));
+    if (has_guard_context) {
+      gint64 timestamp = 0;
+      gint64 risk = 0;
+      if (!parse_int64_query_param (guard_timestamp, &timestamp) ||
+          !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
+          risk < 0 || risk > 100 ||
+          !wyl_guard_loc_class_is_valid (guard_loc_class)) {
+        decide_reply_finish (msg, ctx, &auth, 400, "invalid_decide_request",
+            NULL);
+        return;
+      }
+      wyl_decide_req_set_guard_context (authority_req, timestamp,
+          guard_loc_class, risk);
+    }
+    wyrelog_error_t authority_rc = wyl_decide (handle, authority_req,
+            authority_resp);
+    if (authority_rc != WYRELOG_E_OK) {
+      decide_reply_finish (msg, ctx, &auth, 500, "decide_failed", NULL);
+      return;
+    }
+    if (wyl_decide_resp_get_decision (authority_resp) != WYL_DECISION_ALLOW) {
+      decide_reply_finish (msg, ctx, &auth, 403, "decide_denied", NULL);
+      return;
+    }
+    if (!wyl_policy_service_subject_is_valid (user, strlen (user))) {
+      decide_reply_finish (msg, ctx, &auth, 400, "invalid_decide_request",
+          NULL);
+      return;
+    }
+    wyl_policy_service_principal_info_t target_principal = { 0 };
+    wyl_policy_store_t *policy_store = wyl_handle_get_policy_store (handle);
+    wyrelog_error_t target_rc = wyl_policy_store_lookup_service_principal (
+      policy_store, user, &target_principal);
+    if (target_rc != WYRELOG_E_OK && target_rc != WYRELOG_E_NOT_FOUND) {
+      wyl_policy_service_principal_info_clear (&target_principal);
+      decide_reply_finish (msg, ctx, &auth, 500, "decide_failed", NULL);
+      return;
+    }
+    if (target_rc == WYRELOG_E_NOT_FOUND || target_principal.state == NULL
+        || !g_str_equal (target_principal.state, "active")) {
+      wyl_policy_service_principal_info_clear (&target_principal);
+      decide_reply_finish (msg, ctx, &auth, 403, "decide_denied", NULL);
+      return;
+    }
+    const gchar *target_tenant = lookup_request_tenant (query);
+    if (target_tenant == NULL)
+      target_tenant = auth.tenant;
+    DecideServiceCredentialOwnership ownership = { 0 };
+    wyrelog_error_t ownership_rc = wyl_policy_store_foreach_service_credential
+          (policy_store, user, target_tenant,
+            decide_service_credential_ownership_cb, &ownership);
+    if (ownership_rc != WYRELOG_E_OK) {
+      wyl_policy_service_principal_info_clear (&target_principal);
+      decide_reply_finish (msg, ctx, &auth, 500, "decide_failed", NULL);
+      return;
+    }
+    if (!ownership.found) {
+      wyl_policy_service_principal_info_clear (&target_principal);
+      decide_reply_finish (msg, ctx, &auth, 403, "decide_denied", NULL);
+      return;
+    }
+    wyl_policy_service_principal_info_clear (&target_principal);
+  }
+
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   wyl_decide_req_set_subject_id (req, user);
