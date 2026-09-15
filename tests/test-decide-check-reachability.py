@@ -28,16 +28,13 @@ import sys
 
 
 SOURCE = "tests/test-daemon-http-decide.c"
-# One known gap, tracked, not tolerated.  check_service_auth_invalidator_
-# contract has never been called since bd2efe1a added it; wiring it in makes
-# check_compound_tenant_real_resolver_and_activation fail at 2151, because it
-# leaves fixture state on the shared server.  Untangling that is #1115, and
-# this entry exists so the guard can be enforced now instead of waiting for
-# it.  An entry here is a debt with an issue number, so removing the issue
-# means removing the entry.
-KNOWN_UNREACHED = {
-    "check_service_auth_invalidator_contract": 1115,
-}
+# Empty, and that is the point.  The one gap this guard shipped with --
+# check_service_auth_invalidator_contract, added in bd2efe1a and never
+# wired to a caller -- was closed by 695360a3, and the allowance expired
+# the way it was built to: the guard started failing to ask for its own
+# entry to be removed (#1115).  An entry here is a debt with an issue
+# number, and it cannot outlive the issue.
+KNOWN_UNREACHED: dict[str, int] = {}
 # A definition is the identifier at column 0 followed by its parameter list,
 # which is how every check in this file is written.
 DEFINITION = re.compile(r"^(check_[A-Za-z0-9_]+) \(", re.M)
