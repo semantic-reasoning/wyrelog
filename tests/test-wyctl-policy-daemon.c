@@ -521,6 +521,37 @@ main (void)
   assert_wyctl_stdout_contains (fact_quota_status_argv,
       "tenant=__wr_default dimension=graph_count limit=2 committed=1 pending=0");
 
+  gchar *fact_write_rate_configure_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "write_rate",
+    "--rate-per-second", "7",
+    "--burst", "11",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (fact_write_rate_configure_argv,
+      "tenant=__wr_default dimension=write_rate rate_per_second=7 burst=11");
+  gchar *fact_write_rate_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "write_rate",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (fact_write_rate_status_argv,
+      "tenant=__wr_default dimension=write_rate rate_per_second=7 burst=11");
+
   gchar *schema_register_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
