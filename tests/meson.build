@@ -551,6 +551,16 @@ if build_client
     timeout : 240,
   )
 
+  # The audit variant's 600s deadline below was 240, set against a plain
+  # build.  The policy-write sanitizer job runs it under ASan+UBSan and then
+  # five more times in parallel, where it measured 177.66s, then 189.52s,
+  # then 207.68s as coverage grew, and 194s / 217s / TIMEOUT on the repeat
+  # pass of those same three runs.  217 against 240 is 90% of budget, a
+  # margin rather than a pass, and it crossed the first time the runner was
+  # slower.  The work is legitimate, so the deadline moved rather than the
+  # coverage.  Moving it again means editing
+  # test-daemon-http-decide-private-companion-boundary.py, which pins the
+  # value -- that is the point of the pin, not an obstacle to it.
   if test_daemon_http_decide_audit_enabled
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
       'test-daemon-http-decide.c',
@@ -567,7 +577,7 @@ if build_client
     test_daemon_http_decide_targets += [test_daemon_http_decide_audit]
 
     test('daemon-http-decide-audit', test_daemon_http_decide_audit,
-      timeout : 240,
+      timeout : 600,
     )
   endif
 
