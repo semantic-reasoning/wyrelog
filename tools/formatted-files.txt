@@ -38,6 +38,7 @@ tests/test-engine-intern.c
 tests/test-engine-io.c
 tests/test-engine.c
 tests/test-events.c
+tests/test-exit-status-reporting.c
 tests/test-exit-status-termination.c
 tests/test-exit-status.h
 tests/test-fact-artifact-durability-journal-codec.c

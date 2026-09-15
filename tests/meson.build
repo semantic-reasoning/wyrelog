@@ -3659,19 +3659,6 @@ test('secure-duckdb-ci-wiring', python3,
   args : [files('test-secure-duckdb-ci-wiring.py'),
     meson.project_source_root()])
 
-# The exit status is the only thing a failing run of test-fact-store reports,
-# so two checks sharing a code cost the first question triage asks.
-test('fact-store-failure-codes', python3,
-  args : [files('test-fact-store-failure-codes.py'),
-    meson.project_source_root()])
-
-test('fact-store-failure-codes-self-test', python3,
-  args : [
-    files('test-fact-store-failure-codes.py'),
-    '--self-test',
-    meson.project_source_root(),
-  ])
-
 # A failure code that is a multiple of 256 reaches the shell as exit status 0,
 # so meson records a failing assertion as Ok.  Eleven files carried one.
 #
@@ -3731,6 +3718,16 @@ if host_machine.system() != 'windows'
   test('exit-status-termination', exit_status_termination)
 
 endif
+
+exit_status_reporting = executable(
+  'test-exit-status-reporting',
+  'test-exit-status-reporting.c',
+  include_directories : include_directories('.'),
+  link_language : 'c',
+)
+test('exit-status-reporting', python3,
+  args : [files('test-exit-status-reporting.py'),
+    exit_status_reporting.full_path()])
 
 if enable_secure_duckdb_bridge_opt.enabled()
   exit_status_nested_lambda = executable(

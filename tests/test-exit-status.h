@@ -2,18 +2,29 @@
 #ifndef WYL_TEST_EXIT_STATUS_H
 #define WYL_TEST_EXIT_STATUS_H
 
-/* Shells observe only the low byte of a POSIX process status.  Keep a failed
- * test from becoming a success when its status is a nonzero multiple of 256.
- * Windows process exit codes are not subject to this shell truncation. */
+#include <stdio.h>
+
+/* Failure identity belongs in the diagnostic stream, not in the process
+ * status.  The latter is only a success/failure bit at the test boundary. */
 static inline int
-wyl_test_normalize_exit_status (int status)
+wyl_test_report_exit_status (const char *file, const char *function,
+    int line, int status)
 {
-#ifndef _WIN32
-  if (status != 0 && status % 256 == 0)
-    return 1;
-#endif
-  return status;
+  if (status == 0)
+    return 0;
+  (void) fprintf (stderr,
+      "WYRELOG_TEST_FAILURE file=%s function=%s line=%d code=%d\n", file,
+      function, line, status);
+  (void) fflush (stderr);
+  return 1;
 }
+
+#define wyl_test_normalize_exit_status(status_expression) \
+  wyl_test_report_exit_status (__FILE__, __func__, __LINE__, \
+      (status_expression))
+#define wyl_test_normalize_exit_status_named(name, status_expression) \
+  wyl_test_report_exit_status (__FILE__, (name), __LINE__, \
+      (status_expression))
 
 #ifndef _WIN32
 #define WYL_TEST_EXIT_CAPTURE_NAME_I(line) wyl_test_exit_status_capture_ ## line

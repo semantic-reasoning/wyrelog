@@ -83,7 +83,8 @@ def _main_returns(text: str, source: str
       line = source_line(match.start())
       if not expression:
         raise ValueError(f"{source}:{line}: main has a bare return")
-      if not re.match(r"^wyl_test_normalize_exit_status\s*\(", expression):
+      if not re.match(
+          r"^wyl_test_normalize_exit_status(?:_named)?\s*\(", expression):
         raise ValueError(
             f"{source}:{line}: main return is not normalized: {expression}")
       rows.append({"line": line, "expression": expression})
@@ -179,7 +180,7 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
         + re.escape(name) + r"\b", scanned))
     definitions = [match for match in directives
         if match.group(1) == "define"]
-    expected = 0 if name == "wyl_test_normalize_exit_status" else 2
+    expected = 1 if name == "wyl_test_normalize_exit_status" else 2
     if len(definitions) != expected or len(directives) != expected:
       errors.append(f"header has unexpected sanitizer bindings for {name}")
   capture_bindings = ("WYL_TEST_EXIT_CAPTURE_NAME_I",
@@ -211,16 +212,14 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
           windows_branch) is None:
         errors.append(f"{macro} Windows pass-through definition changed")
   normalizer = re.search(
-      r"\bstatic\s+inline\s+int\s+wyl_test_normalize_exit_status\s*"
-      r"\(\s*int\s+status\s*\)\s*\{\s*#ifndef\s+_WIN32\s+"
-      r"if\s*\(\s*status\s*!=\s*0\s*&&\s*status\s*%\s*256\s*"
-      r"==\s*0\s*\)\s*return\s+1\s*;\s*#endif\s+"
-      r"return\s+status\s*;\s*\}", flattened)
+      r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
+      r"\([^)]*\)\s*\{.*?if\s*\(\s*status\s*==\s*0\s*\)\s*"
+      r"return\s+0\s*;.*?return\s+1\s*;\s*\}", flattened)
   if normalizer is None:
-    errors.append("POSIX normalizer does not map each nonzero 256 multiple to 1")
+    errors.append("POSIX normalizer does not map each nonzero status to 1")
   normalizer_definitions = list(re.finditer(
-      r"\bstatic\s+inline\s+int\s+wyl_test_normalize_exit_status\s*"
-      r"\(\s*int\s+status\s*\)\s*\{", flattened))
+      r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
+      r"\([^)]*\)\s*\{", flattened))
   if len(normalizer_definitions) != 1:
     errors.append("header must define exactly one POSIX status normalizer")
   posix_else = re.search(r"(?m)^#else\s*$", scanned)
@@ -555,7 +554,7 @@ def validate_repository(root: Path) -> list[str]:
   if sites != expected_sites:
     errors.append("direct termination inventory differs from "
         + SITES_MANIFEST)
-  if returns["source_count"] != 159 or returns["main_definitions"] != 166:
+  if returns["source_count"] != 160 or returns["main_definitions"] != 167:
     errors.append("main census changed; review and update the inventory")
   if (len(sites) != 70
       or sum(site["api"] == "_exit" for site in sites) != 49
@@ -664,9 +663,8 @@ def self_test(root: Path) -> list[str]:
       errors.append("trigraph-spliced source sanitizer binding escaped the guard")
   header = (root / "tests/test-exit-status.h").read_text(encoding="utf-8")
   sanitizer_mutations = (
-      ("normalizer modulus", "status % 256 == 0",
-          "status % 256 != 0"),
-      ("normalizer replacement", "    return 1;", "    return status;"),
+      ("normalizer zero check", "status == 0", "status != 0"),
+      ("normalizer replacement", "  return 1;", "  return status;"),
       ("normalized _Exit argument",
           "_Exit (WYL_TEST_EXIT_CAPTURE_NAME (__LINE__));",
           "_Exit (status_expression);"),

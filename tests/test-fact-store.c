@@ -74,11 +74,11 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
 }
 
 /*
- * Failure-code allocation.  main() hands these to the shell as the exit
- * status, so two functions sharing one are indistinguishable in a failing
- * run.  tests/test-fact-store-failure-codes.py enforces uniqueness; this
- * table is here so the next author can pick a free range without reading
- * the whole file.  Ranges are inclusive of what is used, not reserved.
+ * Failure-code allocation.  The shared test-status boundary reports the
+ * source site and full code, so these ranges are no longer an identity
+ * mechanism.  They remain useful for locating checks in source and for
+ * reading historical diagnostics.  Ranges are inclusive of what is used,
+ * not reserved.
  *
  *   100-130      check_fact_store_retracts_idempotently
  *   131-203      check_fact_store_appends_idempotently
