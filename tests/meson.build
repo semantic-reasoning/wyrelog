@@ -3738,7 +3738,13 @@ exit_status_reporting = executable(
 )
 test('exit-status-reporting', python3,
   args : [files('test-exit-status-reporting.py'),
-    exit_status_reporting.full_path()])
+    exit_status_reporting.full_path()],
+  depends : exit_status_reporting)
+
+test('meson-test-executable-dependencies', python3,
+  args : [meson.current_source_dir() / '../tools'
+      / 'check-meson-test-dependencies.py',
+    meson.current_source_dir() / 'meson.build'])
 
 if enable_secure_duckdb_bridge_opt.enabled()
   exit_status_nested_lambda = executable(
@@ -3759,7 +3765,8 @@ if enable_secure_duckdb_bridge_opt.enabled()
     )
     test('exit-status-nested-lambda-outer-mutation', python3,
       args : [files('test-exit-status-main-mutation.py'),
-        exit_status_nested_lambda_mutant.full_path()])
+        exit_status_nested_lambda_mutant.full_path()],
+      depends : exit_status_nested_lambda_mutant)
   endif
 endif
 
