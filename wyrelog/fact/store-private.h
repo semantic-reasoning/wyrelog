@@ -397,4 +397,11 @@ wyrelog_error_t wyl_fact_store_forget_pending_count (wyl_fact_store_t * store,
     const gchar * expected_tenant_id, const gchar * expected_graph_id,
     gsize * out_pending);
 
+/* Report whether the durable batch ledger contains at least one committed
+ * mutation.  This is used to reconcile a policy marker left PENDING by a
+ * crash or marker-write failure without treating schema-only stores as
+ * materialized. */
+wyrelog_error_t wyl_fact_store_has_durable_batches (wyl_fact_store_t * store,
+    gboolean * out_has_batches);
+
 G_END_DECLS;

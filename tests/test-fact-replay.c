@@ -3574,6 +3574,53 @@ test_provisioned_graph_reports_empty_not_degraded (void)
 }
 
 static void
+test_materialized_store_loss_reports_unavailable (void)
+{
+  TEST ("a materialized graph whose store is lost reports unavailable");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-materialized-store-loss-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+  WylPolicyAuthorityMutationResult transition =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_transition_fact_graph_materialization
+        (policy, "tenant-a", "orders",
+      WYL_POLICY_GRAPH_MATERIALIZATION_NEVER,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &transition), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (transition, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_autofree gchar *graph_dir = lookup_graph_storage_path (policy, "tenant-a",
+          "orders");
+  g_autofree gchar *fact_db = g_build_filename (graph_dir, "facts.duckdb",
+          NULL);
+  g_assert_cmpint (g_remove (fact_db), ==, 0);
+  g_clear_pointer (&policy, wyl_policy_store_close);
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+      fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 1);
+  g_assert_cmpuint (probe.unavailable, ==, 1);
+  g_assert_cmpuint (probe.empty, ==, 0);
+  remove_tree (root);
+}
+
+static void
 test_closed_graph_reports_sealed_not_ready (void)
 {
   g_autoptr (GError) error = NULL;
@@ -4676,6 +4723,8 @@ main (int argc, char **argv)
       test_status_is_not_ready_while_an_erasure_is_outstanding);
   g_test_add_func ("/fact-replay/provisioned-graph-reports-empty",
       test_provisioned_graph_reports_empty_not_degraded);
+  g_test_add_func ("/fact-replay/materialized-store-loss-unavailable",
+      test_materialized_store_loss_reports_unavailable);
   g_test_add_func ("/fact-replay/boot-converges-forget-on-sealed-graph",
       test_boot_converges_forget_on_sealed_graph);
   g_test_add_func

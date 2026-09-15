@@ -978,9 +978,22 @@ typedef struct
   wyl_policy_store_t *policy;
   const gchar *fact_root;
   const wyl_policy_fact_graph_info_t *info;
+  WylPolicyGraphMaterializationState materialization_state;
   WylFactArtifactNamespace *artifact_namespace;
   WylFactArtifactMutationLease *artifact_lease;
 } GraphBuildCtx;
+
+static WylPolicyGraphMaterializationState
+graph_materialization_state_or_unknown (wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *graph_info)
+{
+  WylPolicyGraphMaterializationState state =
+      WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+  if (wyl_policy_store_read_fact_graph_materialization (policy,
+      graph_info->tenant_id, graph_info->graph_id, &state) != WYRELOG_E_OK)
+    return WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
+  return state;
+}
 
 static wyrelog_error_t
 build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
@@ -990,8 +1003,36 @@ build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
   if (g_strcmp0 (key->tenant_id, ctx->info->tenant_id) != 0
       || g_strcmp0 (key->graph_id, ctx->info->graph_id) != 0)
     return WYRELOG_E_INTERNAL;
-  return open_graph_engine_with_artifact_lease (ctx->policy, ctx->fact_root,
-             ctx->info, ctx->artifact_namespace, ctx->artifact_lease, out_engine);
+  /* A crash can leave policy at PENDING after DuckDB committed.  Reconcile
+   * only when the durable batch ledger proves the mutation happened; a
+   * schema-only store remains degraded and is never promoted by boot. */
+  if (ctx->materialization_state == WYL_POLICY_GRAPH_MATERIALIZATION_PENDING) {
+    g_autoptr (wyl_fact_store_t) pending_store = NULL;
+    wyrelog_error_t pending_rc = open_graph_store (ctx->policy,
+            ctx->fact_root, ctx->info, FALSE, ctx->artifact_namespace,
+            ctx->artifact_lease, &pending_store);
+    if (pending_rc != WYRELOG_E_OK)
+      return pending_rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_IO : pending_rc;
+    gboolean has_batches = FALSE;
+    if (wyl_fact_store_has_durable_batches (pending_store, &has_batches)
+        != WYRELOG_E_OK || !has_batches)
+      return WYRELOG_E_IO;
+    WylPolicyAuthorityMutationResult result;
+    (void) wyl_policy_store_transition_fact_graph_materialization (
+      ctx->policy, ctx->info->tenant_id, ctx->info->graph_id,
+      WYL_POLICY_GRAPH_MATERIALIZATION_PENDING,
+      WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED, &result);
+  }
+  wyrelog_error_t rc = open_graph_engine_with_artifact_lease (ctx->policy,
+          ctx->fact_root, ctx->info, ctx->artifact_namespace, ctx->artifact_lease,
+          out_engine);
+  /* A missing store is empty only before the first successful materialization.
+   * Existing graphs and UNKNOWN legacy graphs must remain degraded. */
+  if (rc == WYRELOG_E_NOT_FOUND
+      && ctx->materialization_state
+      != WYL_POLICY_GRAPH_MATERIALIZATION_NEVER)
+    return WYRELOG_E_IO;
+  return rc;
 }
 
 /* Ask whether a graph has any pending forget intention without asking for
@@ -1185,7 +1226,10 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
               "for a pending forget: rc=%d", tenant, graph, (int) forget_rc);
       }
     }
-    GraphBuildCtx build = { policy, fact_root, &spec->info, NULL, NULL };
+    GraphBuildCtx build = {
+      policy, fact_root, &spec->info,
+      graph_materialization_state_or_unknown (policy, &spec->info), NULL, NULL
+    };
     wyrelog_error_t graph_rc = wyl_fact_graph_runtime_manager_refresh
           (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
     if (graph_rc == WYRELOG_E_OK)
@@ -1376,7 +1420,10 @@ wyl_fact_replay_refresh_graph (wyl_policy_store_t *policy,
    * leave every sibling graph's runtime entry and generation untouched
    * (issue #546 isolation), and retiring on a one-element seen set would
    * detach all other entries. */
-  GraphBuildCtx build = { policy, fact_root, graph_info, NULL, NULL };
+  GraphBuildCtx build = {
+    policy, fact_root, graph_info,
+    graph_materialization_state_or_unknown (policy, graph_info), NULL, NULL
+  };
   rc = wyl_fact_graph_runtime_manager_refresh (runtime_manager, &key,
           build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
@@ -1402,8 +1449,11 @@ wyl_fact_replay_refresh_graph_publication
     if (rc != WYRELOG_E_OK)
       return rc;
   }
-  GraphBuildCtx build = { policy, fact_root, graph_info, artifact_namespace,
-                          artifact_lease };
+  GraphBuildCtx build = {
+    policy, fact_root, graph_info,
+    graph_materialization_state_or_unknown (policy, graph_info),
+    artifact_namespace, artifact_lease
+  };
   return wyl_fact_graph_runtime_publication_refresh
            (publication, build_graph_engine, &build, out_status);
 }
@@ -1433,8 +1483,11 @@ refresh_graph_closed_internal (wyl_policy_store_t *policy,
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
-  GraphBuildCtx build = { policy, fact_root, graph_info, artifact_namespace,
-                          artifact_lease };
+  GraphBuildCtx build = {
+    policy, fact_root, graph_info,
+    graph_materialization_state_or_unknown (policy, graph_info),
+    artifact_namespace, artifact_lease
+  };
   rc = wyl_fact_graph_runtime_manager_refresh_closed (runtime_manager, &key,
           build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
@@ -1463,7 +1516,10 @@ wyl_fact_replay_publish_graph_closed_and_open
           graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
-  GraphBuildCtx build = { policy, fact_root, graph_info, NULL, NULL };
+  GraphBuildCtx build = {
+    policy, fact_root, graph_info,
+    graph_materialization_state_or_unknown (policy, graph_info), NULL, NULL
+  };
   rc = wyl_fact_graph_runtime_manager_publish_closed_and_open
         (runtime_manager, &key, build_graph_engine, &build, out_status);
   wyl_fact_graph_key_clear (&key);
