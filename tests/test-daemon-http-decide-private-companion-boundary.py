@@ -186,7 +186,7 @@ audit_target_contract = re.search(
     r"test_daemon_http_decide_targets\s*\+=\s*"
     r"\[test_daemon_http_decide_audit\]\s*"
     r"test\('daemon-http-decide-audit',\s*"
-    r"test_daemon_http_decide_audit,\s*timeout\s*:\s*240,\s*\)\s*"
+    r"test_daemon_http_decide_audit,\s*timeout\s*:\s*600,\s*\)\s*"
     r"endif",
     source,
     re.DOTALL,
