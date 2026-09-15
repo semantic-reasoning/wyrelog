@@ -3703,6 +3703,13 @@ test('variant-diag-coverage', python3,
   args : [files('test-variant-diag-coverage.py'),
     meson.project_source_root()])
 
+test('meson-test-depends', python3,
+  args : [files('test-meson-test-depends.py'),
+    meson.project_source_root()])
+test('meson-test-depends-self-test', python3,
+  args : [files('test-meson-test-depends.py'), '--self-test',
+    meson.project_source_root()])
+
 test('exit-status-boundaries', python3,
   args : [files('test-exit-status-boundaries.py'),
     meson.project_source_root()],
@@ -3738,7 +3745,11 @@ exit_status_reporting = executable(
 )
 test('exit-status-reporting', python3,
   args : [files('test-exit-status-reporting.py'),
-    exit_status_reporting.full_path()])
+    exit_status_reporting.full_path()],
+  # full_path() is a string, so meson builds this target only if it is named
+  # here.  Without it a filtered `meson test` -- which is what CI runs -- never
+  # links the executable and the test dies on FileNotFoundError.
+  depends : exit_status_reporting)
 
 if enable_secure_duckdb_bridge_opt.enabled()
   exit_status_nested_lambda = executable(
@@ -3759,7 +3770,8 @@ if enable_secure_duckdb_bridge_opt.enabled()
     )
     test('exit-status-nested-lambda-outer-mutation', python3,
       args : [files('test-exit-status-main-mutation.py'),
-        exit_status_nested_lambda_mutant.full_path()])
+        exit_status_nested_lambda_mutant.full_path()],
+      depends : exit_status_nested_lambda_mutant)
   endif
 endif
 
