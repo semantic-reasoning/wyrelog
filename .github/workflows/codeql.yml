@@ -11,9 +11,11 @@ permissions:
   contents: read
   security-events: write
 
+# push and schedule both resolve github.ref to refs/heads/main, so they share
+# one group and a merge cancelled the weekly security scan (12 of 15 runs).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true

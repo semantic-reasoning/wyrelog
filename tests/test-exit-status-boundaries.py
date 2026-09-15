@@ -18,11 +18,12 @@ SITES_MANIFEST = "tests/test-exit-status-sites.json"
 SUPPORT_SOURCES = {"tests/test-exit-status-termination.c"}
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp"}
 EXIT_CALL = re.compile(
-    r"\b(WYL_TEST__EXIT|WYL_TEST_EXIT|ExitProcess|TerminateProcess|"
+    r"\b(WYL_TEST__EXIT|WYL_TEST_EXIT|WYL_TEST_SKIP|ExitProcess|TerminateProcess|"
     r"_Exit|_exit|quick_exit|exit)\s*\(")
 SANITIZER_BINDING = re.compile(
     r"(?m)^[ \t]*#[ \t]*(?:define|undef)[ \t]+"
-    r"(?:wyl_test_normalize_exit_status|WYL_TEST__EXIT|WYL_TEST_EXIT)\b")
+    r"(?:wyl_test_normalize_exit_status|WYL_TEST__EXIT|WYL_TEST_EXIT"
+    r"|WYL_TEST_SKIP)\b")
 INCLUDE_DIRECTIVE = re.compile(
     r"^\s*#\s*include\s*([\"<])([^\">]+)[\">]")
 CONDITIONAL_DIRECTIVE = re.compile(
@@ -199,6 +200,16 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
       r"WYL_TEST_EXIT_CAPTURE_NAME_I\s*\(line\)\s*$", scanned)
   if capture_helper_i is None or capture_helper is None:
     errors.append("header capture-name helpers do not match the validated form")
+  skip_directives = list(re.finditer(
+      r"(?m)^[ \t]*#[ \t]*(define|undef)[ \t]+WYL_TEST_SKIP\b", scanned))
+  if len(skip_directives) != 1 or skip_directives[0].group(1) != "define":
+    errors.append("header has unexpected bindings for WYL_TEST_SKIP")
+  # Nullary by contract.  An argument would make this a second way to return an
+  # arbitrary status from main, which is the rule the normalizer exists to keep.
+  if re.search(r"(?m)^#define\s+WYL_TEST_SKIP\s*\(\s*\)\s+_exit\s*\(\s*77\s*\)\s*$",
+      scanned) is None:
+    errors.append("WYL_TEST_SKIP is not the nullary 77 skip primitive")
+
   windows_else = re.search(r"(?m)^#else\s*$", scanned)
   if windows_else is None:
     errors.append("header is missing the Windows pass-through branch")
@@ -211,12 +222,25 @@ def _validate_header_text(header: str, language: str = "c17") -> list[str]:
           + r"\s*\(\s*status_expression\s*\)\s*$",
           windows_branch) is None:
         errors.append(f"{macro} Windows pass-through definition changed")
+  # A search with .*? between the clauses only proves the text is present,
+  # not that it is reached: a body that returns the status verbatim and leaves
+  # `return 1;` behind as dead code satisfied it, so the whole family stayed
+  # green against a normalizer turned into a complete no-op.  Pin the body
+  # exactly, the way the WYL_TEST_EXIT macros below are already pinned.
   normalizer = re.search(
       r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
-      r"\([^)]*\)\s*\{.*?if\s*\(\s*status\s*==\s*0\s*\)\s*"
-      r"return\s+0\s*;.*?return\s+1\s*;\s*\}", flattened)
+      r"\([^)]*\)\s*\{([^{}]*)\}", flattened)
   if normalizer is None:
     errors.append("POSIX normalizer does not map each nonzero status to 1")
+  else:
+    ordered_normalizer = (
+        r"\s*if\s*\(\s*status\s*==\s*0\s*\)\s*return\s+0\s*;\s*"
+        r"\(\s*void\s*\)\s*fprintf\s*\(\s*stderr\s*,\s*,\s*file\s*,"
+        r"\s*function\s*,\s*line\s*,\s*status\s*\)\s*;\s*"
+        r"\(\s*void\s*\)\s*fflush\s*\(\s*stderr\s*\)\s*;\s*"
+        r"return\s+1\s*;\s*")
+    if re.fullmatch(ordered_normalizer, normalizer.group(1)) is None:
+      errors.append("POSIX normalizer does not map each nonzero status to 1")
   normalizer_definitions = list(re.finditer(
       r"\bstatic\s+inline\s+int\s+wyl_test_report_exit_status\s*"
       r"\([^)]*\)\s*\{", flattened))
@@ -556,11 +580,12 @@ def validate_repository(root: Path) -> list[str]:
         + SITES_MANIFEST)
   if returns["source_count"] != 160 or returns["main_definitions"] != 167:
     errors.append("main census changed; review and update the inventory")
-  if (len(sites) != 70
-      or sum(site["api"] == "_exit" for site in sites) != 49
+  if (len(sites) != 74
+      or sum(site["api"] == "_exit" for site in sites) != 52
       or sum(site["api"] == "_Exit" for site in sites) != 13
       or sum(site["api"] == "ExitProcess" for site in sites) != 2
-      or sum(site["api"] == "TerminateProcess" for site in sites) != 6):
+      or sum(site["api"] == "TerminateProcess" for site in sites) != 6
+      or sum(site["api"] == "WYL_TEST_SKIP" for site in sites) != 1):
     errors.append("direct termination API census changed unexpectedly")
   errors.extend(_validate_header(root))
   return errors
@@ -678,6 +703,38 @@ def self_test(root: Path) -> list[str]:
       errors.append(f"sanitizer mutation setup failed: {label}")
     elif not _validate_header_text(mutant):
       errors.append(f"sanitizer mutation survived: {label}")
+  # These name the error they must provoke.  A mutation that merely turns the
+  # gate red proves nothing about which check caught it -- the normalizer
+  # bypass below went undetected for as long as it did because every existing
+  # mutant targets a macro, so "some error appeared" was never the normalizer's
+  # error.
+  named_mutations = (
+      ("normalizer returns the status verbatim",
+          "  (void) fflush (stderr);\n  return 1;",
+          "  (void) fflush (stderr);\n  if (status != 0)\n"
+          "    return status;\n  return 1;",
+          "POSIX normalizer does not map each nonzero status to 1"),
+      ("skip primitive takes an argument",
+          "#define WYL_TEST_SKIP() _exit (77)",
+          "#define WYL_TEST_SKIP(status_expression) _exit (status_expression)",
+          "WYL_TEST_SKIP is not the nullary 77 skip primitive"),
+      ("skip primitive yields a status other than 77",
+          "#define WYL_TEST_SKIP() _exit (77)",
+          "#define WYL_TEST_SKIP() _exit (78)",
+          "WYL_TEST_SKIP is not the nullary 77 skip primitive"),
+  )
+  for label, before, after, expected in named_mutations:
+    mutant = header.replace(before, after, 1)
+    if mutant == header:
+      errors.append(f"sanitizer mutation setup failed: {label}")
+      continue
+    reported = _validate_header_text(mutant)
+    if not reported:
+      errors.append(f"sanitizer mutation survived: {label}")
+    elif expected not in reported:
+      errors.append(f"sanitizer mutation died on the wrong check: {label}: "
+          f"expected {expected!r}, got {reported!r}")
+
   capture = "WYL_TEST_EXIT_CAPTURE_NAME (__LINE__)"
   guard_start = f"    if ({capture} != 0"
   reordered = header.replace(guard_start,

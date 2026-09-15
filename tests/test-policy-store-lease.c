@@ -1285,7 +1285,9 @@ fork_exec_helper (const gchar *path)
     char *const argv[] = { test_lease_self_path, (char *) LEASE_HELPER_ARG,
                            (char *) path, (char *) "--oneshot", NULL};
     execve (test_lease_self_path, argv, environ);
-    WYL_TEST_EXIT(74);
+    /* Not 74: lease_helper_main already uses 74 for a failed store open,
+     * and a failed execve must not be mistaken for one. */
+    WYL_TEST_EXIT (75);
   }
   int status = 0;
   g_assert_cmpint (waitpid (child, &status, 0), ==, child);
@@ -1326,6 +1328,11 @@ spawn_holder (const gchar *path, GDataInputStream **out_stdout)
   g_assert_nonnull (process);
   *out_stdout =
       g_data_input_stream_new (g_subprocess_get_stdout_pipe (process));
+  /* The helper writes READY through stdio, which is a text stream on Windows,
+   * so the line arrives as CRLF there.  The default newline type is LF only,
+   * which would leave the CR on the line and fail the compare below. */
+  g_data_input_stream_set_newline_type (*out_stdout,
+      G_DATA_STREAM_NEWLINE_TYPE_ANY);
   gsize len = 0;
   gchar *line = g_data_input_stream_read_line (*out_stdout, &len, NULL, &error);
   g_assert_no_error (error);
@@ -1394,7 +1401,7 @@ main (int argc, char **argv)
   if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
     g_error ("policy-store lease test has no executable path");
   if (argc >= 2 && g_strcmp0 (argv[1], LEASE_HELPER_ARG) == 0)
-    return wyl_test_normalize_exit_status (lease_helper_main (argc, argv));
+    WYL_TEST_EXIT (lease_helper_main (argc, argv));
 
   test_lease_self_path = g_canonicalize_filename (argv[0], NULL);
   if (test_lease_self_path == NULL || !g_path_is_absolute (test_lease_self_path)
@@ -1422,7 +1429,10 @@ main (int argc, char **argv)
       test_early_error_releases_lease);
   g_test_add_func ("/policy-store-lease/lock-symlink",
       test_lock_symlink_rejected);
-  g_test_add_func ("/policy-store-lease/subprocess-crash",
+  /* Not "/subprocess-crash": GLib reserves any path containing "/subprocess"
+   * for g_test_trap_subprocess() children and silently declines to run it, so
+   * under the old name this test never executed and the binary still exited 0. */
+  g_test_add_func ("/policy-store-lease/child-crash",
       test_subprocess_busy_crash_and_reacquire);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
