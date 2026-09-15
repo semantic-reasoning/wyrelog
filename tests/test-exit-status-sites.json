@@ -29,6 +29,20 @@
   },
   {
     "api": "_exit",
+    "expression": "run_lease_child (argv[2], argv[3])",
+    "line": 4793,
+    "path": "tests/test-fact-artifact-namespace-windows.c",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
+    "api": "_exit",
+    "expression": "run_temp_token_child (argv[2], argv[3], argv[4])",
+    "line": 4795,
+    "path": "tests/test-fact-artifact-namespace-windows.c",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
+    "api": "_exit",
     "expression": "91",
     "line": 275,
     "path": "tests/test-fact-artifact-namespace.c",
@@ -196,6 +210,13 @@
     "platform": "posix-normalized-wrapper"
   },
   {
+    "api": "WYL_TEST_SKIP",
+    "expression": "",
+    "line": 55,
+    "path": "tests/test-lobac-partial-delta.c",
+    "platform": "windows"
+  },
+  {
     "api": "_Exit",
     "expression": "81",
     "line": 1544,
@@ -232,8 +253,15 @@
   },
   {
     "api": "_exit",
-    "expression": "74",
-    "line": 1288,
+    "expression": "75",
+    "line": 1290,
+    "path": "tests/test-policy-store-lease.c",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
+    "api": "_exit",
+    "expression": "lease_helper_main (argc, argv)",
+    "line": 1399,
     "path": "tests/test-policy-store-lease.c",
     "platform": "posix-normalized-wrapper"
   },
