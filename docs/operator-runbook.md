@@ -814,6 +814,22 @@ alongside the human admins that own the deployment. Keep the pieces distinct:
   against the current policy. It is not cached in the token; a role change flips
   the same unexpired token immediately.
 
+  **The `session_token` query parameter carries the policy scope, not a session
+  token.** The name is legacy and the value is used only as the resource the
+  decision is evaluated against; the caller is authenticated by the `Bearer`
+  header. Pass the tenant -- for a service request, the credential tenant:
+
+  ```
+  POST /decide?user=alice&perm=wr.datalog.query&tenant=__wr_default     &session_token=__wr_default          -> {"decision":1}
+  ```
+
+  Passing an actual session token there asks about a scope no grant is written
+  at, so it answers a confident `{"decision":0}` for a permission the daemon
+  will honour on the very next request. `docs/developer-lifecycle.md` states
+  the rule; it is repeated here because this page is the one an operator reads
+  while debugging a denial, and reading only this page was enough to
+  misdiagnose `/decide` as broken (#1034).
+
 Management authority is asymmetric by design:
 
 - **Human SYSTEM management authority.** Creating principals, issuing/rotating/
