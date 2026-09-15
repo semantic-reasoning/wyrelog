@@ -337,8 +337,8 @@ wyctl_key_options_clear (WyctlKeyOptions *opts)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlKeyOptions, wyctl_key_options_clear);
 
 static void
-    wyctl_service_permission_closure_options_clear
-    (WyctlServicePermissionClosureOptions * opts)
+wyctl_service_permission_closure_options_clear
+  (WyctlServicePermissionClosureOptions * opts)
 {
   g_clear_pointer (&opts->store_path, g_free);
   g_clear_pointer (&opts->keyprovider_path, g_free);
@@ -705,7 +705,7 @@ send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
   g_cond_init (&timeout.cond);
   g_mutex_init (&timeout.mutex);
   GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
-      &timeout);
+          &timeout);
 
   g_autoptr (GError) io_error = NULL;
   g_autoptr (GBytes) body =
@@ -871,8 +871,8 @@ readiness_reason_is_known (const gchar *reason)
   if (reason == NULL)
     return FALSE;
   return g_strcmp0 (reason, "delta_not_ready") == 0 ||
-      g_strcmp0 (reason, "audit_degraded") == 0 ||
-      g_strcmp0 (reason, "not_ready") == 0;
+         g_strcmp0 (reason, "audit_degraded") == 0 ||
+         g_strcmp0 (reason, "not_ready") == 0;
 }
 
 static const gchar *
@@ -902,11 +902,11 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
   };
   GOptionEntry entries[] = {
     {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
-        "Daemon URL", "URL"},
+     "Daemon URL", "URL"},
     {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
-        "Daemon probe timeout in milliseconds", "N"},
+     "Daemon probe timeout in milliseconds", "N"},
     {"readiness", 0, 0, G_OPTION_ARG_NONE, &opts.readiness,
-        "Report daemon readiness", NULL},
+     "Report daemon readiness", NULL},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -931,10 +931,10 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
   const gchar *timeout_ms_arg_input = opts.timeout_ms_arg != NULL ?
       opts.timeout_ms_arg : global_opts->timeout_ms_arg;
   g_autofree gchar *daemon_url = wyctl_resolve_string_option (daemon_url_arg,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (timeout_ms_arg_input,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
@@ -1050,9 +1050,9 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceTokenOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-file", 0, 0, G_OPTION_ARG_STRING, &opts.credential_file,
-        "Protected service credential file", "PATH"},
+     "Protected service credential file", "PATH"},
     {"token-output", 0, 0, G_OPTION_ARG_STRING, &opts.token_output,
-        "Protected access-token output path", "PATH"},
+     "Protected access-token output path", "PATH"},
     {NULL}
   };
   g_autoptr (GOptionContext) context = g_option_context_new ("service-token");
@@ -1073,7 +1073,7 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
     return 2;
   }
   g_autofree gchar *daemon_url = wyctl_resolve_string_option
-      (global_opts->daemon_url, global_opts->settings, "daemon-url");
+        (global_opts->daemon_url, global_opts->settings, "daemon-url");
   if (daemon_url == NULL || !daemon_url_is_valid (daemon_url)
       || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
@@ -1081,7 +1081,7 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   }
   g_autofree gchar *raw = NULL;
   WyctlTokenFileStatus file_status = wyctl_token_file_read
-      (opts.credential_file, &raw);
+        (opts.credential_file, &raw);
   if (file_status != WYCTL_TOKEN_FILE_OK) {
     g_printerr ("wyctl: unable to read service credential file: %s\n",
         opts.credential_file);
@@ -1090,7 +1090,7 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlSensitiveText) credential_secret = { 0 };
   g_autofree gchar *credential_id = NULL;
   if (wyctl_publication_credential_document_decode (raw, strlen (raw),
-          &credential_id, &credential_secret) != WYRELOG_E_OK) {
+      &credential_id, &credential_secret) != WYRELOG_E_OK) {
     wyctl_token_file_free_sensitive (g_steal_pointer (&raw), 0);
     g_printerr ("wyctl: invalid service credential file\n");
     return 2;
@@ -1112,8 +1112,8 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   }
   guint timeout_ms = 0;
   g_autofree gchar *timeout_arg = wyctl_resolve_string_option
-      (global_opts->timeout_ms_arg, global_opts->settings,
-      "default-timeout-ms");
+        (global_opts->timeout_ms_arg, global_opts->settings,
+          "default-timeout-ms");
   if (!parse_timeout_ms (timeout_arg, &timeout_ms)) {
     wyctl_sensitive_text_clear (&credential_secret);
     g_printerr ("wyctl: invalid timeout\n");
@@ -1122,14 +1122,14 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   wyl_client_set_timeout_ms (client, timeout_ms);
   g_auto (WylClientServiceTokenResult) result = { 0 };
   wyrelog_error_t rc = wyl_client_service_token_exchange (client, &request,
-      &result);
+          &result);
   wyctl_sensitive_text_clear (&credential_secret);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: service token exchange failed\n");
     return 1;
   }
   WyctlTokenFileStatus output_status = wyctl_token_file_write_protected
-      (opts.token_output, result.access_token.text, result.access_token.len);
+        (opts.token_output, result.access_token.text, result.access_token.len);
   if (output_status != WYCTL_TOKEN_FILE_OK) {
     g_printerr ("wyctl: unable to publish access token: %s\n",
         opts.token_output);
@@ -1149,11 +1149,11 @@ run_policy_decide_request (const WyctlOptions *global_opts,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
@@ -1173,7 +1173,7 @@ run_policy_decide_request (const WyctlOptions *global_opts,
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
     return 2;
   }
@@ -1181,7 +1181,7 @@ run_policy_decide_request (const WyctlOptions *global_opts,
 
   g_autoptr (WylClientDecision) result = NULL;
   wyrelog_error_t rc = wyl_client_decide_ex (client, policy_opts->user,
-      policy_opts->permission, policy_opts->resource, &result);
+          policy_opts->permission, policy_opts->resource, &result);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: policy %s failed\n", command);
     return 3;
@@ -1197,7 +1197,7 @@ run_policy_check (const WyctlOptions *global_opts,
 {
   g_autoptr (WylClientDecision) result = NULL;
   int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
-      "check", &result);
+          "check", &result);
   if (rc != 0)
     return rc;
 
@@ -1217,7 +1217,7 @@ run_policy_explain (const WyctlOptions *global_opts,
 {
   g_autoptr (WylClientDecision) result = NULL;
   int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
-      "explain", &result);
+          "explain", &result);
   if (rc != 0)
     return rc;
 
@@ -1245,11 +1245,11 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   GOptionEntry entries[] = {
     {"user", 0, 0, G_OPTION_ARG_STRING, &opts.user, "Decision user", "USER"},
     {"permission", 0, 0, G_OPTION_ARG_STRING, &opts.permission,
-        "Decision permission", "PERMISSION"},
+     "Decision permission", "PERMISSION"},
     {"resource", 0, 0, G_OPTION_ARG_STRING, &opts.resource,
-        "Decision resource", "RESOURCE"},
+     "Decision resource", "RESOURCE"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1280,7 +1280,7 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   }
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
   g_autofree gchar *access_token = NULL;
   int token_rc = load_access_token_file (access_token_file, &access_token);
   if (token_rc != 0)
@@ -1302,19 +1302,19 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   g_auto (WyctlPolicyPermissionOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Mutation subject", "SUBJECT_ID"},
+     "Mutation subject", "SUBJECT_ID"},
     {"perm", 0, 0, G_OPTION_ARG_STRING, &opts.perm,
-        "Mutation permission", "PERMISSION_ID"},
+     "Mutation permission", "PERMISSION_ID"},
     {"scope", 0, 0, G_OPTION_ARG_STRING, &opts.scope,
-        "Mutation scope", "SCOPE_ID"},
+     "Mutation scope", "SCOPE_ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1346,14 +1346,14 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
@@ -1395,7 +1395,7 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
     return 2;
   }
@@ -1404,10 +1404,10 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   wyrelog_error_t rc = WYRELOG_E_INVALID;
   if (g_strcmp0 (command, "permission-grant") == 0) {
     rc = wyl_client_policy_permission_grant (client, opts.subject, opts.perm,
-        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+            opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
   } else if (g_strcmp0 (command, "permission-revoke") == 0) {
     rc = wyl_client_policy_permission_revoke (client, opts.subject, opts.perm,
-        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+            opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
   } else {
     g_printerr ("wyctl: policy %s is not implemented\n", command);
     return 3;
@@ -1440,19 +1440,19 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
   g_auto (WyctlPolicyRoleOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Mutation subject", "SUBJECT_ID"},
+     "Mutation subject", "SUBJECT_ID"},
     {"role", 0, 0, G_OPTION_ARG_STRING, &opts.role,
-        "Mutation role", "ROLE_ID"},
+     "Mutation role", "ROLE_ID"},
     {"scope", 0, 0, G_OPTION_ARG_STRING, &opts.scope,
-        "Mutation scope", "SCOPE_ID"},
+     "Mutation scope", "SCOPE_ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1484,14 +1484,14 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
@@ -1533,7 +1533,7 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
     return 2;
   }
@@ -1542,10 +1542,10 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
   wyrelog_error_t rc = WYRELOG_E_INVALID;
   if (g_strcmp0 (command, "role-grant") == 0) {
     rc = wyl_client_policy_role_grant (client, opts.subject, opts.role,
-        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+            opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
   } else if (g_strcmp0 (command, "role-revoke") == 0) {
     rc = wyl_client_policy_role_revoke (client, opts.subject, opts.role,
-        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+            opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
   } else {
     g_printerr ("wyctl: policy %s is not implemented\n", command);
     return 3;
@@ -1581,15 +1581,15 @@ run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   if (g_strcmp0 (argv[1], "check") == 0 || g_strcmp0 (argv[1], "explain") == 0)
     return run_policy_decision_command (global_opts, argv[1], argc - 1,
-        argv + 1);
+               argv + 1);
   if (g_strcmp0 (argv[1], "permission-grant") == 0 ||
       g_strcmp0 (argv[1], "permission-revoke") == 0)
     return run_policy_permission_mutation_command (global_opts, argv[1],
-        argc - 1, argv + 1);
+               argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "role-grant") == 0 ||
       g_strcmp0 (argv[1], "role-revoke") == 0)
     return run_policy_role_mutation_command (global_opts, argv[1],
-        argc - 1, argv + 1);
+               argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown policy command: %s\n", argv[1]);
   return 2;
@@ -1673,7 +1673,7 @@ create_management_client (const gchar *daemon_url,
     return 2;
   }
   return create_fact_client (daemon_url, timeout_ms_arg, WYL_TENANT_DEFAULT,
-      access_token_file, out_client);
+             access_token_file, out_client);
 }
 
 static gboolean
@@ -1716,13 +1716,13 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1739,18 +1739,18 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
-      global_opts->settings, "default-graph");
+          global_opts->settings, "default-graph");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (graph == NULL || graph[0] == '\0') {
     g_printerr ("wyctl: missing --graph\n");
@@ -1759,17 +1759,17 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
   wyrelog_error_t rc = wyl_client_graph_create (client, tenant,
-      graph, guard_timestamp, opts.guard_loc_class, guard_risk);
+          graph, guard_timestamp, opts.guard_loc_class, guard_risk);
   int exit_rc = fact_remote_exit (client, "graph create", rc,
-      "graph_create_failed");
+          "graph_create_failed");
   if (exit_rc == 0)
     g_print ("ok\n");
   return exit_rc;
@@ -1809,7 +1809,7 @@ parse_columns_arg (const gchar *raw, WylClientFactColumn **out_columns,
   *out_n_columns = 0;
   g_auto (GStrv) entries = g_strsplit (raw, ",", -1);
   g_autoptr (GArray) cols = g_array_new (FALSE, TRUE,
-      sizeof (WylClientFactColumn));
+          sizeof (WylClientFactColumn));
   for (gsize i = 0; entries[i] != NULL; i++) {
     if (entries[i][0] == '\0')
       return FALSE;
@@ -1830,7 +1830,7 @@ parse_columns_arg (const gchar *raw, WylClientFactColumn **out_columns,
     return FALSE;
   *out_n_columns = cols->len;
   *out_columns = (WylClientFactColumn *) g_array_free (g_steal_pointer (&cols),
-      FALSE);
+          FALSE);
   return TRUE;
 }
 
@@ -1843,23 +1843,23 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
     {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
-        "NS"},
+     "NS"},
     {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
-        "REL"},
+     "REL"},
     {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
-        "Schema version", "N"},
+     "Schema version", "N"},
     {"columns", 0, 0, G_OPTION_ARG_STRING, &opts.columns_arg,
-        "Columns as name:type,...", "COLUMNS"},
+     "Columns as name:type,...", "COLUMNS"},
     {"max-rows", 0, 0, G_OPTION_ARG_STRING, &opts.max_rows_arg,
-        "Maximum rows authorized for the default relation query", "N"},
+     "Maximum rows authorized for the default relation query", "N"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1877,18 +1877,18 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
   }
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
-      global_opts->settings, "default-graph");
+          global_opts->settings, "default-graph");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
       || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
@@ -1903,7 +1903,7 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
   }
   guint32 max_rows = 0;
   if (opts.max_rows_arg != NULL && !parse_positive_uint32 (opts.max_rows_arg,
-          &max_rows)) {
+      &max_rows)) {
     g_printerr ("wyctl: invalid --max-rows\n");
     return 2;
   }
@@ -1916,24 +1916,24 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk)) {
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk)) {
     client_fact_columns_clear (columns, n_columns);
     return 2;
   }
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0) {
     client_fact_columns_clear (columns, n_columns);
     return client_rc;
   }
   wyrelog_error_t rc = wyl_client_fact_schema_register_with_max_rows (client,
-      tenant,
-      graph, opts.namespace_id, opts.relation, schema_version, columns,
-      n_columns, max_rows, guard_timestamp, opts.guard_loc_class, guard_risk);
+          tenant,
+          graph, opts.namespace_id, opts.relation, schema_version, columns,
+          n_columns, max_rows, guard_timestamp, opts.guard_loc_class, guard_risk);
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
-      "schema_register_failed");
+          "schema_register_failed");
   if (exit_rc == 0)
     g_print ("ok\n");
   return exit_rc;
@@ -1952,68 +1952,69 @@ convert_csv_to_tsv (const gchar *input, gsize size)
 }
 
 static int
-run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
+run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
+    gboolean retract)
 {
   g_auto (WyctlFactPutOptions) opts = { 0 };
+  const gchar *action = retract ? "fact retract" : "fact put";
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
     {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
-        "NS"},
+     "NS"},
     {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
-        "REL"},
+     "REL"},
     {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
-        "Schema version", "N"},
+     "Schema version", "N"},
     {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id, "Batch id",
-        "ID"},
+     "ID"},
     {"idempotency-key", 0, 0, G_OPTION_ARG_STRING, &opts.idempotency_key,
-        "Idempotency key", "KEY"},
+     "Idempotency key", "KEY"},
     {"format", 0, 0, G_OPTION_ARG_STRING, &opts.format, "Input format",
-        "csv|tsv"},
+     "csv|tsv"},
     {"input", 0, 0, G_OPTION_ARG_STRING, &opts.input, "Input file", "PATH"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
-  g_autoptr (GOptionContext) context = g_option_context_new
-      ("- wyrelog fact put");
+  g_autoptr (GOptionContext) context = g_option_context_new (action);
   g_option_context_add_main_entries (context, entries, NULL);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
     return 2;
   }
   if (argc > 1) {
-    g_printerr ("wyctl: unexpected fact put argument: %s\n", argv[1]);
+    g_printerr ("wyctl: unexpected %s argument: %s\n", action, argv[1]);
     return 2;
   }
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
-      global_opts->settings, "default-graph");
+          global_opts->settings, "default-graph");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
       || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
       opts.relation[0] == '\0' || opts.batch_id == NULL ||
       opts.batch_id[0] == '\0' || opts.idempotency_key == NULL ||
       opts.idempotency_key[0] == '\0') {
-    g_printerr ("wyctl: missing fact put target option\n");
+    g_printerr ("wyctl: missing %s target option\n", action);
     return 2;
   }
   guint32 schema_version = 0;
@@ -2022,7 +2023,7 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
   if (opts.format == NULL || (g_strcmp0 (opts.format, "csv") != 0 &&
-          g_strcmp0 (opts.format, "tsv") != 0)) {
+      g_strcmp0 (opts.format, "tsv") != 0)) {
     g_printerr ("wyctl: unsupported --format\n");
     return 2;
   }
@@ -2051,25 +2052,41 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
   g_autoptr (WylClientFactAppendResult) result = NULL;
-  wyrelog_error_t rc = wyl_client_fact_put_batch (client, tenant,
-      graph, opts.namespace_id, opts.relation, schema_version,
-      opts.batch_id, opts.idempotency_key, (const guint8 *) payload,
-      payload_size, guard_timestamp, opts.guard_loc_class, guard_risk,
-      &result);
-  int exit_rc = fact_remote_exit (client, "fact put", rc,
-      "fact_append_failed");
+  wyrelog_error_t rc = retract
+      ? wyl_client_fact_retract_batch (client, tenant, graph, opts.namespace_id,
+          opts.relation, schema_version, opts.batch_id,
+          opts.idempotency_key, (const guint8 *) payload, payload_size,
+          guard_timestamp, opts.guard_loc_class, guard_risk, &result)
+      : wyl_client_fact_put_batch (client, tenant, graph, opts.namespace_id,
+          opts.relation, schema_version, opts.batch_id,
+          opts.idempotency_key, (const guint8 *) payload, payload_size,
+          guard_timestamp, opts.guard_loc_class, guard_risk, &result);
+  int exit_rc = fact_remote_exit (client, action, rc,
+          retract ? "fact_retract_failed" : "fact_append_failed");
   if (exit_rc == 0)
     g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
         "inserted" : "duplicate");
   return exit_rc;
+}
+
+static int
+run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  return run_fact_mutation (global_opts, argc, argv, FALSE);
+}
+
+static int
+run_fact_retract (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  return run_fact_mutation (global_opts, argc, argv, TRUE);
 }
 
 static int
@@ -2096,6 +2113,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_schema (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "put") == 0)
     return run_fact_put (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "retract") == 0)
+    return run_fact_retract (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown fact command: %s\n", argv[1]);
   return 2;
 }
@@ -2129,18 +2148,18 @@ run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
     {"query", 0, 0, G_OPTION_ARG_STRING, &opts.query, "Relation query",
-        "ATOM"},
+     "ATOM"},
     {"output", 0, 0, G_OPTION_ARG_STRING, &opts.output, "Output format",
-        "json"},
+     "json"},
     {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg, "Row limit", "N"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -2157,18 +2176,18 @@ run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
-      global_opts->settings, "default-graph");
+          global_opts->settings, "default-graph");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (graph == NULL || graph[0] == '\0' || opts.query == NULL ||
       opts.query[0] == '\0') {
@@ -2187,19 +2206,19 @@ run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
   g_autofree gchar *json = NULL;
   wyrelog_error_t rc = wyl_client_datalog_query_json (client, tenant,
-      graph, opts.query, limit, guard_timestamp, opts.guard_loc_class,
-      guard_risk, &json);
+          graph, opts.query, limit, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &json);
   int exit_rc = fact_remote_exit (client, "datalog query", rc,
-      "datalog_query_failed");
+          "datalog_query_failed");
   if (exit_rc == 0)
     g_print ("%s\n", json);
   return exit_rc;
@@ -2224,17 +2243,17 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_auto (WyctlAuditOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"filter", 0, 0, G_OPTION_ARG_STRING, &opts.filter,
-        "Audit event filter", "FILTER"},
+     "Audit event filter", "FILTER"},
     {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
-        "Maximum events to print", "N"},
+     "Maximum events to print", "N"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -2253,14 +2272,14 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings,
-      "default-timeout-ms");
+          global_opts->settings,
+          "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
@@ -2307,7 +2326,7 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
+      WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid audit credentials\n");
     return 2;
   }
@@ -2315,7 +2334,7 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 
   g_autoptr (WylAuditIter) iter = NULL;
   wyrelog_error_t query_rc = wyl_client_audit_query_with_guard_context (client,
-      opts.filter, guard_timestamp, opts.guard_loc_class, guard_risk, &iter);
+          opts.filter, guard_timestamp, opts.guard_loc_class, guard_risk, &iter);
   if (query_rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: audit query failed\n");
     return 3;
@@ -2432,8 +2451,8 @@ wyctl_mfa_build_otpauth_uri (const gchar *subject, const gchar *base32_secret)
    * operator can paste it into authenticator apps that expect the
    * canonical base32 form. */
   return g_strdup_printf
-      ("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
-      issuer_enc, subject_enc, base32_secret, issuer_enc);
+           ("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
+             issuer_enc, subject_enc, base32_secret, issuer_enc);
 }
 
 /* Read a single line from stdin and parse it as a 6-digit decimal code.
@@ -2449,7 +2468,7 @@ wyctl_mfa_read_six_digit_code (guint *out_code)
   gsize len = strlen (buf);
   while (len > 0
       && (buf[len - 1] == '\n' || buf[len - 1] == '\r'
-          || buf[len - 1] == ' ' || buf[len - 1] == '\t'))
+      || buf[len - 1] == ' ' || buf[len - 1] == '\t'))
     buf[--len] = '\0';
   if (len != WYL_TOTP_DIGITS) {
     sodium_memzero (buf, sizeof buf);
@@ -2517,7 +2536,7 @@ wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
 
   g_autoptr (GError) error = NULL;
   wyrelog_error_t rc = wyl_totp_generate_seed (enr.secret, sizeof enr.secret,
-      &error);
+          &error);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: totp seed generation failed: %s\n",
         wyrelog_error_string (rc));
@@ -2527,7 +2546,7 @@ wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
 
   g_autofree gchar *base32_secret = NULL;
   rc = wyl_totp_base32_encode (enr.secret, sizeof enr.secret, &base32_secret,
-      &error);
+          &error);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: base32 encode failed: %s\n", wyrelog_error_string (rc));
     wyl_totp_enrollment_clear (&enr);
@@ -2535,7 +2554,7 @@ wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
   }
 
   g_autofree gchar *otpauth = wyctl_mfa_build_otpauth_uri (subject,
-      base32_secret);
+          base32_secret);
 
   /* Secret-bearing output goes to stdout in a key=value format so an
    * operator can pipe it into a parser, but the help text warns
@@ -2563,7 +2582,7 @@ wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
   gint64 now_secs = (gint64) (g_get_real_time () / G_USEC_PER_SEC);
   guint64 matched_step = 0;
   gboolean matched = wyl_totp_code_matches (enr.secret, sizeof enr.secret,
-      now_secs, code, &matched_step, &error);
+          now_secs, code, &matched_step, &error);
   if (!matched) {
     g_printerr ("wyctl: code did not match; no enrollment written\n");
     g_clear_error (&error);
@@ -2590,7 +2609,7 @@ wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
    * commit-5 atomicity test for the same primitive used in
    * apply_principal_failure. */
   rc = wyl_mfa_enrollment_commit (store, &enr, subject, NULL, "wyctl",
-      reset_mode);
+          reset_mode);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: enrollment mutation failed: %s\n",
         wyrelog_error_string (rc));
@@ -2639,14 +2658,14 @@ wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
   *out_body = NULL;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   g_autofree gchar *uri = g_strdup_printf
-      ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
-      "&guard_loc_class=public&guard_risk=0", daemon_url, path,
-      WYL_TENANT_DEFAULT, now);
+        ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=public&guard_risk=0", daemon_url, path,
+          WYL_TENANT_DEFAULT, now);
   g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
   if (msg == NULL)
     return 1;
   g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-      access_token);
+          access_token);
   soup_message_headers_replace (soup_message_get_request_headers (msg),
       "Authorization", authorization);
   g_autoptr (GBytes) request = g_bytes_new (json, strlen (json));
@@ -2654,7 +2673,7 @@ wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) response = soup_session_send_and_read (session, msg, NULL,
-      &error);
+          &error);
   if (response == NULL) {
     g_printerr ("wyctl: online MFA request failed: %s\n", error->message);
     return 1;
@@ -2690,7 +2709,7 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
     const WyctlMfaOptions *opts)
 {
   g_autofree gchar *daemon_url = wyctl_resolve_string_option
-      (global_opts->daemon_url, global_opts->settings, "daemon-url");
+        (global_opts->daemon_url, global_opts->settings, "daemon-url");
   if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
@@ -2708,14 +2727,14 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
   g_string_append_c (start_json, '}');
   g_autoptr (WyctlSensitiveChar) start_body = NULL;
   if (wyctl_mfa_online_post (daemon_url, "/auth/mfa/enroll/start",
-          access_token, start_json->str, &start_body) != 0)
+      access_token, start_json->str, &start_body) != 0)
     return 1;
   g_autofree gchar *challenge = wyctl_mfa_json_string (start_body,
-      "challenge");
+          "challenge");
   g_autoptr (WyctlSensitiveChar) uri = wyctl_mfa_json_string (start_body,
-      "otpauth_uri");
+          "otpauth_uri");
   g_autoptr (WyctlSensitiveChar) secret = wyctl_mfa_json_string (start_body,
-      "secret_base32");
+          "secret_base32");
   if (challenge == NULL || uri == NULL || secret == NULL) {
     g_printerr ("wyctl: invalid online MFA response\n");
     return 1;
@@ -2739,7 +2758,7 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
   sodium_memzero (code_text, sizeof code_text);
   g_autoptr (WyctlSensitiveChar) confirm_body = NULL;
   rc = wyctl_mfa_online_post (daemon_url, "/auth/mfa/enroll/confirm",
-      access_token, confirm_json->str, &confirm_body);
+          access_token, confirm_json->str, &confirm_body);
   sodium_memzero (confirm_json->str, confirm_json->len);
   if (rc != 0)
     return rc;
@@ -2753,19 +2772,19 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_auto (WyctlMfaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Principal subject id to enroll", "SUBJECT"},
+     "Principal subject id to enroll", "SUBJECT"},
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Policy store path (SQLite file)", "PATH"},
+     "Policy store path (SQLite file)", "PATH"},
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Optional KeyProvider spec for encrypted stores", "SPEC"},
+     "Optional KeyProvider spec for encrypted stores", "SPEC"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer token file for online enrollment", "PATH"},
+     "Bearer token file for online enrollment", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (GOptionContext) context = g_option_context_new
-      ("- enroll a subject for TOTP MFA. Output is sensitive: do NOT pipe "
-      "stdout to logs.");
+        ("- enroll a subject for TOTP MFA. Output is sensitive: do NOT pipe "
+          "stdout to logs.");
   g_option_context_add_main_entries (context, entries, NULL);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -2788,13 +2807,13 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
       && opts.keyprovider_path[0] != '\0';
   g_autofree gchar *store_path =
       online ? g_strdup (opts.
-      store_path) : wyctl_resolve_string_option (opts.store_path,
-      global_opts->settings,
-      "default-policy-store");
+          store_path) : wyctl_resolve_string_option (opts.store_path,
+          global_opts->settings,
+          "default-policy-store");
   g_autofree gchar *keyprovider_path = online ?
       g_strdup (opts.keyprovider_path) :
       wyctl_resolve_string_option (opts.keyprovider_path,
-      global_opts->settings, "default-keyprovider");
+          global_opts->settings, "default-keyprovider");
   g_clear_pointer (&opts.store_path, g_free);
   opts.store_path = g_steal_pointer (&store_path);
   g_clear_pointer (&opts.keyprovider_path, g_free);
@@ -2832,17 +2851,17 @@ run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_auto (WyctlMfaOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Principal subject id to reset", "SUBJECT"},
+     "Principal subject id to reset", "SUBJECT"},
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Policy store path (SQLite file)", "PATH"},
+     "Policy store path (SQLite file)", "PATH"},
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Optional KeyProvider spec for encrypted stores", "SPEC"},
+     "Optional KeyProvider spec for encrypted stores", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (GOptionContext) context = g_option_context_new
-      ("- reset a subject's TOTP enrollment: deletes the prior row, then "
-      "runs the enroll flow.");
+        ("- reset a subject's TOTP enrollment: deletes the prior row, then "
+          "runs the enroll flow.");
   g_option_context_add_main_entries (context, entries, NULL);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -2858,10 +2877,10 @@ run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
    * keys), then transfer the resolved values to the option holder used by
    * downstream validation/open. */
   g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
-      global_opts->settings, "default-policy-store");
+          global_opts->settings, "default-policy-store");
   g_autofree gchar *keyprovider_path =
       wyctl_resolve_string_option (opts.keyprovider_path,
-      global_opts->settings, "default-keyprovider");
+          global_opts->settings, "default-keyprovider");
   g_clear_pointer (&opts.store_path, g_free);
   opts.store_path = g_steal_pointer (&store_path);
   g_clear_pointer (&opts.keyprovider_path, g_free);
@@ -2929,11 +2948,12 @@ wyctl_key_recovery_make_opts (const gchar *spec,
   if (keyprovider == NULL)
     return WYRELOG_E_IO;
   *out_opts = (wyl_policy_store_open_options_t) {
-  .keyprovider_vtable =
+    .keyprovider_vtable =
         wyl_keyprovider_file_get_vtable (),.keyprovider_state =
         keyprovider,.keyprovider_state_free =
         (void (*)(gpointer)) wyl_keyprovider_file_free,.require_encrypted =
-        TRUE,};
+        TRUE,
+  };
   return WYRELOG_E_OK;
 }
 
@@ -2999,8 +3019,9 @@ wyctl_key_recovery_validate (const WyctlKeyOptions *opts,
   out_data->from_spec = opts->from_keyprovider_path;
   out_data->to_spec = opts->to_keyprovider_path;
   *out_factory = (wyl_policy_rotation_recovery_factory_t) {
-  .make_old_opts = wyctl_key_recovery_make_old,.make_new_opts =
-        wyctl_key_recovery_make_new,.data = out_data,};
+    .make_old_opts = wyctl_key_recovery_make_old,.make_new_opts =
+        wyctl_key_recovery_make_new,.data = out_data,
+  };
   return 0;
 }
 
@@ -3069,7 +3090,7 @@ run_key_status_recovery (const WyctlKeyOptions *opts)
   WylPolicyRotationRecoveryAction action =
       WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
   wyrelog_error_t rc = wyl_policy_store_rotation_recovery_status
-      (opts->store_path, &factory, &probe, &action);
+        (opts->store_path, &factory, &probe, &action);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: key status failed: %s\n", wyrelog_error_string (rc));
     return 1;
@@ -3122,13 +3143,13 @@ run_key_status (gint argc, gchar **argv)
   g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
+     "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Encrypted policy store path (rotation recovery status)", "PATH"},
+     "Encrypted policy store path (rotation recovery status)", "PATH"},
     {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+     &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
     {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
+     &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3180,11 +3201,11 @@ run_key_rotate (gint argc, gchar **argv)
   g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Encrypted policy store path", "PATH"},
+     "Encrypted policy store path", "PATH"},
     {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+     &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
     {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
+     &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3242,7 +3263,7 @@ run_key_rotate (gint argc, gchar **argv)
     .require_encrypted = TRUE,
   };
   wyrelog_error_t rc = wyl_policy_store_rotate_keyprovider (opts.store_path,
-      &old_opts, &new_opts);
+          &old_opts, &new_opts);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyctl: key rotation failed: %s\n", wyrelog_error_string (rc));
     return 1;
@@ -3261,17 +3282,17 @@ run_key_recover (gint argc, gchar **argv)
   g_auto (WyctlKeyOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Encrypted policy store path", "PATH"},
+     "Encrypted policy store path", "PATH"},
     {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+     &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
     {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
-        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
+     &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (GOptionContext) context =
       g_option_context_new
-      ("- recover an interrupted policy store key rotation");
+        ("- recover an interrupted policy store key rotation");
   g_option_context_add_main_entries (context, entries, NULL);
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
@@ -3386,23 +3407,23 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject id", "SUBJECT_ID"},
+     "Service subject id", "SUBJECT_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"destination", 0, 0, G_OPTION_ARG_STRING, &opts.destination,
-        "Escrow publication destination", "NAME"},
+     "Escrow publication destination", "NAME"},
     {"expires-at-us", 0, 0, G_OPTION_ARG_STRING, &opts.expires_at_us_arg,
-        "Publication expiry, absolute epoch microseconds (> 0)", "US"},
+     "Publication expiry, absolute epoch microseconds (> 0)", "US"},
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
-        "Idempotency request id (default: minted)", "ID"},
+     "Idempotency request id (default: minted)", "ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3421,15 +3442,15 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.subject == NULL || opts.subject[0] == '\0') {
     g_printerr ("wyctl: missing --subject\n");
@@ -3448,12 +3469,12 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
   const gchar *request_id = service_credential_resolve_request_id
-      (opts.request_id, request_id_buf, sizeof request_id_buf);
+        (opts.request_id, request_id_buf, sizeof request_id_buf);
   if (request_id == NULL) {
     g_printerr ("wyctl: unable to mint request id\n");
     return 2;
@@ -3461,7 +3482,7 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
@@ -3474,9 +3495,9 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
   };
   g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
   wyrelog_error_t rc = wyl_client_service_credential_issue (client, &request,
-      guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
+          guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
   int exit_rc = fact_remote_exit (client, "service-credential issue", rc,
-      "service_credential_issue_failed");
+          "service_credential_issue_failed");
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;
@@ -3489,23 +3510,23 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
-        "Credential id to rotate", "CREDENTIAL_ID"},
+     "Credential id to rotate", "CREDENTIAL_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"destination", 0, 0, G_OPTION_ARG_STRING, &opts.destination,
-        "Escrow publication destination", "NAME"},
+     "Escrow publication destination", "NAME"},
     {"expires-at-us", 0, 0, G_OPTION_ARG_STRING, &opts.expires_at_us_arg,
-        "Publication expiry, absolute epoch microseconds (> 0)", "US"},
+     "Publication expiry, absolute epoch microseconds (> 0)", "US"},
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
-        "Idempotency request id (default: minted)", "ID"},
+     "Idempotency request id (default: minted)", "ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3524,15 +3545,15 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.credential_id == NULL || opts.credential_id[0] == '\0') {
     g_printerr ("wyctl: missing --credential-id\n");
@@ -3551,12 +3572,12 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
   const gchar *request_id = service_credential_resolve_request_id
-      (opts.request_id, request_id_buf, sizeof request_id_buf);
+        (opts.request_id, request_id_buf, sizeof request_id_buf);
   if (request_id == NULL) {
     g_printerr ("wyctl: unable to mint request id\n");
     return 2;
@@ -3564,16 +3585,16 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
   wyrelog_error_t rc = wyl_client_service_credential_rotate_for_tenant (client,
-      opts.credential_id, request_id, opts.destination, expires_at_us,
-      tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
+          opts.credential_id, request_id, opts.destination, expires_at_us,
+          tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
   int exit_rc = fact_remote_exit (client, "service-credential rotate", rc,
-      "service_credential_rotate_failed");
+          "service_credential_rotate_failed");
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;
@@ -3601,18 +3622,18 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject id", "SUBJECT_ID"},
+     "Service subject id", "SUBJECT_ID"},
     {"display-name", 0, 0, G_OPTION_ARG_STRING, &opts.display_name,
-        "Human-readable display name", "NAME"},
+     "Human-readable display name", "NAME"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3631,13 +3652,13 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.subject == NULL || opts.subject[0] == '\0') {
     g_printerr ("wyctl: missing --subject\n");
@@ -3652,21 +3673,21 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg,
-      WYL_TENANT_DEFAULT, access_token_file, &client);
+          WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServicePrincipal) principal = { 0 };
   wyrelog_error_t rc = wyl_client_service_principal_create (client,
-      opts.subject, opts.display_name, guard_timestamp, opts.guard_loc_class,
-      guard_risk, &principal);
+          opts.subject, opts.display_name, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal create", rc,
-      "service_principal_create_failed");
+          "service_principal_create_failed");
   if (exit_rc == 0)
     print_service_principal_row (&principal);
   return exit_rc;
@@ -3680,13 +3701,13 @@ run_service_principal_list (const WyctlOptions *global_opts, gint argc,
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3705,33 +3726,33 @@ run_service_principal_list (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (!service_principal_tenant_is_supported (opts.tenant))
     return 2;
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg,
-      WYL_TENANT_DEFAULT, access_token_file, &client);
+          WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServicePrincipalList) list = { 0 };
   wyrelog_error_t rc = wyl_client_service_principal_list (client,
-      guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+          guard_timestamp, opts.guard_loc_class, guard_risk, &list);
   int exit_rc = fact_remote_exit (client, "service-principal list", rc,
-      "service_principal_list_failed");
+          "service_principal_list_failed");
   if (exit_rc == 0) {
     for (gsize i = 0; i < list.len; i++)
       print_service_principal_row (&list.items[i]);
@@ -3746,18 +3767,18 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServicePrincipalOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject to disable", "SUBJECT_ID"},
+     "Service subject to disable", "SUBJECT_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
-        "Caller idempotency key", "REQUEST_ID"},
+     "Caller idempotency key", "REQUEST_ID"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3776,13 +3797,13 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.subject == NULL || opts.subject[0] == '\0') {
     g_printerr ("wyctl: missing --subject\n");
@@ -3793,18 +3814,18 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg,
-      WYL_TENANT_DEFAULT, access_token_file, &client);
+          WYL_TENANT_DEFAULT, access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
   const gchar *request_id = service_credential_resolve_request_id
-      (opts.request_id, request_id_buf, sizeof request_id_buf);
+        (opts.request_id, request_id_buf, sizeof request_id_buf);
   if (request_id == NULL) {
     g_printerr ("wyctl: failed to mint --request-id\n");
     return 5;
@@ -3812,10 +3833,10 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
   g_auto (WylClientServicePrincipal) principal = { 0 };
   wyrelog_error_t rc =
       wyl_client_service_principal_disable_with_request_id (client,
-      opts.subject, request_id, guard_timestamp, opts.guard_loc_class,
-      guard_risk, &principal);
+          opts.subject, request_id, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal disable", rc,
-      "service_principal_disable_failed");
+          "service_principal_disable_failed");
   if (exit_rc == 0)
     g_print ("subject_id=%s disabled=yes\n", opts.subject);
   return exit_rc;
@@ -3869,17 +3890,17 @@ run_service_credential_list (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
-        "Service subject whose credentials to list", "SUBJECT_ID"},
+     "Service subject whose credentials to list", "SUBJECT_ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3898,15 +3919,15 @@ run_service_credential_list (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.subject == NULL || opts.subject[0] == '\0') {
     g_printerr ("wyctl: missing --subject\n");
@@ -3915,21 +3936,21 @@ run_service_credential_list (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialList) list = { 0 };
   wyrelog_error_t rc = wyl_client_service_credential_list_for_tenant (client,
-      opts.subject, tenant, guard_timestamp, opts.guard_loc_class, guard_risk,
-      &list);
+          opts.subject, tenant, guard_timestamp, opts.guard_loc_class, guard_risk,
+          &list);
   int exit_rc = fact_remote_exit (client, "service-credential list", rc,
-      "service_credential_list_failed");
+          "service_credential_list_failed");
   if (exit_rc == 0) {
     for (gsize i = 0; i < list.len; i++)
       print_service_credential_row (&list.items[i]);
@@ -3944,19 +3965,19 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
-        "Credential id to revoke", "CREDENTIAL_ID"},
+     "Credential id to revoke", "CREDENTIAL_ID"},
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
-        "Idempotency request id (default: minted)", "ID"},
+     "Idempotency request id (default: minted)", "ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -3975,15 +3996,15 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.credential_id == NULL || opts.credential_id[0] == '\0') {
     g_printerr ("wyctl: missing --credential-id\n");
@@ -3992,12 +4013,12 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
   const gchar *request_id = service_credential_resolve_request_id
-      (opts.request_id, request_id_buf, sizeof request_id_buf);
+        (opts.request_id, request_id_buf, sizeof request_id_buf);
   if (request_id == NULL) {
     g_printerr ("wyctl: unable to mint request id\n");
     return 2;
@@ -4005,16 +4026,16 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredential) credential = { 0 };
   wyrelog_error_t rc = wyl_client_service_credential_revoke_for_tenant (client,
-      opts.credential_id, request_id, tenant, guard_timestamp,
-      opts.guard_loc_class, guard_risk, &credential);
+          opts.credential_id, request_id, tenant, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &credential);
   int exit_rc = fact_remote_exit (client, "service-credential revoke", rc,
-      "service_credential_revoke_failed");
+          "service_credential_revoke_failed");
   if (exit_rc == 0) {
     const gchar *credential_id =
         credential.credential_id != NULL ? credential.credential_id : "-";
@@ -4032,7 +4053,7 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
  * read-only view over an existing client enum, not a new domain state
  * machine; unknown values render as "-". */
 static const gchar *service_credential_operation_string
-    (WylClientServiceCredentialOperationReconcileOperation op)
+  (WylClientServiceCredentialOperationReconcileOperation op)
 {
   switch (op) {
     case WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE:
@@ -4051,8 +4072,8 @@ static const gchar *service_credential_operation_string
  * is never NULL-guarded. The recovery field is emitted only when
  * |with_recovery| is TRUE (status-list entries never carry it). */
 static void
-    print_service_credential_operation_row
-    (const WylClientServiceCredentialOperationStatusEntry * e,
+print_service_credential_operation_row
+  (const WylClientServiceCredentialOperationStatusEntry * e,
     gboolean with_recovery)
 {
   const gchar *request_id = e->request_id != NULL ? e->request_id : "-";
@@ -4083,17 +4104,17 @@ run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
-        "Durable operation request id to recover", "ID"},
+     "Durable operation request id to recover", "ID"},
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -4112,15 +4133,15 @@ run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   if (opts.request_id == NULL || opts.request_id[0] == '\0') {
     g_printerr ("wyctl: missing --request-id\n");
@@ -4129,22 +4150,22 @@ run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) entry = { 0 };
   wyrelog_error_t rc =
       wyl_client_service_credential_operation_recover_for_tenant (client,
-      tenant, opts.request_id, guard_timestamp, opts.guard_loc_class,
-      guard_risk, &entry);
+          tenant, opts.request_id, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &entry);
   int exit_rc = fact_remote_exit (client, "service-credential recover", rc,
-      "service_credential_recover_failed");
+          "service_credential_recover_failed");
   if (exit_rc == 0)
     print_service_credential_operation_row (&entry, TRUE);
   return exit_rc;
@@ -4157,15 +4178,15 @@ run_service_credential_status (const WyctlOptions *global_opts, gint argc,
   g_auto (WyctlServiceCredentialOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
-        "TENANT"},
+     "TENANT"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
-        "Bearer access token file", "PATH"},
+     "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
-        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
     {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
-        "Guard location class", "CLASS"},
+     "Guard location class", "CLASS"},
     {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
-        "Guard risk score", "N"},
+     "Guard risk score", "N"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -4184,34 +4205,34 @@ run_service_credential_status (const WyctlOptions *global_opts, gint argc,
 
   g_autofree gchar *daemon_url =
       wyctl_resolve_string_option (global_opts->daemon_url,
-      global_opts->settings, "daemon-url");
+          global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_ms_arg =
       wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
-      global_opts->settings, "default-timeout-ms");
+          global_opts->settings, "default-timeout-ms");
   g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
-      global_opts->settings, "default-tenant");
+          global_opts->settings, "default-tenant");
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
-      global_opts->settings, "access-token-file");
+          global_opts->settings, "access-token-file");
 
   gint64 guard_timestamp = 0;
   gint64 guard_risk = 0;
   if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
-          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
 
   g_autoptr (WylClient) client = NULL;
   int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
-      access_token_file, &client);
+          access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
 
   g_auto (WylClientServiceCredentialOperationStatusList) list = { 0 };
   wyrelog_error_t rc =
       wyl_client_service_credential_operation_status_list_for_tenant (client,
-      tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+          tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &list);
   int exit_rc = fact_remote_exit (client, "service-credential status", rc,
-      "service_credential_status_failed");
+          "service_credential_status_failed");
   if (exit_rc == 0) {
     for (gsize i = 0; i < list.n_entries; i++)
       print_service_credential_operation_row (&list.entries[i], FALSE);
@@ -4302,11 +4323,11 @@ run_service_permission_closure_inspect (gint argc, gchar **argv)
   g_auto (WyctlServicePermissionClosureOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Encrypted policy store", "PATH"},
+     "Encrypted policy store", "PATH"},
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Policy KeyProvider spec", "SPEC"},
+     "Policy KeyProvider spec", "SPEC"},
     {"output", 0, 0, G_OPTION_ARG_STRING, &opts.output_path,
-        "Create owner-only removal manifest", "PATH"},
+     "Create owner-only removal manifest", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -4320,7 +4341,7 @@ run_service_permission_closure_inspect (gint argc, gchar **argv)
   if (argc > 1 || opts.store_path == NULL || opts.keyprovider_path == NULL
       || opts.output_path == NULL) {
     g_printerr
-        ("wyctl: inspect requires --store, --keyprovider, and --output\n");
+      ("wyctl: inspect requires --store, --keyprovider, and --output\n");
     return 2;
   }
   wyl_policy_store_t *store = NULL;
@@ -4336,10 +4357,10 @@ run_service_permission_closure_inspect (gint argc, gchar **argv)
     rc = wyl_request_id_new (request_id, sizeof request_id);
     if (rc == WYRELOG_E_OK)
       rc = wyl_service_permission_manifest_from_analysis (&analysis,
-          request_id, &manifest);
+              request_id, &manifest);
     if (rc == WYRELOG_E_OK)
       rc = wyl_service_permission_manifest_write_new_owner_only
-          (opts.output_path, &manifest);
+            (opts.output_path, &manifest);
     if (rc == WYRELOG_E_OK)
       service_permission_closure_print_analysis (&analysis, "manifest_created");
     wyl_service_permission_manifest_clear (&manifest);
@@ -4364,19 +4385,19 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
   g_auto (WyctlServicePermissionClosureOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
-        "Encrypted policy store", "PATH"},
+     "Encrypted policy store", "PATH"},
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Policy KeyProvider spec", "SPEC"},
+     "Policy KeyProvider spec", "SPEC"},
     {"manifest", 0, 0, G_OPTION_ARG_STRING, &opts.manifest_path,
-        "Owner-only canonical removal manifest", "PATH"},
+     "Owner-only canonical removal manifest", "PATH"},
     {"receipt", 0, 0, G_OPTION_ARG_STRING, &opts.receipt_path,
-        "Create owner-only durable apply receipt", "PATH"},
+     "Create owner-only durable apply receipt", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
   g_autoptr (GOptionContext) context = g_option_context_new (apply ?
-      "- apply offline service permission closure removals" :
-      "- dry-run offline service permission closure removals");
+          "- apply offline service permission closure removals" :
+          "- dry-run offline service permission closure removals");
   g_option_context_add_main_entries (context, entries, NULL);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -4391,7 +4412,7 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
   }
   WylServicePermissionManifest manifest = { 0 };
   wyrelog_error_t rc = wyl_service_permission_manifest_read_owner_only
-      (opts.manifest_path, &manifest);
+        (opts.manifest_path, &manifest);
   wyl_policy_store_t *store = NULL;
   if (rc == WYRELOG_E_OK)
     rc = service_permission_closure_open_store (&opts, &store);
@@ -4411,7 +4432,7 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
        * leaves no receipt but the change stands. Recover by replaying this
        * exact apply (idempotent by request_id) with a fresh --receipt path. */
       rc = wyl_service_permission_receipt_write_new_owner_only
-          (opts.receipt_path, &receipt);
+            (opts.receipt_path, &receipt);
       if (rc != WYRELOG_E_OK)
         g_printerr ("status=RECEIPT_OUTPUT_FAILED request_id=%s audit_id=%s"
             " recovery=\"replay this exact apply with the same manifest and a"
@@ -4448,10 +4469,10 @@ run_service_permission_closure (gint argc, gchar **argv)
     return run_service_permission_closure_inspect (argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "dry-run") == 0)
     return run_service_permission_closure_manifest_command (FALSE,
-        argc - 1, argv + 1);
+               argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "apply") == 0)
     return run_service_permission_closure_manifest_command (TRUE,
-        argc - 1, argv + 1);
+               argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-permission-closure command: %s\n",
       argv[1]);
   return 2;
@@ -4463,11 +4484,11 @@ main (int argc, char **argv)
   g_auto (WyctlOptions) opts = { 0 };
   GOptionEntry entries[] = {
     {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
-        "Daemon URL", "URL"},
+     "Daemon URL", "URL"},
     {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
-        "Daemon probe timeout in milliseconds", "N"},
+     "Daemon probe timeout in milliseconds", "N"},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts.show_version,
-        "Print version and exit", NULL},
+     "Print version and exit", NULL},
     {NULL}
   };
   g_autoptr (GError) error = NULL;

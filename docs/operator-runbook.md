@@ -1180,7 +1180,27 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --query 'orders(O,A)' --output json --limit 10 \
   --access-token-file "$TOKEN" \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+printf 'order_id\tamount\no-1\t42\n' >/tmp/orders-retract.tsv
+wyctl --daemon-url "$BASE_URL" fact retract \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --batch-id orders-retract --idempotency-key orders-retract \
+  --format tsv --input /tmp/orders-retract.tsv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" datalog query \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --query 'orders(O,A)' --output json --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
+
+The retract command prints `inserted` for a new tombstone batch and `duplicate`
+when the same batch and idempotency key are replayed. The final query must no
+longer contain `o-1, 42`; query results are the proof that the row was removed,
+rather than the HTTP status alone.
 
 Fact mutation is schema-registered: append, retract, and forget operate only on
 relations registered through `fact schema register`. The daemon does not support

@@ -500,6 +500,22 @@ wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
     gint64 guard_timestamp,
     const gchar * guard_loc_class,
     gint64 guard_risk, WylClientFactAppendResult ** out_result);
+/* Retracts the supplied rows through the schema-backed endpoint.  The result
+ * uses the append result shape: inserted is TRUE for a new tombstone batch and
+ * FALSE for an idempotent replay. */
+wyrelog_error_t wyl_client_fact_retract_batch (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * relation,
+    guint32 schema_version,
+    const gchar * batch_id,
+    const gchar * idempotency_key,
+    const guint8 * tsv_payload,
+    gsize tsv_len,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientFactAppendResult ** out_result);
 wyrelog_error_t wyl_client_datalog_query_json (WylClient * client,
     const gchar * tenant,
     const gchar * graph,

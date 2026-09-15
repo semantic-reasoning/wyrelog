@@ -560,6 +560,28 @@ main (void)
   assert_wyctl_stdout (fact_put_argv, "duplicate\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
     return wyl_test_normalize_exit_status (105);
+  gchar *fact_retract_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "retract",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "retract-1",
+    "--idempotency-key", "retract-key-1",
+    "--format", "csv",
+    "--input", input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_retract_argv, "inserted\n");
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
+  assert_wyctl_stdout (fact_retract_argv, "duplicate\n");
   g_unlink (input_path);
 #endif
 
