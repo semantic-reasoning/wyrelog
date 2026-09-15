@@ -64,7 +64,7 @@ EXPECTED_PARSE_SITES = {
     "run_policy_role_mutation_command": "WyctlPolicyRoleOptions",
     "run_graph_create": "WyctlGraphOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
-    "run_fact_put": "WyctlFactPutOptions",
+    "run_fact_mutation": "WyctlFactPutOptions",
     "run_datalog_query": "WyctlDatalogQueryOptions",
     "run_audit_query": "WyctlAuditOptions",
     "run_mfa_enroll": "WyctlMfaOptions",

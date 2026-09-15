@@ -1940,13 +1940,19 @@ wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
              guard_timestamp, guard_loc_class, guard_risk);
 }
 
-wyrelog_error_t
-wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
+typedef enum
+{
+  WYL_CLIENT_FACT_MUTATION_APPEND,
+  WYL_CLIENT_FACT_MUTATION_RETRACT,
+} WylClientFactMutation;
+
+static wyrelog_error_t
+client_fact_mutate_batch (WylClient *client, const gchar *tenant,
     const gchar *graph, const gchar *namespace_id, const gchar *relation,
     guint32 schema_version, const gchar *batch_id,
     const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
-    WylClientFactAppendResult **out_result)
+    WylClientFactMutation mutation, WylClientFactAppendResult **out_result)
 {
   if (out_result != NULL)
     *out_result = NULL;
@@ -1976,11 +1982,22 @@ wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
   g_autofree gchar *escaped_batch = g_uri_escape_string (batch_id, NULL, TRUE);
   g_autofree gchar *escaped_key = g_uri_escape_string (idempotency_key, NULL,
           TRUE);
+  const gchar *operation = NULL;
+  switch (mutation) {
+    case WYL_CLIENT_FACT_MUTATION_APPEND:
+      operation = "append";
+      break;
+    case WYL_CLIENT_FACT_MUTATION_RETRACT:
+      operation = "retract";
+      break;
+    default:
+      return WYRELOG_E_INVALID;
+  }
   g_autofree gchar *uri = g_strdup_printf
-        ("%s/facts/%s/%s/%s:append?%s&namespace=%s&schema_version=%u"
+        ("%s/facts/%s/%s/%s:%s?%s&namespace=%s&schema_version=%u"
           "&batch_id=%s&idempotency_key=%s", base_url, escaped_tenant,
-          escaped_graph, escaped_relation, guard_query, escaped_namespace,
-          schema_version, escaped_batch, escaped_key);
+          escaped_graph, escaped_relation, operation, guard_query,
+          escaped_namespace, schema_version, escaped_batch, escaped_key);
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
@@ -2007,6 +2024,34 @@ wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
     *out_result = result;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id,
+    const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactAppendResult **out_result)
+{
+  return client_fact_mutate_batch (client, tenant, graph, namespace_id,
+             relation, schema_version, batch_id, idempotency_key, tsv_payload, tsv_len,
+             guard_timestamp, guard_loc_class, guard_risk,
+             WYL_CLIENT_FACT_MUTATION_APPEND, out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_retract_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id,
+    const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactAppendResult **out_result)
+{
+  return client_fact_mutate_batch (client, tenant, graph, namespace_id,
+             relation, schema_version, batch_id, idempotency_key, tsv_payload, tsv_len,
+             guard_timestamp, guard_loc_class, guard_risk,
+             WYL_CLIENT_FACT_MUTATION_RETRACT, out_result);
 }
 
 wyrelog_error_t
