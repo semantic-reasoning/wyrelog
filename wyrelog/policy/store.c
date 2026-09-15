@@ -13711,8 +13711,9 @@ fact_write_rate_retry_after_us (guint64 rate_per_second,
     guint64 remainder)
 {
   const guint64 scale = G_USEC_PER_SEC;
-  /* ceil((1 - remainder/scale) / rate_per_second * scale). */
-  guint64 numerator = (scale - remainder) * scale;
+  /* remainder is a micro-token numerator. Convert the missing fraction of
+   * one token directly to microseconds at rate_per_second tokens/second. */
+  guint64 numerator = scale - remainder;
   guint64 retry = numerator / rate_per_second;
   if (numerator % rate_per_second != 0)
     retry++;
