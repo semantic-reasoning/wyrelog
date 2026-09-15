@@ -998,6 +998,8 @@ def validate(files: dict[str, str]) -> None:
         raise AssertionError("rollback failure returns before poisoning the store")
 
     kind_owners = {
+        "wyl_fact_store_create_schema":
+            "WYL_FACT_STORE_TRANSACTION_SCHEMA_MIGRATION",
         "wyl_fact_store_append_batch_delta (wyl_fact_store_t *store":
             "WYL_FACT_STORE_TRANSACTION_APPEND_CORE",
         "wyl_fact_store_retract_by_batch_id":
