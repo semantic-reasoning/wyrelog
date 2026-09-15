@@ -23310,6 +23310,14 @@ refresh_variant_checks (void)
   if (read_only_method_rc != 0)
     return read_only_method_rc;
 
+  /* Before the skip-MFA grant below: the contract's own first case asserts
+   * that login-user is DENIED a skip-MFA login, so it has to observe the
+   * ungranted state (#1113). */
+  gint raw_login_rc = check_raw_login_contract (http.server, handle,
+          base_url);
+  if (raw_login_rc != 0)
+    return raw_login_rc;
+
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
         (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
