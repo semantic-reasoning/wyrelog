@@ -724,7 +724,7 @@ send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
   if (out_status == NULL || out_body == NULL || msg == NULL)
     return 2;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (GCancellable) cancellable = g_cancellable_new ();
@@ -2842,7 +2842,9 @@ static int
 wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
     const gchar *access_token, const gchar *json, gchar **out_body)
 {
-  *out_body = NULL;
+  if (out_body == NULL)
+    return 1;
+  g_clear_pointer (out_body, g_free);
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   g_autofree gchar *uri = g_strdup_printf
         ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT

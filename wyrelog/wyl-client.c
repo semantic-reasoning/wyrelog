@@ -2236,7 +2236,7 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
     WylClientFactMutation mutation, WylClientFactAppendResult **out_result)
 {
   if (out_result != NULL)
-    *out_result = NULL;
+    g_clear_pointer (out_result, wyl_client_fact_append_result_free);
   if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
       namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
       schema_version == 0 || batch_id == NULL || batch_id[0] == '\0' ||
@@ -2342,7 +2342,7 @@ wyl_client_datalog_query_json (WylClient *client, const gchar *tenant,
     gchar **out_json)
 {
   if (out_json != NULL)
-    *out_json = NULL;
+    g_clear_pointer (out_json, g_free);
   if (graph == NULL || graph[0] == '\0' || query == NULL ||
       query[0] == '\0' || out_json == NULL)
     return WYRELOG_E_INVALID;
