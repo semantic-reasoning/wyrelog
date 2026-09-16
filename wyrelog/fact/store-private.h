@@ -105,7 +105,8 @@ wyrelog_error_t wyl_fact_store_close_checked (wyl_fact_store_t * store);
 FactOpenReservationAdapter *wyl_fact_store_open_reservation_begin
   (wyl_policy_store_t *policy_store, const gchar *tenant_id,
     const gchar *graph_id, const gchar *root_identity,
-    const gchar *token_identity, WylFactOpenReservation **out_reservation);
+    const gchar *token_identity, WylFactOpenReservation **out_reservation,
+    wyrelog_error_t *out_error);
 void wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
     FactOpenReservationAdapter *adapter, WylFactOpenReservation *reservation);
 void wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,

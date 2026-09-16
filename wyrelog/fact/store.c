@@ -158,25 +158,39 @@ fact_store_open_reservation_release (gpointer user_data,
 FactOpenReservationAdapter *
 wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
     const gchar *tenant_id, const gchar *graph_id, const gchar *root_identity,
-    const gchar *token_identity, WylFactOpenReservation **out_reservation)
+    const gchar *token_identity, WylFactOpenReservation **out_reservation,
+    wyrelog_error_t *out_error)
 {
   if (out_reservation != NULL)
     *out_reservation = NULL;
+  if (out_error != NULL)
+    *out_error = WYRELOG_E_OK;
   if (policy_store == NULL || tenant_id == NULL || graph_id == NULL
       || root_identity == NULL || token_identity == NULL
-      || out_reservation == NULL)
+      || out_reservation == NULL){
+    if (out_error != NULL)
+      *out_error = WYRELOG_E_INVALID;
     return NULL;
+  }
   g_autofree gchar *owner = g_uuid_string_random ();
   g_autofree gchar *reservation_id = g_uuid_string_random ();
-  if (owner == NULL || reservation_id == NULL
-      || wyl_policy_store_register_fact_open_owner (policy_store, owner)
-      != WYRELOG_E_OK)
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (owner == NULL || reservation_id == NULL)
+    rc = WYRELOG_E_NOMEM;
+  else
+    rc = wyl_policy_store_register_fact_open_owner (policy_store, owner);
+  if (rc != WYRELOG_E_OK) {
+    if (out_error != NULL)
+      *out_error = rc;
     return NULL;
+  }
   g_autofree gchar *persisted_id = NULL;
-  if (wyl_policy_store_reserve_fact_open (policy_store, reservation_id, owner,
-      tenant_id, graph_id, root_identity, token_identity, &persisted_id)
-      != WYRELOG_E_OK) {
+  rc = wyl_policy_store_reserve_fact_open (policy_store, reservation_id, owner,
+          tenant_id, graph_id, root_identity, token_identity, &persisted_id);
+  if (rc != WYRELOG_E_OK) {
     (void) wyl_policy_store_retire_fact_open_owner (policy_store, owner);
+    if (out_error != NULL)
+      *out_error = rc;
     return NULL;
   }
 
@@ -201,11 +215,13 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
         adapter->owner_incarnation);
     g_free (adapter->owner_incarnation);
     g_free (adapter);
+    if (out_error != NULL)
+      *out_error = WYRELOG_E_NOMEM;
     return NULL;
   }
-  if (wyl_fact_open_reservation_begin_acquisition (reservation)
-      != WYRELOG_E_OK) {
-    (void) wyl_fact_open_reservation_fail (reservation);
+  rc = wyl_fact_open_reservation_begin_acquisition (reservation);
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t fail_rc = wyl_fact_open_reservation_fail (reservation);
     if (wyl_fact_open_reservation_get_state (reservation)
         == WYL_FACT_OPEN_RESERVATION_SETTLED)
       wyl_fact_open_reservation_free (reservation);
@@ -213,6 +229,8 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
         adapter->owner_incarnation);
     g_free (adapter->owner_incarnation);
     g_free (adapter);
+    if (out_error != NULL)
+      *out_error = fail_rc != WYRELOG_E_OK ? fail_rc : rc;
     return NULL;
   }
   *out_reservation = reservation;
