@@ -9807,10 +9807,15 @@ fact_quota_table_schema_is_compatible (sqlite3 *db)
     compact = g_string_free (normalized, FALSE);
   }
   gboolean compatible = compact != NULL
-      && strstr (compact, "dimensionin('graph_count','write_rate','logical_rows','concurrent_opens')")
+      && strstr (compact,
+          "dimensionin('graph_count','write_rate','logical_rows',"
+          "'concurrent_opens','schema_count')")
       != NULL
       && strstr (compact,
           "logical_rows'andhard_limitisnotnullandlogical_byte_limitisnotnull")
+      != NULL
+      && strstr (compact,
+          "schema_count'andhard_limitisnotnullandlogical_byte_limitisnull")
       != NULL;
   sqlite3_finalize (stmt);
   return compatible;
@@ -9868,7 +9873,8 @@ migrate_fact_quota_table (wyl_policy_store_t *store)
           "CREATE TABLE fact_tenant_quota_limits ("
           "  tenant_id TEXT NOT NULL,"
           "  dimension TEXT NOT NULL CHECK (dimension IN "
-          "    ('graph_count','write_rate','logical_rows','concurrent_opens')) ,"
+          "    ('graph_count','write_rate','logical_rows',"
+          "    'concurrent_opens','schema_count')) ,"
           "  hard_limit INTEGER CHECK (hard_limit IS NULL OR "
           "    (typeof(hard_limit)='integer' AND hard_limit >= 0)),"
           "  logical_byte_limit INTEGER CHECK (logical_byte_limit IS NULL OR "
@@ -9888,6 +9894,9 @@ migrate_fact_quota_table (wyl_policy_store_t *store)
           "    logical_byte_limit IS NULL AND rate_per_second IS NOT NULL AND "
           "    burst IS NOT NULL) OR "
           "    (dimension='concurrent_opens' AND hard_limit IS NOT NULL AND "
+          "    logical_byte_limit IS NULL AND rate_per_second IS NULL AND "
+          "    burst IS NULL) OR "
+          "    (dimension='schema_count' AND hard_limit IS NOT NULL AND "
           "    logical_byte_limit IS NULL AND rate_per_second IS NULL AND "
           "    burst IS NULL)),"
           "  PRIMARY KEY (tenant_id, dimension),"
@@ -12489,7 +12498,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits ("
       "  tenant_id TEXT NOT NULL,"
       "  dimension TEXT NOT NULL CHECK (dimension IN "
-      "    ('graph_count', 'write_rate', 'logical_rows', 'concurrent_opens')) ,"
+      "    ('graph_count', 'write_rate', 'logical_rows', "
+      "     'concurrent_opens', 'schema_count')) ,"
       "  hard_limit INTEGER CHECK (hard_limit IS NULL OR ("
       "    typeof(hard_limit) = 'integer' AND hard_limit >= 0)),"
       "  logical_byte_limit INTEGER CHECK (logical_byte_limit IS NULL OR ("
@@ -12509,6 +12519,9 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "    logical_byte_limit IS NULL AND rate_per_second IS NOT NULL AND "
       "    burst IS NOT NULL) OR "
       "    (dimension = 'concurrent_opens' AND hard_limit IS NOT NULL AND "
+      "    logical_byte_limit IS NULL AND rate_per_second IS NULL AND "
+      "    burst IS NULL) OR "
+      "    (dimension = 'schema_count' AND hard_limit IS NOT NULL AND "
       "    logical_byte_limit IS NULL AND rate_per_second IS NULL AND "
       "    burst IS NULL)),"
       "  PRIMARY KEY (tenant_id, dimension),"
@@ -14652,6 +14665,8 @@ wyl_policy_store_admit_fact_write_rate (wyl_policy_store_t *store,
   return rc;
 }
 
+static wyrelog_error_t fact_schema_quota_commit (wyl_policy_store_t *store);
+
 wyrelog_error_t
 wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
     const gchar *tenant_id, WylPolicyFactQuotaDimension dimension,
@@ -14679,6 +14694,43 @@ wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
       return WYRELOG_E_INVALID;
     return wyl_policy_store_set_fact_concurrent_open_quota (store, tenant_id,
                config->hard_limit);
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT) {
+    if (!config->has_limit || config->hard_limit > G_MAXINT64)
+      return WYRELOG_E_INVALID;
+    wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    WylPolicyFactSchemaQuotaStatus status = { 0 };
+    rc = wyl_policy_store_get_fact_schema_quota_status (store, tenant_id,
+            &status);
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_store_rollback_mutation (store);
+      return rc;
+    }
+    if (status.registered > config->hard_limit) {
+      wyl_policy_store_rollback_mutation (store);
+      return WYRELOG_E_CONFLICT;
+    }
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "INSERT INTO fact_tenant_quota_limits "
+            "(tenant_id,dimension,hard_limit,updated_at) VALUES (?,'schema_count',?,unixepoch()) "
+            "ON CONFLICT(tenant_id,dimension) DO UPDATE SET hard_limit=excluded.hard_limit,updated_at=excluded.updated_at;",
+            &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, tenant_id);
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2,
+        (sqlite3_int64) config->hard_limit) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_schema_quota_commit (store);
+    else
+      wyl_policy_store_rollback_mutation (store);
+    return rc;
   }
   return WYRELOG_E_INVALID;
 }
@@ -15416,7 +15468,93 @@ wyl_policy_store_get_fact_quota_config (wyl_policy_store_t *store,
     }
     return rc;
   }
+  if (dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT) {
+    WylPolicyFactSchemaQuotaStatus status = { 0 };
+    wyrelog_error_t rc = wyl_policy_store_get_fact_schema_quota_status (store,
+            tenant_id, &status);
+    if (rc == WYRELOG_E_OK) {
+      out_config->has_limit = status.has_limit;
+      out_config->hard_limit = status.hard_limit;
+    }
+    return rc;
+  }
   return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_fact_schema_quota_status (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactSchemaQuotaStatus *out_status)
+{
+  if (out_status == NULL || store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_status = (WylPolicyFactSchemaQuotaStatus) { 0 };
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_tenant_exists (store, tenant_id,
+          &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_NOT_FOUND;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT hard_limit FROM fact_tenant_quota_limits "
+          "WHERE tenant_id=? AND dimension='schema_count';", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    out_status->has_limit = TRUE;
+    out_status->hard_limit = (guint64) sqlite3_column_int64 (stmt, 0);
+  } else if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = prepare_stmt (store->db,
+          "SELECT COUNT(*) FROM fact_relation_schemas WHERE tenant_id=?;",
+          &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW)
+    out_status->registered = (guint64) sqlite3_column_int64 (stmt, 0);
+  else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* Registration consumes one durable schema row.  Counting the rows directly
+ * keeps staged and active metadata in the same authority and avoids a
+ * separately maintained counter that could drift from the ledger.  The
+ * caller must already hold the mutation transaction. */
+static wyrelog_error_t
+fact_schema_quota_admission_check (wyl_policy_store_t *store,
+    const gchar *tenant_id, gboolean *out_exceeded)
+{
+  if (out_exceeded != NULL)
+    *out_exceeded = FALSE;
+  WylPolicyFactSchemaQuotaStatus status = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_get_fact_schema_quota_status (store,
+          tenant_id, &status);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (status.has_limit && status.registered >= status.hard_limit) {
+    if (out_exceeded != NULL)
+      *out_exceeded = TRUE;
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fact_schema_quota_commit (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    policy_store_make_terminal (store, rc);
+  return rc;
 }
 
 /* Called only after beginning the same SQLite mutation that will admit the
@@ -19752,9 +19890,13 @@ wyl_policy_store_fact_relation_schema_exists (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
-    const wyl_policy_fact_relation_schema_options_t *opts)
+wyl_policy_store_register_fact_relation_schema_with_quota_result
+  (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts,
+    gboolean *out_quota_exceeded)
 {
+  if (out_quota_exceeded != NULL)
+    *out_quota_exceeded = FALSE;
   wyrelog_error_t rc = validate_fact_relation_schema_options (store, opts);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -19770,6 +19912,19 @@ wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
   rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  gboolean schema_exists = FALSE;
+  rc = wyl_policy_store_fact_relation_schema_exists (store, opts->tenant_id,
+          opts->graph_id, opts->namespace_id, opts->relation_name,
+          opts->schema_version, &schema_exists);
+  if (rc == WYRELOG_E_OK && schema_exists)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_schema_quota_admission_check (store, opts->tenant_id,
+            out_quota_exceeded);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
   rc = insert_fact_namespace_metadata (store, opts);
   if (rc == WYRELOG_E_OK)
     rc = insert_fact_relation_schema_metadata (store, opts);
@@ -19790,6 +19945,14 @@ wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
     return rc;
   }
   return wyl_policy_store_commit_mutation (store);
+}
+
+wyrelog_error_t
+wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  return wyl_policy_store_register_fact_relation_schema_with_quota_result
+           (store, opts, NULL);
 }
 
 wyrelog_error_t

@@ -435,7 +435,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid
 CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     tenant_id  TEXT NOT NULL,
     dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate',
-        'logical_rows', 'concurrent_opens')),
+        'logical_rows', 'concurrent_opens', 'schema_count')),
     hard_limit INTEGER CHECK (
         hard_limit IS NULL OR (typeof(hard_limit) = 'integer' AND hard_limit >= 0)),
     logical_byte_limit INTEGER CHECK (
@@ -456,6 +456,9 @@ CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
             AND logical_byte_limit IS NULL AND rate_per_second IS NOT NULL
             AND burst IS NOT NULL)
         OR (dimension = 'concurrent_opens' AND hard_limit IS NOT NULL
+            AND logical_byte_limit IS NULL AND rate_per_second IS NULL
+            AND burst IS NULL)
+        OR (dimension = 'schema_count' AND hard_limit IS NOT NULL
             AND logical_byte_limit IS NULL AND rate_per_second IS NULL
             AND burst IS NULL)),
     PRIMARY KEY (tenant_id, dimension),

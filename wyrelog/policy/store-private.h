@@ -2411,6 +2411,7 @@ typedef enum
   WYL_POLICY_FACT_QUOTA_GRAPH_COUNT = 0,
   WYL_POLICY_FACT_QUOTA_WRITE_RATE,
   WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS,
+  WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT,
 } WylPolicyFactQuotaDimension;
 typedef struct
 {
@@ -2420,6 +2421,12 @@ typedef struct
   guint64 burst;
 } WylPolicyFactQuotaConfig;
 
+typedef struct
+{
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 registered;
+} WylPolicyFactSchemaQuotaStatus;
 typedef struct
 {
   gboolean has_limit;
@@ -2565,6 +2572,9 @@ wyrelog_error_t wyl_policy_store_get_fact_quota_config
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyFactQuotaDimension dimension,
     WylPolicyFactQuotaConfig * out_config);
+wyrelog_error_t wyl_policy_store_get_fact_schema_quota_status
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyFactSchemaQuotaStatus * out_status);
 wyrelog_error_t wyl_policy_store_set_fact_concurrent_open_quota
   (wyl_policy_store_t * store, const gchar * tenant_id, guint64 hard_limit);
 wyrelog_error_t wyl_policy_store_get_fact_concurrent_open_quota
@@ -2664,6 +2674,10 @@ wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_register_fact_relation_schema
   (wyl_policy_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * opts);
+wyrelog_error_t wyl_policy_store_register_fact_relation_schema_with_quota_result
+  (wyl_policy_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * opts,
+    gboolean * out_quota_exceeded);
 /* Checks whether schema metadata exists for a relation. A zero version checks
  * any version; a nonzero version checks only that exact version. */
 wyrelog_error_t wyl_policy_store_fact_relation_schema_exists
