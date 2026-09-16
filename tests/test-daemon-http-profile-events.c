@@ -115,7 +115,7 @@ test_server_stop (TestServer *ts)
 static gint
 send_event_path (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *path, const gchar *json,
-    guint *out_status, gchar **out_body)
+    gboolean expect_continue, guint *out_status, gchar **out_body)
 {
   *out_status = 0;
   *out_body = NULL;
@@ -127,6 +127,9 @@ send_event_path (SoupSession *session, const gchar *method,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 1;
+  if (expect_continue)
+    soup_message_headers_set_expectations (soup_message_get_request_headers (msg),
+        SOUP_EXPECTATION_CONTINUE);
   if (json != NULL) {
     g_autoptr (GBytes) payload = g_bytes_new (json, strlen (json));
     soup_message_set_request_body_from_bytes (msg, "application/json", payload);
@@ -152,7 +155,7 @@ send_event (SoupSession *session, const gchar *method, const gchar *base_url,
     const gchar *json, guint *out_status, gchar **out_body)
 {
   return send_event_path (session, method, base_url, "/profile/events", json,
-             out_status, out_body);
+             FALSE, out_status, out_body);
 }
 
 static gint
@@ -170,7 +173,7 @@ check_exact_alias_producer_canary (SoupServer *server, const gchar *base_url)
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_event_path (session, "POST", base_url, aliases[i],
-        PRODUCER_PAYLOAD, &status, &body) != 0)
+        PRODUCER_PAYLOAD, FALSE, &status, &body) != 0)
       return 801 + (gint) i *10;
     if (status != 404 || g_strcmp0 (body, "{\"error\":\"not_found\"}") != 0)
       return 802 + (gint) i *10;
@@ -291,11 +294,76 @@ check_oversized_rejected (const gchar *base_url)
 
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_event (session, "POST", base_url, big->str, &status, &body) != 0)
+  /* Wait for the early response without racing an unread upload with close. */
+  if (send_event_path (session, "POST", base_url, "/profile/events", big->str,
+      TRUE, &status, &body) != 0)
     return 500;
   if (status != 413
       || strstr (body, "\"request_body_too_large\"") == NULL)
     return 501;
+  return 0;
+}
+
+static gint
+check_eager_upload_recovery (const gchar *base_url)
+{
+  g_autoptr (GUri) uri = g_uri_parse (base_url, G_URI_FLAGS_NONE, NULL);
+  g_autoptr (GSocketClient) client = g_socket_client_new ();
+  g_socket_client_set_timeout (client, 3);
+  /* Exercise the same real transport on Windows as well as POSIX. No Expect:
+   * unread inbound data may turn the early close into a TCP reset. Neither
+   * case may hang or prevent the next ordinary request from succeeding. */
+  for (guint i = 0; i < 3; i++) {
+    g_autoptr (GError) error = NULL;
+    g_autoptr (GSocketConnection) connection = g_socket_client_connect_to_host
+          (client, g_uri_get_host (uri), (guint16) g_uri_get_port (uri), NULL,
+            &error);
+    if (connection == NULL)
+      return 510;
+    g_autoptr (GString) request = g_string_new (
+      "POST /profile/events HTTP/1.1\r\nHost: localhost\r\n"
+      "Content-Length: 67108864\r\nConnection: close\r\n\r\n");
+    for (guint j = 0; j < 32768; j++)
+      g_string_append_c (request, 'x');
+    GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (connection));
+    if (!g_output_stream_write_all (output, request->str, request->len, NULL,
+        NULL, &error)
+        && !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED))
+      return 511;
+    g_clear_error (&error);
+    GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
+    g_autoptr (GString) response = g_string_new (NULL);
+    gint64 deadline = g_get_monotonic_time () + 3 * G_TIME_SPAN_SECOND;
+    for (;;) {
+      if (g_get_monotonic_time () >= deadline)
+        return 515;
+      gchar buffer[512];
+      gssize count = g_input_stream_read (input, buffer, sizeof buffer, NULL,
+              &error);
+      if (count < 0) {
+        if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED))
+          return 517;
+        break;
+      }
+      if (count == 0)
+        break;
+      g_string_append_len (response, buffer, count);
+      if (response->len > 4096)
+        return 513;
+    }
+    /* A reset can truncate the response; if its status arrived it must be 413.
+     * The Expect probes above separately require the complete JSON and ID. */
+    if (response->len >= 12
+        && !g_str_has_prefix (response->str, "HTTP/1.1 413"))
+      return 514;
+    g_autoptr (SoupSession) session = soup_session_new_with_options ("timeout", 3,
+            NULL);
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_event (session, "POST", base_url, PRODUCER_PAYLOAD, &status,
+        &body) != 0 || status != 200 || strstr (body, "\"ok\":true") == NULL)
+      return 516;
+  }
   return 0;
 }
 
@@ -318,7 +386,8 @@ check_non_system_profile_denied (const gchar *base_url)
   for (gsize i = 0; i < 1200; i++)
     g_string_append_c (big, 'a');
   g_string_append (big, "\",\"timestamp_us\":1}");
-  if (send_event (session, "POST", base_url, big->str, &status, &body) != 0)
+  if (send_event_path (session, "POST", base_url, "/profile/events", big->str,
+      TRUE, &status, &body) != 0)
     return 602;
   if (status != 413 || strstr (body, "\"request_body_too_large\"") == NULL)
     return 603;
@@ -396,6 +465,8 @@ main (void)
   if ((rc = check_malformed_rejected (sys.base_url)) != 0)
     goto out_system;
   if ((rc = check_oversized_rejected (sys.base_url)) != 0)
+    goto out_system;
+  if ((rc = check_eager_upload_recovery (sys.base_url)) != 0)
     goto out_system;
   if ((rc = check_non_loopback_denied ()) != 0)
     goto out_system;

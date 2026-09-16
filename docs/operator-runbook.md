@@ -22,6 +22,9 @@ without waiting for the final chunk. The response is HTTP 413 with
 limit retain the endpoint's normal validation response. If the peer cannot
 receive the error or the socket write fails, the daemon closes the connection
 without waiting; clients may then observe a transport error instead of 413.
+An eager upload can also cause a TCP reset when the connection closes with
+unread inbound data, even after the error was written. Clients that need the
+early HTTP response should use `Expect: 100-continue` and wait before uploading.
 
 ## Installed Layout
 

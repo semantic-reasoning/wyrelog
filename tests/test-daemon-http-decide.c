@@ -6933,6 +6933,45 @@ build_policy_mutation_uri (const gchar *base_url, const gchar *path,
   return g_strdup_printf ("%s%s?%s", root, path, query);
 }
 
+/* Strict 413 probes use Expect so an unread upload cannot reset the response.
+ * Ordinary and raw-socket transport probes deliberately do not use Expect. */
+static gint
+send_oversized_policy_body (SoupSession *session, const gchar *base_url,
+    const gchar *path, const gchar *query, const gchar *access_token,
+    const gchar *request_body, guint *out_status, gchar **out_body)
+{
+  *out_status = 0;
+  *out_body = NULL;
+  g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
+  if (msg == NULL)
+    return 121;
+  SoupMessageHeaders *headers = soup_message_get_request_headers (msg);
+  soup_message_headers_set_expectations (headers, SOUP_EXPECTATION_CONTINUE);
+  if (access_token != NULL) {
+    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", access_token);
+    soup_message_headers_replace (headers, "Authorization", authorization);
+  }
+  g_autoptr (GBytes) payload = g_bytes_new_static (request_body,
+          strlen (request_body));
+  soup_message_set_request_body_from_bytes (msg, "application/json", payload);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+          &error);
+  if (bytes == NULL) {
+    g_printerr ("oversized request %s failed: %s\n", path, error->message);
+    return 122;
+  }
+  gint rc = check_response_request_id_header (msg, 177);
+  if (rc != 0)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
 static gint
 send_raw_policy_mutation_body_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *path, const gchar *query,
@@ -11724,8 +11763,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
     g_clear_pointer (&body, g_free);
   }
   g_autofree gchar *oversized_tenant_seal_body = g_strnfill (1025, 'x');
-  rc = send_raw_policy_mutation_body (session, "POST", base_url,
-          "/tenants/seal", tenant_seal_query, oversized_tenant_seal_body,
+  rc = send_oversized_policy_body (session, base_url,
+          "/tenants/seal", tenant_seal_query, NULL, oversized_tenant_seal_body,
           &status, &body);
   if (rc != 0)
     return rc;
@@ -18151,7 +18190,7 @@ check_service_principal_management_contract (void)
   }
   g_clear_pointer (&body, g_free);
   oversized_principal_disable_body = g_strnfill (1025, 'x');
-  if (send_raw_service_principal_bearer (session, "POST", base_url,
+  if (send_oversized_policy_body (session, base_url,
       "/service-principals/svc:tenant-a:worker/disable", query,
       access_token, oversized_principal_disable_body, &status,
       &body) != 0 || status != 413 || body == NULL
