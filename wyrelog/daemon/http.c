@@ -7667,7 +7667,7 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       g_string_append (body, "null");
     if (dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT)
       g_string_append_printf (body,
-          ",\"committed\":%" G_GUINT64_FORMAT ",\"pending\":0}",
+          ",\"registered\":%" G_GUINT64_FORMAT "}",
           schema_status.registered);
     else
       g_string_append_printf (body,
