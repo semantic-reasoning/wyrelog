@@ -1996,6 +1996,10 @@ send_raw_refresh_body (SoupSession *session, const gchar *base_url,
     const gchar *query_token, const gchar *body_json, guint *out_status,
     gchar **out_body)
 {
+  if (out_status == NULL || out_body == NULL)
+    return 1;
+  *out_status = 0;
+  g_clear_pointer (out_body, g_free);
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
@@ -2031,7 +2035,6 @@ send_raw_refresh_body (SoupSession *session, const gchar *base_url,
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
-  g_clear_pointer (out_body, g_free);
   *out_body = g_strndup (data, size);
   return 0;
 }
@@ -22821,8 +22824,10 @@ static gint
 send_logout_challenge_probe (SoupSession *session, const gchar *base_url,
     const gchar *authorization, guint *out_status, gchar **out_challenge)
 {
+  if (out_status == NULL || out_challenge == NULL)
+    return 213;
   *out_status = 0;
-  *out_challenge = NULL;
+  g_clear_pointer (out_challenge, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -22894,9 +22899,10 @@ check_refresh_body_form_contract (const gchar *base_url)
   g_autofree gchar *first = extract_json_string (body, "refresh_token");
   if (first == NULL)
     return 230;
-  g_clear_pointer (&body, g_free);
 
-  /* The body form works and rotates, exactly as the query form does. */
+  /* Reuse the response slot without a caller-side clear.  The helper owns
+   * the slot contract and must release the first response before replacing
+   * it with the rotated response. */
   g_autofree gchar *body_json = g_strdup_printf
         ("{\"refresh_token\":\"%s\"}", first);
   if (send_raw_refresh_body (session, base_url, NULL, body_json, &status,
