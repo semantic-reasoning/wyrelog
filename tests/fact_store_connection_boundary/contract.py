@@ -43,7 +43,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "validate_projection_shape_unlocked": 2,
         "validate_store_scope_unlocked": 1,
         "wyl_fact_store_append_batch_delta": 1,
-        "wyl_fact_store_close": 2,
+        "fact_store_close_checked": 2,
         "wyl_fact_store_connection_session_begin": 2,
         "wyl_fact_store_connection_session_get": 1,
         "wyl_fact_store_create_schema": 2,
@@ -103,7 +103,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "validate_projection_shape_unlocked": 22,
         "validate_schema_shape": 1,
         "wyl_fact_store_append_batch_delta": 10,
-        "wyl_fact_store_close": 2,
+        "fact_store_close_checked": 2,
         "wyl_fact_store_ensure_projection": 1,
         "wyl_fact_store_has_durable_batches": 5,
         "wyl_fact_store_open": 2,
@@ -147,6 +147,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "validate_graph_internal",
     "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
     "wyl_fact_replay_validate_graph_with_artifact_lease",
+    "wyl_fact_store_close",
+    "wyl_fact_store_close_checked",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -175,6 +177,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "fact_store_duckdb_apply_config",
         "forget_survey_unlocked",
         "quarantine_forget_intent_unlocked",
+        "wyl_fact_store_close",
+        "wyl_fact_store_close_checked",
     },
 }
 OLD_AUTHORITY = (

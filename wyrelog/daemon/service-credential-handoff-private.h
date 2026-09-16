@@ -81,8 +81,8 @@ typedef struct
  * material.  This entry point is not itself registered as a route: the routed
  * service-credential issue/rotate handlers and focused tests drive this core.
  *
- * out_json is caller-owned and set only on WYRELOG_E_OK; it is left NULL on any
- * failure.  Returns WYRELOG_E_NOT_FOUND when the handoff roots are unconfigured,
+ * out_json is caller-owned; an existing value is released before the call and
+ * the slot is left NULL on any failure.  Returns WYRELOG_E_NOT_FOUND when the handoff roots are unconfigured,
  * WYRELOG_E_INVALID for malformed arguments, and otherwise the front-door
  * return code verbatim. */
 wyrelog_error_t

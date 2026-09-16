@@ -2324,7 +2324,6 @@ main (void)
   if (wyl_client_decision_get_deny_reason (decision_result) != NULL ||
       wyl_client_decision_get_deny_origin (decision_result) != NULL)
     return wyl_test_normalize_exit_status (181);
-  g_clear_pointer (&decision_result, wyl_client_decision_free);
   if (wyl_client_decide_ex (local_client, NULL, "wr.audit.read", "doc/42",
       &decision_result) != WYRELOG_E_INVALID)
     return wyl_test_normalize_exit_status (186);
