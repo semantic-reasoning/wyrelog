@@ -3566,6 +3566,103 @@ test_fact_concurrent_open_quota_store_api (void)
 }
 
 static void
+test_fact_concurrent_open_quota_cross_handle_reopen (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  wyl_policy_store_open_options_t options = { .path = path };
+  g_autoptr (wyl_policy_store_t) setup = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&options, &setup), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (setup), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (setup, "race-tenant",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (setup,
+      "race-owner-a"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (setup,
+      "race-owner-b"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (setup,
+      "race-tenant", 1), ==, WYRELOG_E_OK);
+  g_clear_pointer (&setup, wyl_policy_store_close);
+
+  g_autoptr (wyl_policy_store_t) first = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&options, &first), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *settled_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (first,
+      "race-reservation-a", "race-owner-a", "race-tenant", "race-graph-a",
+      "race-root-a", "race-token-a", &settled_id), ==, WYRELOG_E_OK);
+  g_assert_nonnull (settled_id);
+  g_clear_pointer (&first, wyl_policy_store_close);
+
+  /* A separately opened handle must account for the durable reservation and
+   * reject a second admission while the first reservation remains charged. */
+  g_autoptr (wyl_policy_store_t) second = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&options, &second), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *rejected_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (second,
+      "race-reservation-b", "race-owner-b", "race-tenant", "race-graph-b",
+      "race-root-b", "race-token-b", &rejected_id), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected_id);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (second),
+      "SELECT count(*) FROM fact_open_reservations WHERE "
+      "reservation_id='race-reservation-b';"), ==, 0);
+  WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (second,
+      "race-tenant", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.charged, ==, 1);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (second, settled_id,
+      "race-owner-a", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (second, settled_id,
+      "race-owner-a", NULL, TRUE), ==, WYRELOG_E_OK);
+  g_clear_pointer (&second, wyl_policy_store_close);
+
+  g_autoptr (wyl_policy_store_t) reopened = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&options, &reopened), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (reopened,
+      "race-tenant", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.pending, ==, 0);
+  g_assert_cmpuint (status.active, ==, 0);
+  g_assert_cmpuint (status.charged, ==, 0);
+  g_autofree gchar *settled_state = scalar_text (
+    wyl_policy_store_get_db (reopened),
+    "SELECT state FROM fact_open_reservations WHERE reservation_id="
+    "'race-reservation-a';");
+  g_assert_cmpstr (settled_state, ==, "settled");
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (reopened, settled_id,
+      "race-owner-a", NULL, TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (reopened, settled_id,
+      "race-owner-b", NULL, TRUE), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (reopened, settled_id,
+      "race-owner-a", "stale-claim", TRUE), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (reopened, settled_id,
+      "race-owner-a", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (reopened,
+      "race-tenant", &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.charged, ==, 0);
+  g_autofree gchar *reusable_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (reopened,
+      "race-reservation-reusable", "race-owner-b", "race-tenant",
+      "race-graph-reusable", "race-root-reusable", "race-token-reusable",
+      &reusable_id), ==, WYRELOG_E_OK);
+  g_assert_nonnull (reusable_id);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (reopened, reusable_id,
+      "race-owner-b", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (reopened, reusable_id,
+      "race-owner-b", NULL, TRUE), ==, WYRELOG_E_OK);
+  g_clear_pointer (&reusable_id, g_free);
+  g_clear_pointer (&reopened, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
 open_fact_open_fault_fixture (const gchar *path,
     wyl_policy_store_t **out_store)
 {
@@ -5928,6 +6025,9 @@ main (int argc, char **argv)
       test_graph_quota_store_api);
   g_test_add_func ("/policy/graph-authority/fact-concurrent-open-quota-store-api",
       test_fact_concurrent_open_quota_store_api);
+  g_test_add_func
+    ("/policy/graph-authority/fact-concurrent-open-cross-handle-reopen",
+      test_fact_concurrent_open_quota_cross_handle_reopen);
   g_test_add_func ("/policy/graph-authority/fact-open-publication-faults",
       test_fact_open_publication_faults);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-quota-persists",
