@@ -3148,6 +3148,15 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
       || !rate_state_exists || rate_tokens != 2)
     return 5280;
+  /* Keep the request sequence deterministic under sanitizer builds: the
+   * admission clock is real, so a slow preceding HTTP request must not refill
+   * a token before the next debit assertion. */
+  g_autofree gchar *reset_rate_clock = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='__wr_default';", g_get_real_time ());
+  if (sqlite3_exec (wyl_policy_store_get_db (store), reset_rate_clock,
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 52801;
   const gchar *rate_retract_query = "tenant=__wr_default&namespace=shop&"
       "schema_version=1&batch_id=rate-retract&idempotency_key=rate-retract&"
       FACT_GUARD;
@@ -3161,6 +3170,13 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
       || !rate_state_exists || rate_tokens != 1)
     return 52811;
+  g_clear_pointer (&reset_rate_clock, g_free);
+  reset_rate_clock = g_strdup_printf
+        ("UPDATE fact_tenant_write_rate_state SET last_refill_at=%" G_GINT64_FORMAT
+          " WHERE tenant_id='__wr_default';", g_get_real_time ());
+  if (sqlite3_exec (wyl_policy_store_get_db (store), reset_rate_clock,
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 52812;
   const gchar *rate_second_query = "tenant=__wr_default&namespace=shop&"
       "schema_version=1&batch_id=rate-second&idempotency_key=rate-second&"
       FACT_GUARD;
