@@ -200,6 +200,8 @@ struct wyl_policy_store_t
   WylPolicyStoreRotationIntentEntryGateFunc rotation_intent_entry_gate;
   gpointer rotation_intent_entry_gate_data;
   WylPolicyGraphAuthorityMutationFailStage mutation_fail_once;
+  guint fact_open_publication_fail_mask;
+  gboolean fact_open_publication_cleanup_active;
   WylPolicyDarwinEvidenceGateFunc darwin_evidence_gate;
   gpointer darwin_evidence_gate_data;
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -329,6 +331,14 @@ policy_store_runtime_writer_end (wyl_policy_store_t *store)
     return WYRELOG_E_OK;
   store->runtime_writer_depth--;
   if (store->runtime_writer_depth == 0 && store->runtime_lease != NULL) {
+    if (store->fact_open_publication_cleanup_active
+        && (store->fact_open_publication_fail_mask
+        & (1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_LEASE_RELEASE)) != 0) {
+      store->fact_open_publication_fail_mask &=
+          ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_LEASE_RELEASE);
+      store->runtime_writer_depth = 1;
+      return WYRELOG_E_IO;
+    }
     wyrelog_error_t rc = wyl_policy_store_runtime_lease_downgrade
           (store->runtime_lease);
     if (rc != WYRELOG_E_OK) {
@@ -8104,6 +8114,9 @@ wyl_policy_store_is_autocommit (wyl_policy_store_t *store)
 wyrelog_error_t
 wyl_policy_store_publication_transaction_begin (wyl_policy_store_t *store)
 {
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK)
+    return terminal;
   if (!wyl_policy_store_is_autocommit (store))
     return WYRELOG_E_BUSY;
   wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
@@ -11929,6 +11942,16 @@ wyl_policy_store_graph_authority_mutation_fail_once (wyl_policy_store_t *store,
 }
 
 void
+wyl_policy_store_fact_open_publication_fail_once
+  (wyl_policy_store_t *store, WylPolicyFactOpenPublicationFailStage stage)
+{
+  if (store == NULL || stage <= WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_NONE
+      || stage >= WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COUNT)
+    return;
+  store->fact_open_publication_fail_mask |= 1u << stage;
+}
+
+void
 wyl_policy_store_darwin_evidence_gate (wyl_policy_store_t *store,
     WylPolicyDarwinEvidenceGateFunc gate, gpointer data)
 {
@@ -13850,22 +13873,49 @@ fact_open_state_name (WylPolicyFactOpenReservationState state)
 static wyrelog_error_t
 fact_open_publication_commit (wyl_policy_store_t *store)
 {
-  wyrelog_error_t commit_rc = exec_sql (store->db, "COMMIT;");
+  store->fact_open_publication_cleanup_active = TRUE;
+  wyrelog_error_t commit_rc = WYRELOG_E_OK;
+  if ((store->fact_open_publication_fail_mask
+      & (1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COMMIT)) != 0) {
+    store->fact_open_publication_fail_mask &=
+        ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COMMIT);
+    commit_rc = WYRELOG_E_IO;
+  } else if ((store->fact_open_publication_fail_mask
+      & (1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_AUTOROLLBACK)) != 0) {
+    store->fact_open_publication_fail_mask &=
+        ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_AUTOROLLBACK);
+    wyrelog_error_t rollback_rc = exec_sql (store->db, "ROLLBACK;");
+    if (rollback_rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store))
+      policy_store_make_terminal (store, rollback_rc != WYRELOG_E_OK
+          ? rollback_rc : WYRELOG_E_INTERNAL);
+    commit_rc = WYRELOG_E_IO;
+  } else {
+    commit_rc = exec_sql (store->db, "COMMIT;");
+  }
   if (commit_rc != WYRELOG_E_OK) {
     wyrelog_error_t rollback_rc = WYRELOG_E_OK;
     if (!wyl_policy_store_is_autocommit (store)) {
-      rollback_rc = exec_sql (store->db, "ROLLBACK;");
+      if ((store->fact_open_publication_fail_mask
+          & (1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK)) != 0) {
+        store->fact_open_publication_fail_mask &=
+            ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK);
+        rollback_rc = WYRELOG_E_IO;
+      } else {
+        rollback_rc = exec_sql (store->db, "ROLLBACK;");
+      }
       if (rollback_rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit
             (store))
         rollback_rc = WYRELOG_E_INTERNAL;
     }
     wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+    store->fact_open_publication_cleanup_active = FALSE;
     if (rollback_rc != WYRELOG_E_OK || lease_rc != WYRELOG_E_OK)
       policy_store_make_terminal (store, rollback_rc != WYRELOG_E_OK
           ? rollback_rc : lease_rc);
     return commit_rc;
   }
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  store->fact_open_publication_cleanup_active = FALSE;
   if (lease_rc != WYRELOG_E_OK)
     policy_store_make_terminal (store, lease_rc);
   /* The database commit is durable even when writer-lease cleanup fails. */
@@ -13876,8 +13926,18 @@ static wyrelog_error_t
 fact_open_publication_rollback (wyl_policy_store_t *store,
     wyrelog_error_t primary_rc)
 {
-  wyrelog_error_t cleanup_rc =
-      wyl_policy_store_publication_transaction_rollback_checked (store);
+  wyrelog_error_t cleanup_rc = WYRELOG_E_OK;
+  store->fact_open_publication_cleanup_active = TRUE;
+  if ((store->fact_open_publication_fail_mask
+      & (1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK)) != 0) {
+    store->fact_open_publication_fail_mask &=
+        ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK);
+    cleanup_rc = WYRELOG_E_IO;
+  } else {
+    cleanup_rc = wyl_policy_store_publication_transaction_rollback_checked
+          (store);
+  }
+  store->fact_open_publication_cleanup_active = FALSE;
   if (cleanup_rc != WYRELOG_E_OK) {
     policy_store_make_terminal (store, cleanup_rc);
     return cleanup_rc;

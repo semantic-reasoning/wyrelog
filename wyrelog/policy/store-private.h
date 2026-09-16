@@ -2436,6 +2436,15 @@ typedef enum
   WYL_POLICY_FACT_OPEN_ACTIVE,
   WYL_POLICY_FACT_OPEN_CLEANUP_PENDING,
 } WylPolicyFactOpenReservationState;
+typedef enum
+{
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_NONE = 0,
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COMMIT,
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_AUTOROLLBACK,
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK,
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_LEASE_RELEASE,
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COUNT,
+} WylPolicyFactOpenPublicationFailStage;
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);
@@ -2485,6 +2494,8 @@ wyrelog_error_t wyl_policy_store_set_fact_concurrent_open_quota
 wyrelog_error_t wyl_policy_store_get_fact_concurrent_open_quota
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyFactConcurrentOpenQuotaStatus * out_status);
+void wyl_policy_store_fact_open_publication_fail_once
+  (wyl_policy_store_t *store, WylPolicyFactOpenPublicationFailStage stage);
 wyrelog_error_t wyl_policy_store_register_fact_open_owner
   (wyl_policy_store_t * store, const gchar * owner_incarnation);
 wyrelog_error_t wyl_policy_store_retire_fact_open_owner
