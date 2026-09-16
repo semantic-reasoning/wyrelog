@@ -6131,6 +6131,178 @@ test_fact_write_rate_admission_persists_and_bounds (void)
   cleanup_store_path (store_root, store_path);
 }
 
+static void
+test_fact_logical_quota_ledger (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-a",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-b",
+      &created), ==, WYRELOG_E_OK);
+
+  WylPolicyFactLogicalQuotaConfig config = {
+    .has_limit = TRUE,
+    .logical_row_limit = 3,
+    .logical_byte_limit = 10,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "logical-a",
+      &config), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "missing",
+      &config), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "logical-a", 1), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "logical-regression-owner"), ==, WYRELOG_E_OK);
+  g_autofree gchar *regression_reservation = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "logical-regression-reservation", "logical-regression-owner",
+      "logical-a", "logical-regression-graph", "logical-regression-root",
+      "logical-regression-token", &regression_reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      regression_reservation, "logical-regression-owner", NULL,
+      WYL_POLICY_FACT_OPEN_PENDING, WYL_POLICY_FACT_OPEN_ACQUIRING), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      regression_reservation, "logical-regression-owner", NULL,
+      WYL_POLICY_FACT_OPEN_ACQUIRING, WYL_POLICY_FACT_OPEN_ACTIVE), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      regression_reservation, "logical-regression-owner", NULL,
+      WYL_POLICY_FACT_OPEN_ACTIVE, WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      regression_reservation, "logical-regression-owner", NULL, TRUE), ==,
+      WYRELOG_E_OK);
+  WylPolicyFactLogicalQuotaConfig loaded = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota (store, "logical-a",
+      &loaded), ==, WYRELOG_E_OK);
+  g_assert_true (loaded.has_limit);
+  g_assert_cmpuint (loaded.logical_row_limit, ==, 3);
+  g_assert_cmpuint (loaded.logical_byte_limit, ==, 10);
+
+  const WylPolicyFactLogicalQuotaOperation operation = {
+    .tenant_id = "logical-a",
+    .graph_id = "graph-a",
+    .batch_id = "batch-a",
+    .request_id = "request-a",
+    .payload_digest =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  };
+  WylPolicyFactLogicalOperationStatus op_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &operation, 2, 6, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  g_assert_false (op_status.replay);
+
+  const WylPolicyFactLogicalQuotaOperation competing_operation = {
+    .tenant_id = "logical-a",
+    .graph_id = "graph-b",
+    .batch_id = "batch-b",
+    .request_id = "request-b",
+    .payload_digest =
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &competing_operation, 1, 4, &op_status), ==, WYRELOG_E_OK);
+
+  WylPolicyFactLogicalQuotaStatus quota_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "logical-a", &quota_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota_status.pending_rows, ==, 3);
+  g_assert_cmpuint (quota_status.pending_bytes, ==, 10);
+
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &operation, 2, 6, &op_status), ==, WYRELOG_E_OK);
+  g_assert_true (op_status.replay);
+  const WylPolicyFactLogicalQuotaOperation conflicting_operation = {
+    .tenant_id = "logical-a",
+    .graph_id = "graph-a",
+    .batch_id = "batch-a",
+    .request_id = "request-a",
+    .payload_digest =
+        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &conflicting_operation, 2, 6, &op_status), ==, WYRELOG_E_CONFLICT);
+
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &operation, 2, 6, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &operation, 2, 6, &op_status), ==, WYRELOG_E_OK);
+  g_assert_true (op_status.replay);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &operation, 1, 6, &op_status), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &competing_operation, 1, 4, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "logical-a", &quota_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota_status.committed_rows, ==, 3);
+  g_assert_cmpuint (quota_status.committed_bytes, ==, 10);
+  g_assert_cmpuint (quota_status.pending_rows, ==, 0);
+  g_assert_cmpuint (quota_status.pending_bytes, ==, 0);
+
+  config.logical_row_limit = 10;
+  config.logical_byte_limit = 100;
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "logical-a",
+      &config), ==, WYRELOG_E_OK);
+  const WylPolicyFactLogicalQuotaOperation unknown_operation = {
+    .tenant_id = "logical-a",
+    .graph_id = "graph-c",
+    .batch_id = "batch-c",
+    .request_id = "request-c",
+    .payload_digest =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+  };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store,
+      &unknown_operation, 1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &unknown_operation, 1, -1, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &unknown_operation, 1, -1, &op_status), ==, WYRELOG_E_OK);
+  g_assert_true (op_status.replay);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store,
+      &unknown_operation, 1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "logical-a", &quota_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota_status.committed_rows, ==, 4);
+  g_assert_cmpuint (quota_status.pending_rows, ==, 0);
+  g_assert_cmpuint (quota_status.committed_bytes, ==, 15);
+  g_assert_cmpuint (quota_status.pending_bytes, ==, 0);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store,
+      &unknown_operation, FALSE, &op_status), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store,
+      &unknown_operation, TRUE, &op_status), ==, WYRELOG_E_CONFLICT);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "logical-a", &quota_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota_status.committed_rows, ==, 4);
+  g_assert_cmpuint (quota_status.committed_bytes, ==, 15);
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "logical-a",
+      &(WylPolicyFactLogicalQuotaConfig) { 0 }), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota (store, "logical-b",
+      &loaded), ==, WYRELOG_E_OK);
+  g_assert_false (loaded.has_limit);
+  cleanup_store_path (store_root, store_path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -6228,6 +6400,8 @@ main (int argc, char **argv)
       test_fact_write_rate_admission_persists_and_bounds);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-admission-clock",
       test_fact_write_rate_admission_clock_remainder);
+  g_test_add_func ("/policy/graph-authority/fact-logical-quota-ledger",
+      test_fact_logical_quota_ledger);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);

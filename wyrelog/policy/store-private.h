@@ -2419,6 +2419,7 @@ typedef struct
   guint64 rate_per_second;
   guint64 burst;
 } WylPolicyFactQuotaConfig;
+
 typedef struct
 {
   gboolean has_limit;
@@ -2429,6 +2430,7 @@ typedef struct
   guint64 cleanup_pending;
   guint64 charged;
 } WylPolicyFactConcurrentOpenQuotaStatus;
+
 typedef enum
 {
   WYL_POLICY_FACT_OPEN_PENDING = 0,
@@ -2445,6 +2447,80 @@ typedef enum
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_LEASE_RELEASE,
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COUNT,
 } WylPolicyFactOpenPublicationFailStage;
+/* The logical budget is cumulative: committed rows and bytes are never
+ * removed by a later fact forget. The two limits are one paired dimension;
+ * callers must configure both or neither. A settlement byte delta of -1 is
+ * deliberately retained as unknown by the operation journal and never
+ * treated as zero. */
+typedef struct
+{
+  gboolean has_limit;
+  guint64 logical_row_limit;
+  guint64 logical_byte_limit;
+} WylPolicyFactLogicalQuotaConfig;
+
+typedef struct
+{
+  guint64 committed_rows;
+  guint64 committed_bytes;
+  guint64 pending_rows;
+  guint64 pending_bytes;
+  gboolean has_limit;
+  guint64 logical_row_limit;
+  guint64 logical_byte_limit;
+} WylPolicyFactLogicalQuotaStatus;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *batch_id;
+  const gchar *request_id;
+  const gchar *payload_digest;
+} WylPolicyFactLogicalQuotaOperation;
+
+typedef enum
+{
+  WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING = 0,
+  WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED,
+  WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING,
+  WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED,
+} WylPolicyFactLogicalOperationState;
+
+typedef struct
+{
+  WylPolicyFactLogicalOperationState state;
+  gboolean replay;
+  guint64 requested_rows;
+  guint64 requested_bytes;
+  guint64 applied_rows;
+  gint64 applied_bytes;
+} WylPolicyFactLogicalOperationStatus;
+
+wyrelog_error_t wyl_policy_store_set_fact_logical_quota
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    const WylPolicyFactLogicalQuotaConfig *config);
+wyrelog_error_t wyl_policy_store_get_fact_logical_quota
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    WylPolicyFactLogicalQuotaConfig *out_config);
+wyrelog_error_t wyl_policy_store_get_fact_logical_quota_status
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    WylPolicyFactLogicalQuotaStatus *out_status);
+wyrelog_error_t wyl_policy_store_reserve_fact_logical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactLogicalQuotaOperation *operation,
+    guint64 requested_rows, guint64 requested_bytes,
+    WylPolicyFactLogicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_settle_fact_logical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactLogicalQuotaOperation *operation,
+    guint64 applied_rows, gint64 applied_bytes,
+    WylPolicyFactLogicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_cancel_fact_logical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactLogicalQuotaOperation *operation,
+    gboolean definite_noncommit,
+    WylPolicyFactLogicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);

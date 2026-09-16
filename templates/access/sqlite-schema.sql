@@ -434,20 +434,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid
 -- committed but whose safe filesystem materialization has not completed.
 CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     tenant_id  TEXT NOT NULL,
-    dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate', 'concurrent_opens')),
+    dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate',
+        'logical_rows', 'concurrent_opens')),
     hard_limit INTEGER CHECK (
         hard_limit IS NULL OR (typeof(hard_limit) = 'integer' AND hard_limit >= 0)),
+    logical_byte_limit INTEGER CHECK (
+        logical_byte_limit IS NULL OR
+        (typeof(logical_byte_limit) = 'integer' AND logical_byte_limit >= 0)),
     rate_per_second INTEGER CHECK (
         rate_per_second IS NULL OR (typeof(rate_per_second) = 'integer' AND rate_per_second > 0)),
     burst INTEGER CHECK (
         burst IS NULL OR (typeof(burst) = 'integer' AND burst > 0)),
     updated_at INTEGER NOT NULL,
     CHECK ((dimension = 'graph_count' AND hard_limit IS NOT NULL
-            AND rate_per_second IS NULL AND burst IS NULL)
+            AND logical_byte_limit IS NULL AND rate_per_second IS NULL
+            AND burst IS NULL)
+        OR (dimension = 'logical_rows' AND hard_limit IS NOT NULL
+            AND logical_byte_limit IS NOT NULL AND rate_per_second IS NULL
+            AND burst IS NULL)
         OR (dimension = 'write_rate' AND hard_limit IS NULL
-            AND rate_per_second IS NOT NULL AND burst IS NOT NULL)
+            AND logical_byte_limit IS NULL AND rate_per_second IS NOT NULL
+            AND burst IS NOT NULL)
         OR (dimension = 'concurrent_opens' AND hard_limit IS NOT NULL
-            AND rate_per_second IS NULL AND burst IS NULL)),
+            AND logical_byte_limit IS NULL AND rate_per_second IS NULL
+            AND burst IS NULL)),
     PRIMARY KEY (tenant_id, dimension),
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
 );
@@ -496,6 +506,51 @@ CREATE TABLE IF NOT EXISTS fact_tenant_write_rate_state (
     burst            INTEGER NOT NULL CHECK (burst > 0),
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
 );
+
+-- Durable cumulative logical-row/byte usage. Reserved values are moved to
+-- committed values by the policy-store operation journal's CAS settlement.
+CREATE TABLE IF NOT EXISTS fact_tenant_logical_quota_usage (
+    tenant_id       TEXT PRIMARY KEY,
+    committed_rows  INTEGER NOT NULL CHECK (
+        typeof(committed_rows) = 'integer' AND committed_rows >= 0),
+    committed_bytes INTEGER NOT NULL CHECK (
+        typeof(committed_bytes) = 'integer' AND committed_bytes >= 0),
+    pending_rows    INTEGER NOT NULL CHECK (
+        typeof(pending_rows) = 'integer' AND pending_rows >= 0),
+    pending_bytes   INTEGER NOT NULL CHECK (
+        typeof(pending_bytes) = 'integer' AND pending_bytes >= 0),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+-- One row per cross-store mutation operation. request_id is the idempotency
+-- identity; the remaining columns bind it to one tenant/graph/batch/payload.
+CREATE TABLE IF NOT EXISTS fact_logical_quota_operations (
+    request_id    TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL,
+    graph_id      TEXT NOT NULL,
+    batch_id      TEXT NOT NULL,
+    payload_digest TEXT NOT NULL CHECK (
+        typeof(payload_digest) = 'text' AND length(payload_digest) = 64 AND
+        payload_digest = lower(payload_digest) AND
+        payload_digest NOT GLOB '*[^0-9a-f]*'),
+    requested_rows  INTEGER NOT NULL CHECK (
+        typeof(requested_rows) = 'integer' AND requested_rows >= 0),
+    requested_bytes INTEGER NOT NULL CHECK (
+        typeof(requested_bytes) = 'integer' AND requested_bytes >= 0),
+    applied_rows    INTEGER NOT NULL DEFAULT 0 CHECK (
+        typeof(applied_rows) = 'integer' AND applied_rows >= 0),
+    applied_bytes   INTEGER NOT NULL DEFAULT -1 CHECK (
+        typeof(applied_bytes) = 'integer' AND applied_bytes >= -1),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'reconciling', 'settled',
+        'cancelled')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (tenant_id, graph_id, batch_id, request_id, payload_digest),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_logical_quota_operations_state
+    ON fact_logical_quota_operations (tenant_id, state);
 
 CREATE TABLE IF NOT EXISTS fact_graph_create_reservations (
     tenant_id     TEXT NOT NULL,
