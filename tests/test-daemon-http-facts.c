@@ -103,6 +103,15 @@ send_raw_with_request_id (SoupSession *session, const gchar *method, const gchar
     const gchar *request_body, guint *out_status, gchar **out_body,
     gchar **out_request_id, gchar **out_retry_after)
 {
+  /* The output pointers own the previous response.  Clear them before a
+   * request so callers may safely reuse one response slot across requests;
+   * otherwise assigning the new response leaks the old allocation. */
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_free);
+  if (out_request_id != NULL)
+    g_clear_pointer (out_request_id, g_free);
+  if (out_retry_after != NULL)
+    g_clear_pointer (out_retry_after, g_free);
   g_autofree gchar *uri = build_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
@@ -3089,8 +3098,6 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     g_printerr ("recovered mutation was not committed_ready: %s\n", body);
     return 523;
   }
-  g_clear_pointer (&body, g_free);
-
   WylPolicyFactQuotaConfig write_rate_config = {
     .has_limit = TRUE,
     .rate_per_second = 1,
