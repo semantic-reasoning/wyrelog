@@ -7140,13 +7140,8 @@ parse_int64_query_param (const gchar *value, gint64 *out_value)
   if (value == NULL || value[0] == '\0' || out_value == NULL)
     return FALSE;
 
-  gchar *end = NULL;
-  errno = 0;
-  gint64 parsed = g_ascii_strtoll (value, &end, 10);
-  if (errno != 0 || end == value || *end != '\0')
-    return FALSE;
-  *out_value = parsed;
-  return TRUE;
+  return g_ascii_string_to_signed (value, 10, G_MININT64, G_MAXINT64,
+             out_value, NULL);
 }
 
 static void
@@ -7712,11 +7707,9 @@ profile_events_ingest_core (WylDaemonProfile profile, gboolean transport_ok,
   /* The typed parser already guaranteed a canonical, non-negative,
    * in-range decimal string; the reconvert cannot fail but is checked
    * defensively. */
-  errno = 0;
-  gchar *end = NULL;
-  gint64 timestamp_us = g_ascii_strtoll (timestamp_value, &end, 10);
-  if (end == timestamp_value || *end != '\0' || errno == ERANGE
-      || timestamp_us < 0) {
+  gint64 timestamp_us = 0;
+  if (!g_ascii_string_to_signed (timestamp_value, 10, 0, G_MAXINT64,
+      &timestamp_us, NULL)) {
     *out_status = 400;
     *out_token = "invalid_profile_event_request";
     return WYRELOG_E_OK;
@@ -8676,16 +8669,13 @@ service_credential_request_id_is_valid (const gchar *request_id)
 static gboolean
 service_credential_parse_expiry (const gchar *text, gint64 *out_expiry)
 {
-  gchar *end = NULL;
-  gint64 expiry = 0;
   if (out_expiry == NULL)
     return FALSE;
   *out_expiry = 0;
   if (text == NULL || text[0] == '\0')
     return FALSE;
-  errno = 0;
-  expiry = g_ascii_strtoll (text, &end, 10);
-  if (errno != 0 || end == text || *end != '\0' || expiry < 0)
+  gint64 expiry = 0;
+  if (!g_ascii_string_to_signed (text, 10, 0, G_MAXINT64, &expiry, NULL))
     return FALSE;
   *out_expiry = expiry;
   return TRUE;
@@ -11996,10 +11986,9 @@ parse_fact_value (const gchar *text,
     return out->as.text != NULL;
   }
   if (g_strcmp0 (column->column_type, "int64") == 0) {
-    gchar *end = NULL;
-    errno = 0;
-    gint64 parsed = g_ascii_strtoll (text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0')
+    gint64 parsed = 0;
+    if (!g_ascii_string_to_signed (text, 10, G_MININT64, G_MAXINT64,
+        &parsed, NULL))
       return FALSE;
     out->type = WYL_FACT_VALUE_INT64;
     out->as.int64_value = parsed;
@@ -12014,10 +12003,9 @@ parse_fact_value (const gchar *text,
     return TRUE;
   }
   if (g_strcmp0 (column->column_type, "compound_ref") == 0) {
-    gchar *end = NULL;
-    errno = 0;
-    gint64 parsed = g_ascii_strtoll (text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0')
+    gint64 parsed = 0;
+    if (!g_ascii_string_to_signed (text, 10, G_MININT64, G_MAXINT64,
+        &parsed, NULL))
       return FALSE;
     out->type = WYL_FACT_VALUE_COMPOUND_REF;
     out->as.compound_ref = parsed;
