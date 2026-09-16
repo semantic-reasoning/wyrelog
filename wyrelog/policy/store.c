@@ -14392,18 +14392,26 @@ fact_write_rate_fractional_tokens (guint64 rate_per_second,
   return tokens;
 }
 
-static guint64
+static gboolean
 fact_write_rate_retry_after_us (guint64 rate_per_second,
-    guint64 remainder)
+    guint64 remainder, guint64 now, guint64 last_refill_at,
+    guint64 *out_retry_after_us)
 {
   const guint64 scale = G_USEC_PER_SEC;
   /* remainder is a micro-token numerator. Convert the missing fraction of
-   * one token directly to microseconds at rate_per_second tokens/second. */
+   * one token directly to microseconds at rate_per_second tokens/second. A
+   * backward clock must also wait until the retained future refill anchor. */
   guint64 numerator = scale - remainder;
   guint64 retry = numerator / rate_per_second;
   if (numerator % rate_per_second != 0)
     retry++;
-  return retry == 0 ? 1 : retry;
+  guint64 anchor_wait = now < last_refill_at ? last_refill_at - now : 0;
+  if (retry > G_MAXUINT64 - anchor_wait)
+    return FALSE;
+  retry += anchor_wait;
+  if (out_retry_after_us != NULL)
+    *out_retry_after_us = retry == 0 ? 1 : retry;
+  return TRUE;
 }
 
 static wyrelog_error_t
@@ -14567,8 +14575,9 @@ wyl_policy_store_admit_fact_write_rate (wyl_policy_store_t *store,
   } else {
     out_admission->admitted = FALSE;
     out_admission->remaining_tokens = 0;
-    out_admission->retry_after_us = fact_write_rate_retry_after_us
-          (config.rate_per_second, remainder);
+    if (!fact_write_rate_retry_after_us (config.rate_per_second, remainder,
+        now, last_refill_at, &out_admission->retry_after_us))
+      out_admission->retry_after_us = 0;
   }
 
   rc = prepare_stmt (store->db,

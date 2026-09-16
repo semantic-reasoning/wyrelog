@@ -3213,10 +3213,12 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       WYL_TENANT_DEFAULT, &rate_state_exists, &rate_tokens) != 0
       || !rate_state_exists || rate_tokens != 0)
     return 52821;
+  gint64 freeze_anchor_us = g_get_real_time ()
+      + G_GINT64_CONSTANT (3600) * G_USEC_PER_SEC;
   g_autofree gchar *freeze_rate_state = g_strdup_printf
         ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
           "last_refill_at=%" G_GINT64_FORMAT
-          " WHERE tenant_id='%s';", g_get_real_time () + G_USEC_PER_SEC,
+          " WHERE tenant_id='%s';", freeze_anchor_us,
           WYL_TENANT_DEFAULT);
   if (sqlite3_exec (wyl_policy_store_get_db (store), freeze_rate_state, NULL,
       NULL, NULL) != SQLITE_OK)
@@ -3224,14 +3226,29 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   const gchar *rate_excess_query = "tenant=__wr_default&namespace=shop&"
       "schema_version=1&batch_id=rate-excess&idempotency_key=rate-excess&"
       FACT_GUARD;
+  gint64 request_started_us = g_get_real_time ();
   g_autofree gchar *retry_after = NULL;
   rc = send_raw_with_request_id (session, "POST", base_url, rate_append_path,
           rate_excess_query, admin_token, "value\nrate-excess\n", &status, &body,
           NULL, &retry_after);
+  gint64 request_finished_us = g_get_real_time ();
+  guint64 retry_after_seconds = retry_after == NULL ? 0
+        : g_ascii_strtoull (retry_after, NULL, 10);
+  guint64 retry_min_us = freeze_anchor_us > request_finished_us
+        ? (guint64) (freeze_anchor_us - request_finished_us)
+      + G_USEC_PER_SEC : G_USEC_PER_SEC;
+  guint64 retry_max_us = freeze_anchor_us > request_started_us
+        ? (guint64) (freeze_anchor_us - request_started_us)
+      + G_USEC_PER_SEC : G_USEC_PER_SEC;
+  guint64 retry_min_seconds = (retry_min_us + G_USEC_PER_SEC - 1)
+      / G_USEC_PER_SEC;
+  guint64 retry_max_seconds = (retry_max_us + G_USEC_PER_SEC - 1)
+      / G_USEC_PER_SEC;
   if (rc != 0 || status != 429
       || strstr (body, "\"error\":\"fact_quota_exceeded\"") == NULL
       || strstr (body, "\"dimension\":\"write_rate\"") == NULL
-      || g_strcmp0 (retry_after, "1") != 0) {
+      || retry_after_seconds < retry_min_seconds
+      || retry_after_seconds > retry_max_seconds) {
     g_printerr ("write-rate response rc=%d status=%u retry=%s body=%s\n", rc,
         status, retry_after != NULL ? retry_after : "(null)",
         body != NULL ? body : "(null)");
