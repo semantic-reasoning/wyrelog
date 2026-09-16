@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/store-open-private.h"
 
+#include "fact/open-reservation-private.h"
+
 #include "fact/graph-locator-private.h"
 #include "fact/provisioning-run-private.h"
 
@@ -153,9 +155,35 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
 
   WylPolicyGraphProvisioningRecord *record = NULL;
   rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, &record);
+  FactOpenReservationAdapter *adapter = NULL;
+  WylFactOpenReservation *reservation = NULL;
+  if (rc == WYRELOG_E_OK) {
+    adapter = wyl_fact_store_open_reservation_begin (policy_store, tenant_id,
+            graph_id, fact_root, authority->store_uuid, &reservation);
+    if (adapter == NULL)
+      rc = WYRELOG_E_POLICY;
+  }
   if (rc == WYRELOG_E_OK)
     rc = open_provisioned_active (fact_root, authority, record, writable,
             out_store);
+  gboolean reservation_attached = FALSE;
+  if (rc == WYRELOG_E_OK){
+    wyl_fact_store_open_reservation_attach (*out_store, adapter,
+        reservation);
+    reservation_attached = TRUE;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_open_reservation_adopt_native (reservation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_open_reservation_mark_active (reservation);
+  if (rc != WYRELOG_E_OK) {
+    if (*out_store != NULL) {
+      wyl_fact_store_close (*out_store);
+      *out_store = NULL;
+    }
+    if (!reservation_attached)
+      wyl_fact_store_open_reservation_abort (adapter, reservation);
+  }
   wyl_policy_graph_provisioning_record_free (record);
   wyl_policy_graph_authority_record_free (authority);
   return rc;
