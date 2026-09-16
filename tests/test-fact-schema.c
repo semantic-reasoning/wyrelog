@@ -129,11 +129,23 @@ check_relation_schema_registration_and_validation (void)
       "graph-main", "shop", "orders", 1, &schema_exists) != WYRELOG_E_OK
       || !schema_exists)
     return 103;
+
+  WylPolicyFactQuotaConfig schema_quota = {
+    .has_limit = TRUE,
+    .hard_limit = 2,
+  };
+  if (wyl_policy_store_set_fact_quota_config (store, "tenant-a",
+      WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT, &schema_quota) != WYRELOG_E_OK)
+    return 104;
+  WylPolicyFactSchemaQuotaStatus schema_status = { 0 };
+  if (wyl_policy_store_get_fact_schema_quota_status (store, "tenant-a",
+      &schema_status) != WYRELOG_E_OK || !schema_status.has_limit
+      || schema_status.registered != 1)
+    return 105;
   if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
       "graph-main", "shop", "orders", 2, &schema_exists) != WYRELOG_E_OK
       || schema_exists)
-    return 104;
-
+    return 106;
   /* Internal callers retain versioned metadata for the staged activation
    * workflow. The public HTTP route imposes the one-registration policy. */
   wyl_policy_fact_relation_schema_options_t staged_opts = opts;
@@ -148,6 +160,26 @@ check_relation_schema_registration_and_validation (void)
       "graph-main", "shop", "orders", 2, &schema_exists) != WYRELOG_E_OK
       || !schema_exists)
     return 106;
+  wyrelog_error_t schema_status_rc =
+      wyl_policy_store_get_fact_schema_quota_status (store, "tenant-a",
+          &schema_status);
+  if (schema_status_rc != WYRELOG_E_OK || schema_status.registered != 2)
+    return 107;
+
+  wyl_policy_fact_relation_schema_options_t over_limit_opts = staged_opts;
+  over_limit_opts.schema_version = 3;
+  gboolean quota_exceeded = FALSE;
+  if (wyl_policy_store_register_fact_relation_schema_with_quota_result (store,
+      &over_limit_opts, &quota_exceeded) != WYRELOG_E_POLICY
+      || !quota_exceeded
+      || wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
+      "graph-main", "shop", "orders", 3, &schema_exists) != WYRELOG_E_OK
+      || schema_exists)
+    return 108;
+  schema_quota.hard_limit = 10;
+  if (wyl_policy_store_set_fact_quota_config (store, "tenant-a",
+      WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT, &schema_quota) != WYRELOG_E_OK)
+    return 109;
 
   /* A query-name uniqueness collision is an expected conflict, and the
    * registration transaction must leave no schema metadata behind. */
@@ -159,8 +191,9 @@ check_relation_schema_registration_and_validation (void)
           G_N_ELEMENTS (collision_query));
   collision_opts.namespace_id = "other";
   collision_opts.relation_name = "different_orders";
-  if (wyl_policy_store_register_fact_relation_schema (store, &collision_opts)
-      != WYRELOG_E_CONFLICT)
+  wyrelog_error_t collision_rc =
+      wyl_policy_store_register_fact_relation_schema (store, &collision_opts);
+  if (collision_rc != WYRELOG_E_CONFLICT)
     return 107;
   if (wyl_policy_store_fact_relation_schema_exists (store, "tenant-a",
       "graph-main", "other", "different_orders", 1, &schema_exists)
@@ -336,8 +369,9 @@ check_relation_schema_registration_and_validation (void)
   if (collision_decl == NULL || g_strcmp0 (collision_decl, mangled_decl) == 0)
     return 202;
 
-  if (wyl_policy_store_register_fact_relation_schema (store, &opts)
-      != WYRELOG_E_POLICY)
+  wyrelog_error_t duplicate_rc =
+      wyl_policy_store_register_fact_relation_schema (store, &opts);
+  if (duplicate_rc != WYRELOG_E_POLICY)
     return 21;
 
   opts.namespace_id = "wr.internal";

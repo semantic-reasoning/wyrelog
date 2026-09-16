@@ -1203,6 +1203,28 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (quota_rc != 0 || quota_status != 200
       || strstr (quota_body, "\"dimension\":\"graph_count\"") == NULL)
     return 181;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *schema_quota_configure_query = g_strdup_printf (
+    "tenant=%s&dimension=schema_count&limit=1000&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          schema_quota_configure_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"schema_count\"") == NULL
+      || strstr (quota_body, "\"limit\":1000") == NULL
+      || strstr (quota_body, "\"registered\":") == NULL)
+    return 182;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *schema_quota_status_query = g_strdup_printf (
+    "tenant=%s&dimension=schema_count&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          schema_quota_status_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"schema_count\"") == NULL
+      || strstr (quota_body, "\"registered\":") == NULL)
+    return 183;
   WylClientFactQuotaStatus quota_client_status = { 0 };
   if (wyl_client_fact_quota_status (admin_client, WYL_TENANT_DEFAULT,
       0, "trusted", 0, &quota_client_status) != WYRELOG_E_OK ||
@@ -1987,6 +2009,49 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         status, body != NULL ? body : "(null)");
     return 274;
   }
+
+  WylPolicyFactSchemaQuotaStatus schema_quota_status = { 0 };
+  if (wyl_policy_store_get_fact_schema_quota_status (store,
+      WYL_TENANT_DEFAULT, &schema_quota_status) != WYRELOG_E_OK)
+    return 206;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *schema_quota_full_query = g_strdup_printf (
+    "tenant=%s&dimension=schema_count&limit=%" G_GUINT64_FORMAT "&%s",
+    WYL_TENANT_DEFAULT, schema_quota_status.registered, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          schema_quota_full_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 207;
+  g_clear_pointer (&quota_body, g_free);
+  /* Refusal happens before any durable row is written, so the exhausted quota
+   * is exercised on the graph that already carries facts.  A graph created
+   * only to be refused would never materialize, and would leave the tenant
+   * status degraded for the readiness assertion above. */
+  g_autofree gchar *schema_quota_register_query = g_strdup_printf (
+    "tenant=%s&graph=orders&namespace=shop&"
+    "relation=quota_full&schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          schema_quota_register_query, admin_token,
+          "value\tstring\tfalse\ttrue\n", &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 429
+      || strstr (quota_body, "\"error\":\"fact_quota_exceeded\"") == NULL
+      || strstr (quota_body, "\"dimension\":\"schema_count\"") == NULL
+      || strstr (quota_body, "\"observed\":\"") != NULL)
+    return 208;
+  gboolean schema_429_exists = FALSE;
+  if (wyl_policy_store_fact_relation_schema_exists (store, WYL_TENANT_DEFAULT,
+      "orders", "shop", "quota_full", 1, &schema_429_exists)
+      != WYRELOG_E_OK || schema_429_exists)
+    return 209;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *schema_quota_restore_query = g_strdup_printf (
+    "tenant=%s&dimension=schema_count&limit=1000&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          schema_quota_restore_query, admin_token, NULL, &quota_status, &quota_body);
+  if (quota_rc != 0 || quota_status != 200)
+    return 210;
+  g_clear_pointer (&quota_body, g_free);
   g_clear_pointer (&body, g_free);
   g_autofree gchar *null_verify_query = g_strdup_printf
         ("tenant=%s&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
