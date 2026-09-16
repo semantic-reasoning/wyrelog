@@ -3321,6 +3321,251 @@ test_graph_quota_store_api (void)
 }
 
 static void
+test_fact_concurrent_open_quota_store_api (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-a", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-b", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-c", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-d", &created),
+      ==, WYRELOG_E_OK);
+  g_assert_true (created);
+
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "owner-api"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "recovery-api"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  gchar *nested_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-nested", "owner-api", "open-c", "graph-nested",
+      "root-nested", "token-nested", &nested_id), ==, WYRELOG_E_BUSY);
+  g_free (nested_id);
+  wyl_policy_store_rollback_mutation (store);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-publication", "owner-api", "open-c", "graph-publication",
+      "root-publication", "token-publication", &nested_id), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (nested_id);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_rollback_checked
+        (store), ==, WYRELOG_E_OK);
+  /* A SQLite-side rollback can leave the connection in autocommit before the
+   * checked cleanup helper runs.  It must still release the writer lease that
+   * publication_transaction_begin acquired. */
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  exec_ok (wyl_policy_store_get_db (store), "ROLLBACK;");
+  g_assert_true (wyl_policy_store_is_autocommit (store));
+  g_assert_cmpint (wyl_policy_store_publication_transaction_rollback_checked
+        (store), ==, WYRELOG_E_OK);
+  /* A second handle can acquire the store only after the first handle's
+   * writer lease has actually been released. */
+  g_autoptr (wyl_policy_store_t) competing_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts,
+      &competing_store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&competing_store, wyl_policy_store_close);
+  g_autofree gchar *reservation_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store, "reservation-api",
+      "owner-api",
+      "open-c", "graph-api", "root-api", "token-api", &reservation_id),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (reservation_id);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  WylPolicyFactConcurrentOpenQuotaStatus reopened_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-c", &reopened_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (reopened_status.pending, ==, 1);
+  g_assert_cmpuint (reopened_status.charged, ==, 1);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "owner-api", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACQUIRING), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "owner-api", NULL, WYL_POLICY_FACT_OPEN_ACQUIRING,
+      WYL_POLICY_FACT_OPEN_ACTIVE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "owner-api", NULL, WYL_POLICY_FACT_OPEN_ACTIVE,
+      WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==, WYRELOG_E_OK);
+  wyrelog_error_t settle_rc = wyl_policy_store_settle_fact_open (store,
+          reservation_id, "owner-api", NULL, TRUE);
+  g_assert_cmpint (settle_rc, ==, WYRELOG_E_OK);
+  settle_rc = wyl_policy_store_settle_fact_open (store, reservation_id,
+          "owner-api", NULL, TRUE);
+  g_assert_cmpint (settle_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "owner-api", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACTIVE), ==, WYRELOG_E_CONFLICT);
+  g_autofree gchar *recovery_reservation_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-recovery", "owner-api", "open-c", "graph-recovery",
+      "root-recovery", "token-recovery", &recovery_reservation_id),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_claim_fact_open_recovery (store,
+      recovery_reservation_id, "owner-api", NULL, "recovery-api", "claim-a"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      recovery_reservation_id, "owner-api", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACQUIRING), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      recovery_reservation_id, "recovery-api", "claim-a", WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACQUIRING), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "recovery-api-2"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_claim_fact_open_recovery (store,
+      recovery_reservation_id, "recovery-api", "claim-a", "recovery-api-2",
+      "claim-b"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      recovery_reservation_id, "recovery-api", "claim-a",
+      WYL_POLICY_FACT_OPEN_ACQUIRING, WYL_POLICY_FACT_OPEN_ACTIVE),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b",
+      WYL_POLICY_FACT_OPEN_ACQUIRING, WYL_POLICY_FACT_OPEN_ACTIVE),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-a", TRUE),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b",
+      WYL_POLICY_FACT_OPEN_ACTIVE, WYL_POLICY_FACT_OPEN_CLEANUP_PENDING),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b", TRUE),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "wrong-claim", TRUE),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b", FALSE),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "recovery-api-retired"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_retire_fact_open_owner (store,
+      "recovery-api-retired"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_claim_fact_open_recovery (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b",
+      "recovery-api-retired", "claim-retired"), ==, WYRELOG_E_CONFLICT);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  /* Settlement identity remains fenced after reopening the durable store. */
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "wrong-claim", TRUE),
+      ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      recovery_reservation_id, "recovery-api-2", "claim-b", TRUE),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_retire_fact_open_owner (store,
+      "owner-api"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "owner-api"), ==, WYRELOG_E_CONFLICT);
+
+  WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-a", &status), ==, WYRELOG_E_OK);
+  g_assert_false (status.has_limit);
+  g_assert_cmpuint (status.pending, ==, 0);
+  g_assert_cmpuint (status.active, ==, 0);
+  g_assert_cmpuint (status.acquiring, ==, 0);
+  g_assert_cmpuint (status.cleanup_pending, ==, 0);
+  g_assert_cmpuint (status.charged, ==, 0);
+
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-a", 2), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-d", 1), ==, WYRELOG_E_OK);
+  g_autofree gchar *limited_reservation_id = NULL;
+  g_autofree gchar *limited_reservation_id_2 = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-limited", "recovery-api", "open-d", "graph-limited",
+      "root-limited", "token-limited", &limited_reservation_id),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-limited-2", "recovery-api", "open-d", "graph-limited-2",
+      "root-limited-2", "token-limited-2", &limited_reservation_id_2),
+      ==, WYRELOG_E_POLICY);
+  WylPolicyFactConcurrentOpenQuotaStatus limited_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-d", &limited_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (limited_status.pending, ==, 1);
+  g_assert_cmpuint (limited_status.charged, ==, 1);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-b", 4), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-a", G_MAXUINT64), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "missing", 1), ==, WYRELOG_E_NOT_FOUND);
+
+  exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_open_owners (owner_incarnation,state,registered_at)"
+      " VALUES ('owner-a','active',1);");
+  exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_open_reservations (reservation_id,owner_incarnation,"
+      "tenant_id,graph_id,root_identity,token_identity,state,created_at,updated_at) VALUES "
+      "('r-active','owner-a','open-a','graph-a','root-a','token-a','active',1,1),"
+      "('r-pending','owner-a','open-a','graph-b','root-b','token-b','acquiring',1,1),"
+      "('r-other','owner-a','open-b','graph-c','root-c','token-c','active',1,1);");
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-a", &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.hard_limit, ==, 2);
+  g_assert_cmpuint (status.pending, ==, 0);
+  g_assert_cmpuint (status.active, ==, 1);
+  g_assert_cmpuint (status.acquiring, ==, 1);
+  g_assert_cmpuint (status.cleanup_pending, ==, 0);
+  g_assert_cmpuint (status.charged, ==, 2);
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-a", 1), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "open-b",
+      WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 5 }),
+      ==, WYRELOG_E_OK);
+
+  /* Upgrade an already-typed table whose CHECK constraint predates the
+   * concurrent-opens dimension, preserving both existing dimensions. */
+  exec_ok (wyl_policy_store_get_db (store),
+      "DROP TABLE fact_tenant_quota_limits;"
+      "CREATE TABLE fact_tenant_quota_limits ("
+      "tenant_id TEXT NOT NULL, dimension TEXT NOT NULL CHECK "
+      "(dimension IN ('graph_count','write_rate')),"
+      "hard_limit INTEGER, rate_per_second INTEGER, burst INTEGER,"
+      "updated_at INTEGER NOT NULL, PRIMARY KEY(tenant_id,dimension),"
+      "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id));"
+      "INSERT INTO fact_tenant_quota_limits VALUES "
+      "('open-a','graph_count',1,NULL,NULL,1),"
+      "('open-b','write_rate',NULL,7,11,1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  WylPolicyFactQuotaConfig migrated = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_quota_config (store, "open-a",
+      WYL_POLICY_FACT_QUOTA_GRAPH_COUNT, &migrated), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (migrated.hard_limit, ==, 1);
+  migrated = (WylPolicyFactQuotaConfig) { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_quota_config (store, "open-b",
+      WYL_POLICY_FACT_QUOTA_WRITE_RATE, &migrated), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (migrated.rate_per_second, ==, 7);
+  g_assert_cmpuint (migrated.burst, ==, 11);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+}
+
+static void
 remove_quota_test_tree (const gchar *path)
 {
   g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
@@ -5521,6 +5766,8 @@ main (int argc, char **argv)
       test_tenant_state_constraints);
   g_test_add_func ("/policy/graph-authority/graph-quota-store-api",
       test_graph_quota_store_api);
+  g_test_add_func ("/policy/graph-authority/fact-concurrent-open-quota-store-api",
+      test_fact_concurrent_open_quota_store_api);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-quota-persists",
       test_fact_write_rate_quota_persists);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-admission",

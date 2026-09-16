@@ -149,6 +149,7 @@ struct wyl_policy_store_t
    * coexist while mutations can fail closed when another runtime is live. */
   wyl_policy_store_lease_t *runtime_lease;
   guint runtime_writer_depth;
+  guint policy_mutation_depth;
   gchar *canonical_path;
   gchar *work_path;
   /* Directory fd anchoring Wyrelog-owned openat()/renameat() calls against
@@ -850,6 +851,9 @@ static const gchar *const required_tables[] = {
   "fact_graph_relation_columns",
   "fact_graph_query_allowlist",
   "fact_tenant_quota_limits",
+  "fact_open_owners",
+  "fact_open_reservations",
+  "fact_open_settlements",
   "fact_tenant_write_rate_state",
   "fact_graph_create_reservations",
   "fact_namespaces",
@@ -8058,6 +8062,8 @@ wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
   rc = exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
   if (rc != WYRELOG_E_OK)
     (void) policy_store_runtime_writer_end (store);
+  else
+    store->policy_mutation_depth++;
   return rc;
 }
 
@@ -8069,6 +8075,8 @@ wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
   wyrelog_error_t rc = exec_sql (store->db,
           "RELEASE SAVEPOINT wyrelog_policy_mutation;");
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (rc == WYRELOG_E_OK && store->policy_mutation_depth != 0)
+    store->policy_mutation_depth--;
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
   return rc;
@@ -8082,6 +8090,8 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
   (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;");
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
   (void) policy_store_runtime_writer_end (store);
+  if (store->policy_mutation_depth != 0)
+    store->policy_mutation_depth--;
 }
 
 gboolean
@@ -8123,7 +8133,11 @@ wyl_policy_store_publication_transaction_rollback_checked
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
   if (sqlite3_get_autocommit (store->db))
-    return WYRELOG_E_OK;
+    /* SQLite may have already rolled the transaction back as a consequence
+     * of a failed statement.  The transaction is gone, but the runtime writer
+     * lease acquired by publication_transaction_begin still belongs to this
+     * operation and must be balanced. */
+    return policy_store_runtime_writer_end (store);
   wyrelog_error_t rc = exec_sql (store->db, "ROLLBACK;");
   if (rc != WYRELOG_E_OK || !sqlite3_get_autocommit (store->db))
     return rc == WYRELOG_E_OK ? WYRELOG_E_INTERNAL : rc;
@@ -9773,15 +9787,95 @@ migrate_fact_quota_table (wyl_policy_store_t *store)
   sqlite3_finalize (stmt);
   if (step_rc != SQLITE_DONE)
     return WYRELOG_E_IO;
-  if (typed)
-    return WYRELOG_E_OK;
+  if (typed) {
+    sqlite3_stmt *schema_stmt = NULL;
+    if (sqlite3_prepare_v2 (store->db,
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='fact_tenant_quota_limits';", -1, &schema_stmt, NULL)
+        != SQLITE_OK)
+      return WYRELOG_E_IO;
+    step_rc = sqlite3_step (schema_stmt);
+    const gchar *schema_sql = step_rc == SQLITE_ROW
+        ? (const gchar *) sqlite3_column_text (schema_stmt, 0) : NULL;
+    gboolean supports_concurrent_opens = FALSE;
+    if (schema_sql != NULL) {
+      GString *normalized = g_string_new (NULL);
+      gboolean line_comment = FALSE;
+      gboolean block_comment = FALSE;
+      for (const gchar *p = schema_sql; *p != '\0'; p++) {
+        if (line_comment) {
+          if (*p == '\n') line_comment = FALSE;
+          continue;
+        }
+        if (block_comment) {
+          if (p[0] == '*' && p[1] == '/') {
+            block_comment = FALSE;
+            p++;
+          }
+          continue;
+        }
+        if (p[0] == '-' && p[1] == '-') {
+          line_comment = TRUE;
+          p++;
+          continue;
+        }
+        if (p[0] == '/' && p[1] == '*') {
+          block_comment = TRUE;
+          p++;
+          continue;
+        }
+        if (!g_ascii_isspace (*p))
+          g_string_append_c (normalized, g_ascii_tolower (*p));
+      }
+      supports_concurrent_opens = strstr (normalized->str,
+              "dimensiontextnotnullcheck(dimensionin('graph_count','write_rate',"
+              "'concurrent_opens'))") != NULL
+          && strstr (normalized->str,
+              "dimension='concurrent_opens'andhard_limitisnotnulland"
+              "rate_per_secondisnullandburstisnull") != NULL;
+      g_string_free (normalized, TRUE);
+    }
+    sqlite3_finalize (schema_stmt);
+    if (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE)
+      return WYRELOG_E_IO;
+    if (supports_concurrent_opens)
+      return WYRELOG_E_OK;
+
+    return exec_sql (store->db,
+               "ALTER TABLE fact_tenant_quota_limits RENAME TO "
+               "fact_tenant_quota_limits_legacy_v2;"
+               "CREATE TABLE fact_tenant_quota_limits ("
+               "  tenant_id TEXT NOT NULL,"
+               "  dimension TEXT NOT NULL CHECK (dimension IN "
+               "    ('graph_count','write_rate','concurrent_opens')),"
+               "  hard_limit INTEGER CHECK (hard_limit IS NULL OR "
+               "    (typeof(hard_limit)='integer' AND hard_limit >= 0)),"
+               "  rate_per_second INTEGER CHECK (rate_per_second IS NULL OR "
+               "    (typeof(rate_per_second)='integer' AND rate_per_second > 0)),"
+               "  burst INTEGER CHECK (burst IS NULL OR "
+               "    (typeof(burst)='integer' AND burst > 0)),"
+               "  updated_at INTEGER NOT NULL,"
+               "  CHECK ((dimension='graph_count' AND hard_limit IS NOT NULL AND "
+               "    rate_per_second IS NULL AND burst IS NULL) OR "
+               "    (dimension='write_rate' AND hard_limit IS NULL AND "
+               "    rate_per_second IS NOT NULL AND burst IS NOT NULL) OR "
+               "    (dimension='concurrent_opens' AND hard_limit IS NOT NULL AND "
+               "    rate_per_second IS NULL AND burst IS NULL)),"
+               "  PRIMARY KEY (tenant_id, dimension),"
+               "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id));"
+               "INSERT INTO fact_tenant_quota_limits "
+               "(tenant_id,dimension,hard_limit,rate_per_second,burst,updated_at) "
+               "SELECT tenant_id,dimension,hard_limit,rate_per_second,burst,updated_at "
+               "FROM fact_tenant_quota_limits_legacy_v2;"
+               "DROP TABLE fact_tenant_quota_limits_legacy_v2;");
+  }
 
   return exec_sql (store->db,
              "ALTER TABLE fact_tenant_quota_limits RENAME TO "
              "fact_tenant_quota_limits_legacy;"
              "CREATE TABLE fact_tenant_quota_limits ("
              "  tenant_id TEXT NOT NULL,"
-             "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count','write_rate')),"
+             "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count','write_rate','concurrent_opens')),"
              "  hard_limit INTEGER CHECK (hard_limit IS NULL OR "
              "    (typeof(hard_limit)='integer' AND hard_limit >= 0)),"
              "  rate_per_second INTEGER CHECK (rate_per_second IS NULL OR "
@@ -9792,7 +9886,9 @@ migrate_fact_quota_table (wyl_policy_store_t *store)
              "  CHECK ((dimension='graph_count' AND hard_limit IS NOT NULL AND "
              "    rate_per_second IS NULL AND burst IS NULL) OR "
              "    (dimension='write_rate' AND hard_limit IS NULL AND "
-             "    rate_per_second IS NOT NULL AND burst IS NOT NULL)),"
+             "    rate_per_second IS NOT NULL AND burst IS NOT NULL) OR "
+             "    (dimension='concurrent_opens' AND hard_limit IS NOT NULL AND "
+             "    rate_per_second IS NULL AND burst IS NULL)),"
              "  PRIMARY KEY (tenant_id, dimension),"
              "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id));"
              "INSERT INTO fact_tenant_quota_limits "
@@ -12381,7 +12477,7 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON fact_graphs (tenant_id);"
       "CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits ("
       "  tenant_id TEXT NOT NULL,"
-      "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate')),"
+      "  dimension TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate', 'concurrent_opens')),"
       "  hard_limit INTEGER CHECK (hard_limit IS NULL OR ("
       "    typeof(hard_limit) = 'integer' AND hard_limit >= 0)),"
       "  rate_per_second INTEGER CHECK (rate_per_second IS NULL OR ("
@@ -12392,9 +12488,41 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  CHECK ((dimension = 'graph_count' AND hard_limit IS NOT NULL AND "
       "    rate_per_second IS NULL AND burst IS NULL) OR "
       "    (dimension = 'write_rate' AND hard_limit IS NULL AND "
-      "    rate_per_second IS NOT NULL AND burst IS NOT NULL)),"
+      "    rate_per_second IS NOT NULL AND burst IS NOT NULL) OR "
+      "    (dimension = 'concurrent_opens' AND hard_limit IS NOT NULL AND "
+      "    rate_per_second IS NULL AND burst IS NULL)),"
       "  PRIMARY KEY (tenant_id, dimension),"
       "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_open_owners ("
+      "  owner_incarnation TEXT PRIMARY KEY,"
+      "  state TEXT NOT NULL CHECK (state IN ('active', 'retired')),"
+      "  registered_at INTEGER NOT NULL,"
+      "  retired_at INTEGER"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_open_reservations ("
+      "  reservation_id TEXT PRIMARY KEY,"
+      "  owner_incarnation TEXT NOT NULL,"
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  root_identity TEXT NOT NULL,"
+      "  token_identity TEXT NOT NULL,"
+      "  state TEXT NOT NULL CHECK (state IN ('pending', 'acquiring', 'active', 'cleanup_pending', 'settled')),"
+      "  recovery_claim TEXT,"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  FOREIGN KEY (owner_incarnation) REFERENCES fact_open_owners (owner_incarnation),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_fact_open_reservations_tenant_state "
+      "  ON fact_open_reservations (tenant_id, state);"
+      "CREATE TABLE IF NOT EXISTS fact_open_settlements ("
+      "  reservation_id TEXT PRIMARY KEY,"
+      "  settlement_owner TEXT NOT NULL,"
+      "  recovery_claim TEXT,"
+      "  cleanup_succeeded INTEGER NOT NULL CHECK (cleanup_succeeded IN (0,1)),"
+      "  settled_at INTEGER NOT NULL,"
+      "  FOREIGN KEY (reservation_id) REFERENCES fact_open_reservations (reservation_id)"
       ");"
       "CREATE TABLE IF NOT EXISTS fact_tenant_write_rate_state ("
       "  tenant_id TEXT PRIMARY KEY,"
@@ -13613,6 +13741,504 @@ wyl_policy_store_get_graph_quota_status (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_set_fact_concurrent_open_quota (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint64 hard_limit)
+{
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || hard_limit > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, tenant_id, &exists);
+  if (rc != WYRELOG_E_OK || !exists) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_NOT_FOUND;
+  }
+  WylPolicyFactConcurrentOpenQuotaStatus current = { 0 };
+  rc = wyl_policy_store_get_fact_concurrent_open_quota (store, tenant_id,
+          &current);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO fact_tenant_quota_limits "
+          "(tenant_id,dimension,hard_limit,updated_at) "
+          "VALUES (?,'concurrent_opens',?,unixepoch()) "
+          "ON CONFLICT(tenant_id,dimension) DO UPDATE SET "
+          "hard_limit=excluded.hard_limit,updated_at=excluded.updated_at;",
+          &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2,
+      (sqlite3_int64) hard_limit) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_fact_concurrent_open_quota (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactConcurrentOpenQuotaStatus *out_status)
+{
+  if (store == NULL || store->db == NULL || out_status == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_status = (WylPolicyFactConcurrentOpenQuotaStatus) { 0 };
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT q.hard_limit, "
+          "(SELECT COUNT(*) FROM fact_open_reservations AS r "
+          " WHERE r.tenant_id=t.tenant_id AND r.state='pending'), "
+          "(SELECT COUNT(*) FROM fact_open_reservations AS r "
+          " WHERE r.tenant_id=t.tenant_id AND r.state='active'), "
+          "(SELECT COUNT(*) FROM fact_open_reservations AS r "
+          " WHERE r.tenant_id=t.tenant_id AND r.state='acquiring'), "
+          "(SELECT COUNT(*) FROM fact_open_reservations AS r "
+          " WHERE r.tenant_id=t.tenant_id AND r.state='cleanup_pending'), "
+          "(SELECT COUNT(*) FROM fact_open_reservations AS r "
+          " WHERE r.tenant_id=t.tenant_id AND r.state IN "
+          " ('pending','acquiring','active','cleanup_pending')) "
+          "FROM tenants AS t LEFT JOIN fact_tenant_quota_limits AS q "
+          "ON q.tenant_id=t.tenant_id AND q.dimension='concurrent_opens' "
+          "WHERE t.tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    out_status->has_limit = sqlite3_column_type (stmt, 0) != SQLITE_NULL;
+    if (out_status->has_limit)
+      out_status->hard_limit = (guint64) sqlite3_column_int64 (stmt, 0);
+    out_status->pending = (guint64) sqlite3_column_int64 (stmt, 1);
+    out_status->active = (guint64) sqlite3_column_int64 (stmt, 2);
+    out_status->acquiring = (guint64) sqlite3_column_int64 (stmt, 3);
+    out_status->cleanup_pending = (guint64) sqlite3_column_int64 (stmt, 4);
+    out_status->charged = (guint64) sqlite3_column_int64 (stmt, 5);
+  }
+  sqlite3_finalize (stmt);
+  return rc != WYRELOG_E_OK ? rc :
+         step_rc == SQLITE_ROW ? WYRELOG_E_OK :
+         step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+}
+
+static const gchar *
+fact_open_state_name (WylPolicyFactOpenReservationState state)
+{
+  switch (state) {
+    case WYL_POLICY_FACT_OPEN_PENDING: return "pending";
+    case WYL_POLICY_FACT_OPEN_ACQUIRING: return "acquiring";
+    case WYL_POLICY_FACT_OPEN_ACTIVE: return "active";
+    case WYL_POLICY_FACT_OPEN_CLEANUP_PENDING: return "cleanup_pending";
+    default: return NULL;
+  }
+}
+
+/* COMMIT is the durable linearization point. A writer-lease downgrade can
+ * fail after SQLite has returned to autocommit; callers must not retry such a
+ * mutation and accidentally duplicate a durable reservation. */
+static wyrelog_error_t
+fact_open_publication_commit (wyl_policy_store_t *store)
+{
+  wyrelog_error_t commit_rc = exec_sql (store->db, "COMMIT;");
+  if (commit_rc != WYRELOG_E_OK) {
+    wyrelog_error_t rollback_rc = WYRELOG_E_OK;
+    if (!wyl_policy_store_is_autocommit (store)) {
+      rollback_rc = exec_sql (store->db, "ROLLBACK;");
+      if (rollback_rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit
+            (store))
+        rollback_rc = WYRELOG_E_INTERNAL;
+    }
+    wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+    if (rollback_rc != WYRELOG_E_OK || lease_rc != WYRELOG_E_OK)
+      policy_store_make_terminal (store, rollback_rc != WYRELOG_E_OK
+          ? rollback_rc : lease_rc);
+    return commit_rc;
+  }
+  wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
+  if (lease_rc != WYRELOG_E_OK)
+    policy_store_make_terminal (store, lease_rc);
+  /* The database commit is durable even when writer-lease cleanup fails. */
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fact_open_publication_rollback (wyl_policy_store_t *store,
+    wyrelog_error_t primary_rc)
+{
+  wyrelog_error_t cleanup_rc =
+      wyl_policy_store_publication_transaction_rollback_checked (store);
+  if (cleanup_rc != WYRELOG_E_OK) {
+    policy_store_make_terminal (store, cleanup_rc);
+    return cleanup_rc;
+  }
+  return primary_rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_register_fact_open_owner (wyl_policy_store_t *store,
+    const gchar *owner_incarnation)
+{
+  if (store == NULL || store->db == NULL || owner_incarnation == NULL
+      || owner_incarnation[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT state FROM fact_open_owners WHERE owner_incarnation=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, owner_incarnation);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  gboolean found = step_rc == SQLITE_ROW;
+  gboolean retired = found && g_strcmp0 (
+    (const gchar *) sqlite3_column_text (stmt, 0), "retired") == 0;
+  if (rc == WYRELOG_E_OK && step_rc != SQLITE_ROW && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && retired)
+    rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK && found)
+    rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK || found){
+    if (rc != WYRELOG_E_OK)
+      wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  rc = prepare_stmt (store->db,
+          "INSERT INTO fact_open_owners(owner_incarnation,state,registered_at) "
+          "VALUES (?,'active',unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, owner_incarnation);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_retire_fact_open_owner (wyl_policy_store_t *store,
+    const gchar *owner_incarnation)
+{
+  if (store == NULL || store->db == NULL || owner_incarnation == NULL
+      || owner_incarnation[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "UPDATE fact_open_owners SET state='retired',retired_at=unixepoch() "
+          "WHERE owner_incarnation=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, owner_incarnation);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && !changed)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
+    const gchar *reservation_id, const gchar *owner_incarnation,
+    const gchar *tenant_id,
+    const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, gchar **out_reservation_id)
+{
+  if (out_reservation_id != NULL)
+    *out_reservation_id = NULL;
+  if (store == NULL || store->db == NULL || out_reservation_id == NULL
+      || reservation_id == NULL || reservation_id[0] == '\0'
+      || owner_incarnation == NULL || owner_incarnation[0] == '\0'
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || graph_id == NULL || graph_id[0] == '\0'
+      || root_identity == NULL || root_identity[0] == '\0'
+      || token_identity == NULL || token_identity[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, tenant_id, &exists);
+  if (rc == WYRELOG_E_OK && !exists)
+    rc = WYRELOG_E_NOT_FOUND;
+  gboolean owner_active = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK) {
+    rc = prepare_stmt (store->db,
+            "SELECT state='active' FROM fact_open_owners "
+            "WHERE owner_incarnation=?;", &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, owner_incarnation);
+    int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW)
+      owner_active = sqlite3_column_int (stmt, 0) != 0;
+    else if (rc == WYRELOG_E_OK && step_rc == SQLITE_DONE)
+      rc = WYRELOG_E_NOT_FOUND;
+    else if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK && !owner_active)
+    rc = WYRELOG_E_POLICY;
+  WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_get_fact_concurrent_open_quota (store, tenant_id,
+            &status);
+  if (rc == WYRELOG_E_OK && status.has_limit && status.charged >= status.hard_limit)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    rc = prepare_stmt (store->db,
+            "INSERT INTO fact_open_reservations(reservation_id,owner_incarnation,"
+            "tenant_id,graph_id,root_identity,token_identity,state,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?, 'pending',unixepoch(),unixepoch());", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, owner_incarnation);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, tenant_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, graph_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, root_identity);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 6, token_identity);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = fact_open_publication_commit (store);
+  else
+    rc = fact_open_publication_rollback (store, rc);
+  if (rc == WYRELOG_E_OK)
+    *out_reservation_id = g_strdup (reservation_id);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_transition_fact_open (wyl_policy_store_t *store,
+    const gchar *reservation_id, const gchar *owner_incarnation,
+    const gchar *recovery_claim,
+    WylPolicyFactOpenReservationState expected_state,
+    WylPolicyFactOpenReservationState next_state)
+{
+  const gchar *expected = fact_open_state_name (expected_state);
+  const gchar *next = fact_open_state_name (next_state);
+  if (store == NULL || store->db == NULL || reservation_id == NULL
+      || owner_incarnation == NULL || expected == NULL || next == NULL
+      || expected_state == next_state)
+    return WYRELOG_E_INVALID;
+  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  if (!((expected_state == WYL_POLICY_FACT_OPEN_PENDING
+      && (next_state == WYL_POLICY_FACT_OPEN_ACQUIRING
+      || next_state == WYL_POLICY_FACT_OPEN_CLEANUP_PENDING))
+      || (expected_state == WYL_POLICY_FACT_OPEN_ACQUIRING
+      && (next_state == WYL_POLICY_FACT_OPEN_ACTIVE
+      || next_state == WYL_POLICY_FACT_OPEN_CLEANUP_PENDING))
+      || (expected_state == WYL_POLICY_FACT_OPEN_ACTIVE
+      && next_state == WYL_POLICY_FACT_OPEN_CLEANUP_PENDING)))
+    return WYRELOG_E_CONFLICT;
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "UPDATE fact_open_reservations SET state=?,updated_at=unixepoch() "
+          "WHERE reservation_id=? AND owner_incarnation=? AND recovery_claim IS ? "
+          "AND state=?;", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, next);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, reservation_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, owner_incarnation);
+  if (rc == WYRELOG_E_OK) {
+    if (recovery_claim == NULL)
+      rc = sqlite3_bind_null (stmt, 4) == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+    else
+      rc = bind_text (stmt, 4, recovery_claim);
+  }
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, expected);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && !changed) rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_open_publication_commit (store);
+  else
+    rc = fact_open_publication_rollback (store, rc);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_claim_fact_open_recovery (wyl_policy_store_t *store,
+    const gchar *reservation_id, const gchar *expected_owner,
+    const gchar *expected_claim, const gchar *recovery_owner,
+    const gchar *recovery_claim)
+{
+  if (store == NULL || store->db == NULL || reservation_id == NULL
+      || expected_owner == NULL || expected_owner[0] == '\0'
+      || recovery_owner == NULL || recovery_owner[0] == '\0'
+      || recovery_claim == NULL || recovery_claim[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "UPDATE fact_open_reservations SET owner_incarnation=?,recovery_claim=?,"
+          "updated_at=unixepoch() WHERE reservation_id=? AND owner_incarnation=? "
+          "AND recovery_claim IS ? AND state IN "
+          "('pending','acquiring','active','cleanup_pending') AND EXISTS "
+          "(SELECT 1 FROM fact_open_owners WHERE owner_incarnation=? "
+          "AND state='active');", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, recovery_owner);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, recovery_claim);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, reservation_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, expected_owner);
+  if (rc == WYRELOG_E_OK) {
+    if (expected_claim == NULL)
+      rc = sqlite3_bind_null (stmt, 5) == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+    else
+      rc = bind_text (stmt, 5, expected_claim);
+  }
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 6, recovery_owner);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && !changed) rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = fact_open_publication_commit (store);
+  else
+    rc = fact_open_publication_rollback (store, rc);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_settle_fact_open (wyl_policy_store_t *store,
+    const gchar *reservation_id, const gchar *settlement_owner,
+    const gchar *recovery_claim,
+    gboolean cleanup_succeeded)
+{
+  if (store == NULL || store->db == NULL || reservation_id == NULL
+      || settlement_owner == NULL || settlement_owner[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (store->policy_mutation_depth != 0
+      || !wyl_policy_store_is_autocommit (store))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) return rc;
+  sqlite3_stmt *stmt = NULL;
+  if (cleanup_succeeded) {
+    rc = prepare_stmt (store->db,
+            "SELECT settlement_owner,recovery_claim FROM fact_open_settlements "
+            "WHERE reservation_id=?;", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
+    int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+      gboolean same_owner = g_strcmp0 ((const gchar *) sqlite3_column_text
+                (stmt, 0), settlement_owner) == 0;
+      gboolean same_claim = (recovery_claim == NULL
+          ? sqlite3_column_type (stmt, 1) == SQLITE_NULL
+          : g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+          recovery_claim) == 0);
+      sqlite3_finalize (stmt);
+      if (same_owner && same_claim)
+        rc = fact_open_publication_commit (store);
+      else {
+        rc = fact_open_publication_rollback (store, WYRELOG_E_CONFLICT);
+      }
+      return rc;
+    }
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    if (rc != WYRELOG_E_OK) {
+      rc = fact_open_publication_rollback (store, rc);
+      return rc;
+    }
+  }
+  if (!cleanup_succeeded) {
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_open_reservations SET state='cleanup_pending',"
+            "updated_at=unixepoch() WHERE reservation_id=? AND state != 'settled' AND "
+            "(owner_incarnation=? AND recovery_claim IS ?);", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, settlement_owner);
+    if (rc == WYRELOG_E_OK) {
+      if (recovery_claim == NULL)
+        rc = sqlite3_bind_null (stmt, 3) == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+      else
+        rc = bind_text (stmt, 3, recovery_claim);
+    }
+  } else {
+    rc = prepare_stmt (store->db,
+            "INSERT INTO fact_open_settlements(reservation_id,settlement_owner,"
+            "recovery_claim,cleanup_succeeded,settled_at) VALUES (?,?,?,1,unixepoch()) "
+            "ON CONFLICT(reservation_id) DO NOTHING;", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, settlement_owner);
+    if (rc == WYRELOG_E_OK) {
+      if (recovery_claim == NULL)
+        rc = sqlite3_bind_null (stmt, 3) == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+      else
+        rc = bind_text (stmt, 3, recovery_claim);
+    }
+  }
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && !changed && !cleanup_succeeded)
+    rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK && cleanup_succeeded) {
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_open_reservations SET state='settled',updated_at=unixepoch() "
+            "WHERE reservation_id=? AND state='cleanup_pending' AND "
+            "(owner_incarnation=? AND recovery_claim IS ?);",
+            &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, settlement_owner);
+    if (rc == WYRELOG_E_OK) {
+      if (recovery_claim == NULL)
+        rc = sqlite3_bind_null (stmt, 3) == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+      else
+        rc = bind_text (stmt, 3, recovery_claim);
+    }
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) == 0)
+      rc = WYRELOG_E_CONFLICT;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = fact_open_publication_commit (store);
+  else
+    rc = fact_open_publication_rollback (store, rc);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_set_fact_write_rate_quota (wyl_policy_store_t *store,
     const gchar *tenant_id, guint64 rate_per_second, guint64 burst)
 {
@@ -13942,6 +14568,12 @@ wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
     return wyl_policy_store_set_fact_write_rate_quota (store, tenant_id,
                config->rate_per_second, config->burst);
   }
+  if (dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
+    if (!config->has_limit || config->hard_limit > G_MAXINT64)
+      return WYRELOG_E_INVALID;
+    return wyl_policy_store_set_fact_concurrent_open_quota (store, tenant_id,
+               config->hard_limit);
+  }
   return WYRELOG_E_INVALID;
 }
 
@@ -13971,6 +14603,16 @@ wyl_policy_store_get_fact_quota_config (wyl_policy_store_t *store,
       out_config->has_limit = status.has_limit;
       out_config->rate_per_second = status.rate_per_second;
       out_config->burst = status.burst;
+    }
+    return rc;
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
+    WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+    wyrelog_error_t rc = wyl_policy_store_get_fact_concurrent_open_quota
+          (store, tenant_id, &status);
+    if (rc == WYRELOG_E_OK) {
+      out_config->has_limit = status.has_limit;
+      out_config->hard_limit = status.hard_limit;
     }
     return rc;
   }

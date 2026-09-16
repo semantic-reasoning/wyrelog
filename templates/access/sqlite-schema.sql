@@ -434,7 +434,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid
 -- committed but whose safe filesystem materialization has not completed.
 CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     tenant_id  TEXT NOT NULL,
-    dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate')),
+    dimension  TEXT NOT NULL CHECK (dimension IN ('graph_count', 'write_rate', 'concurrent_opens')),
     hard_limit INTEGER CHECK (
         hard_limit IS NULL OR (typeof(hard_limit) = 'integer' AND hard_limit >= 0)),
     rate_per_second INTEGER CHECK (
@@ -445,9 +445,45 @@ CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     CHECK ((dimension = 'graph_count' AND hard_limit IS NOT NULL
             AND rate_per_second IS NULL AND burst IS NULL)
         OR (dimension = 'write_rate' AND hard_limit IS NULL
-            AND rate_per_second IS NOT NULL AND burst IS NOT NULL)),
+            AND rate_per_second IS NOT NULL AND burst IS NOT NULL)
+        OR (dimension = 'concurrent_opens' AND hard_limit IS NOT NULL
+            AND rate_per_second IS NULL AND burst IS NULL)),
     PRIMARY KEY (tenant_id, dimension),
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_open_owners (
+    owner_incarnation TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('active', 'retired')),
+    registered_at INTEGER NOT NULL,
+    retired_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS fact_open_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    owner_incarnation TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    graph_id TEXT NOT NULL,
+    root_identity TEXT NOT NULL,
+    token_identity TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'acquiring', 'active', 'cleanup_pending', 'settled')),
+    recovery_claim TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (owner_incarnation) REFERENCES fact_open_owners (owner_incarnation),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_open_reservations_tenant_state
+    ON fact_open_reservations (tenant_id, state);
+
+CREATE TABLE IF NOT EXISTS fact_open_settlements (
+    reservation_id TEXT PRIMARY KEY,
+    settlement_owner TEXT NOT NULL,
+    recovery_claim TEXT,
+    cleanup_succeeded INTEGER NOT NULL CHECK (cleanup_succeeded IN (0, 1)),
+    settled_at INTEGER NOT NULL,
+    FOREIGN KEY (reservation_id) REFERENCES fact_open_reservations (reservation_id)
 );
 
 CREATE TABLE IF NOT EXISTS fact_tenant_write_rate_state (

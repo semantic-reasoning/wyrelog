@@ -2410,6 +2410,7 @@ typedef enum
 {
   WYL_POLICY_FACT_QUOTA_GRAPH_COUNT = 0,
   WYL_POLICY_FACT_QUOTA_WRITE_RATE,
+  WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS,
 } WylPolicyFactQuotaDimension;
 typedef struct
 {
@@ -2418,6 +2419,23 @@ typedef struct
   guint64 rate_per_second;
   guint64 burst;
 } WylPolicyFactQuotaConfig;
+typedef struct
+{
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 pending;
+  guint64 active;
+  guint64 acquiring;
+  guint64 cleanup_pending;
+  guint64 charged;
+} WylPolicyFactConcurrentOpenQuotaStatus;
+typedef enum
+{
+  WYL_POLICY_FACT_OPEN_PENDING = 0,
+  WYL_POLICY_FACT_OPEN_ACQUIRING,
+  WYL_POLICY_FACT_OPEN_ACTIVE,
+  WYL_POLICY_FACT_OPEN_CLEANUP_PENDING,
+} WylPolicyFactOpenReservationState;
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);
@@ -2462,6 +2480,35 @@ wyrelog_error_t wyl_policy_store_get_fact_quota_config
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyFactQuotaDimension dimension,
     WylPolicyFactQuotaConfig * out_config);
+wyrelog_error_t wyl_policy_store_set_fact_concurrent_open_quota
+  (wyl_policy_store_t * store, const gchar * tenant_id, guint64 hard_limit);
+wyrelog_error_t wyl_policy_store_get_fact_concurrent_open_quota
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyFactConcurrentOpenQuotaStatus * out_status);
+wyrelog_error_t wyl_policy_store_register_fact_open_owner
+  (wyl_policy_store_t * store, const gchar * owner_incarnation);
+wyrelog_error_t wyl_policy_store_retire_fact_open_owner
+  (wyl_policy_store_t * store, const gchar * owner_incarnation);
+wyrelog_error_t wyl_policy_store_reserve_fact_open
+  (wyl_policy_store_t * store, const gchar * reservation_id,
+    const gchar * owner_incarnation,
+    const gchar * tenant_id, const gchar * graph_id,
+    const gchar * root_identity, const gchar * token_identity,
+    gchar ** out_reservation_id);
+wyrelog_error_t wyl_policy_store_transition_fact_open
+  (wyl_policy_store_t * store, const gchar * reservation_id,
+    const gchar * owner_incarnation,
+    const gchar * recovery_claim,
+    WylPolicyFactOpenReservationState expected_state,
+    WylPolicyFactOpenReservationState next_state);
+wyrelog_error_t wyl_policy_store_claim_fact_open_recovery
+  (wyl_policy_store_t * store, const gchar * reservation_id,
+    const gchar * expected_owner, const gchar * expected_claim,
+    const gchar * recovery_owner, const gchar * recovery_claim);
+wyrelog_error_t wyl_policy_store_settle_fact_open
+  (wyl_policy_store_t * store, const gchar * reservation_id,
+    const gchar * settlement_owner, const gchar * recovery_claim,
+    gboolean cleanup_succeeded);
 /* Create a graph as a crash-safe provisioning operation: inserts the metadata
  * and reserves the graph authority (moving it to provisioning) in one atomic
  * mutation, then returns the reservation's operation UUID so the caller can
