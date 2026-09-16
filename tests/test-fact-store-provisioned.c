@@ -137,10 +137,17 @@ test_open_provisioned_pair_persists_across_reopen (void)
   g_assert_cmpint (open_live (policy_store, root, TRUE, &store), ==,
       WYRELOG_E_OK);
   g_assert_nonnull (store);
+  WylPolicyFactConcurrentOpenQuotaStatus open_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota
+        (policy_store, tenant_id, &open_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (open_status.charged, ==, 1);
   g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_true (exec_ok (store, "CREATE TABLE probe (x INTEGER);"));
   g_assert_true (exec_ok (store, "INSERT INTO probe VALUES (42), (7);"));
   wyl_fact_store_close (store);
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota
+        (policy_store, tenant_id, &open_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (open_status.charged, ==, 0);
 
   /* Reopen a fresh live handle on the same pair: the writes are durable. */
   g_assert_cmpint (probe_count (policy_store, root), ==, 2);

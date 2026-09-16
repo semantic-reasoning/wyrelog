@@ -5,6 +5,7 @@
 
 #include "compound-private.h"
 #include "legacy-store-identity-private.h"
+#include "open-reservation-private.h"
 #include "store-duckdb-config-test-seams-private.h"
 #include "store-identity-private.h"
 #include "wyrelog/wyl-log-private.h"
@@ -33,6 +34,13 @@ wyl_fact_artifact_namespace_open_provisioned_pair_internal
   (WylFactGraphProvisionedPair * pair, WylFactArtifactNamespace ** out);
 #endif
 
+struct FactOpenReservationAdapter
+{
+  wyl_policy_store_t *policy_store;
+  wyl_fact_store_t *store;
+  gchar *owner_incarnation;
+};
+
 struct wyl_fact_store_t
 {
   duckdb_database db;
@@ -48,6 +56,8 @@ struct wyl_fact_store_t
   guint64 identity_format_version;
   guint64 identity_path_encoding_version;
   WylSecureDuckdbBridge *provisioned_bridge;
+  WylFactOpenReservation *open_reservation;
+  FactOpenReservationAdapter *open_reservation_adapter;
   enum
   {
     WYL_FACT_STORE_HEALTHY = 0,
@@ -72,6 +82,172 @@ static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
 static gpointer identity_validation_test_hook_data;
 G_LOCK_DEFINE_STATIC (identity_validation_test_hook);
 static GPrivate active_connection_session = G_PRIVATE_INIT (NULL);
+
+static WylPolicyFactOpenReservationState
+fact_open_policy_state (WylFactOpenReservationState state)
+{
+  switch (state) {
+    case WYL_FACT_OPEN_RESERVATION_PENDING:
+      return WYL_POLICY_FACT_OPEN_PENDING;
+    case WYL_FACT_OPEN_RESERVATION_ACQUIRING:
+      return WYL_POLICY_FACT_OPEN_ACQUIRING;
+    case WYL_FACT_OPEN_RESERVATION_ACTIVE:
+      return WYL_POLICY_FACT_OPEN_ACTIVE;
+    case WYL_FACT_OPEN_RESERVATION_CLEANUP_PENDING:
+      return WYL_POLICY_FACT_OPEN_CLEANUP_PENDING;
+    case WYL_FACT_OPEN_RESERVATION_SETTLED:
+      break;
+  }
+  return WYL_POLICY_FACT_OPEN_CLEANUP_PENDING;
+}
+
+static wyrelog_error_t
+fact_store_open_reservation_transition (gpointer user_data,
+    const gchar *reservation_id, const gchar *owner,
+    WylFactOpenReservationState expected, WylFactOpenReservationState target)
+{
+  FactOpenReservationAdapter *adapter = user_data;
+  if (adapter == NULL || adapter->policy_store == NULL
+      || adapter->owner_incarnation == NULL
+      || g_strcmp0 (owner, adapter->owner_incarnation) != 0)
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_transition_fact_open (adapter->policy_store,
+             reservation_id, owner, NULL, fact_open_policy_state (expected),
+             fact_open_policy_state (target));
+}
+
+static wyrelog_error_t
+fact_store_open_reservation_settle (gpointer user_data,
+    const gchar *reservation_id, const gchar *owner)
+{
+  FactOpenReservationAdapter *adapter = user_data;
+  if (adapter == NULL || adapter->policy_store == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_settle_fact_open (adapter->policy_store,
+             reservation_id, owner, NULL, TRUE);
+}
+
+static wyrelog_error_t
+fact_store_release_native (wyl_fact_store_t *store, gboolean *out_released)
+{
+  if (store == NULL || out_released == NULL)
+    return WYRELOG_E_INVALID;
+  *out_released = FALSE;
+  duckdb_disconnect (&store->conn);
+  duckdb_close (&store->db);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  if (store->provisioned_bridge != NULL) {
+    rc = wyl_secure_duckdb_bridge_release_live (store->provisioned_bridge);
+    store->provisioned_bridge = NULL;
+  }
+#endif
+  *out_released = TRUE;
+  return rc;
+}
+
+static wyrelog_error_t
+fact_store_open_reservation_release (gpointer user_data,
+    gboolean *out_released)
+{
+  FactOpenReservationAdapter *adapter = user_data;
+  return adapter == NULL ? WYRELOG_E_INVALID
+      : fact_store_release_native (adapter->store, out_released);
+}
+
+FactOpenReservationAdapter *
+wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, WylFactOpenReservation **out_reservation)
+{
+  if (out_reservation != NULL)
+    *out_reservation = NULL;
+  if (policy_store == NULL || tenant_id == NULL || graph_id == NULL
+      || root_identity == NULL || token_identity == NULL
+      || out_reservation == NULL)
+    return NULL;
+  g_autofree gchar *owner = g_uuid_string_random ();
+  g_autofree gchar *reservation_id = g_uuid_string_random ();
+  if (owner == NULL || reservation_id == NULL
+      || wyl_policy_store_register_fact_open_owner (policy_store, owner)
+      != WYRELOG_E_OK)
+    return NULL;
+  g_autofree gchar *persisted_id = NULL;
+  if (wyl_policy_store_reserve_fact_open (policy_store, reservation_id, owner,
+      tenant_id, graph_id, root_identity, token_identity, &persisted_id)
+      != WYRELOG_E_OK) {
+    (void) wyl_policy_store_retire_fact_open_owner (policy_store, owner);
+    return NULL;
+  }
+
+  FactOpenReservationAdapter *adapter = g_new0 (FactOpenReservationAdapter, 1);
+  adapter->policy_store = policy_store;
+  adapter->owner_incarnation = g_steal_pointer (&owner);
+  WylFactOpenReservationCallbacks callbacks = {
+    fact_store_open_reservation_transition,
+    fact_store_open_reservation_settle,
+    fact_store_open_reservation_release,
+    adapter,
+  };
+  WylFactOpenReservation *reservation = wyl_fact_open_reservation_new
+        (reservation_id, adapter->owner_incarnation, &callbacks);
+  if (reservation == NULL) {
+    (void) wyl_policy_store_transition_fact_open (policy_store, reservation_id,
+        adapter->owner_incarnation, NULL, WYL_POLICY_FACT_OPEN_PENDING,
+        WYL_POLICY_FACT_OPEN_CLEANUP_PENDING);
+    (void) wyl_policy_store_settle_fact_open (policy_store, reservation_id,
+        adapter->owner_incarnation, NULL, TRUE);
+    wyl_policy_store_retire_fact_open_owner (policy_store,
+        adapter->owner_incarnation);
+    g_free (adapter->owner_incarnation);
+    g_free (adapter);
+    return NULL;
+  }
+  if (wyl_fact_open_reservation_begin_acquisition (reservation)
+      != WYRELOG_E_OK) {
+    (void) wyl_fact_open_reservation_fail (reservation);
+    if (wyl_fact_open_reservation_get_state (reservation)
+        == WYL_FACT_OPEN_RESERVATION_SETTLED)
+      wyl_fact_open_reservation_free (reservation);
+    wyl_policy_store_retire_fact_open_owner (policy_store,
+        adapter->owner_incarnation);
+    g_free (adapter->owner_incarnation);
+    g_free (adapter);
+    return NULL;
+  }
+  *out_reservation = reservation;
+  return adapter;
+}
+
+void
+wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
+    FactOpenReservationAdapter *adapter, WylFactOpenReservation *reservation)
+{
+  if (store == NULL || adapter == NULL || reservation == NULL)
+    return;
+  adapter->store = store;
+  store->open_reservation_adapter = adapter;
+  store->open_reservation = reservation;
+}
+
+void
+wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
+    WylFactOpenReservation *reservation)
+{
+  if (adapter == NULL)
+    return;
+  if (reservation != NULL) {
+    (void) wyl_fact_open_reservation_fail (reservation);
+    if (wyl_fact_open_reservation_get_state (reservation)
+        == WYL_FACT_OPEN_RESERVATION_SETTLED)
+      wyl_fact_open_reservation_free (reservation);
+  }
+  if (adapter->policy_store != NULL && adapter->owner_incarnation != NULL)
+    (void) wyl_policy_store_retire_fact_open_owner (adapter->policy_store,
+        adapter->owner_incarnation);
+  g_free (adapter->owner_incarnation);
+  g_free (adapter);
+}
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
 static WylFactStoreDuckdbConfigSetting duckdb_config_failure =
@@ -943,17 +1119,30 @@ fact_store_close_checked (wyl_fact_store_t *store)
 {
   if (store == NULL)
     return WYRELOG_E_INVALID;
-  duckdb_disconnect (&store->conn);
-  duckdb_close (&store->db);
   wyrelog_error_t rc = WYRELOG_E_OK;
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
-  /* Order matters: the disconnect + close above destruct the instance so its
-   * shutdown checkpoint runs through the bounded filesystem under the lease the
-   * bridge still holds.  Only now is it safe to observe health and release the
-   * lease. */
-  if (store->provisioned_bridge != NULL)
-    rc = wyl_secure_duckdb_bridge_release_live (store->provisioned_bridge);
-#endif
+  if (store->open_reservation != NULL) {
+    rc = wyl_fact_open_reservation_close (store->open_reservation);
+    if (wyl_fact_open_reservation_get_state (store->open_reservation)
+        != WYL_FACT_OPEN_RESERVATION_SETTLED)
+      return rc;
+    g_clear_pointer (&store->open_reservation,
+        wyl_fact_open_reservation_free);
+    if (store->open_reservation_adapter != NULL) {
+      wyrelog_error_t retire_rc = wyl_policy_store_retire_fact_open_owner
+            (store->open_reservation_adapter->policy_store,
+              store->open_reservation_adapter->owner_incarnation);
+      if (rc == WYRELOG_E_OK)
+        rc = retire_rc;
+      g_free (store->open_reservation_adapter->owner_incarnation);
+      g_free (store->open_reservation_adapter);
+      store->open_reservation_adapter = NULL;
+    }
+  } else {
+    gboolean released = FALSE;
+    rc = fact_store_release_native (store, &released);
+    if (!released)
+      return rc;
+  }
   g_mutex_clear (&store->lock);
   g_free (store->identity_tenant_id);
   g_free (store->identity_graph_id);

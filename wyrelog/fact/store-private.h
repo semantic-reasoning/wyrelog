@@ -17,6 +17,8 @@
 G_BEGIN_DECLS;
 
 typedef struct wyl_fact_store_t wyl_fact_store_t;
+typedef struct FactOpenReservationAdapter FactOpenReservationAdapter;
+typedef struct WylFactOpenReservation WylFactOpenReservation;
 
 typedef void (*WylFactStoreIdentityValidationTestHook) (duckdb_database db,
     gpointer user_data);
@@ -100,6 +102,14 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 /* Close the DuckDB instance and release any secure bridge, returning bridge
  * health diagnostics after the native resources have been consumed. */
 wyrelog_error_t wyl_fact_store_close_checked (wyl_fact_store_t * store);
+FactOpenReservationAdapter *wyl_fact_store_open_reservation_begin
+  (wyl_policy_store_t *policy_store, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, WylFactOpenReservation **out_reservation);
+void wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
+    FactOpenReservationAdapter *adapter, WylFactOpenReservation *reservation);
+void wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
+    WylFactOpenReservation *reservation);
 
 wyrelog_error_t wyl_fact_store_create_schema (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_table_exists (wyl_fact_store_t * store,
