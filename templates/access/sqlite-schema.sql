@@ -450,6 +450,17 @@ CREATE TABLE IF NOT EXISTS fact_tenant_quota_limits (
     FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
 );
 
+CREATE TABLE IF NOT EXISTS fact_tenant_write_rate_state (
+    tenant_id        TEXT PRIMARY KEY,
+    tokens           INTEGER NOT NULL CHECK (tokens >= 0),
+    refill_remainder INTEGER NOT NULL CHECK (
+        refill_remainder BETWEEN 0 AND 999999),
+    last_refill_at   INTEGER NOT NULL CHECK (last_refill_at >= 0),
+    rate_per_second  INTEGER NOT NULL CHECK (rate_per_second > 0),
+    burst            INTEGER NOT NULL CHECK (burst > 0),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
 CREATE TABLE IF NOT EXISTS fact_graph_create_reservations (
     tenant_id     TEXT NOT NULL,
     graph_id      TEXT NOT NULL,
