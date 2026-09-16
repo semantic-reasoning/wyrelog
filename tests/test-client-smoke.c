@@ -29,6 +29,8 @@ typedef struct
   gchar *last_role;
   gchar *last_scope;
   gchar *last_tenant;
+  gchar *last_dimension;
+  gchar *last_limit;
   gchar *last_event;
   gchar *last_session_token;
   gchar *last_refresh_token;
@@ -87,6 +89,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_role);
   g_free (http->last_scope);
   g_free (http->last_tenant);
+  g_free (http->last_dimension);
+  g_free (http->last_limit);
   g_free (http->last_event);
   g_free (http->last_session_token);
   g_free (http->last_refresh_token);
@@ -123,6 +127,10 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       query != NULL ? g_strdup (g_hash_table_lookup (query, "scope")) : NULL;
   http->last_tenant =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "tenant")) : NULL;
+  http->last_dimension =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "dimension")) : NULL;
+  http->last_limit =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "limit")) : NULL;
   http->last_event =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "event")) : NULL;
   http->last_session_token =
@@ -1139,6 +1147,61 @@ main (void)
       || fact_status.n_graphs != 0)
     return wyl_test_normalize_exit_status (285);
   http.oversized_chunked_response = FALSE;
+
+  /* #1096: the schema-count quota client must keep its typed contract
+   * distinct from graph-count and write-rate quotas. */
+  WylClientFactSchemaQuotaStatus schema_quota = { 0 };
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"schema_count\",\"limit\":3,\"registered\":2}";
+  if (wyl_client_fact_schema_quota_status (management_client,
+      "__wr_default", 123, "public", 49, &schema_quota) != WYRELOG_E_OK
+      || !schema_quota.has_limit || schema_quota.hard_limit != 3
+      || schema_quota.registered != 2
+      || g_strcmp0 (schema_quota.tenant_id, "__wr_default") != 0
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/facts/quota") != 0
+      || g_strcmp0 (http.last_dimension, "schema_count") != 0
+      || http.last_limit != NULL || http.last_body != NULL)
+    return wyl_test_normalize_exit_status (286);
+
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"schema_count\",\"limit\":4,\"registered\":2}";
+  if (wyl_client_fact_schema_quota_configure (management_client,
+      "__wr_default", 4, 123, "public", 49, &schema_quota) != WYRELOG_E_OK
+      || !schema_quota.has_limit || schema_quota.hard_limit != 4
+      || schema_quota.registered != 2
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_dimension, "schema_count") != 0
+      || g_strcmp0 (http.last_limit, "4") != 0 || http.last_body != NULL)
+    return wyl_test_normalize_exit_status (287);
+
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"schema_count\",\"limit\":null,\"registered\":0}";
+  if (wyl_client_fact_schema_quota_status (management_client,
+      "__wr_default", 123, "public", 49, &schema_quota) != WYRELOG_E_OK
+      || schema_quota.has_limit || schema_quota.hard_limit != 0
+      || schema_quota.registered != 0)
+    return wyl_test_normalize_exit_status (288);
+
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"schema_count\",\"limit\":3,\"registered\":2}";
+  if (wyl_client_fact_schema_quota_status (management_client,
+      "__wr_default", 123, "public", 49, &schema_quota) != WYRELOG_E_OK
+      || !schema_quota.has_limit || schema_quota.hard_limit != 3
+      || schema_quota.registered != 2)
+    return wyl_test_normalize_exit_status (289);
+
+  /* A malformed replacement clears the previous typed result rather than
+   * leaving stale quota data visible to the caller. */
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"schema_count\",\"limit\":null}";
+  if (wyl_client_fact_schema_quota_status (management_client,
+      "__wr_default", 123, "public", 49, &schema_quota) != WYRELOG_E_IO
+      || schema_quota.tenant_id != NULL || schema_quota.has_limit
+      || schema_quota.hard_limit != 0 || schema_quota.registered != 0)
+    return wyl_test_normalize_exit_status (290);
+  wyl_client_fact_schema_quota_status_clear (&schema_quota);
+
   /*
    * #1031: with a token the request must carry the bearer AND name the
    * tenant, because the daemon resolves an unnamed request tenant to
@@ -2731,6 +2794,8 @@ main (void)
   g_clear_pointer (&http.last_role, g_free);
   g_clear_pointer (&http.last_scope, g_free);
   g_clear_pointer (&http.last_tenant, g_free);
+  g_clear_pointer (&http.last_dimension, g_free);
+  g_clear_pointer (&http.last_limit, g_free);
   g_clear_pointer (&http.last_event, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_refresh_token, g_free);
