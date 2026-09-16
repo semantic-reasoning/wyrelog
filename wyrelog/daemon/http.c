@@ -3482,6 +3482,15 @@ wyl_daemon_http_service_token_exchange_for_test (SoupServer *server,
     const WylDaemonServiceTokenRequest *request, guint *out_status,
     gchar **out_body, guint *out_retry_after)
 {
+  /* The output slot owns its previous response even when the server has no
+   * context.  Clear it before the early validation return as well as on the
+   * normal core path. */
+  if (out_status != NULL)
+    *out_status = 0;
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_free);
+  if (out_retry_after != NULL)
+    *out_retry_after = 0;
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL)
     return WYRELOG_E_INVALID;
@@ -5056,6 +5065,10 @@ service_token_response_set_error (guint status, const gchar *code,
 {
   if (out_status == NULL || out_body == NULL)
     return WYRELOG_E_INVALID;
+  /* Response outputs own their previous allocation.  The test/API callers
+   * intentionally reuse one response slot across requests; replacing it
+   * without releasing the old body loses that allocation. */
+  g_clear_pointer (out_body, g_free);
   *out_status = status;
   if (out_retry_after != NULL)
     *out_retry_after = retry_after_seconds;
@@ -5264,13 +5277,14 @@ service_token_exchange_core_with_authority (WylDaemonHttpContext *ctx,
   if (out_status != NULL)
     *out_status = 0;
   if (out_body != NULL)
-    *out_body = NULL;
+    g_clear_pointer (out_body, g_free);
   if (out_retry_after != NULL)
     *out_retry_after = 0;
   if (out_sensitive_response != NULL)
-    *out_sensitive_response = NULL;
+    g_clear_pointer (out_sensitive_response,
+        wyl_sensitive_service_token_response_free);
   if (out_authority != NULL)
-    *out_authority = NULL;
+    g_clear_pointer (out_authority, service_response_authority_free);
   if (ctx == NULL || request == NULL || out_status == NULL || out_body == NULL
       || out_sensitive_response == NULL || out_authority == NULL)
     return WYRELOG_E_INVALID;
@@ -5495,6 +5509,14 @@ service_token_exchange_handle (SoupServer *server, SoupServerMessage *msg,
     g_autoptr (GBytes) bytes = g_bytes_new_with_free_func (body_owner->text,
             body_owner->len,
             (GDestroyNotify) wyl_sensitive_service_token_response_free, body_owner);
+    if (bytes == NULL) {
+      /* GBytes takes ownership only after successful construction.  Keep the
+       * response owner local until that handoff succeeds so an allocation
+       * failure cannot leak the sensitive response. */
+      wyl_sensitive_service_token_response_free (body_owner);
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+      return;
+    }
     soup_message_body_append_bytes (message_body, bytes);
     soup_message_body_complete (message_body);
   } else {
@@ -5531,6 +5553,12 @@ wyl_daemon_http_issue_service_token_for_test (SoupServer *server,
     gboolean transport_ok, const gchar *request_body, gsize request_body_len,
     guint *out_status, gchar **out_body, guint *out_retry_after)
 {
+  if (out_status != NULL)
+    *out_status = 0;
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_free);
+  if (out_retry_after != NULL)
+    *out_retry_after = 0;
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL || out_status == NULL || out_body == NULL)
     return WYRELOG_E_INVALID;
@@ -5551,6 +5579,9 @@ wyl_daemon_http_publish_service_token_for_test (SoupServer *server,
     gsize credential_secret_len, gchar **out_body)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (out_body == NULL)
+    return WYRELOG_E_INVALID;
+  g_clear_pointer (out_body, g_free);
   g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
   g_autoptr (WylServiceResponseAuthority) authority = NULL;
   wyrelog_error_t rc = service_token_exchange_prepare (ctx, credential_id,

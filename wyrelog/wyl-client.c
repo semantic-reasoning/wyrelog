@@ -283,10 +283,10 @@ static wyrelog_error_t
 client_send_message_collect (WylClient *client, SoupMessage *message,
     GBytes **out_body, guint *out_status)
 {
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
     return WYRELOG_E_INVALID;
-  if (out_body != NULL)
-    *out_body = NULL;
   if (out_status != NULL)
     *out_status = 0;
 
@@ -333,10 +333,11 @@ static wyrelog_error_t
 client_send_message_collect_bounded (WylClient *client, SoupMessage *message,
     gsize max_body_size, GBytes **out_body, guint *out_status)
 {
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL
       || out_body == NULL || max_body_size == 0)
     return WYRELOG_E_INVALID;
-  *out_body = NULL;
   if (out_status != NULL)
     *out_status = 0;
 
@@ -419,10 +420,11 @@ wyrelog_error_t
 wyl_client_send_message (WylClient *client, SoupMessage *message,
     GBytes **out_body)
 {
-  if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL ||
-      out_body == NULL)
+  if (out_body == NULL)
     return WYRELOG_E_INVALID;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_bytes_unref);
+  if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
+    return WYRELOG_E_INVALID;
   guint status = 0;
   g_autoptr (GBytes) body = NULL;
   wyrelog_error_t rc =
@@ -895,7 +897,7 @@ client_send_service_management_message (WylClient *client,
     SoupMessage *message, GBytes **out_body, guint *out_status)
 {
   if (out_body != NULL)
-    *out_body = NULL;
+    g_clear_pointer (out_body, g_bytes_unref);
   if (out_status != NULL)
     *out_status = 0;
 
@@ -922,7 +924,7 @@ client_service_management_request_for_tenant (WylClient *client,
     guint *out_status)
 {
   if (out_body != NULL)
-    *out_body = NULL;
+    g_clear_pointer (out_body, g_bytes_unref);
   if (out_status != NULL)
     *out_status = 0;
   if (client == NULL || !WYL_IS_CLIENT (client) || method == NULL
@@ -1669,10 +1671,10 @@ static wyrelog_error_t
 client_send_fact_message (WylClient *client, SoupMessage *message,
     GBytes **out_body)
 {
+  if (out_body != NULL)
+    g_clear_pointer (out_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
     return WYRELOG_E_INVALID;
-  if (out_body != NULL)
-    *out_body = NULL;
   client_clear_last_http_error (client);
 
   g_autoptr (GError) error = NULL;

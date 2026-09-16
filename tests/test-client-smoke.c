@@ -981,6 +981,9 @@ main (void)
   const gchar *body_data = g_bytes_get_data (body, &body_size);
   if (body_size != 2 || memcmp (body_data, "[]", 2) != 0)
     return wyl_test_normalize_exit_status (26);
+  if (wyl_client_send_message (local_client, NULL, &body) !=
+      WYRELOG_E_INVALID || body != NULL)
+    return wyl_test_normalize_exit_status (2611);
 
   if (wyl_client_login (NULL, "alice", NULL) != WYRELOG_E_INVALID)
     return wyl_test_normalize_exit_status (38);
@@ -2214,7 +2217,6 @@ main (void)
     return wyl_test_normalize_exit_status (155);
   g_autoptr (SoupMessage) guarded_audit_message =
       wyl_audit_iter_new_request_message (guarded_audit_iter);
-  g_clear_pointer (&body, g_bytes_unref);
   if (wyl_client_send_message (local_client, guarded_audit_message, &body) !=
       WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (156);

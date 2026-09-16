@@ -15546,6 +15546,25 @@ static gint
 check_service_token_exchange_contract_on_server (SoupServer *server,
     WylHandle *handle, const gchar *base_url)
 {
+  /* Invalid-context returns must release and reset reusable output slots. */
+  {
+    g_autoptr (SoupServer) bare_server = soup_server_new (NULL, NULL);
+    g_autofree gchar *reused_body = g_strdup ("old-response");
+    guint reused_status = 77;
+    guint reused_retry_after = 88;
+    if (wyl_daemon_http_service_token_exchange_for_test (bare_server, NULL,
+        &reused_status, &reused_body, &reused_retry_after) != WYRELOG_E_INVALID
+        || reused_body != NULL || reused_status != 0 || reused_retry_after != 0)
+      return 19441;
+    reused_body = g_strdup ("old-response");
+    reused_status = 77;
+    reused_retry_after = 88;
+    if (wyl_daemon_http_issue_service_token_for_test (bare_server, TRUE, NULL,
+        0, &reused_status, &reused_body, &reused_retry_after)
+        != WYRELOG_E_INVALID || reused_body != NULL || reused_status != 0
+        || reused_retry_after != 0)
+      return 19442;
+  }
   g_autofree gchar *access_token = NULL;
   g_autofree gchar *route_access_token = NULL;
   prepare_service_token_subject (handle, "svc:exchange:worker");
@@ -15756,7 +15775,8 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   g_autofree gchar *malformed_body =
       g_strdup_printf ("{\"credential_id\":\"%s\",\"extra\":\"x\"}",
           issued.credential.credential_id);
-  g_clear_pointer (&body, g_free);
+  /* Reuse the prior successful response slot.  The daemon test API must
+   * release it before publishing the malformed-request response. */
   if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
       malformed_body, strlen (malformed_body), &status, &body,
       &retry_after) != WYRELOG_E_OK)
