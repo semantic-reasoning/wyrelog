@@ -251,6 +251,8 @@ wyrelog/fact/graph-seal-private.h
 wyrelog/fact/legacy-store-identity-private.c
 wyrelog/fact/legacy-store-identity-private.h
 wyrelog/fact/mutation-outcome-private.h
+wyrelog/fact/open-reservation-private.c
+wyrelog/fact/open-reservation-private.h
 wyrelog/fact/provisioning-construct-private.c
 wyrelog/fact/provisioning-construct-private.h
 wyrelog/fact/provisioning-private.c

@@ -12,6 +12,7 @@
 #endif
 
 #include "fact/recovery-mac-private.h"
+#include "fact/open-reservation-private.h"
 #include "fact-test-support.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
@@ -3565,6 +3566,179 @@ test_fact_concurrent_open_quota_store_api (void)
   cleanup_store_path (store_root, store_path);
 }
 
+typedef struct
+{
+  guint transitions;
+  guint releases;
+  guint settlements;
+  gboolean fail_transition;
+  gboolean fail_release;
+  gboolean release_on_error;
+  gboolean release_unconfirmed;
+  gboolean fail_settlement;
+  WylFactOpenReservationState state;
+} FactOpenReservationFake;
+
+static wyrelog_error_t
+fact_open_reservation_fake_transition (gpointer user_data,
+    const gchar *reservation_id, const gchar *owner,
+    WylFactOpenReservationState expected,
+    WylFactOpenReservationState target)
+{
+  FactOpenReservationFake *fake = user_data;
+  g_assert_cmpstr (reservation_id, ==, "reservation-1");
+  g_assert_cmpstr (owner, ==, "owner-1");
+  g_assert_cmpint (fake->state, ==, expected);
+  if (fake->fail_transition)
+    return WYRELOG_E_IO;
+  fake->state = target;
+  fake->transitions++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fact_open_reservation_fake_settle (gpointer user_data,
+    const gchar *reservation_id, const gchar *owner)
+{
+  FactOpenReservationFake *fake = user_data;
+  g_assert_cmpstr (reservation_id, ==, "reservation-1");
+  g_assert_cmpstr (owner, ==, "owner-1");
+  fake->settlements++;
+  return fake->fail_settlement ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fact_open_reservation_fake_release (gpointer user_data, gboolean *out_released)
+{
+  FactOpenReservationFake *fake = user_data;
+  fake->releases++;
+  *out_released = !fake->release_unconfirmed
+      && (!fake->fail_release || fake->release_on_error);
+  return fake->fail_release ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+test_fact_open_reservation_owns_retryable_teardown (void)
+{
+  FactOpenReservationFake fake = {
+    .state = WYL_FACT_OPEN_RESERVATION_PENDING,
+  };
+  WylFactOpenReservationCallbacks callbacks = {
+    fact_open_reservation_fake_transition,
+    fact_open_reservation_fake_settle,
+    fact_open_reservation_fake_release,
+    &fake,
+  };
+  g_assert_null (wyl_fact_open_reservation_new (NULL, "owner-1", &callbacks));
+  WylFactOpenReservation *reservation =
+      wyl_fact_open_reservation_new ("reservation-1", "owner-1", &callbacks);
+  g_assert_nonnull (reservation);
+  g_assert_cmpint (wyl_fact_open_reservation_begin_acquisition (reservation),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_adopt_native (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_mark_active (reservation), ==,
+      WYRELOG_E_OK);
+  fake.fail_release = TRUE;
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_open_reservation_get_state (reservation), ==,
+      WYL_FACT_OPEN_RESERVATION_CLEANUP_PENDING);
+  g_assert_cmpuint (fake.releases, ==, 1);
+  g_assert_cmpuint (fake.settlements, ==, 0);
+  fake.fail_release = FALSE;
+  fake.fail_settlement = TRUE;
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpuint (fake.releases, ==, 2);
+  g_assert_cmpuint (fake.settlements, ==, 1);
+  fake.fail_settlement = FALSE;
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_get_state (reservation), ==,
+      WYL_FACT_OPEN_RESERVATION_SETTLED);
+  g_assert_cmpuint (fake.releases, ==, 2);
+  g_assert_cmpuint (fake.settlements, ==, 2);
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (fake.releases, ==, 2);
+
+  fake = (FactOpenReservationFake) {
+    .state = WYL_FACT_OPEN_RESERVATION_PENDING,
+  };
+  g_clear_pointer (&reservation, wyl_fact_open_reservation_free);
+  reservation = wyl_fact_open_reservation_new ("reservation-1", "owner-1",
+          &callbacks);
+  g_assert_cmpint (wyl_fact_open_reservation_begin_acquisition (reservation),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_fail (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_get_state (reservation), ==,
+      WYL_FACT_OPEN_RESERVATION_SETTLED);
+  g_assert_cmpuint (fake.releases, ==, 0);
+  g_assert_cmpuint (fake.settlements, ==, 1);
+
+  fake = (FactOpenReservationFake) {
+    .state = WYL_FACT_OPEN_RESERVATION_PENDING,
+    .fail_transition = FALSE,
+  };
+  g_clear_pointer (&reservation, wyl_fact_open_reservation_free);
+  reservation = wyl_fact_open_reservation_new ("reservation-1", "owner-1",
+          &callbacks);
+  g_assert_cmpint (wyl_fact_open_reservation_begin_acquisition (reservation),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_adopt_native (reservation), ==,
+      WYRELOG_E_OK);
+  fake.fail_transition = TRUE;
+  g_assert_cmpint (wyl_fact_open_reservation_mark_active (reservation), ==,
+      WYRELOG_E_IO);
+  fake.fail_transition = FALSE;
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (fake.releases, ==, 1);
+
+  fake = (FactOpenReservationFake) {
+    .state = WYL_FACT_OPEN_RESERVATION_PENDING,
+    .fail_release = TRUE,
+    .release_on_error = TRUE,
+  };
+  g_clear_pointer (&reservation, wyl_fact_open_reservation_free);
+  reservation = wyl_fact_open_reservation_new ("reservation-1", "owner-1",
+          &callbacks);
+  g_assert_cmpint (wyl_fact_open_reservation_begin_acquisition (reservation),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_adopt_native (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpuint (fake.releases, ==, 1);
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (fake.releases, ==, 1);
+  g_assert_cmpuint (fake.settlements, ==, 1);
+  wyl_fact_open_reservation_free (reservation);
+
+  fake = (FactOpenReservationFake) {
+    .state = WYL_FACT_OPEN_RESERVATION_PENDING,
+    .release_unconfirmed = TRUE,
+  };
+  reservation = wyl_fact_open_reservation_new ("reservation-1", "owner-1",
+          &callbacks);
+  g_assert_cmpint (wyl_fact_open_reservation_begin_acquisition (reservation),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_adopt_native (reservation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_open_reservation_get_state (reservation), ==,
+      WYL_FACT_OPEN_RESERVATION_CLEANUP_PENDING);
+  g_assert_cmpuint (fake.settlements, ==, 0);
+  fake.release_unconfirmed = FALSE;
+  g_assert_cmpint (wyl_fact_open_reservation_close (reservation), ==,
+      WYRELOG_E_OK);
+  wyl_fact_open_reservation_free (reservation);
+}
+
 static void
 test_fact_concurrent_open_quota_cross_handle_reopen (void)
 {
@@ -6030,6 +6204,9 @@ main (int argc, char **argv)
       test_fact_concurrent_open_quota_cross_handle_reopen);
   g_test_add_func ("/policy/graph-authority/fact-open-publication-faults",
       test_fact_open_publication_faults);
+  g_test_add_func
+    ("/policy/graph-authority/fact-open-reservation-retryable-teardown",
+      test_fact_open_reservation_owns_retryable_teardown);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-quota-persists",
       test_fact_write_rate_quota_persists);
   g_test_add_func ("/policy/graph-authority/fact-write-rate-admission",
