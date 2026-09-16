@@ -219,35 +219,35 @@
   {
     "api": "_Exit",
     "expression": "81",
-    "line": 1545,
+    "line": 1546,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :\n        (rc == WYRELOG_E_OK\n        && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82)",
-    "line": 1556,
+    "line": 1557,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "73",
-    "line": 2784,
+    "line": 2785,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "74",
-    "line": 2803,
+    "line": 2804,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
   {
     "api": "_Exit",
     "expression": "75",
-    "line": 2807,
+    "line": 2808,
     "path": "tests/test-policy-graph-authority.c",
     "platform": "posix-normalized-wrapper"
   },
