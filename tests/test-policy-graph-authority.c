@@ -3561,6 +3561,36 @@ test_fact_concurrent_open_quota_store_api (void)
       WYL_POLICY_FACT_QUOTA_WRITE_RATE, &migrated), ==, WYRELOG_E_OK);
   g_assert_cmpuint (migrated.rate_per_second, ==, 7);
   g_assert_cmpuint (migrated.burst, ==, 11);
+  /* The quota-table rebuild must not disturb the independently durable fact
+   * open ledger.  Re-establish the migrated table's new dimension and prove
+   * that the pre-existing reservation is still charged and enforceable. */
+  g_assert_cmpint (wyl_policy_store_set_fact_concurrent_open_quota (store,
+      "open-d", 1), ==, WYRELOG_E_OK);
+  WylPolicyFactConcurrentOpenQuotaStatus migrated_open_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-d", &migrated_open_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (migrated_open_status.pending, ==, 1);
+  g_assert_cmpuint (migrated_open_status.charged, ==, 1);
+  g_autofree gchar *migrated_rejected_id = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "reservation-migrated-rejected", "recovery-api", "open-d",
+      "graph-migrated-rejected", "root-migrated-rejected",
+      "token-migrated-rejected", &migrated_rejected_id), ==, WYRELOG_E_POLICY);
+  g_assert_null (migrated_rejected_id);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      limited_reservation_id, "recovery-api", NULL,
+      WYL_POLICY_FACT_OPEN_PENDING, WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
+      limited_reservation_id, "recovery-api", NULL, TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "open-d", &migrated_open_status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (migrated_open_status.pending, ==, 0);
+  g_assert_cmpuint (migrated_open_status.charged, ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (store_root, store_path);
