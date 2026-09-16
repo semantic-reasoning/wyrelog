@@ -689,7 +689,7 @@ send_raw_path_probe (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 1900;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -1464,9 +1464,9 @@ send_raw_decide_authorization_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 30;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *uri =
       build_decide_uri (base_url, user, perm, scope, extra_query);
@@ -1596,7 +1596,7 @@ send_request_id_probe (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_request_id == NULL)
     return 1800;
   *out_status = 0;
-  *out_request_id = NULL;
+  g_clear_pointer (out_request_id, g_free);
 
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
@@ -1935,8 +1935,11 @@ send_raw_login_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, guint *out_status,
     gchar **out_body, gchar **out_request_id)
 {
+  if (out_status == NULL || out_body == NULL)
+    return 1;
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
+  g_clear_pointer (out_body, g_free);
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
@@ -2028,6 +2031,7 @@ send_raw_refresh_body (SoupSession *session, const gchar *base_url,
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
+  g_clear_pointer (out_body, g_free);
   *out_body = g_strndup (data, size);
   return 0;
 }
@@ -2037,6 +2041,9 @@ send_raw_refresh (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *refresh_token, guint *out_status,
     gchar **out_body)
 {
+  if (out_status == NULL || out_body == NULL)
+    return 1;
+  g_clear_pointer (out_body, g_free);
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
@@ -6152,9 +6159,9 @@ send_raw_logout_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 484;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -6204,9 +6211,9 @@ send_raw_logout_authorization_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 484;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -6941,7 +6948,7 @@ send_oversized_policy_body (SoupSession *session, const gchar *base_url,
     const gchar *request_body, guint *out_status, gchar **out_body)
 {
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new ("POST", uri);
   if (msg == NULL)
@@ -6981,9 +6988,9 @@ send_raw_policy_mutation_body_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 120;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -7052,7 +7059,7 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 120;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -7086,7 +7093,7 @@ send_raw_service_principal_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 120;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -7330,9 +7337,9 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
   if (out_status == NULL || out_body == NULL)
     return 166;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -13160,7 +13167,7 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
   if (out_status == NULL || out_body == NULL)
     return 90;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *uri = build_audit_uri (base_url, query);
   g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
@@ -13187,10 +13194,11 @@ send_raw_audit_bearer_full (SoupSession *session, const gchar *base_url,
     const gchar *query, const gchar *access_token, guint *out_status,
     gchar **out_body, gchar **out_request_id)
 {
-  if (access_token == NULL)
+  if (access_token == NULL || out_status == NULL || out_body == NULL)
     return 89;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *uri = build_audit_uri (base_url, query);
   g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
@@ -18755,9 +18763,9 @@ send_raw_service_principal_bearer_full (SoupSession *session,
   if (out_status == NULL || out_body == NULL)
     return 120;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
   if (out_request_id != NULL)
-    *out_request_id = NULL;
+    g_clear_pointer (out_request_id, g_free);
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -20873,7 +20881,7 @@ send_raw_service_management_forwarded_spoof (SoupSession *session,
   if (access_token == NULL || out_status == NULL || out_body == NULL)
     return 2520;
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);

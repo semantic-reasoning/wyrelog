@@ -118,7 +118,7 @@ send_event_path (SoupSession *session, const gchar *method,
     gboolean expect_continue, guint *out_status, gchar **out_body)
 {
   *out_status = 0;
-  *out_body = NULL;
+  g_clear_pointer (out_body, g_free);
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
