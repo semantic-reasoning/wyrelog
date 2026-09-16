@@ -3536,8 +3536,10 @@ test_graph_quota_reservation_survives_reopen (void)
   /* Make the retry root available before reopening the policy store and bind
    * it explicitly so the wrong-root check exercises the production contract. */
   g_assert_cmpint (g_remove (blocking_file), ==, 0);
-  g_assert_cmpint (g_mkdir (blocking_file, 0700), ==, 0);
-  g_assert_cmpint (g_mkdir (fallback_root, 0700), ==, 0);
+  g_assert_true (wyl_test_create_secure_directory (blocking_file, &error));
+  g_assert_no_error (error);
+  g_assert_true (wyl_test_create_secure_directory (fallback_root, &error));
+  g_assert_no_error (error);
 
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
@@ -3582,7 +3584,8 @@ test_graph_quota_reservation_survives_reopen (void)
       "arity) VALUES ('quota-fallback','recover-me','stale',1);");
   g_autofree gchar *changed_config_root = g_build_filename (fact_root,
           "facts-after-restart", NULL);
-  g_assert_cmpint (g_mkdir (changed_config_root, 0700), ==, 0);
+  g_assert_true (wyl_test_create_secure_directory (changed_config_root, &error));
+  g_assert_no_error (error);
   fallback_opts.fact_root = changed_config_root;
   g_assert_cmpint (wyl_policy_store_create_fact_graph_with_quota_result
         (store, &fallback_opts, NULL, &fallback_quota_exceeded, NULL), ==,
