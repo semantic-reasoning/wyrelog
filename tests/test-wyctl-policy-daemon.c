@@ -299,6 +299,20 @@ assert_wyctl_stdout_contains (gchar **argv, const gchar *needle)
   g_assert_nonnull (strstr (stdout_buf, needle));
   g_assert_cmpstr (stderr_buf, ==, "");
 }
+
+static void
+assert_wyctl_rejected (gchar **argv, const gchar *expected_stderr)
+{
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_wyctl (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
+}
 #endif
 
 int
@@ -552,6 +566,68 @@ main (void)
   assert_wyctl_stdout_contains (fact_write_rate_status_argv,
       "tenant=__wr_default dimension=write_rate rate_per_second=7 burst=11");
 
+  gchar *fact_schema_quota_configure_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "schema_count",
+    "--limit", "2",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_schema_quota_configure_argv,
+      "tenant=__wr_default dimension=schema_count limit=2 registered=0\n");
+  gchar *fact_schema_quota_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "schema_count",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_schema_quota_status_argv,
+      "tenant=__wr_default dimension=schema_count limit=2 registered=0\n");
+
+  gchar *fact_schema_quota_missing_limit_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "schema_count",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_schema_quota_missing_limit_argv,
+      "wyctl: schema_count requires --limit and rejects rate options\n");
+  gchar *fact_schema_quota_rate_options_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "schema_count",
+    "--limit", "2",
+    "--rate-per-second", "1",
+    "--burst", "1",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_schema_quota_rate_options_argv,
+      "wyctl: schema_count requires --limit and rejects rate options\n");
+
   gchar *schema_register_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -569,6 +645,8 @@ main (void)
     NULL,
   };
   assert_wyctl_ok (schema_register_argv);
+  assert_wyctl_stdout (fact_schema_quota_status_argv,
+      "tenant=__wr_default dimension=schema_count limit=2 registered=1\n");
 
   g_autoptr (GError) input_error = NULL;
   gchar *input_path = NULL;
