@@ -5404,7 +5404,9 @@ test_fact_write_rate_admission_persists_and_bounds (void)
   g_autofree gchar *maximum_state = g_strdup_printf
         ("UPDATE fact_tenant_write_rate_state SET tokens=0,"
           "refill_remainder=999999,last_refill_at=%" G_GINT64_FORMAT
-          " WHERE tenant_id='rate-admit';", g_get_real_time () - 1000001);
+          ",rate_per_second=%" G_GUINT64_FORMAT ",burst=%" G_GUINT64_FORMAT
+          " WHERE tenant_id='rate-admit';", g_get_real_time () - 1000001,
+          (guint64) G_MAXINT64, (guint64) G_MAXINT64);
   exec_ok (wyl_policy_store_get_db (store), maximum_state);
   g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
       "rate-admit", &admission), ==, WYRELOG_E_OK);

@@ -3203,6 +3203,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || !rate_state_exists || rate_tokens != 0)
     return 5292;
 
+  g_clear_pointer (&body, g_free);
   return 0;
 }
 
