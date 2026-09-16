@@ -466,6 +466,10 @@ test_daemon_handoff_issue (void)
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
   g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
   g_assert_cmpuint (publication.commit_calls, ==, 1);
+
+  g_assert_cmpint (wyl_daemon_service_credential_handoff (NULL, &inputs, &json),
+      ==, WYRELOG_E_INVALID);
+  g_assert_null (json);
 }
 
 /* A configured rotate of an existing credential drives the module to a delivered

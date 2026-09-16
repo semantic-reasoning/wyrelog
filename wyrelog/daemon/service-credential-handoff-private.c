@@ -172,7 +172,7 @@ wyl_daemon_service_credential_handoff (const
   g_autofree gchar *parent_identity = NULL;
 
   if (out_json != NULL)
-    *out_json = NULL;
+    g_clear_pointer (out_json, g_free);
   if (ctx == NULL || inputs == NULL || out_json == NULL
       || ctx->handle == NULL || ctx->session == NULL
       || ctx->authenticated_actor_subject_id == NULL

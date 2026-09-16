@@ -3681,7 +3681,7 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
 {
   if (out_result == NULL)
     return WYRELOG_E_INVALID;
-  *out_result = NULL;
+  g_clear_pointer (out_result, wyl_client_decision_free);
   if (client == NULL || !WYL_IS_CLIENT (client) || user == NULL ||
       perm == NULL || session_token == NULL)
     return WYRELOG_E_INVALID;
