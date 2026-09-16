@@ -638,7 +638,9 @@ static void
 retract_by_id_fixture_clear (RetractByIdFixture *fix)
 {
   g_free (fix->table);
-  wyl_fact_store_close (fix->store);
+  g_assert_cmpint (wyl_fact_store_close_checked (fix->store), ==,
+      WYRELOG_E_OK);
+  fix->store = NULL;
 }
 
 static gint

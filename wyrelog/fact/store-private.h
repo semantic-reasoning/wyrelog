@@ -97,6 +97,9 @@ void wyl_fact_store_set_forget_transaction_test_hook
 #endif
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
+/* Close the DuckDB instance and release any secure bridge, returning bridge
+ * health diagnostics after the native resources have been consumed. */
+wyrelog_error_t wyl_fact_store_close_checked (wyl_fact_store_t * store);
 
 wyrelog_error_t wyl_fact_store_create_schema (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_table_exists (wyl_fact_store_t * store,
