@@ -3153,7 +3153,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
    * a token before the next debit assertion. */
   g_autofree gchar *reset_rate_clock = g_strdup_printf
         ("UPDATE fact_tenant_write_rate_state SET last_refill_at=%" G_GINT64_FORMAT
-          " WHERE tenant_id='__wr_default';", g_get_real_time ());
+          ",refill_remainder=0"
+          " WHERE tenant_id='__wr_default';", g_get_real_time ()
+          + G_GINT64_CONSTANT (3600) * G_USEC_PER_SEC);
   if (sqlite3_exec (wyl_policy_store_get_db (store), reset_rate_clock,
       NULL, NULL, NULL) != SQLITE_OK)
     return 52801;
@@ -3173,7 +3175,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_clear_pointer (&reset_rate_clock, g_free);
   reset_rate_clock = g_strdup_printf
         ("UPDATE fact_tenant_write_rate_state SET last_refill_at=%" G_GINT64_FORMAT
-          " WHERE tenant_id='__wr_default';", g_get_real_time ());
+          ",refill_remainder=0"
+          " WHERE tenant_id='__wr_default';", g_get_real_time ()
+          + G_GINT64_CONSTANT (3600) * G_USEC_PER_SEC);
   if (sqlite3_exec (wyl_policy_store_get_db (store), reset_rate_clock,
       NULL, NULL, NULL) != SQLITE_OK)
     return 52812;
