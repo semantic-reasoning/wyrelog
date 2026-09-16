@@ -3069,6 +3069,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     g_printerr ("recovered mutation was not committed_ready: %s\n", body);
     return 523;
   }
+  g_clear_pointer (&body, g_free);
 
   WylPolicyFactQuotaConfig write_rate_config = {
     .has_limit = TRUE,
