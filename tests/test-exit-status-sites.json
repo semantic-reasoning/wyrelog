@@ -154,6 +154,13 @@
     "platform": "posix-normalized-wrapper"
   },
   {
+    "api": "_exit",
+    "expression": "0",
+    "line": 31,
+    "path": "tests/test-fact-open-concurrent-process.c",
+    "platform": "posix-normalized-wrapper"
+  },
+  {
     "api": "_Exit",
     "expression": "0",
     "line": 201,

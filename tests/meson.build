@@ -1401,6 +1401,17 @@ test('policy-graph-authority', test_policy_graph_authority,
 test('policy-store-close-ownership', python3,
   args : files('test-policy-store-close-ownership.py'),
 )
+
+test_fact_open_concurrent_process = executable('test-fact-open-concurrent-process',
+  'test-fact-open-concurrent-process.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('fact-open-concurrent-process', test_fact_open_concurrent_process,
+  timeout : 30,
+  is_parallel : false,
+)
 test('policy-graph-authority-pre-windows-provisioning-migration', test_policy_graph_authority,
   args : ['-p', '/policy/graph-authority/pre-windows-provisioning-migration'],
   timeout : 90,
