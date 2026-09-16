@@ -47,6 +47,7 @@ wyrelog_sources = files(
   'audit/event.c',
   'daemon/auth-registry-private.c',
   'fact/graph-locator-darwin-private.c',
+  'fact/open-reservation-private.c',
   'fact/graph-locator-private.c',
   'fact/reconcile-private.c',
   'fact/reconcile-move-private.c',
