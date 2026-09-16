@@ -938,26 +938,40 @@ wyl_fact_store_open (const gchar *path, wyl_fact_store_t **out_store)
   return WYRELOG_E_OK;
 }
 
-void
-wyl_fact_store_close (wyl_fact_store_t *store)
+static wyrelog_error_t
+fact_store_close_checked (wyl_fact_store_t *store)
 {
   if (store == NULL)
-    return;
+    return WYRELOG_E_INVALID;
   duckdb_disconnect (&store->conn);
   duckdb_close (&store->db);
+  wyrelog_error_t rc = WYRELOG_E_OK;
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
   /* Order matters: the disconnect + close above destruct the instance so its
    * shutdown checkpoint runs through the bounded filesystem under the lease the
    * bridge still holds.  Only now is it safe to observe health and release the
    * lease. */
   if (store->provisioned_bridge != NULL)
-    (void) wyl_secure_duckdb_bridge_release_live (store->provisioned_bridge);
+    rc = wyl_secure_duckdb_bridge_release_live (store->provisioned_bridge);
 #endif
   g_mutex_clear (&store->lock);
   g_free (store->identity_tenant_id);
   g_free (store->identity_graph_id);
   g_free (store->identity_store_uuid);
   g_free (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_close_checked (wyl_fact_store_t *store)
+{
+  return fact_store_close_checked (store);
+}
+
+void
+wyl_fact_store_close (wyl_fact_store_t *store)
+{
+  (void) fact_store_close_checked (store);
 }
 
 wyrelog_error_t
