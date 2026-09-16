@@ -5553,6 +5553,21 @@ test_fact_write_rate_admission_clock_remainder (void)
   g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
       "rate-clock", &admission), ==, WYRELOG_E_OK);
   g_assert_cmpuint (admission.remaining_tokens, ==, 2);
+  exec_ok (wyl_policy_store_get_db (store),
+      "UPDATE fact_tenant_write_rate_state SET tokens=0,refill_remainder=0,"
+      "last_refill_at=3000000 WHERE tenant_id='rate-clock';");
+  now_us = 1000000;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (admission.retry_after_us, ==, 2500000);
+  now_us = 3000000;
+  g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
+      "rate-clock", &admission), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (admission.retry_after_us, ==, 500000);
+  exec_ok (wyl_policy_store_get_db (store),
+      "UPDATE fact_tenant_write_rate_state SET tokens=2,refill_remainder=0,"
+      "last_refill_at=1000000 WHERE tenant_id='rate-clock';");
+  now_us = G_USEC_PER_SEC;
   now_us += 250000;
   g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
       "rate-clock", &admission), ==, WYRELOG_E_OK);
