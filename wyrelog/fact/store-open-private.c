@@ -157,11 +157,13 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
   rc = open_provisioned_find_op (policy_store, tenant_id, graph_id, &record);
   FactOpenReservationAdapter *adapter = NULL;
   WylFactOpenReservation *reservation = NULL;
+  wyrelog_error_t reservation_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {
     adapter = wyl_fact_store_open_reservation_begin (policy_store, tenant_id,
-            graph_id, fact_root, authority->store_uuid, &reservation);
+            graph_id, fact_root, authority->store_uuid, &reservation,
+            &reservation_rc);
     if (adapter == NULL)
-      rc = WYRELOG_E_POLICY;
+      rc = reservation_rc;
   }
   if (rc == WYRELOG_E_OK)
     rc = open_provisioned_active (fact_root, authority, record, writable,
