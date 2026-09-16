@@ -1,5 +1,5 @@
 {
-  "aggregate": "ab3d81ae312b83c06b3c4e2bd4e67662005b244602d9c1b54620e31da7f163ae",
+  "aggregate": "ff489f8f5c97a57add6e1757c13c01200c6df46bbd3ed5ddd097b6f55766993e",
   "directives": {
     "count": 528,
     "sha256": "82c64f1ef8845c667626f7406a354f9f76d358ade62163a3ad0f3a3d148ea2b5"
@@ -8,7 +8,7 @@
     "direct_permission_mutation_handler": "029b8875cfc10f5b184ada7ac0fb03fba2d7a573e09519c1f308174484e335d0",
     "ensure_policy_permission_exists": "9a12fb60ed4158b55ac94f121d3eed9817d0c851069cf1d9aa36287952906d5f",
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
-    "facts_quota_handler": "6d70d3201ac3ae748a5d2428576714a17dba3687bc90d23d69e7214440ba1e3d",
+    "facts_quota_handler": "8a31473080c73337ec9d2260cbc92eb8b6d113f1b04d07091339be49c3b4213e",
     "facts_route_handler": "7bf7edabf849226d19f395ed5e63168903fa0be3c9d87fbd109a33beb32291e6",
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
     "graph_seal_handler": "d05b56e29f9dd57178b0615664422bbfa5e095428beb1f608ed97769b88d99b5",
