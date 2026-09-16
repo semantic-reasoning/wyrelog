@@ -15,7 +15,7 @@
     "tests/test-fact-store-provisioned.c": 3,
     "tests/test-handle-engine-pair.c": 3,
     "tests/test-login-projection.c": 3,
-    "tests/test-policy-graph-authority.c": 101,
+    "tests/test-policy-graph-authority.c": 104,
     "tests/test-policy-service-namespace.c": 4,
     "tests/test-policy-store-lease.c": 2,
     "tests/test-policy-store-service-cvk.c": 12,

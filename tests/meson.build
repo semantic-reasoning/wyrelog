@@ -1381,8 +1381,11 @@ test('policy-store', test_policy_store,
 
 test_policy_graph_authority = executable('test-policy-graph-authority',
   'test-policy-graph-authority.c',
+  'fact-test-support.c',
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, sodium_dep],
+  c_args : fact_test_support_c_args,
+  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, sodium_dep]
+    + fact_test_support_deps,
 )
 
 # The two 19-stage migration matrices took 43.22s and 35.19s on Windows,
@@ -3738,7 +3741,8 @@ exit_status_reporting = executable(
 )
 test('exit-status-reporting', python3,
   args : [files('test-exit-status-reporting.py'),
-    exit_status_reporting.full_path()])
+    exit_status_reporting.full_path()],
+  depends : exit_status_reporting)
 
 if enable_secure_duckdb_bridge_opt.enabled()
   exit_status_nested_lambda = executable(
@@ -3759,7 +3763,8 @@ if enable_secure_duckdb_bridge_opt.enabled()
     )
     test('exit-status-nested-lambda-outer-mutation', python3,
       args : [files('test-exit-status-main-mutation.py'),
-        exit_status_nested_lambda_mutant.full_path()])
+        exit_status_nested_lambda_mutant.full_path()],
+      depends : exit_status_nested_lambda_mutant)
   endif
 endif
 
