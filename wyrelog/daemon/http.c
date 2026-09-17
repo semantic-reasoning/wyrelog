@@ -37,6 +37,7 @@
 #include "wyrelog/fact/graph-seal-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/query-private.h"
+#include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
@@ -7419,6 +7420,10 @@ static gboolean authorize_guarded_session_action (SoupServer *server,
     const gchar *action, const gchar *resource,
     const gchar *auth_required_code, const gchar *invalid_code,
     const gchar *denied_code, const gchar *failed_code, gchar **out_actor);
+#ifdef WYL_HAS_FACT_STORE
+static void facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data);
+#endif
 
 static void
 facts_status_handler (SoupServer *server, SoupServerMessage *msg,
@@ -11964,6 +11969,65 @@ lookup_fact_graph (wyl_policy_store_t *store, const gchar *tenant,
   out->graph_id = graph;
   return wyl_policy_store_foreach_fact_graph (store, tenant, lookup_graph_cb,
              out);
+}
+
+static void
+facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)
+      || !fact_http_customer_name_is_valid (graph)) {
+    set_json_error (msg, 400, "invalid_fact_verify_request");
+    return;
+  }
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+      "wr.fact.read", tenant, "fact_verify_auth_required",
+      "invalid_fact_verify_auth", "fact_verify_denied",
+      "fact_verify_auth_failed", &actor))
+    return;
+  (void) actor;
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (ctx->handle);
+  GraphLookupCtx lookup = { 0 };
+  wyrelog_error_t rc = lookup_fact_graph (policy, tenant, graph, &lookup);
+  if (rc == WYRELOG_E_OK && !lookup.found)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_validate_graph (policy, ctx->fact_root,
+            &lookup.info);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "fact_graph_verification_failed");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 503, "fact_graph_verification_unavailable");
+    return;
+  }
+  graph_lookup_clear (&lookup);
+  attach_request_id_header (msg);
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"verified\":true,\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append_c (body, '}');
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
 }
 
 static gboolean
@@ -17371,6 +17435,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/status",
       facts_status_handler, ctx, NULL);
+#ifdef WYL_HAS_FACT_STORE
+  wyl_daemon_http_add_exact_handler (server, "/facts/verify",
+      facts_verify_handler, ctx, NULL);
+#endif
   wyl_daemon_http_add_exact_handler (server, "/facts/quota",
       facts_quota_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/schema/register",
