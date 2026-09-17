@@ -115,6 +115,10 @@ wyrelog_error_t wyl_fact_store_ensure_projection (wyl_fact_store_t * store,
 wyrelog_error_t wyl_fact_store_validate_projection (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     gboolean * out_exists);
+/* Verify that a store belongs to the graph selected by the caller without
+ * binding legacy metadata or changing any durable state. */
+wyrelog_error_t wyl_fact_store_validate_scope (wyl_fact_store_t * store,
+    const gchar * expected_tenant_id, const gchar * expected_graph_id);
 /* Narrow read-only integrity observation used by production-level callers
  * that must verify one batch without borrowing the DuckDB connection. */
 wyrelog_error_t wyl_fact_store_count_projection_batch_rows
