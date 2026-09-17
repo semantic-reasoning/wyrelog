@@ -98,6 +98,12 @@ append_graph_status_json (const wyl_fact_graph_status_t *status,
       g_string_append (ctx->graphs, "null");
     else
       append_json_string (ctx->graphs, status->last_error_class);
+    g_string_append_printf (ctx->graphs,
+        ",\"operation_generation\":%" G_GUINT64_FORMAT
+        ",\"engine_generation\":%" G_GUINT64_FORMAT
+        ",\"last_replay_at_us\":%" G_GINT64_FORMAT,
+        status->operation_generation, status->engine_generation,
+        status->last_replay_at_us);
     g_string_append_c (ctx->graphs, '}');
   }
   return WYRELOG_E_OK;

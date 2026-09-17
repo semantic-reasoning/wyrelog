@@ -1267,6 +1267,15 @@ fact_status_parse_graph (JsonCursor *cursor,
       if (seen_queryable || !parse_bool (cursor, &graph->queryable))
         return FALSE;
       seen_queryable = TRUE;
+    } else if (g_strcmp0 (key, "operation_generation") == 0) {
+      if (!parse_uint64 (cursor, &graph->operation_generation))
+        return FALSE;
+    } else if (g_strcmp0 (key, "engine_generation") == 0) {
+      if (!parse_uint64 (cursor, &graph->engine_generation))
+        return FALSE;
+    } else if (g_strcmp0 (key, "last_replay_at_us") == 0) {
+      if (!parse_int64 (cursor, &graph->last_replay_at_us))
+        return FALSE;
     } else if (g_strcmp0 (key, "last_error_class") == 0) {
       if (seen_reason || !parse_nullable_string (cursor,
           &graph->last_error_class)

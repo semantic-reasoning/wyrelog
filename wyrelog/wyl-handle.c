@@ -2901,6 +2901,8 @@ fact_graph_runtime_status_cb (const WylFactGraphRuntimeStatus *runtime_status,
      * reports exactly what the runtime said. */
     .queryable = runtime_status->queryable
         && runtime_status->admission == WYL_FACT_GRAPH_ADMISSION_OPEN,
+    .operation_generation = runtime_status->operation_generation,
+    .engine_generation = runtime_status->engine_generation,
     .last_replay_at_us = runtime_status->last_replay_at_us,
   };
   return ctx->callback (&status, ctx->user_data);

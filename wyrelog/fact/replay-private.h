@@ -77,6 +77,8 @@ typedef struct
   wyl_fact_graph_state_t state;
   gchar *last_error_class;
   gboolean queryable;
+  guint64 operation_generation;
+  guint64 engine_generation;
   gint64 last_replay_at_us;
 } wyl_fact_graph_status_t;
 
