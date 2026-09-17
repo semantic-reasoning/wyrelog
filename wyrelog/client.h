@@ -73,6 +73,9 @@ typedef struct
   WylClientFactGraphState state;
   gchar *state_name;
   gboolean queryable;
+  guint64 operation_generation;
+  guint64 engine_generation;
+  gint64 last_replay_at_us;
   WylClientFactReasonClass reason_class;
   gchar *last_error_class;
 } WylClientFactGraphStatus;
