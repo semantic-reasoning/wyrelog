@@ -602,7 +602,7 @@ def validate(files: dict[str, str]) -> None:
                         f"connection session pointer forwarded to helper: {path}: {name}"
                     )
     expected_calls = {
-        "wyrelog/fact/store.c": (15, 4, 18),
+        "wyrelog/fact/store.c": (16, 4, 19),
         "wyrelog/fact/compound.c": (5, 5, 7),
         "wyrelog/fact/replay.c": (3, 2, 3),
     }
@@ -623,6 +623,7 @@ def validate(files: dict[str, str]) -> None:
             "wyl_fact_store_table_exists",
             "wyl_fact_store_ensure_projection",
             "wyl_fact_store_validate_projection",
+            "wyl_fact_store_validate_scope",
             "wyl_fact_store_append_batch_delta (wyl_fact_store_t *store",
             "wyl_fact_store_retract_by_batch_id",
             "wyl_fact_store_count_projection_batch_rows",

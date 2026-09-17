@@ -800,6 +800,16 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
     return rc;
   wyl_fact_store_connection_session_end (&admission);
 
+  /* The path in policy is caller-owned expectation, while a store's identity
+   * is evidence from the artifact itself.  Check both before enumerating or
+   * publishing any facts; otherwise a relocated graph can serve another
+   * graph's data successfully.  This is deliberately read-only and does not
+   * bind legacy metadata during replay. */
+  rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   g_autoptr (GPtrArray) relations = NULL;
   rc = list_replay_relations (policy, store, graph_info, &relations);
   if (rc != WYRELOG_E_OK)
@@ -870,6 +880,11 @@ validate_graph_internal (wyl_policy_store_t *policy,
   g_autoptr (wyl_fact_store_t) store = NULL;
   wyrelog_error_t rc = open_graph_store (policy, fact_root, graph_info, FALSE,
           artifact_namespace, artifact_lease, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
+          graph_info->graph_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 

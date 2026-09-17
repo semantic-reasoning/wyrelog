@@ -1241,6 +1241,31 @@ provisioned_871_status_cb (const wyl_fact_graph_status_t *status,
 }
 #endif
 
+static void
+test_replay_rejects_store_from_another_scope (void)
+{
+  TEST ("replay validates the store scope before publishing an engine");
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_test_exec_sql (store,
+      "INSERT INTO fact_store_metadata VALUES ('tenant_id','tenant-b');"
+      "INSERT INTO fact_store_metadata VALUES ('graph_id','orders');"),
+      ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_graph_info_t graph_info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylEngine *engine = GINT_TO_POINTER (1);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine_with_store_for_test(
+        policy, store, &graph_info, &engine), ==, WYRELOG_E_POLICY);
+  g_assert_null (engine);
+}
+
 /* Issue #871: the legacy sealed-store path is covered above, but provisioned
  * stores cross a distinct authority gate.  This case proves startup may open
  * a retained SEALED pair to finish an already-recorded erasure without
@@ -4782,6 +4807,8 @@ main (int argc, char **argv)
       test_mutation_refused_by_a_barrier_is_not_degraded);
   g_test_add_func ("/fact-replay/evicted-closed-outranks-sealed",
       test_evicted_and_closed_reports_evicted_not_sealed);
+  g_test_add_func ("/fact-replay/rejects-cross-scope-store",
+      test_replay_rejects_store_from_another_scope);
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   g_test_add_func ("/fact-replay/unleased-metadata-refused",
       test_unleased_replay_rejects_metadata);

@@ -712,7 +712,6 @@ validate_store_scope_unlocked (wyl_fact_store_t *store, const gchar *tenant_id,
              graph_id, bind_if_empty, WYL_FACT_LEGACY_IDENTITY_BIND_STORE);
 }
 
-
 void wyl_fact_store_identity_set_validation_test_hook
   (WylFactStoreIdentityValidationTestHook hook, gpointer user_data)
 {
@@ -1250,6 +1249,28 @@ wyl_fact_store_connection_session_end (WylFactStoreConnectionSession *session)
   memset (session, 0, sizeof (*session));
   g_private_set (&active_connection_session, NULL);
   g_mutex_unlock (&store->lock);
+}
+
+wyrelog_error_t
+wyl_fact_store_validate_scope (wyl_fact_store_t *store,
+    const gchar *expected_tenant_id, const gchar *expected_graph_id)
+{
+  if (store == NULL || expected_tenant_id == NULL
+      || expected_tenant_id[0] == '\0' || expected_graph_id == NULL
+      || expected_graph_id[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  WylFactStoreConnectionSession session = { 0 };
+  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
+          &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, expected_tenant_id,
+            expected_graph_id, FALSE);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
 }
 
 static wyrelog_error_t
