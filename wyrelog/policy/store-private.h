@@ -7,6 +7,7 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/graph-artifact-inventory-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -2575,10 +2576,21 @@ wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota
     const WylPolicyFactPhysicalQuotaOperation *operation,
     guint64 requested_bytes,
     WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota_evidence
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *request_id,
+    const WylFactArtifactPhysicalQuotaEvidence *evidence,
+    guint64 requested_bytes,
+    WylPolicyFactPhysicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_settle_fact_physical_quota
   (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,
     guint64 observed_bytes, gboolean stable_evidence,
+    WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_settle_fact_physical_quota_evidence
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *request_id,
+    const WylFactArtifactPhysicalQuotaEvidence *evidence,
     WylPolicyFactPhysicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_cancel_fact_physical_quota
   (wyl_policy_store_t *store,
