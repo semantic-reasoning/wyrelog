@@ -983,6 +983,82 @@ fact_identity_execute (gpointer context, const gchar *sql,
   return WYRELOG_E_OK;
 }
 
+/* The column lists of fact_batches and fact_event_log, shared by the fresh
+ * CREATE TABLE and by the #1103 rebuild that converges a migrated store's
+ * logical_bytes to NOT NULL.  One definition each, for the reason given above
+ * FACT_FORGET_INTENT_COLUMNS: a rebuild that restated the columns could
+ * silently drop the primary key, the UNIQUE, the op CHECK -- or, for
+ * fact_event_log, the foreign key that is the whole reason the rebuild exists.
+ * Keeping the FOREIGN KEY inside the shared macro means the rebuild's recreate
+ * and the fresh DDL are textually the same string, so it cannot drift away.
+ *
+ * logical_bytes carries the batch's logical fact-byte cost, so a quota settle
+ * can recover what a committed batch consumed after a restart instead of only
+ * from the committing call's return value (#1013).  Distinct from the physical
+ * artifact inventory of #622, which measures storage rather than fact payload.
+ * The rationale lives here rather than inside the macro so the macro body stays
+ * string literals only, the shape the forget boundary test pins. */
+#define FACT_BATCHES_COLUMNS \
+  "  batch_id VARCHAR PRIMARY KEY," \
+  "  tenant_id VARCHAR NOT NULL," \
+  "  graph_id VARCHAR NOT NULL," \
+  "  namespace_id VARCHAR NOT NULL," \
+  "  relation_name VARCHAR NOT NULL," \
+  "  schema_version BIGINT NOT NULL," \
+  "  source VARCHAR," \
+  "  request_id VARCHAR," \
+  "  idempotency_key VARCHAR NOT NULL UNIQUE," \
+  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract'))," \
+  "  row_count BIGINT NOT NULL," \
+  "  logical_bytes BIGINT NOT NULL," \
+  "  content_hash VARCHAR NOT NULL," \
+  "  created_at_us BIGINT NOT NULL"
+
+/* The same fourteen names, in the same order, for the explicit
+ * INSERT (...) SELECT ... of the rebuild and for its equality proof.  Never
+ * SELECT *: a migrated store carries logical_bytes last (ADD COLUMN appends)
+ * while this list carries it third from last, and DuckDB 1.5.5 compares an
+ * EXCEPT positionally rather than refusing the mismatch -- measured to return
+ * a false empty difference on one shape and a spurious one on another.  The
+ * names are what make the proof mean anything. */
+#define FACT_BATCHES_COLUMN_NAMES \
+  "batch_id, tenant_id, graph_id, namespace_id, relation_name, " \
+  "schema_version, source, request_id, idempotency_key, op, row_count, " \
+  "logical_bytes, content_hash, created_at_us"
+
+#define FACT_EVENT_LOG_COLUMNS \
+  "  seq BIGINT PRIMARY KEY," \
+  "  batch_id VARCHAR NOT NULL," \
+  "  tenant_id VARCHAR NOT NULL," \
+  "  graph_id VARCHAR NOT NULL," \
+  "  namespace_id VARCHAR NOT NULL," \
+  "  relation_name VARCHAR NOT NULL," \
+  "  schema_version BIGINT NOT NULL," \
+  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract'))," \
+  "  created_at_us BIGINT NOT NULL," \
+  "  valid BOOLEAN NOT NULL," \
+  "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)"
+
+/* fact_event_log without the foreign key, for the staging table that carries
+ * its rows across the window where the real table must not exist.  The staging
+ * table is data-only ballast and never becomes a real table, so it is the one
+ * place a keyless copy is correct. */
+#define FACT_EVENT_LOG_STAGE_COLUMNS \
+  "  seq BIGINT," \
+  "  batch_id VARCHAR," \
+  "  tenant_id VARCHAR," \
+  "  graph_id VARCHAR," \
+  "  namespace_id VARCHAR," \
+  "  relation_name VARCHAR," \
+  "  schema_version BIGINT," \
+  "  op VARCHAR," \
+  "  created_at_us BIGINT," \
+  "  valid BOOLEAN"
+
+#define FACT_EVENT_LOG_COLUMN_NAMES \
+  "seq, batch_id, tenant_id, graph_id, namespace_id, relation_name, " \
+  "schema_version, op, created_at_us, valid"
+
 /* The column list of fact_forget_intent, shared by CREATE TABLE and by the
  * rebuild that widens its state CHECK.  One definition: a rebuild that
  * restated the columns could silently drop the primary key or a constraint,
@@ -1677,38 +1753,9 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             "INSERT OR IGNORE INTO fact_store_metadata (key, value) "
             "VALUES ('store_kind', 'wyrelog.fact');"
             "CREATE TABLE IF NOT EXISTS fact_batches ("
-            "  batch_id VARCHAR PRIMARY KEY,"
-            "  tenant_id VARCHAR NOT NULL,"
-            "  graph_id VARCHAR NOT NULL,"
-            "  namespace_id VARCHAR NOT NULL,"
-            "  relation_name VARCHAR NOT NULL,"
-            "  schema_version BIGINT NOT NULL,"
-            "  source VARCHAR,"
-            "  request_id VARCHAR,"
-            "  idempotency_key VARCHAR NOT NULL UNIQUE,"
-            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-            "  row_count BIGINT NOT NULL,"
-            /* The batch's logical fact-byte cost, so a quota settle can
-             * recover what a committed batch consumed after a restart
-             * instead of only from the committing call's return value
-             * (#1013).  Distinct from the physical artifact inventory of
-             * #622, which measures storage rather than fact payload. */
-            "  logical_bytes BIGINT NOT NULL,"
-            "  content_hash VARCHAR NOT NULL,"
-            "  created_at_us BIGINT NOT NULL"
-            ");"
+            FACT_BATCHES_COLUMNS ");"
             "CREATE TABLE IF NOT EXISTS fact_event_log ("
-            "  seq BIGINT PRIMARY KEY,"
-            "  batch_id VARCHAR NOT NULL,"
-            "  tenant_id VARCHAR NOT NULL,"
-            "  graph_id VARCHAR NOT NULL,"
-            "  namespace_id VARCHAR NOT NULL,"
-            "  relation_name VARCHAR NOT NULL,"
-            "  schema_version BIGINT NOT NULL,"
-            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-            "  created_at_us BIGINT NOT NULL,"
-            "  valid BOOLEAN NOT NULL,"
-            "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");"
+            FACT_EVENT_LOG_COLUMNS ");"
             "CREATE TABLE IF NOT EXISTS fact_forget_audit ("
             "  id            BIGINT PRIMARY KEY,"
             "  batch_id      VARCHAR NOT NULL,"
