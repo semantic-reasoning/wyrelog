@@ -127,7 +127,18 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   3020-3027
  *       check_retract_of_never_appended_row_reports_success
  *   3500-3510    check_fact_store_persists_logical_bytes
- *   3520-3532    check_fact_store_migrates_pre_logical_bytes_store
+ *   3520-3536    check_fact_store_migrates_pre_logical_bytes_store
+ *   3540-3552
+ *       check_fact_store_logical_bytes_shape_is_identical_fresh_and_migrated
+ *   3560-3567    check_fact_store_logical_bytes_convergence_is_idempotent
+ *   3570-3582
+ *       check_fact_store_logical_bytes_convergence_keeps_sentinel_and_events
+ *   3590-3603
+ *       check_fact_store_logical_bytes_convergence_fails_closed_on_null
+ *   3610-3620
+ *       check_fact_store_logical_bytes_convergence_fails_closed_on_orphan
+ *   3630-3639
+ *       check_fact_store_logical_bytes_convergence_fails_closed_on_widened
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -1971,22 +1982,39 @@ check_fact_store_migrates_pre_logical_bytes_store (void)
       return 3526;
     if (stored_bytes != -1)
       return 3527;
-    /* The backfill default must not linger: a later insert that forgot to
-     * bind the column has to fail loudly rather than be handed the sentinel.
+    /* An insert that forgets to bind the column has to fail loudly rather
+     * than be handed the sentinel.  Before #1103 this could only be observed
+     * after the fact, as a NULL row nobody had rejected; the convergence
+     * migration moves the rejection to the write itself, so assert the write
+     * is refused and that nothing landed.
+     *
+     * The positive control is what makes the refusal mean something: the same
+     * INSERT with logical_bytes bound must succeed.  Without it this passes
+     * on any malformed statement -- a typo, a key collision -- rather than on
+     * the NOT NULL the migration establishes.
      */
     if (exec_ok (store,
         "INSERT INTO fact_batches "
         "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
         " schema_version, idempotency_key, op, row_count, content_hash, "
         " created_at_us) VALUES ('no-bind', 'tenant-a', 'orders', 'shop', "
-        "'order', 1, 'no-bind-key', 'assert', 1, 'h', 1);")) {
-      gint64 unbound = 0;
-      if (!count_i64 (store,
-          "SELECT COUNT(*) FROM fact_batches "
-          "WHERE batch_id = 'no-bind' AND logical_bytes IS NULL;", &unbound)
-          || unbound != 1)
-        return 3528;
-    }
+        "'order', 1, 'no-bind-key', 'assert', 1, 'h', 1);"))
+      return 3533;
+    gint64 unbound = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'no-bind';",
+        &unbound) || unbound != 0)
+      return 3534;
+    if (!exec_ok (store,
+        "INSERT INTO fact_batches "
+        "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+        " schema_version, idempotency_key, op, row_count, logical_bytes, "
+        " content_hash, created_at_us) VALUES ('bound', 'tenant-a', "
+        "'orders', 'shop', 'order', 1, 'bound-key', 'assert', 1, 5, 'h', 1);"))
+      return 3535;
+    if (!exec_ok (store,
+        "DELETE FROM fact_batches WHERE batch_id = 'bound';"))
+      return 3536;
 
     /*
      * Replaying the legacy batch restates what it consumed.  The row count
@@ -2007,6 +2035,631 @@ check_fact_store_migrates_pre_logical_bytes_store (void)
       return 3531;
     if (legacy_delta.logical_byte_delta != -1)
       return 3532;
+  }
+  return 0;
+}
+
+/* Build a store in the pre-#1013 shape at |path| and leave it closed.
+ *
+ * The event log is dropped and recreated rather than merely emptied, because
+ * dropping the column is what the legacy shape is, and DuckDB refuses that
+ * while the foreign key references fact_batches.  |keep_events| restores the
+ * rows afterwards, so a caller can choose whether convergence has to carry a
+ * non-empty audit trail across the rebuild.
+ */
+static gboolean
+build_pre_logical_bytes_store (const gchar *path,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean keep_events)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, schema, NULL)
+      != WYRELOG_E_OK)
+    return FALSE;
+  if (wyl_fact_store_append_batch (store, schema, batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return FALSE;
+  if (keep_events && !exec_ok (store,
+      "CREATE TABLE fact_event_log_keep AS SELECT * FROM fact_event_log;"))
+    return FALSE;
+  if (!exec_ok (store, "DROP TABLE fact_event_log;"))
+    return FALSE;
+  if (!exec_ok (store, "ALTER TABLE fact_batches DROP COLUMN logical_bytes;"))
+    return FALSE;
+  if (!keep_events)
+    return TRUE;
+  /* Put the event log back, with its rows and its foreign key, BEFORE the
+   * caller opens the store again.  The convergence pass runs inside that
+   * open, so restoring afterwards would hand the rebuild an empty audit
+   * trail -- and a rebuild that silently dropped every event row would look
+   * exactly like a passing test.  A legacy store always has rows here. */
+  if (!exec_ok (store,
+      "CREATE TABLE fact_event_log ("
+      "  seq BIGINT PRIMARY KEY,"
+      "  batch_id VARCHAR NOT NULL,"
+      "  tenant_id VARCHAR NOT NULL,"
+      "  graph_id VARCHAR NOT NULL,"
+      "  namespace_id VARCHAR NOT NULL,"
+      "  relation_name VARCHAR NOT NULL,"
+      "  schema_version BIGINT NOT NULL,"
+      "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+      "  created_at_us BIGINT NOT NULL,"
+      "  valid BOOLEAN NOT NULL,"
+      "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id));"))
+    return FALSE;
+  if (!exec_ok (store,
+      "INSERT INTO fact_event_log SELECT * FROM fact_event_log_keep;"))
+    return FALSE;
+  return exec_ok (store, "DROP TABLE fact_event_log_keep;");
+}
+
+/* Read the four properties of fact_batches.logical_bytes that #1103 requires
+ * a fresh store and a migrated store to agree on.  column_index is included
+ * because ADD COLUMN appends: a migrated store carried the column last, and
+ * the rebuild is what puts it back where the fresh DDL declares it. */
+static gboolean
+read_logical_bytes_shape (wyl_fact_store_t *store, gchar **out_type,
+    gint64 *out_nullable, gint64 *out_has_default, gint64 *out_index)
+{
+  if (!query_text (store,
+      "SELECT data_type FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", out_type))
+    return FALSE;
+  if (!count_i64 (store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", out_nullable))
+    return FALSE;
+  if (!count_i64 (store,
+      "SELECT CAST(column_default IS NOT NULL AS BIGINT) "
+      "FROM duckdb_columns() WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", out_has_default))
+    return FALSE;
+  return count_i64 (store,
+             "SELECT CAST(column_index AS BIGINT) FROM duckdb_columns() "
+             "WHERE table_name = 'fact_batches' "
+             "AND column_name = 'logical_bytes';", out_index);
+}
+
+static gboolean
+count_event_log_foreign_keys (wyl_fact_store_t *store, gint64 *out_count)
+{
+  return count_i64 (store,
+             "SELECT COUNT(*) FROM duckdb_constraints() "
+             "WHERE table_name = 'fact_event_log' "
+             "AND constraint_type = 'FOREIGN KEY';", out_count);
+}
+
+/* The issue's first acceptance criterion: a store created before #1013 and
+ * one created after it must report the same logical_bytes column definition.
+ * Asserted by building both shapes in one run and comparing, rather than by
+ * pinning the expected values, so the two cannot drift apart together. */
+static gint
+check_fact_store_logical_bytes_shape_is_identical_fresh_and_migrated (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-shape-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3540;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "shape-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-shape",
+    .idempotency_key = "shape:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+
+  g_autofree gchar *fresh_path = g_build_filename (dir, "fresh.duckdb", NULL);
+  g_autofree gchar *migrated_path = g_build_filename (dir, "migrated.duckdb",
+          NULL);
+  if (!build_pre_logical_bytes_store (migrated_path, &schema, &batch, FALSE))
+    return 3541;
+
+  g_autofree gchar *fresh_type = NULL;
+  gint64 fresh_nullable = 0;
+  gint64 fresh_has_default = 0;
+  gint64 fresh_index = 0;
+  gint64 fresh_fks = 0;
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (fresh_path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3542;
+    if (!read_logical_bytes_shape (store, &fresh_type, &fresh_nullable,
+        &fresh_has_default, &fresh_index))
+      return 3543;
+    if (!count_event_log_foreign_keys (store, &fresh_fks))
+      return 3544;
+  }
+
+  g_autofree gchar *migrated_type = NULL;
+  gint64 migrated_nullable = 0;
+  gint64 migrated_has_default = 0;
+  gint64 migrated_index = 0;
+  gint64 migrated_fks = 0;
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (migrated_path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3545;
+    if (!read_logical_bytes_shape (store, &migrated_type, &migrated_nullable,
+        &migrated_has_default, &migrated_index))
+      return 3546;
+    if (!count_event_log_foreign_keys (store, &migrated_fks))
+      return 3547;
+  }
+
+  if (g_strcmp0 (fresh_type, migrated_type) != 0)
+    return 3548;
+  if (fresh_nullable != migrated_nullable)
+    return 3549;
+  if (fresh_has_default != migrated_has_default)
+    return 3550;
+  if (fresh_index != migrated_index)
+    return 3551;
+  /* Agreeing on the wrong shape would satisfy every comparison above. */
+  if (fresh_nullable != 0 || fresh_has_default != 0 || fresh_fks != 1
+      || migrated_fks != 1)
+    return 3552;
+  return 0;
+}
+
+/* Repeated opens must leave the store alone: no row churn, no sequence reset,
+ * no staging table left behind, and the column still NOT NULL.
+ *
+ * These are the observable consequences, not the mechanism.  A rebuild that
+ * ran again on every open would satisfy every assertion here, because
+ * re-running it really is idempotent.  What pins "does no work at all" is
+ * test_logical_bytes_migration_commit_failure_rolls_back in
+ * tests/test-fact-store-poison.c, which arms the transaction seam and asserts
+ * a converged store never reaches it. */
+static gint
+check_fact_store_logical_bytes_convergence_is_idempotent (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-idem-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3560;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "idem-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-idem",
+    .idempotency_key = "idem:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_logical_bytes_store (path, &schema, &batch, TRUE))
+    return 3561;
+
+  gint64 first_batches = 0;
+  gint64 first_seq = 0;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3562;
+    if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3563;
+    gint64 nullable = 1;
+    if (!count_i64 (store,
+        "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+        "WHERE table_name = 'fact_batches' "
+        "AND column_name = 'logical_bytes';", &nullable) || nullable != 0)
+      return 3564;
+    gint64 batches = 0;
+    gint64 seq = 0;
+    if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &batches)
+        || !count_i64 (store,
+        "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;", &seq))
+      return 3565;
+    if (attempt == 0) {
+      first_batches = batches;
+      first_seq = seq;
+    } else if (batches != first_batches || seq != first_seq) {
+      return 3566;
+    }
+    gint64 staging = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+        "('fact_batches_rebuild', 'fact_event_log_stage');", &staging)
+        || staging != 0)
+      return 3567;
+  }
+  return 0;
+}
+
+/* Convergence must not invent a cost it does not have, and must carry the
+ * audit trail across the rebuild with the foreign key still enforcing. */
+static gint
+check_fact_store_logical_bytes_convergence_keeps_sentinel_and_events (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-keep-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3570;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "keep-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-keep",
+    .idempotency_key = "keep:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_logical_bytes_store (path, &schema, &batch, TRUE))
+    return 3571;
+
+  /* Snapshot the event row the fixture left in place, so the assertions
+   * below compare against what the rebuild was actually handed rather than
+   * against a constant. */
+  gint64 expected_seq = 0;
+  {
+    g_autoptr (wyl_fact_store_t) probe = NULL;
+    if (wyl_fact_store_open (path, &probe) != WYRELOG_E_OK)
+      return 3572;
+    if (!count_i64 (probe,
+        "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;", &expected_seq)
+        || expected_seq < 1)
+      return 3573;
+    gint64 pre_events = 0;
+    if (!count_i64 (probe, "SELECT COUNT(*) FROM fact_event_log;",
+        &pre_events) || pre_events != 1)
+      return 3574;
+  }
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3575;
+  /* Without this the rest of the check passes on an unconverged store: the
+   * sentinel, the event row and the foreign key all survive the ALTER-only
+   * migration untouched.  Asserting the converged shape here is what makes
+   * the sentinel assertion below a statement about convergence. */
+  gint64 nullable = 1;
+  if (!count_i64 (store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", &nullable) || nullable != 0)
+    return 3582;
+  gint64 stored_bytes = 0;
+  if (!count_i64 (store,
+      "SELECT logical_bytes FROM fact_batches WHERE batch_id = 'keep-1';",
+      &stored_bytes))
+    return 3576;
+  /* -1, never 0: 0 is a charge an empty-valued batch really has. */
+  if (stored_bytes != -1)
+    return 3577;
+  gint64 events = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_event_log WHERE batch_id = 'keep-1';",
+      &events) || events != 1)
+    return 3578;
+  /* The exact seq, not merely a row: a rebuild that renumbered the audit
+   * trail would keep the count and lose the identity, and
+   * next_sequence_unlocked reads MAX(seq) to pick the next one. */
+  gint64 max_seq = 0;
+  if (!count_i64 (store, "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;",
+      &max_seq) || max_seq != expected_seq)
+    return 3579;
+  gint64 fks = 0;
+  if (!count_event_log_foreign_keys (store, &fks) || fks != 1)
+    return 3580;
+  /* The restored key must be enforcing, not merely catalogued. */
+  if (exec_ok (store,
+      "INSERT INTO fact_event_log (seq, batch_id, tenant_id, graph_id, "
+      "namespace_id, relation_name, schema_version, op, created_at_us, valid) "
+      "VALUES (9999, 'no-such-batch', 'tenant-a', 'orders', 'shop', 'order', "
+      "1, 'assert', 1, true);"))
+    return 3581;
+  return 0;
+}
+
+/* The schema condition: a fact_batches column the rebuild does not know about.
+ *
+ * The rebuild copies exactly the names FACT_BATCHES_COLUMN_NAMES lists, and
+ * both equality proofs read that same list, so a column added by some later
+ * migration without being mirrored into the macros is not a statement that
+ * fails -- every statement succeeds, and the column is dropped with its data
+ * while both proofs pass.  Nothing else in the change can see that, which is
+ * why the refusal exists and why deleting it must make this test red.
+ *
+ * WYRELOG_E_INTERNAL specifically, not merely "not OK", so the assertion
+ * cannot be satisfied by some unrelated later failure on the same store.
+ */
+static gint
+check_fact_store_logical_bytes_convergence_fails_closed_on_widened (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-extra-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3630;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "extra-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-extra",
+    .idempotency_key = "extra:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_logical_bytes_store (path, &schema, &batch, TRUE))
+    return 3631;
+
+  /* Stand in for a future migration that widened fact_batches without
+   * widening the macros. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3632;
+    if (!exec_ok (store,
+        "ALTER TABLE fact_batches ADD COLUMN unmirrored VARCHAR;"))
+      return 3633;
+  }
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+    return 3634;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_INTERNAL)
+    return 3635;
+  gint64 nullable = 0;
+  if (!count_i64 (store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", &nullable) || nullable != 1)
+    return 3636;
+  gint64 kept = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' AND column_name = 'unmirrored';",
+      &kept) || kept != 1)
+    return 3637;
+  gint64 staging = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+      "('fact_batches_rebuild', 'fact_event_log_stage');", &staging)
+      || staging != 0)
+    return 3638;
+  gint64 events = 0;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &events)
+      || events != 1)
+    return 3639;
+  return 0;
+}
+
+/* The other blocker: an event row whose batch_id is not in fact_batches.
+ *
+ * Recreating the foreign key would reject it, so the rebuild would abort deep
+ * inside phase B with a DuckDB message measured to name a batch_id that IS
+ * present rather than the one that is missing.  Counting it before BEGIN turns
+ * that into a diagnosis, and leaves the store untouched by construction.
+ */
+static gint
+check_fact_store_logical_bytes_convergence_fails_closed_on_orphan (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-orphan-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3610;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "orphan-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-orphan",
+    .idempotency_key = "orphan:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_logical_bytes_store (path, &schema, &batch, FALSE))
+    return 3611;
+
+  /* Rebuild the legacy shape by hand, WITHOUT the foreign key, so an orphan
+   * row can exist at all -- which is the only way a real store could have
+   * acquired one. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3612;
+    if (!exec_ok (store,
+        "ALTER TABLE fact_batches ADD COLUMN IF NOT EXISTS logical_bytes "
+        "BIGINT DEFAULT -1;")
+        || !exec_ok (store,
+        "ALTER TABLE fact_batches ALTER COLUMN logical_bytes DROP DEFAULT;"))
+      return 3613;
+    if (!exec_ok (store,
+        "CREATE TABLE fact_event_log ("
+        "  seq BIGINT PRIMARY KEY,"
+        "  batch_id VARCHAR NOT NULL,"
+        "  tenant_id VARCHAR NOT NULL,"
+        "  graph_id VARCHAR NOT NULL,"
+        "  namespace_id VARCHAR NOT NULL,"
+        "  relation_name VARCHAR NOT NULL,"
+        "  schema_version BIGINT NOT NULL,"
+        "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+        "  created_at_us BIGINT NOT NULL,"
+        "  valid BOOLEAN NOT NULL);"))
+      return 3614;
+    if (!exec_ok (store,
+        "INSERT INTO fact_event_log VALUES (1, 'vanished-batch', 'tenant-a', "
+        "'orders', 'shop', 'order', 1, 'assert', 1, true);"))
+      return 3615;
+  }
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+    return 3616;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_INTERNAL)
+    return 3617;
+  gint64 nullable = 0;
+  if (!count_i64 (store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';", &nullable) || nullable != 1)
+    return 3618;
+  gint64 orphans = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'vanished-batch';", &orphans) || orphans != 1)
+    return 3619;
+  gint64 staging = 0;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+      "('fact_batches_rebuild', 'fact_event_log_stage');", &staging)
+      || staging != 0)
+    return 3620;
+  return 0;
+}
+
+/* A NULL logical_bytes means nobody recorded a cost; the -1 sentinel means a
+ * cost was recorded as unrecoverable.  Convergence must refuse rather than
+ * collapse the first into the second, and must leave the store exactly as it
+ * found it when it does. */
+static gint
+check_fact_store_logical_bytes_convergence_fails_closed_on_null (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-bytes-null-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3590;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "null-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-null",
+    .idempotency_key = "null:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_logical_bytes_store (path, &schema, &batch, TRUE))
+    return 3591;
+
+  /* Reach the nullable shape, then poison one row the way a writer that
+   * never bound the column would have. */
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3592;
+    if (!exec_ok (store,
+        "ALTER TABLE fact_batches ADD COLUMN IF NOT EXISTS logical_bytes "
+        "BIGINT DEFAULT -1;")
+        || !exec_ok (store,
+        "ALTER TABLE fact_batches ALTER COLUMN logical_bytes DROP DEFAULT;"))
+      return 3593;
+    if (!exec_ok (store,
+        "INSERT INTO fact_batches "
+        "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+        " schema_version, idempotency_key, op, row_count, content_hash, "
+        " created_at_us) VALUES ('unrecorded', 'tenant-a', 'orders', 'shop', "
+        "'order', 1, 'unrecorded-key', 'assert', 1, 'h', 1);"))
+      return 3594;
+  }
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+      return 3595;
+    /* The refusal is stable, not a one-shot that a retry converts into a
+     * silent repair. */
+    if (wyl_fact_store_create_schema (store) != WYRELOG_E_INTERNAL)
+      return 3596;
+    gint64 nullable = 0;
+    if (!count_i64 (store,
+        "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+        "WHERE table_name = 'fact_batches' "
+        "AND column_name = 'logical_bytes';", &nullable) || nullable != 1)
+      return 3597;
+    gint64 still_null = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches "
+        "WHERE batch_id = 'unrecorded' AND logical_bytes IS NULL;",
+        &still_null) || still_null != 1)
+      return 3598;
+    gint64 sentinel = 0;
+    if (!count_i64 (store,
+        "SELECT logical_bytes FROM fact_batches WHERE batch_id = 'null-1';",
+        &sentinel) || sentinel != -1)
+      return 3599;
+    gint64 fks = 0;
+    if (!count_event_log_foreign_keys (store, &fks) || fks != 1)
+      return 3600;
+    gint64 staging = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+        "('fact_batches_rebuild', 'fact_event_log_stage');", &staging)
+        || staging != 0)
+      return 3601;
+    gint64 events = 0;
+    if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;",
+        &events) || events != 1)
+      return 3602;
+    gint64 batches = 0;
+    if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &batches)
+        || batches != 2)
+      return 3603;
   }
   return 0;
 }
@@ -5118,6 +5771,24 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_migrates_pre_logical_bytes_store ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_shape_is_identical_fresh_and_migrated ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_convergence_is_idempotent ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_convergence_keeps_sentinel_and_events ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_convergence_fails_closed_on_null ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_convergence_fails_closed_on_orphan ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_logical_bytes_convergence_fails_closed_on_widened ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_projection_batch_count_validates_scope ();

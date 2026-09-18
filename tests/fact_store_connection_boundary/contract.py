@@ -15,7 +15,7 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (47, 370, 4, 3),
+    "wyrelog/fact/store.c": (54, 389, 4, 3),
     "wyrelog/fact/compound.c": (0, 123, 14, 0),
     "wyrelog/fact/replay.c": (0, 32, 2, 0),
 }
@@ -24,6 +24,8 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "complete_forget_intent_unlocked": 2,
         "count_projection_rows_unlocked": 1,
         "existing_batch_matches_unlocked": 1,
+        "fact_batches_logical_bytes_blockers": 1,
+        "fact_batches_logical_bytes_is_current": 1,
         "fact_identity_execute": 1,
         "fact_identity_validation_barrier": 1,
         "forget_intent_state_check_is_current": 1,
@@ -33,6 +35,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "load_batch_forget_fingerprint_unlocked": 1,
         "load_pending_forget_intents_unlocked": 1,
         "lookup_batch_scope_unlocked": 1,
+        "migrate_fact_batches_logical_bytes_unlocked": 5,
         "migrate_forget_intent_state_check_unlocked": 3,
         "next_sequence_unlocked": 1,
         "prepared_delete_batch_unlocked": 1,
@@ -82,6 +85,8 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "duckdb_type_for_column": 1,
         "exec_sql": 3,
         "existing_batch_matches_unlocked": 38,
+        "fact_batches_logical_bytes_blockers": 11,
+        "fact_batches_logical_bytes_is_current": 8,
         "fact_identity_bind_param": 3,
         "fact_identity_execute": 25,
         "fact_store_duckdb_set_config": 1,
@@ -515,6 +520,7 @@ def validate(files: dict[str, str]) -> None:
             "wyl_fact_store_transaction_begin",
             "execute_forget_intent_unlocked",
             "quarantine_forget_intent_unlocked",
+            "migrate_fact_batches_logical_bytes_unlocked",
         }
         for name in session_names:
             opaque_type = r"(?:gpointer|void\s*\*|guintptr|uintptr_t)"

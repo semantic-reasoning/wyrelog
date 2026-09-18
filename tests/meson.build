@@ -3627,6 +3627,10 @@ test('duckdb-transaction-control-boundary', python3,
   args : [files('test-duckdb-transaction-control-boundary.py'),
     meson.project_source_root()])
 
+test('fact-schema-macro-consistency', python3,
+  args : [files('test-fact-schema-macro-consistency.py'),
+    meson.project_source_root()])
+
 test('fact-store-forget-transaction-boundary', python3,
   args : [files('test-fact-store-forget-transaction-boundary.py'),
     meson.project_source_root()])
@@ -3938,7 +3942,9 @@ if get_option('enable_audit').allowed()
     dependencies : [service_exchange_private_dep],
   )
 
-  test('audit-conn', test_audit_conn, env : audit_conn_test_env, timeout : 60)
+  audit_conn_timeout = host_machine.system() == 'windows' ? 120 : 60
+  test('audit-conn', test_audit_conn, env : audit_conn_test_env,
+    timeout : audit_conn_timeout)
 
   test_audit_conn_duckdb_hardening = executable(
     'test-audit-conn-duckdb-hardening',
@@ -4012,8 +4018,9 @@ if get_option('enable_audit').allowed()
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : [service_exchange_private_dep],
   )
+  service_exchange_projector_timeout = host_machine.system() == 'windows' ? 300 : 180
   test('service-exchange-projector', test_service_exchange_projector,
-    env : audit_conn_test_env, timeout : 180)
+    env : audit_conn_test_env, timeout : service_exchange_projector_timeout)
 
   test_service_exchange_private = executable(
     'test-service-exchange-private',

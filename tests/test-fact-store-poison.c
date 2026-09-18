@@ -864,6 +864,137 @@ static void test_migration_commit_failure_rolls_back(void) {
       "WHERE state = 'QUARANTINED';"), ==, 2);
 }
 
+/* Abort the #1103 convergence rebuild at commit and prove the store is left
+ * exactly as it was.
+ *
+ * The refusal path -- a store whose logical_bytes was never recorded -- never
+ * opens a transaction at all, so it cannot exercise this.  This is the other
+ * half: the rebuild has already dropped and recreated both tables inside the
+ * transaction when the commit fails.  What must survive the rollback is the
+ * whole legacy shape, including the audit trail and the foreign key, because
+ * the alternative to "unchanged" here is a store missing its event log.
+ */
+static void test_logical_bytes_migration_commit_failure_rolls_back(void) {
+  g_autoptr(GError) error = NULL;
+  g_autofree gchar *dir =
+      g_dir_make_tmp("wyl-fact-bytes-migration-XXXXXX", &error);
+  g_assert_no_error(error);
+  g_autofree gchar *path = g_build_filename(dir, "facts.duckdb", NULL);
+  TestSchema schema;
+  TestBatch batch;
+  test_schema_init(&schema);
+  test_batch_init(&batch, "bytes-rollback", "bytes-rollback:1");
+
+  /* Reduce the store to the pre-#1013 shape, with the event log recreated
+   * and repopulated, so the rollback has something to lose. */
+  {
+    g_autoptr(wyl_fact_store_t) store = open_initialized_store(path, &schema);
+    gboolean inserted = FALSE;
+    g_assert_cmpint(wyl_fact_store_append_batch(store, &schema.schema,
+        &batch.batch, &inserted), ==, WYRELOG_E_OK);
+    g_assert_true(inserted);
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "CREATE TABLE fact_event_log_keep AS SELECT * FROM fact_event_log;"),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "DROP TABLE fact_event_log;"), ==, WYRELOG_E_OK);
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "ALTER TABLE fact_batches DROP COLUMN logical_bytes;"), ==,
+        WYRELOG_E_OK);
+    /* Put the event log back, with its row and its foreign key, before the
+     * store is reopened.  Convergence runs inside that open, so leaving the
+     * table absent would hand the aborted rebuild an EMPTY audit trail and
+     * the rollback assertions below would be counting nothing. */
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "CREATE TABLE fact_event_log ("
+        "  seq BIGINT PRIMARY KEY,"
+        "  batch_id VARCHAR NOT NULL,"
+        "  tenant_id VARCHAR NOT NULL,"
+        "  graph_id VARCHAR NOT NULL,"
+        "  namespace_id VARCHAR NOT NULL,"
+        "  relation_name VARCHAR NOT NULL,"
+        "  schema_version BIGINT NOT NULL,"
+        "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+        "  created_at_us BIGINT NOT NULL,"
+        "  valid BOOLEAN NOT NULL,"
+        "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id));"), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "INSERT INTO fact_event_log SELECT * FROM fact_event_log_keep;"), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint(wyl_fact_store_test_exec_sql(store,
+        "DROP TABLE fact_event_log_keep;"), ==, WYRELOG_E_OK);
+  }
+
+  g_autoptr(wyl_fact_store_t) store = NULL;
+  g_assert_cmpint(wyl_fact_store_open(path, &store), ==, WYRELOG_E_OK);
+  TransactionFault fault;
+  transaction_fault_init(&fault,
+      WYL_FACT_STORE_TRANSACTION_TEST_LOGICAL_BYTES_MIGRATION, FALSE);
+  wyl_fact_store_test_set_transaction_hook(store,
+      fail_commit_rollback_succeeds, &fault);
+  g_assert_cmpint(wyl_fact_store_create_schema(store), ==, WYRELOG_E_IO);
+  /* The fault fired on this kind, so the failure is the convergence
+   * transaction aborting rather than some earlier step. */
+  g_assert_cmpuint(fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+      ==, 1);
+  g_assert_cmpuint(
+    fault.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 1);
+  wyl_fact_store_test_set_transaction_hook(store, NULL, NULL);
+  transaction_fault_clear(&fault);
+
+  g_assert_cmpint(query_count(store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';"), ==, 1);
+  g_assert_cmpint(query_count(store,
+      "SELECT logical_bytes FROM fact_batches "
+      "WHERE batch_id = 'bytes-rollback';"), ==, -1);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+      "('fact_batches_rebuild', 'fact_event_log_stage');"), ==, 0);
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM duckdb_constraints() "
+      "WHERE table_name = 'fact_event_log' "
+      "AND constraint_type = 'FOREIGN KEY';"), ==, 1);
+  /* The audit trail is what the aborted rebuild had already dropped inside
+   * the transaction; that its row and its seq come back is the assertion this
+   * test exists for. */
+  g_assert_cmpint(query_count(store,
+      "SELECT COUNT(*) FROM fact_event_log "
+      "WHERE batch_id = 'bytes-rollback';"), ==, 1);
+  g_assert_cmpint(query_count(store,
+      "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;"), ==, 1);
+
+  /* Without the fault the same store converges, so the rollback left it
+   * repairable rather than merely intact. */
+  g_assert_cmpint(wyl_fact_store_create_schema(store), ==, WYRELOG_E_OK);
+  g_assert_cmpint(query_count(store,
+      "SELECT CAST(is_nullable AS BIGINT) FROM duckdb_columns() "
+      "WHERE table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes';"), ==, 0);
+  g_assert_cmpint(query_count(store,
+      "SELECT logical_bytes FROM fact_batches "
+      "WHERE batch_id = 'bytes-rollback';"), ==, -1);
+
+  /* A converged store must not open the transaction at all.  Asserting the
+   * outcome is stable would not show this: a rebuild that ran again on every
+   * open would produce the same rows and the same catalog, so only the seam
+   * can tell "did nothing" from "did it all again". */
+  TransactionFault quiet;
+  transaction_fault_init(&quiet,
+      WYL_FACT_STORE_TRANSACTION_TEST_LOGICAL_BYTES_MIGRATION, FALSE);
+  wyl_fact_store_test_set_transaction_hook(store,
+      fail_commit_rollback_succeeds, &quiet);
+  g_assert_cmpint(wyl_fact_store_create_schema(store), ==, WYRELOG_E_OK);
+  g_assert_cmpuint(quiet.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT],
+      ==, 0);
+  g_assert_cmpuint(
+    quiet.calls[WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_ROLLBACK], ==, 0);
+  wyl_fact_store_test_set_transaction_hook(store, NULL, NULL);
+  transaction_fault_clear(&quiet);
+}
+
 static void test_migration_rollback_failure_poison_reopen(void) {
   g_autoptr(GError) error = NULL;
   g_autofree gchar *dir =
@@ -1013,6 +1144,8 @@ int main(int argc, char **argv) {
       test_file_reopen_recovers_forget);
   g_test_add_func("/fact-store/poison/migration-rollback-failure",
       test_migration_rollback_failure_poison_reopen);
+  g_test_add_func("/fact-store/poison/logical-bytes-migration-commit-failure",
+      test_logical_bytes_migration_commit_failure_rolls_back);
   g_test_add_func("/fact-store/poison/migration-commit-failure",
       test_migration_commit_failure_rolls_back);
   return wyl_test_normalize_exit_status (g_test_run());
