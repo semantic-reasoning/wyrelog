@@ -16173,6 +16173,45 @@ wyl_policy_store_settle_fact_physical_quota_evidence
 }
 
 wyrelog_error_t
+wyl_policy_store_settle_fact_physical_quota_observation
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *request_id,
+    const WylFactArtifactPhysicalQuotaEvidence *reservation_evidence,
+    const WylFactArtifactPhysicalQuotaEvidence *observed_evidence,
+    WylPolicyFactPhysicalOperationStatus *out_status)
+{
+  if (!fact_physical_quota_evidence_is_valid (reservation_evidence)
+      || !fact_physical_quota_evidence_is_valid (observed_evidence))
+    return WYRELOG_E_POLICY;
+  if (g_strcmp0 (tenant_id,
+      wyl_fact_artifact_physical_quota_evidence_tenant_id
+        (reservation_evidence)) != 0
+      || g_strcmp0 (graph_id,
+      wyl_fact_artifact_physical_quota_evidence_graph_id
+        (reservation_evidence)) != 0
+      || g_strcmp0 (tenant_id,
+      wyl_fact_artifact_physical_quota_evidence_tenant_id
+        (observed_evidence)) != 0
+      || g_strcmp0 (graph_id,
+      wyl_fact_artifact_physical_quota_evidence_graph_id
+        (observed_evidence)) != 0)
+    return WYRELOG_E_CONFLICT;
+  WylPolicyFactPhysicalQuotaOperation operation = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .request_id = request_id,
+    .inventory_generation =
+        wyl_fact_artifact_physical_quota_evidence_generation
+          (reservation_evidence),
+    .inventory_digest =
+        wyl_fact_artifact_physical_quota_evidence_digest (reservation_evidence),
+  };
+  return wyl_policy_store_settle_fact_physical_quota (store, &operation,
+             wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+               (observed_evidence), TRUE, out_status);
+}
+
+wyrelog_error_t
 wyl_policy_store_cancel_fact_physical_quota (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,
     gboolean definite_noncommit,

@@ -83,6 +83,15 @@ typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 #endif
+/* Attach the policy and retained namespace used by production graph opens so
+ * append admission can reserve physical growth before touching DuckDB. */
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+void wyl_fact_store_attach_physical_quota_context
+  (wyl_fact_store_t *store, wyl_policy_store_t *policy_store,
+    WylFactArtifactNamespace *namespace_);
+void wyl_fact_store_attach_physical_quota_policy
+  (wyl_fact_store_t *store, wyl_policy_store_t *policy_store);
+#endif
 /* Open a live, secure handle on a retained provisioning pair.  Unlike the raw
  * path open, this binds by descriptor through the bounded secure filesystem, so
  * it serves the nlink-2 pair the regular open path refuses.  The returned handle

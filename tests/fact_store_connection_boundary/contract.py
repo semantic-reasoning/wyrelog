@@ -602,7 +602,7 @@ def validate(files: dict[str, str]) -> None:
                         f"connection session pointer forwarded to helper: {path}: {name}"
                     )
     expected_calls = {
-        "wyrelog/fact/store.c": (16, 4, 19),
+        "wyrelog/fact/store.c": (16, 4, 20),
         "wyrelog/fact/compound.c": (5, 5, 7),
         "wyrelog/fact/replay.c": (3, 2, 3),
     }
