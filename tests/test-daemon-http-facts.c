@@ -1195,6 +1195,25 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 18;
   }
   g_clear_pointer (&quota_body, g_free);
+  WylClientFactLogicalQuotaStatus logical_quota_status = { 0 };
+  if (wyl_client_fact_logical_quota_configure (admin_client,
+      WYL_TENANT_DEFAULT, 1000, 100000, 0, "trusted", 0,
+      &logical_quota_status) != WYRELOG_E_OK
+      || !logical_quota_status.has_limit
+      || logical_quota_status.logical_row_limit != 1000
+      || logical_quota_status.logical_byte_limit != 100000) {
+    wyl_client_fact_logical_quota_status_clear (&logical_quota_status);
+    return 182;
+  }
+  wyl_client_fact_logical_quota_status_clear (&logical_quota_status);
+  if (wyl_client_fact_logical_quota_status (admin_client, WYL_TENANT_DEFAULT,
+      0, "trusted", 0, &logical_quota_status) != WYRELOG_E_OK
+      || logical_quota_status.committed_rows != 0
+      || logical_quota_status.committed_bytes != 0) {
+    wyl_client_fact_logical_quota_status_clear (&logical_quota_status);
+    return 183;
+  }
+  wyl_client_fact_logical_quota_status_clear (&logical_quota_status);
   g_autofree gchar *graph_get_legacy_limit_query = g_strdup_printf (
     "tenant=%s&limit=1000&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
   quota_rc = send_raw (session, "GET", base_url, "/facts/quota",

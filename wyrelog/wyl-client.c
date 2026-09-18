@@ -1851,6 +1851,130 @@ wyl_client_fact_quota_configure (WylClient *client, const gchar *tenant,
 }
 
 void
+wyl_client_fact_logical_quota_status_clear
+  (WylClientFactLogicalQuotaStatus *status)
+{
+  if (status == NULL)
+    return;
+  g_clear_pointer (&status->tenant_id, g_free);
+  *status = (WylClientFactLogicalQuotaStatus) { 0 };
+}
+
+static wyrelog_error_t
+client_fact_logical_quota_decode (const gchar *data, gsize size,
+    const gchar *expected_tenant, WylClientFactLogicalQuotaStatus *out_status)
+{
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size,
+          "tenant_id");
+  g_autofree gchar *dimension = parse_simple_json_string_member (data, size,
+          "dimension");
+  guint64 row_limit = 0, byte_limit = 0;
+  if (g_strcmp0 (tenant, expected_tenant) != 0
+      || g_strcmp0 (dimension, "logical_bytes") != 0
+      || !parse_simple_json_uint64_member (data, size, "committed_rows",
+      &out_status->committed_rows)
+      || !parse_simple_json_uint64_member (data, size, "committed_bytes",
+      &out_status->committed_bytes)
+      || !parse_simple_json_uint64_member (data, size, "pending_rows",
+      &out_status->pending_rows)
+      || !parse_simple_json_uint64_member (data, size, "pending_bytes",
+      &out_status->pending_bytes))
+    return WYRELOG_E_IO;
+  const gchar *row_limit_start = g_strstr_len (data, (gssize) size,
+          "\"row_limit\":");
+  const gchar *byte_limit_start = g_strstr_len (data, (gssize) size,
+          "\"limit\":");
+  if (row_limit_start == NULL || byte_limit_start == NULL)
+    return WYRELOG_E_IO;
+  row_limit_start += strlen ("\"row_limit\":");
+  byte_limit_start += strlen ("\"limit\":");
+  if (strncmp (row_limit_start, "null", strlen ("null")) == 0
+      || strncmp (byte_limit_start, "null", strlen ("null")) == 0) {
+    out_status->has_limit = FALSE;
+  } else if (!parse_simple_json_uint64_member (data, size, "row_limit",
+      &row_limit)
+      || !parse_simple_json_uint64_member (data, size, "limit", &byte_limit)) {
+    return WYRELOG_E_IO;
+  } else {
+    out_status->has_limit = TRUE;
+    out_status->logical_row_limit = row_limit;
+    out_status->logical_byte_limit = byte_limit;
+  }
+  out_status->tenant_id = g_steal_pointer (&tenant);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+client_fact_logical_quota_request
+  (WylClient *client, const gchar *tenant, gboolean configure,
+    guint64 logical_row_limit, guint64 logical_byte_limit,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalQuotaStatus *out_status)
+{
+  if (out_status == NULL || (configure
+      && (logical_row_limit > G_MAXINT64 || logical_byte_limit > G_MAXINT64)))
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_logical_quota_status_clear (out_status);
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *uri = configure
+      ? g_strdup_printf ("%s/facts/quota?%s&dimension=logical_bytes"
+          "&row_limit=%" G_GUINT64_FORMAT "&limit=%" G_GUINT64_FORMAT,
+          base_url, guard_query, logical_row_limit, logical_byte_limit)
+      : g_strdup_printf ("%s/facts/quota?%s&dimension=logical_bytes",
+          base_url, guard_query);
+  g_autoptr (SoupMessage) message = soup_message_new
+        (configure ? "POST" : "GET", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_POLICY && client->last_http_status == 409
+        && g_strcmp0 (client->last_error_code,
+        "fact_quota_limit_below_usage") == 0)
+      return WYRELOG_E_CONFLICT;
+    if (client->last_http_status == 429)
+      return WYRELOG_E_BUSY;
+    return rc;
+  }
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  return client_fact_logical_quota_decode (data, size, tenant, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_logical_quota_status (WylClient *client, const gchar *tenant,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalQuotaStatus *out_status)
+{
+  return client_fact_logical_quota_request (client, tenant, FALSE, 0, 0,
+             guard_timestamp, guard_loc_class, guard_risk, out_status);
+}
+
+wyrelog_error_t
+wyl_client_fact_logical_quota_configure
+  (WylClient *client, const gchar *tenant, guint64 logical_row_limit,
+    guint64 logical_byte_limit, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalQuotaStatus *out_status)
+{
+  return client_fact_logical_quota_request (client, tenant, TRUE,
+             logical_row_limit, logical_byte_limit, guard_timestamp, guard_loc_class,
+             guard_risk, out_status);
+}
+
+void
 wyl_client_fact_schema_quota_status_clear
   (WylClientFactSchemaQuotaStatus *status)
 {

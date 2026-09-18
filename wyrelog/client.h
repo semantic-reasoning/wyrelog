@@ -117,6 +117,18 @@ typedef struct
 {
   gchar *tenant_id;
   gboolean has_limit;
+  guint64 logical_row_limit;
+  guint64 logical_byte_limit;
+  guint64 committed_rows;
+  guint64 committed_bytes;
+  guint64 pending_rows;
+  guint64 pending_bytes;
+} WylClientFactLogicalQuotaStatus;
+
+typedef struct
+{
+  gchar *tenant_id;
+  gboolean has_limit;
   guint64 rate_per_second;
   guint64 burst;
 } WylClientFactWriteRateQuotaStatus;
@@ -532,6 +544,17 @@ wyrelog_error_t wyl_client_fact_quota_configure (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactQuotaStatus * out_status);
 void wyl_client_fact_quota_status_clear (WylClientFactQuotaStatus * status);
+wyrelog_error_t wyl_client_fact_logical_quota_status
+  (WylClient * client, const gchar * tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalQuotaStatus * out_status);
+wyrelog_error_t wyl_client_fact_logical_quota_configure
+  (WylClient * client, const gchar * tenant, guint64 logical_row_limit,
+    guint64 logical_byte_limit, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalQuotaStatus * out_status);
+void wyl_client_fact_logical_quota_status_clear
+  (WylClientFactLogicalQuotaStatus * status);
 wyrelog_error_t wyl_client_fact_write_rate_quota_status (WylClient * client,
     const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
