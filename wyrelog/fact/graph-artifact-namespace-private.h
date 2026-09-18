@@ -505,5 +505,7 @@ wyrelog_error_t wyl_fact_duckdb_temp_root_retire
  * counts only; it is never a path or reopen capability. */
 wyrelog_error_t wyl_fact_artifact_namespace_inventory_snapshot
   (WylFactArtifactNamespace *, WylFactArtifactInventorySnapshot **out_snapshot);
+wyrelog_error_t wyl_fact_artifact_namespace_export_physical_quota_evidence
+  (WylFactArtifactNamespace *, WylFactArtifactPhysicalQuotaEvidence **out_evidence);
 
 G_END_DECLS

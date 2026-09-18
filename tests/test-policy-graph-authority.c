@@ -6383,8 +6383,9 @@ test_fact_physical_quota_ledger (void)
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
       ==, WYRELOG_E_OK);
   g_autoptr (WylFactArtifactPhysicalQuotaEvidence) evidence = NULL;
-  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
-        (snapshot, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+        (snapshot, "physical-b", "graph-b", &evidence), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_evidence
         (store, "physical-b", "graph-b", "physical-request-typed", evidence,
       1, &op_status), ==, WYRELOG_E_OK);

@@ -3340,4 +3340,15 @@ done:
   *out_snapshot = snapshot;
   return rc;
 }
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  (void) namespace_;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  return WYRELOG_E_POLICY;
+}
 #endif

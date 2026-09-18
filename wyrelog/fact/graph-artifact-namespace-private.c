@@ -67,6 +67,17 @@ wyl_fact_artifact_namespace_inventory_snapshot
   return WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  (void) namespace_;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  return WYRELOG_E_POLICY;
+}
+
 gboolean
 wyl_fact_artifact_namespace_test_fault_was_consumed
   (WylFactArtifactNamespaceTestFault fault) {
@@ -830,6 +841,8 @@ typedef struct WylFactArtifactLockDomain WylFactArtifactLockDomain;
 struct WylFactArtifactNamespace
 {
   gint references;
+  gchar *tenant_id;
+  gchar *graph_id;
   gint fd;
   guint64 device, inode, owner;
   gint main_fd;
@@ -1165,6 +1178,8 @@ namespace_unref (WylFactArtifactNamespace *n)
     close (n->lock_pin_fd);
   release_lock_domain (n);
   wyl_fact_graph_provisioned_pair_free (n->provisioned_pair);
+  g_free (n->tenant_id);
+  g_free (n->graph_id);
   g_free (n);
 }
 
@@ -1409,6 +1424,27 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
   }
   WylFactArtifactNamespace *n = g_new0 (WylFactArtifactNamespace, 1);
   n->references = 1;
+  g_autofree gchar *tenant_id = NULL;
+  g_autofree gchar *graph_id = NULL;
+  if (wyl_fact_graph_component_decode (d->tenant_component, &tenant_id)
+      != WYRELOG_E_OK
+      || wyl_fact_graph_component_decode (d->graph_component, &graph_id)
+      != WYRELOG_E_OK) {
+    g_free (n);
+    close (fd);
+    close (main_fd);
+    return WYRELOG_E_POLICY;
+  }
+  n->tenant_id = g_strdup (tenant_id);
+  n->graph_id = g_strdup (graph_id);
+  if (n->tenant_id == NULL || n->graph_id == NULL) {
+    g_free (n->tenant_id);
+    g_free (n->graph_id);
+    g_free (n);
+    close (fd);
+    close (main_fd);
+    return WYRELOG_E_NOMEM;
+  }
   n->fd = fd;
   n->main_fd = main_fd;
   n->writable_main_fd = -1;
@@ -1497,6 +1533,29 @@ wyl_fact_artifact_namespace_open_provisioned_pair_internal
     return WYRELOG_E_NOMEM;
   }
   n->references = 1;
+  g_autofree gchar *tenant_id = NULL;
+  g_autofree gchar *graph_id = NULL;
+  if (wyl_fact_graph_component_decode (pair->directory.tenant_component,
+      &tenant_id) != WYRELOG_E_OK
+      || wyl_fact_graph_component_decode (pair->directory.graph_component,
+      &graph_id) != WYRELOG_E_OK) {
+    g_free (n);
+    close (fd);
+    close (main_fd);
+    close (writable_main_fd);
+    return WYRELOG_E_POLICY;
+  }
+  n->tenant_id = g_strdup (tenant_id);
+  n->graph_id = g_strdup (graph_id);
+  if (n->tenant_id == NULL || n->graph_id == NULL) {
+    g_free (n->tenant_id);
+    g_free (n->graph_id);
+    g_free (n);
+    close (fd);
+    close (main_fd);
+    close (writable_main_fd);
+    return WYRELOG_E_NOMEM;
+  }
   n->fd = fd;
   n->main_fd = main_fd;
   n->writable_main_fd = writable_main_fd;
@@ -5760,5 +5819,24 @@ wyl_fact_artifact_namespace_inventory_snapshot
   g_mutex_unlock (&reader->mutex);
   wyl_fact_artifact_mutation_lease_free (reader);
   return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence
+  (WylFactArtifactNamespace *namespace_,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (namespace_ == NULL || out_evidence == NULL
+      || namespace_->tenant_id == NULL || namespace_->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  wyrelog_error_t result = wyl_fact_artifact_namespace_inventory_snapshot
+        (namespace_, &snapshot);
+  if (result != WYRELOG_E_OK)
+    return result;
+  return wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+           (snapshot, namespace_->tenant_id, namespace_->graph_id, out_evidence);
 }
 #endif
