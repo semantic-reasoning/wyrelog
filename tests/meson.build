@@ -796,9 +796,18 @@ if build_client
         'wyrelog-fact-http-store wyrelog-fact-resolver',
       )
     endif
+    # The Windows clang-cl full suite measured this case at 61.15 seconds
+    # (CI run 35311765477) with every assertion passing.  Keep the normal
+    # 60-second deadline on other hosts, but leave measured headroom on the
+    # hosted Windows runner instead of treating scheduler contention as a
+    # functional failure.
+    test_daemon_http_facts_timeout = 60
+    if host_machine.system() == 'windows'
+      test_daemon_http_facts_timeout = 90
+    endif
     test('daemon-http-facts', test_daemon_http_facts,
       env : test_daemon_http_facts_env,
-      timeout : 60,
+      timeout : test_daemon_http_facts_timeout,
     )
   endif
 endif
