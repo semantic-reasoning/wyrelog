@@ -146,6 +146,7 @@ if get_option('enable_fact_store').allowed()
     'fact/legacy-store-identity-private.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay.c', 'fact/runtime-private.c',
     'fact/tenant-admission-private.c',
+    'fact/legacy-open-private.c',
     'fact/store.c',
     'fact/store-identity-private.c')
   if not get_option('enable_audit').allowed()
