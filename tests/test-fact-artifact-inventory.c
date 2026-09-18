@@ -455,17 +455,22 @@ test_physical_quota_evidence_is_canonical_and_fail_closed (void)
   wyl_fact_artifact_inventory_snapshot_end (snapshot, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
       ==, WYRELOG_E_OK);
-  WylFactArtifactPhysicalQuotaEvidence evidence = { 0 };
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) evidence = NULL;
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
         (snapshot, &evidence), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (evidence.allocated_bytes, ==, 6144);
-  g_assert_cmpuint (strlen (evidence.digest), ==, 64);
-  g_assert_true (g_str_has_prefix (evidence.generation, "v1:"));
-  WylFactArtifactPhysicalQuotaEvidence second = { 0 };
+  g_assert_cmpuint (wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+        (evidence), ==, 6144);
+  g_assert_cmpuint (strlen (wyl_fact_artifact_physical_quota_evidence_digest
+        (evidence)), ==, 64);
+  g_assert_true (g_str_has_prefix
+        (wyl_fact_artifact_physical_quota_evidence_generation (evidence), "v1:"));
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) second = NULL;
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
         (snapshot, &second), ==, WYRELOG_E_OK);
-  g_assert_cmpstr (evidence.digest, ==, second.digest);
-  g_assert_cmpstr (evidence.generation, ==, second.generation);
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_digest (evidence),
+      ==, wyl_fact_artifact_physical_quota_evidence_digest (second));
+  g_assert_cmpstr (wyl_fact_artifact_physical_quota_evidence_generation (evidence),
+      ==, wyl_fact_artifact_physical_quota_evidence_generation (second));
 
   g_autoptr (WylFactArtifactInventorySnapshot) unknown =
       wyl_fact_artifact_inventory_snapshot_new (4);
@@ -475,9 +480,10 @@ test_physical_quota_evidence_is_canonical_and_fail_closed (void)
   wyl_fact_artifact_inventory_snapshot_end (unknown, &point);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (unknown),
       ==, WYRELOG_E_OK);
+  g_clear_pointer (&second, wyl_fact_artifact_physical_quota_evidence_free);
   g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
         (unknown, &second), ==, WYRELOG_E_POLICY);
-  g_assert_cmpuint (second.digest[0], ==, 0);
+  g_assert_null (second);
 }
 
 int

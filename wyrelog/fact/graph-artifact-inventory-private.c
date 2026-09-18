@@ -35,6 +35,16 @@ struct WylFactArtifactInventorySnapshot
   gboolean finalized;
 };
 
+struct WylFactArtifactPhysicalQuotaEvidence
+{
+  gchar generation[68];
+  gchar digest[65];
+  guint64 allocated_bytes;
+  WylFactArtifactInventoryObservation observation;
+  WylFactArtifactInventorySlotEvidence slots
+  [WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT];
+};
+
 static void
 snapshot_zero_result (WylFactArtifactInventorySnapshot *snapshot)
 {
@@ -83,11 +93,11 @@ static gboolean snapshot_published
 wyrelog_error_t
 wyl_fact_artifact_inventory_snapshot_export_physical_quota
   (const WylFactArtifactInventorySnapshot *snapshot,
-    WylFactArtifactPhysicalQuotaEvidence *out_evidence)
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
 {
   if (out_evidence == NULL)
     return WYRELOG_E_INVALID;
-  memset (out_evidence, 0, sizeof *out_evidence);
+  *out_evidence = NULL;
   if (snapshot == NULL
       || snapshot->status != WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE
       || !snapshot_published (snapshot)
@@ -113,15 +123,49 @@ wyl_fact_artifact_inventory_snapshot_export_physical_quota
         (G_CHECKSUM_SHA256, canonical->str, canonical->len);
   if (digest == NULL || strlen (digest) != 64)
     return WYRELOG_E_IO;
-  g_strlcpy (out_evidence->digest, digest, sizeof out_evidence->digest);
-  g_snprintf (out_evidence->generation, sizeof out_evidence->generation,
+  WylFactArtifactPhysicalQuotaEvidence *evidence = g_new0
+        (WylFactArtifactPhysicalQuotaEvidence, 1);
+  g_strlcpy (evidence->digest, digest, sizeof evidence->digest);
+  g_snprintf (evidence->generation, sizeof evidence->generation,
       "v1:%s", digest);
-  out_evidence->allocated_bytes = snapshot->allocated_bytes;
-  out_evidence->observation = snapshot->begin;
+  evidence->allocated_bytes = snapshot->allocated_bytes;
+  evidence->observation = snapshot->begin;
   for (guint i = 0; i < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; i++)
     wyl_fact_artifact_inventory_snapshot_get_slot_evidence (snapshot, i,
-        &out_evidence->slots[i]);
+        &evidence->slots[i]);
+  *out_evidence = evidence;
   return WYRELOG_E_OK;
+}
+
+void
+wyl_fact_artifact_physical_quota_evidence_free
+  (WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  if (evidence != NULL) {
+    memset (evidence, 0, sizeof *evidence);
+    g_free (evidence);
+  }
+}
+
+const gchar *
+wyl_fact_artifact_physical_quota_evidence_generation
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  return evidence != NULL ? evidence->generation : NULL;
+}
+
+const gchar *
+wyl_fact_artifact_physical_quota_evidence_digest
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  return evidence != NULL ? evidence->digest : NULL;
+}
+
+guint64
+wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  return evidence != NULL ? evidence->allocated_bytes : 0;
 }
 
 gboolean

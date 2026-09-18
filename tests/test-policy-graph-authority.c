@@ -6368,6 +6368,31 @@ test_fact_physical_quota_ledger (void)
       "physical-b", &quota), ==, WYRELOG_E_OK);
   g_assert_cmpuint (quota.committed_bytes, ==, 9);
   g_assert_cmpuint (quota.reconciling_bytes, ==, 0);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot =
+      wyl_fact_artifact_inventory_snapshot_new (4);
+  WylFactArtifactInventoryObservation observation = {
+    .directory_identity = { 1, 2, { 0 }, 0 },
+    .guard_identity = { 3, 4, { 0 }, 0 },
+    .entry_fingerprint = 5,
+  };
+  wyl_fact_artifact_inventory_snapshot_begin (snapshot, &observation);
+  for (guint slot = 0; slot < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; slot++)
+    g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_set_slot (snapshot,
+        slot, NULL, FALSE, 0, TRUE, 0), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_inventory_snapshot_end (snapshot, &observation);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
+        (snapshot, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota_evidence
+        (store, "physical-b", "graph-b", "physical-request-typed", evidence,
+      1, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota_evidence
+        (store, "physical-b", "graph-b", "physical-request-typed", evidence,
+      &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
   cleanup_store_path (store_root, store_path);
 }
 

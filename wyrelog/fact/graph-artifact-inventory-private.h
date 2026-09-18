@@ -89,22 +89,25 @@ typedef struct
   guint64 allocated_bytes;
 } WylFactArtifactInventorySlotEvidence;
 
-/* Immutable, snapshot-derived evidence for physical-byte admission.  The
- * textual fields are canonical values produced by the exporter; callers do
- * not get to select a generation, digest, or stability claim. */
-typedef struct
-{
-  gchar generation[67];
-  gchar digest[65];
-  guint64 allocated_bytes;
-  WylFactArtifactInventoryObservation observation;
-  WylFactArtifactInventorySlotEvidence slots
-  [WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT];
-} WylFactArtifactPhysicalQuotaEvidence;
+/* Opaque, immutable, snapshot-derived evidence for physical-byte admission.
+ * Only the exporter can construct one; callers cannot forge its digest or
+ * stability claim by initializing a public value struct. */
+typedef struct WylFactArtifactPhysicalQuotaEvidence
+    WylFactArtifactPhysicalQuotaEvidence;
+void wyl_fact_artifact_physical_quota_evidence_free
+  (WylFactArtifactPhysicalQuotaEvidence *evidence);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactPhysicalQuotaEvidence,
+    wyl_fact_artifact_physical_quota_evidence_free)
 
 wyrelog_error_t wyl_fact_artifact_inventory_snapshot_export_physical_quota
   (const WylFactArtifactInventorySnapshot *snapshot,
-    WylFactArtifactPhysicalQuotaEvidence *out_evidence);
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence);
+const gchar *wyl_fact_artifact_physical_quota_evidence_generation
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence);
+const gchar *wyl_fact_artifact_physical_quota_evidence_digest
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence);
+guint64 wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence);
 
 WylFactArtifactInventorySnapshot *
 wyl_fact_artifact_inventory_snapshot_new (guint max_anomalies);
