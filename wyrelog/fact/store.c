@@ -2097,16 +2097,29 @@ fact_value_logical_bytes (const wyl_fact_value_t *value)
 /* Logical byte size of a batch's fact payload (schema columns only; the
  * bookkeeping columns the appender adds are storage overhead, not logical
  * fact bytes). */
-static gint64
-batch_logical_bytes (const wyl_policy_fact_relation_schema_options_t *schema,
-    const wyl_fact_store_batch_t *batch)
+wyrelog_error_t
+wyl_fact_store_batch_logical_bytes
+  (const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, guint64 *out_bytes)
 {
-  gint64 total = 0;
+  if (out_bytes != NULL)
+    *out_bytes = 0;
+  if (schema == NULL || batch == NULL || out_bytes == NULL
+      || (batch->n_rows != 0 && batch->rows == NULL))
+    return WYRELOG_E_INVALID;
+  guint64 total = 0;
   for (gsize i = 0; i < batch->n_rows; i++) {
-    for (gsize j = 0; j < schema->n_columns; j++)
-      total += fact_value_logical_bytes (&batch->rows[i].values[j]);
+    for (gsize j = 0; j < schema->n_columns; j++) {
+      if (batch->rows[i].values[j].type == WYL_FACT_VALUE_NULL)
+        return WYRELOG_E_INVALID;
+      gint64 value_bytes = fact_value_logical_bytes (&batch->rows[i].values[j]);
+      if (value_bytes < 0 || total > G_MAXINT64 - (guint64) value_bytes)
+        return WYRELOG_E_INVALID;
+      total += (guint64) value_bytes;
+    }
   }
-  return total;
+  *out_bytes = total;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -2212,7 +2225,11 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   gint64 created_at_us = g_get_real_time ();
   /* One number for the durable row and the returned delta, so the two cannot
    * drift apart (#1013). */
-  gint64 logical_bytes = batch_logical_bytes (schema, batch);
+  guint64 logical_bytes_u64 = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_batch_logical_bytes (schema, batch,
+            &logical_bytes_u64);
+  gint64 logical_bytes = (gint64) logical_bytes_u64;
   if (rc == WYRELOG_E_OK)
     rc = next_sequence_unlocked (store, &first_seq);
   if (rc == WYRELOG_E_OK)
@@ -2679,8 +2696,12 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
     goto unlock_return;
   attempted_insert = TRUE;
   created_at_us = g_get_real_time ();
-  rc = insert_batch_unlocked (store, &batch_meta, content_hash,
-          batch_logical_bytes (schema, &batch_meta), created_at_us);
+  guint64 logical_bytes_u64 = 0;
+  rc = wyl_fact_store_batch_logical_bytes (schema, &batch_meta,
+          &logical_bytes_u64);
+  if (rc == WYRELOG_E_OK)
+    rc = insert_batch_unlocked (store, &batch_meta, content_hash,
+            (gint64) logical_bytes_u64, created_at_us);
   if (rc == WYRELOG_E_OK && n_select_rows > 0)
     rc = next_sequence_unlocked (store, &first_seq);
   if (rc == WYRELOG_E_OK && n_select_rows > 0

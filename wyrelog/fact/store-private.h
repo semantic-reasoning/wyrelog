@@ -57,6 +57,13 @@ typedef struct
   gsize n_rows;
 } wyl_fact_store_batch_t;
 
+/* Compute the authoritative logical payload cost used by fact_batches and
+ * logical quota admission.  NULL values are rejected and are not a zero-cost
+ * input to this API. */
+wyrelog_error_t wyl_fact_store_batch_logical_bytes
+  (const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, guint64 *out_bytes);
+
 wyrelog_error_t wyl_fact_store_open (const gchar * path,
     wyl_fact_store_t ** out_store);
 wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
