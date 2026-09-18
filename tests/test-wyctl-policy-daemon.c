@@ -596,6 +596,36 @@ main (void)
   assert_wyctl_stdout (fact_schema_quota_status_argv,
       "tenant=__wr_default dimension=schema_count limit=2 registered=0\n");
 
+  gchar *fact_concurrent_quota_configure_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "concurrent_opens",
+    "--limit", "2",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_concurrent_quota_configure_argv,
+      "tenant=__wr_default dimension=concurrent_opens limit=2 pending=0 active=0 acquiring=0 cleanup_pending=0 charged=0\n");
+  gchar *fact_concurrent_quota_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "concurrent_opens",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_concurrent_quota_status_argv,
+      "tenant=__wr_default dimension=concurrent_opens limit=2 pending=0 active=0 acquiring=0 cleanup_pending=0 charged=0\n");
+
   gchar *fact_schema_quota_missing_limit_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
