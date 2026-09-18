@@ -768,7 +768,8 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
           &fact_db_path);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_fact_store_open (fact_db_path, out_store);
+  return wyl_fact_store_open_legacy_graph (policy, fact_db_path, fact_root,
+             graph_info->tenant_id, graph_info->graph_id, writable, out_store);
 }
 
 static wyrelog_error_t

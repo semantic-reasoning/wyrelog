@@ -11677,6 +11677,31 @@ set_fact_write_rate_quota_exceeded_json (SoupServerMessage *msg,
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
 }
+
+static void
+set_concurrent_open_quota_exceeded_json (SoupServerMessage *msg,
+    const WylPolicyFactConcurrentOpenQuotaStatus *status)
+{
+  if (status == NULL || !status->has_limit) {
+    set_json_error (msg, 500, "fact_quota_status_failed");
+    return;
+  }
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 429,
+      "fact_quota_exceeded") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  g_autoptr (GString) body = g_string_new (
+    "{\"error\":\"fact_quota_exceeded\","
+    "\"dimension\":\"concurrent_opens\",\"limit\":");
+  g_string_append_printf (body, "%" G_GUINT64_FORMAT
+      ",\"observed\":%" G_GUINT64_FORMAT "}", status->hard_limit,
+      status->charged);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 429, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
 #endif
 
 static void
@@ -12561,9 +12586,12 @@ secure_http_fact_db_mode (WylDaemonHttpContext *ctx,
 static wyrelog_error_t
 open_http_fact_store (WylDaemonHttpContext *ctx,
     wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph,
-    wyl_fact_store_t **out_store)
+    wyl_fact_store_t **out_store, gboolean *out_quota_exceeded)
 {
   *out_store = NULL;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (out_quota_exceeded != NULL)
+    *out_quota_exceeded = FALSE;
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   /* A provisioning or active graph is served by the live secure handle on its
    * retained pair; only legacy graphs keep the path open below. */
@@ -12573,18 +12601,20 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       && authority->lifecycle_state
       != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED) {
     wyl_policy_graph_authority_record_free (authority);
-    return wyl_fact_store_open_provisioned_graph (policy_store, ctx->fact_root,
-               tenant, graph, TRUE, out_store);
+    rc = wyl_fact_store_open_provisioned_graph (policy_store, ctx->fact_root,
+            tenant, graph, TRUE, out_store);
+    goto quota_check;
   }
   wyl_policy_graph_authority_record_free (authority);
 #endif
   g_autofree gchar *path = NULL;
   gboolean needs_hardening = FALSE;
-  wyrelog_error_t rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
+  rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
           graph, TRUE, &path, &needs_hardening);
   trace_http_fact_store ("resolve", rc);
   if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_store_open (path, out_store);
+    rc = wyl_fact_store_open_legacy_graph (policy_store, path, ctx->fact_root,
+            tenant, graph, TRUE, out_store);
     trace_http_fact_store ("duckdb-open", rc);
   }
   if (needs_hardening) {
@@ -12614,9 +12644,18 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       rc = WYRELOG_E_POLICY;
     trace_http_fact_store ("strict-resolve", rc);
     if (rc == WYRELOG_E_OK) {
-      rc = wyl_fact_store_open (path, out_store);
+      rc = wyl_fact_store_open_legacy_graph (policy_store, path,
+              ctx->fact_root, tenant, graph, TRUE, out_store);
       trace_http_fact_store ("duckdb-reopen", rc);
     }
+  }
+quota_check:
+  if (rc == WYRELOG_E_POLICY && out_quota_exceeded != NULL) {
+    WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+    if (wyl_policy_store_get_fact_concurrent_open_quota (policy_store, tenant,
+        &status) == WYRELOG_E_OK && status.has_limit
+        && status.charged >= status.hard_limit)
+      *out_quota_exceeded = TRUE;
   }
   return rc;
 }
@@ -13308,7 +13347,21 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       .n_columns = n_loaded,
     };
     g_autoptr (wyl_fact_store_t) fact_store = NULL;
-    rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
+    gboolean concurrent_open_quota_exceeded = FALSE;
+    rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store,
+            &concurrent_open_quota_exceeded);
+    if (concurrent_open_quota_exceeded) {
+      WylPolicyFactConcurrentOpenQuotaStatus quota_status = { 0 };
+      if (wyl_policy_store_get_fact_concurrent_open_quota (write.store, tenant,
+          &quota_status) != WYRELOG_E_OK)
+        set_json_error (msg, 500, "fact_quota_status_failed");
+      else
+        set_concurrent_open_quota_exceeded_json (msg, &quota_status);
+      graph_lookup_clear (&lookup);
+      wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+      schema_columns_clear (schema_columns, n_loaded);
+      return;
+    }
     if (rc == WYRELOG_E_OK)
       wyl_daemon_policy_write_observe_cleanup_resource (&write,
           WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
@@ -13520,7 +13573,22 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   g_autoptr (wyl_fact_store_t) fact_store = NULL;
-  rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
+  gboolean concurrent_open_quota_exceeded = FALSE;
+  rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store,
+          &concurrent_open_quota_exceeded);
+  if (concurrent_open_quota_exceeded) {
+    WylPolicyFactConcurrentOpenQuotaStatus quota_status = { 0 };
+    if (wyl_policy_store_get_fact_concurrent_open_quota (write.store, tenant,
+        &quota_status) != WYRELOG_E_OK)
+      set_json_error (msg, 500, "fact_quota_status_failed");
+    else
+      set_concurrent_open_quota_exceeded_json (msg, &quota_status);
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    return;
+  }
   if (rc == WYRELOG_E_OK)
     wyl_daemon_policy_write_observe_cleanup_resource (&write,
         WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
