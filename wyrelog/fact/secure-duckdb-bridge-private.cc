@@ -617,6 +617,12 @@ wyl_secure_duckdb_bridge_release_live (WylSecureDuckdbBridge *self)
   return result;
 }
 
+extern "C" WylFactArtifactMutationLease *
+wyl_secure_duckdb_bridge_authority_lease (WylSecureDuckdbBridge *self)
+{
+  return self == nullptr ? nullptr : self->authority_lease.get ();
+}
+
 extern "C" void
 wyl_fact_store_pinned_set_test_hook (WylFactStorePinnedTestHook hook,
     gpointer user_data)

@@ -3351,4 +3351,16 @@ wyl_fact_artifact_namespace_export_physical_quota_evidence
     *out_evidence = NULL;
   return WYRELOG_E_POLICY;
 }
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+  (WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  (void) namespace_;
+  (void) lease;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  return WYRELOG_E_POLICY;
+}
 #endif

@@ -65,6 +65,7 @@ struct wyl_fact_store_t
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
   wyl_policy_store_t *physical_quota_policy;
   WylFactArtifactNamespace *physical_quota_namespace;
+  WylFactArtifactMutationLease *physical_quota_lease;
   gboolean physical_quota_namespace_owned;
 #endif
   enum
@@ -307,12 +308,13 @@ wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
 void
 wyl_fact_store_attach_physical_quota_context
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store,
-    WylFactArtifactNamespace *namespace_)
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease)
 {
   if (store == NULL)
     return;
   store->physical_quota_policy = policy_store;
   store->physical_quota_namespace = namespace_;
+  store->physical_quota_lease = lease;
 }
 
 void
@@ -1111,6 +1113,8 @@ wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
   self->conn = conn;
   self->provisioned_bridge = bridge;
   self->physical_quota_namespace = namespace_;
+  self->physical_quota_lease =
+      wyl_secure_duckdb_bridge_authority_lease (bridge);
   self->physical_quota_namespace_owned = TRUE;
   g_mutex_init (&self->lock);
   rc = reject_audit_database_unlocked (self);
@@ -1169,6 +1173,8 @@ wyl_fact_store_open_provisioned_namespace_with_lease
   self->conn = conn;
   self->provisioned_bridge = bridge;
   self->physical_quota_namespace = namespace_;
+  self->physical_quota_lease =
+      wyl_secure_duckdb_bridge_authority_lease (bridge);
   g_mutex_init (&self->lock);
   rc = reject_audit_database_unlocked (self);
   if (rc != WYRELOG_E_OK) {
@@ -2272,6 +2278,7 @@ take_batch_fault_unlocked (wyl_fact_store_t *store)
 typedef struct
 {
   gboolean active;
+  gboolean quota_exceeded;
   WylFactArtifactPhysicalQuotaEvidence *reservation_evidence;
 } WylFactPhysicalQuotaAdmission;
 
@@ -2297,8 +2304,9 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
    * while no physical limit is active. */
   if (!status.has_limit)
     return WYRELOG_E_OK;
-  rc = wyl_fact_artifact_namespace_export_physical_quota_evidence
-        (store->physical_quota_namespace, &admission->reservation_evidence);
+  rc = wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+        (store->physical_quota_namespace, store->physical_quota_lease,
+          &admission->reservation_evidence);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (status.committed_bytes > G_MAXUINT64 - status.pending_bytes
@@ -2307,14 +2315,18 @@ fact_store_physical_quota_reserve (wyl_fact_store_t *store,
     return WYRELOG_E_IO;
   guint64 used = status.committed_bytes + status.pending_bytes
       + status.reconciling_bytes;
-  if (used >= status.hard_limit)
+  if (used >= status.hard_limit) {
+    admission->quota_exceeded = TRUE;
     return WYRELOG_E_POLICY;
+  }
   guint64 bound = status.hard_limit - used;
   WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
   rc = wyl_policy_store_reserve_fact_physical_quota_evidence
         (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
           batch->request_id, admission->reservation_evidence, bound,
           &operation_status);
+  if (rc == WYRELOG_E_POLICY)
+    admission->quota_exceeded = TRUE;
   if (rc == WYRELOG_E_OK)
     admission->active = !operation_status.replay;
   return rc;
@@ -2344,15 +2356,17 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
              (store->physical_quota_policy, &operation, FALSE, &operation_status);
   g_autoptr (WylFactArtifactPhysicalQuotaEvidence) observed = NULL;
   wyrelog_error_t rc =
-      wyl_fact_artifact_namespace_export_physical_quota_evidence
-        (store->physical_quota_namespace, &observed);
+      wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+        (store->physical_quota_namespace, store->physical_quota_lease,
+          &observed);
   if (rc != WYRELOG_E_OK)
     return wyl_policy_store_cancel_fact_physical_quota
              (store->physical_quota_policy, &operation, FALSE, &operation_status);
-  return wyl_policy_store_settle_fact_physical_quota_observation
-           (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
-             batch->request_id, admission->reservation_evidence, observed,
-             &operation_status);
+  rc = wyl_policy_store_settle_fact_physical_quota_observation
+        (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
+          batch->request_id, admission->reservation_evidence, observed,
+          &operation_status);
+  return rc;
 }
 #endif
 
@@ -2421,6 +2435,8 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   rc = fact_store_physical_quota_reserve (store, batch,
           &physical_admission);
   if (rc != WYRELOG_E_OK) {
+    if (out_delta != NULL)
+      out_delta->quota_exceeded = physical_admission.quota_exceeded;
     g_clear_pointer (&physical_admission.reservation_evidence,
         wyl_fact_artifact_physical_quota_evidence_free);
     wyl_fact_store_connection_session_end (&session);
