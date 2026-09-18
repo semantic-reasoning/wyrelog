@@ -1263,6 +1263,31 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || strstr (quota_body, "\"dimension\":\"schema_count\"") == NULL
       || strstr (quota_body, "\"registered\":") == NULL)
     return 183;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *physical_quota_configure_query = g_strdup_printf (
+    "tenant=%s&dimension=physical_bytes&limit=4096&%s",
+    WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "POST", base_url, "/facts/quota",
+          physical_quota_configure_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"physical_bytes\"") == NULL
+      || strstr (quota_body, "\"limit\":4096") == NULL
+      || strstr (quota_body, "\"committed_bytes\":0") == NULL
+      || strstr (quota_body, "\"pending_bytes\":0") == NULL
+      || strstr (quota_body, "\"reconciling_bytes\":0") == NULL)
+    return 184;
+  g_clear_pointer (&quota_body, g_free);
+  g_autofree gchar *physical_quota_status_query = g_strdup_printf (
+    "tenant=%s&dimension=physical_bytes&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  quota_rc = send_raw (session, "GET", base_url, "/facts/quota",
+          physical_quota_status_query, admin_token, NULL, &quota_status,
+          &quota_body);
+  if (quota_rc != 0 || quota_status != 200
+      || strstr (quota_body, "\"dimension\":\"physical_bytes\"") == NULL
+      || strstr (quota_body, "\"limit\":4096") == NULL
+      || strstr (quota_body, "\"reconciling_bytes\":0") == NULL)
+    return 185;
   WylClientFactQuotaStatus quota_client_status = { 0 };
   if (wyl_client_fact_quota_status (admin_client, WYL_TENANT_DEFAULT,
       0, "trusted", 0, &quota_client_status) != WYRELOG_E_OK ||
@@ -1272,6 +1297,18 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 19;
   }
   wyl_client_fact_quota_status_clear (&quota_client_status);
+  WylClientFactPhysicalQuotaStatus physical_client_status = { 0 };
+  if (wyl_client_fact_physical_quota_status (admin_client,
+      WYL_TENANT_DEFAULT, 0, "trusted", 0, &physical_client_status)
+      != WYRELOG_E_OK || !physical_client_status.has_limit
+      || physical_client_status.hard_limit != 4096
+      || physical_client_status.committed_bytes != 0
+      || physical_client_status.pending_bytes != 0
+      || physical_client_status.reconciling_bytes != 0) {
+    wyl_client_fact_physical_quota_status_clear (&physical_client_status);
+    return 186;
+  }
+  wyl_client_fact_physical_quota_status_clear (&physical_client_status);
 
   /* Write-rate configuration uses the same guarded endpoint but a distinct
    * typed response and storage dimension. */

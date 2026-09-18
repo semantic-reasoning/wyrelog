@@ -155,6 +155,16 @@ typedef struct
 
 typedef struct
 {
+  gchar *tenant_id;
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 committed_bytes;
+  guint64 pending_bytes;
+  guint64 reconciling_bytes;
+} WylClientFactPhysicalQuotaStatus;
+
+typedef struct
+{
   gchar *subject_id;
   gchar *display_name;
   gchar *state;
@@ -584,6 +594,16 @@ wyrelog_error_t wyl_client_fact_concurrent_open_quota_configure
     WylClientFactConcurrentOpenQuotaStatus * out_status);
 void wyl_client_fact_concurrent_open_quota_status_clear
   (WylClientFactConcurrentOpenQuotaStatus * status);
+wyrelog_error_t wyl_client_fact_physical_quota_status
+  (WylClient * client, const gchar * tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactPhysicalQuotaStatus * out_status);
+wyrelog_error_t wyl_client_fact_physical_quota_configure
+  (WylClient * client, const gchar * tenant, guint64 hard_limit,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactPhysicalQuotaStatus * out_status);
+void wyl_client_fact_physical_quota_status_clear
+  (WylClientFactPhysicalQuotaStatus * status);
 wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     const gchar * tenant,
     const gchar * graph,

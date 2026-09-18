@@ -7539,6 +7539,8 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       dimension = WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS;
     else if (g_strcmp0 (dimension_arg, "logical_bytes") == 0)
       logical_bytes_dimension = TRUE;
+    else if (g_strcmp0 (dimension_arg, "physical_bytes") == 0)
+      dimension = WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES;
     else {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
@@ -7678,7 +7680,8 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
     WylPolicyFactQuotaConfig config = { .has_limit = TRUE };
     if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT
         || dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT
-        || dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
+        || dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS
+        || dimension == WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES) {
       const gchar *limit_arg = query != NULL
           ? g_hash_table_lookup (query, "limit") : NULL;
       gint64 limit = -1;
@@ -7737,6 +7740,7 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
   WylPolicyGraphQuotaStatus graph_status = { 0 };
   WylPolicyFactSchemaQuotaStatus schema_status = { 0 };
   WylPolicyFactConcurrentOpenQuotaStatus concurrent_status = { 0 };
+  WylPolicyFactPhysicalQuotaStatus physical_status = { 0 };
   if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
     rc = wyl_policy_store_get_graph_quota_status
           (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
@@ -7755,6 +7759,12 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
             auth_tenant, &concurrent_status);
     config.has_limit = concurrent_status.has_limit;
     config.hard_limit = concurrent_status.hard_limit;
+  } else if (dimension == WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES) {
+    rc = wyl_policy_store_get_fact_physical_quota_status
+          (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
+            auth_tenant, &physical_status);
+    config.has_limit = physical_status.has_limit;
+    config.hard_limit = physical_status.hard_limit;
   } else {
     rc = wyl_policy_store_get_fact_quota_config
           (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
@@ -7799,6 +7809,20 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
         concurrent_status.pending, concurrent_status.active,
         concurrent_status.acquiring, concurrent_status.cleanup_pending,
         concurrent_status.charged);
+  } else if (dimension == WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES) {
+    g_string_append (body,
+        ",\"dimension\":\"physical_bytes\",\"limit\":");
+    if (config.has_limit)
+      g_string_append_printf (body, "%" G_GUINT64_FORMAT,
+          config.hard_limit);
+    else
+      g_string_append (body, "null");
+    g_string_append_printf (body,
+        ",\"committed_bytes\":%" G_GUINT64_FORMAT
+        ",\"pending_bytes\":%" G_GUINT64_FORMAT
+        ",\"reconciling_bytes\":%" G_GUINT64_FORMAT "}",
+        physical_status.committed_bytes, physical_status.pending_bytes,
+        physical_status.reconciling_bytes);
   } else {
     const gchar *name = dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT
         ? "schema_count" : "graph_count";
