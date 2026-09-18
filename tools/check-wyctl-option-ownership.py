@@ -29,7 +29,8 @@ EXPECTED_FIELDS = {
          "columns_arg", "max_rows_arg", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlFactQuotaOptions":
-        ("tenant", "dimension", "limit_arg", "rate_per_second_arg",
+        ("tenant", "dimension", "limit_arg", "row_limit_arg",
+         "rate_per_second_arg",
          "burst_arg", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
     "WyctlFactPutOptions":
@@ -93,7 +94,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 163
+EXPECTED_STRING_DESTINATIONS = 164
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

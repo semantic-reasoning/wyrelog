@@ -814,8 +814,8 @@ def validate_owner_inventory(defs):
         found={owner for owner in all_owner_tokens if owner in values}
         if found != set(expected):
             raise GuardError(f"daemon WRITE owner placement mismatch: {name}")
-        for owner in expected:
-            if values.count(owner) != 1:
+        for owner in set(expected):
+            if values.count(owner) != expected.count(owner):
                 raise GuardError(f"daemon WRITE owner id mismatch: {name}:{owner}")
 
 def validate_active_owner_inventory(defs, fact_store_enabled):
@@ -836,8 +836,8 @@ def validate_active_owner_inventory(defs, fact_store_enabled):
         found={owner for owner in all_owner_tokens if owner in values}
         if found != set(owners):
             raise GuardError(f"active daemon WRITE owner placement mismatch: {name}")
-        for owner in owners:
-            if values.count(owner)!=1:
+        for owner in set(owners):
+            if values.count(owner)!=owners.count(owner):
                 raise GuardError(f"active daemon WRITE owner id mismatch: {name}:{owner}")
 
     for name in sorted(TEST_ONLY_OWNER_FUNCTIONS):
