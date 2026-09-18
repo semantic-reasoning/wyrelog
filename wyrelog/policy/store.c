@@ -867,6 +867,9 @@ static const gchar *const required_tables[] = {
   "fact_tenant_write_rate_state",
   "fact_tenant_logical_quota_usage",
   "fact_logical_quota_operations",
+  "fact_tenant_physical_quota_limits",
+  "fact_tenant_physical_quota_usage",
+  "fact_physical_quota_reservations",
   "fact_graph_create_reservations",
   "fact_namespaces",
   "fact_relation_schemas",
@@ -11861,6 +11864,112 @@ validate_graph_authority_schema (sqlite3 *db)
     if (rc != WYRELOG_E_OK)
       return rc;
   }
+  {
+    sqlite3_stmt *physical_presence = NULL;
+    if (sqlite3_prepare_v2 (db,
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
+        "name IN ('fact_tenant_physical_quota_limits',"
+        "'fact_tenant_physical_quota_usage','fact_physical_quota_reservations');",
+        -1, &physical_presence, NULL) != SQLITE_OK)
+      return WYRELOG_E_IO;
+    int presence_step = sqlite3_step (physical_presence);
+    int physical_table_count = presence_step == SQLITE_ROW
+        ? sqlite3_column_int (physical_presence, 0) : -1;
+    sqlite3_finalize (physical_presence);
+    /* Older stores are allowed to reach the additive DDL path first. Once
+     * any physical-quota table exists, however, validate the whole set so a
+     * same-name malformed legacy object cannot be silently accepted. */
+    if (presence_step != SQLITE_ROW)
+      return WYRELOG_E_IO;
+    if (physical_table_count == 0)
+      return validate_graph_authority_rows (db);
+    if (physical_table_count != 3)
+      return WYRELOG_E_POLICY;
+    static const WylGraphAuthorityColumn physical_columns[] = {
+      {"fact_tenant_physical_quota_limits", "tenant_id", "TEXT", FALSE,
+       NULL, NULL, NULL},
+      {"fact_tenant_physical_quota_limits", "hard_limit", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_tenant_physical_quota_usage", "tenant_id", "TEXT", FALSE,
+       NULL, NULL, NULL},
+      {"fact_tenant_physical_quota_usage", "committed_bytes", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_tenant_physical_quota_usage", "pending_bytes", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_tenant_physical_quota_usage", "reconciling_bytes", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_physical_quota_reservations", "request_id", "TEXT", FALSE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_reservations", "tenant_id", "TEXT", TRUE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_reservations", "graph_id", "TEXT", TRUE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_reservations", "inventory_generation", "TEXT", TRUE,
+       NULL, NULL, NULL},
+      {"fact_physical_quota_reservations", "inventory_digest", "TEXT", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_physical_quota_reservations", "requested_bytes", "INTEGER", TRUE,
+       NULL, "CHECK", NULL},
+      {"fact_physical_quota_reservations", "applied_bytes", "INTEGER", TRUE,
+       "0", "CHECK", NULL},
+      {"fact_physical_quota_reservations", "state", "TEXT", TRUE,
+       NULL, "CHECK", NULL},
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS (physical_columns); i++) {
+      gboolean exists = FALSE, matches = FALSE;
+      wyrelog_error_t rc = graph_authority_column_status (db,
+              &physical_columns[i], &exists, &matches);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (!exists || !matches)
+        return WYRELOG_E_POLICY;
+    }
+    static const gchar *const physical_objects[] = {
+      "fact_tenant_physical_quota_limits",
+      "fact_tenant_physical_quota_usage",
+      "fact_physical_quota_reservations",
+      "idx_fact_physical_quota_reservations_state",
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS (physical_objects); i++) {
+      sqlite3_stmt *stmt = NULL;
+      if (sqlite3_prepare_v2 (db,
+          "SELECT 1 FROM sqlite_master WHERE name=? LIMIT 1;", -1,
+          &stmt, NULL) != SQLITE_OK)
+        return WYRELOG_E_IO;
+      wyrelog_error_t rc = bind_text (stmt, 1, physical_objects[i]);
+      int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+      sqlite3_finalize (stmt);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (step != SQLITE_ROW)
+        return step == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+    static const gchar *const invalid_rows[] = {
+      "SELECT 1 FROM fact_tenant_physical_quota_limits WHERE "
+      "typeof(hard_limit)!='integer' OR hard_limit<0 LIMIT 1;",
+      "SELECT 1 FROM fact_tenant_physical_quota_usage WHERE "
+      "typeof(committed_bytes)!='integer' OR committed_bytes<0 OR "
+      "typeof(pending_bytes)!='integer' OR pending_bytes<0 OR "
+      "typeof(reconciling_bytes)!='integer' OR reconciling_bytes<0 LIMIT 1;",
+      "SELECT 1 FROM fact_physical_quota_reservations WHERE "
+      "typeof(requested_bytes)!='integer' OR requested_bytes<0 OR "
+      "typeof(applied_bytes)!='integer' OR applied_bytes<0 OR "
+      "state NOT IN ('pending','reconciling','settled','cancelled') LIMIT 1;",
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS (invalid_rows); i++) {
+      sqlite3_stmt *stmt = NULL;
+      if (sqlite3_prepare_v2 (db, invalid_rows[i], -1, &stmt, NULL) !=
+          SQLITE_OK)
+        return WYRELOG_E_IO;
+      int step = sqlite3_step (stmt);
+      gboolean invalid = step == SQLITE_ROW;
+      sqlite3_finalize (stmt);
+      if (step != SQLITE_ROW && step != SQLITE_DONE)
+        return WYRELOG_E_IO;
+      if (invalid)
+        return WYRELOG_E_POLICY;
+    }
+  }
   return validate_graph_authority_rows (db);
 }
 
@@ -12491,7 +12600,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  updated_at INTEGER NOT NULL,"
       "  sealed_at INTEGER,"
       "  PRIMARY KEY (tenant_id, graph_id),"
-      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs "
+      "    (tenant_id, graph_id)"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_fact_graphs_tenant "
       "  ON fact_graphs (tenant_id);"
@@ -12565,6 +12675,46 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       ");"
       "CREATE INDEX IF NOT EXISTS idx_fact_logical_quota_operations_state "
       "  ON fact_logical_quota_operations (tenant_id, state);"
+      "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_limits ("
+      "  tenant_id TEXT PRIMARY KEY,"
+      "  hard_limit INTEGER NOT NULL CHECK ("
+      "    typeof(hard_limit) = 'integer' AND hard_limit >= 0),"
+      "  updated_at INTEGER NOT NULL,"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_usage ("
+      "  tenant_id TEXT PRIMARY KEY,"
+      "  committed_bytes INTEGER NOT NULL CHECK ("
+      "    typeof(committed_bytes) = 'integer' AND committed_bytes >= 0),"
+      "  pending_bytes INTEGER NOT NULL CHECK ("
+      "    typeof(pending_bytes) = 'integer' AND pending_bytes >= 0),"
+      "  reconciling_bytes INTEGER NOT NULL CHECK ("
+      "    typeof(reconciling_bytes) = 'integer' AND reconciling_bytes >= 0),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations ("
+      "  request_id TEXT PRIMARY KEY,"
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  inventory_generation TEXT NOT NULL,"
+      "  inventory_digest TEXT NOT NULL CHECK ("
+      "    typeof(inventory_digest) = 'text' AND length(inventory_digest) = 64 AND "
+      "    inventory_digest = lower(inventory_digest) AND "
+      "    inventory_digest NOT GLOB '*[^0-9a-f]*'),"
+      "  requested_bytes INTEGER NOT NULL CHECK ("
+      "    typeof(requested_bytes) = 'integer' AND requested_bytes >= 0),"
+      "  applied_bytes INTEGER NOT NULL DEFAULT 0 CHECK ("
+      "    typeof(applied_bytes) = 'integer' AND applied_bytes >= 0),"
+      "  state TEXT NOT NULL CHECK (state IN "
+      "    ('pending', 'reconciling', 'settled', 'cancelled')),"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  UNIQUE (tenant_id, graph_id, request_id, inventory_generation, inventory_digest),"
+      "  FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs "
+      "    (tenant_id, graph_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state "
+      "  ON fact_physical_quota_reservations (tenant_id, state);"
       "CREATE TABLE IF NOT EXISTS fact_open_owners ("
       "  owner_incarnation TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL CHECK (state IN ('active', 'retired')),"
@@ -14690,6 +14840,12 @@ wyl_policy_store_admit_fact_write_rate (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t fact_schema_quota_commit (wyl_policy_store_t *store);
+static wyrelog_error_t fact_physical_quota_usage_ensure
+  (wyl_policy_store_t *store, const gchar *tenant_id);
+static wyrelog_error_t fact_physical_quota_usage_load
+  (wyl_policy_store_t *store, const gchar *tenant_id, guint64 *out_committed,
+    guint64 *out_pending, guint64 *out_reconciling);
+static wyrelog_error_t fact_physical_quota_commit (wyl_policy_store_t *store);
 
 wyrelog_error_t
 wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
@@ -14718,6 +14874,47 @@ wyl_policy_store_set_fact_quota_config (wyl_policy_store_t *store,
       return WYRELOG_E_INVALID;
     return wyl_policy_store_set_fact_concurrent_open_quota (store, tenant_id,
                config->hard_limit);
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES) {
+    if (!config->has_limit || config->hard_limit > G_MAXINT64)
+      return WYRELOG_E_INVALID;
+    wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    gboolean exists = FALSE;
+    rc = wyl_policy_store_tenant_exists (store, tenant_id, &exists);
+    guint64 committed = 0, pending = 0, reconciling = 0;
+    if (rc == WYRELOG_E_OK && !exists)
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_ensure (store, tenant_id);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_load (store, tenant_id, &committed,
+              &pending, &reconciling);
+    if (rc == WYRELOG_E_OK
+        && (committed > G_MAXUINT64 - pending
+        || committed + pending > G_MAXUINT64 - reconciling
+        || committed + pending + reconciling > config->hard_limit))
+      rc = WYRELOG_E_CONFLICT;
+    sqlite3_stmt *stmt = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = prepare_stmt (store->db,
+              "INSERT INTO fact_tenant_physical_quota_limits "
+              "(tenant_id,hard_limit,updated_at) VALUES (?,?,unixepoch()) "
+              "ON CONFLICT(tenant_id) DO UPDATE SET hard_limit=excluded.hard_limit,"
+              "updated_at=excluded.updated_at;", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, tenant_id);
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2,
+        (sqlite3_int64) config->hard_limit) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_commit (store);
+    if (rc != WYRELOG_E_OK)
+      wyl_policy_store_rollback_mutation (store);
+    return rc;
   }
   if (dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT) {
     if (!config->has_limit || config->hard_limit > G_MAXINT64)
@@ -15453,6 +15650,541 @@ wyl_policy_store_cancel_fact_logical_quota (wyl_policy_store_t *store,
   return rc;
 }
 
+static gboolean
+fact_physical_quota_operation_is_valid
+  (const WylPolicyFactPhysicalQuotaOperation *operation)
+{
+  return operation != NULL
+         && operation->tenant_id != NULL
+         && wyl_policy_store_tenant_id_is_valid (operation->tenant_id)
+         && operation->graph_id != NULL && operation->graph_id[0] != '\0'
+         && operation->request_id != NULL && operation->request_id[0] != '\0'
+         && operation->inventory_generation != NULL
+         && operation->inventory_generation[0] != '\0'
+         && fact_logical_quota_hex_digest_is_valid (operation->inventory_digest);
+}
+
+static WylPolicyFactPhysicalOperationState
+fact_physical_quota_operation_state (const gchar *state)
+{
+  if (g_strcmp0 (state, "settled") == 0)
+    return WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED;
+  if (g_strcmp0 (state, "reconciling") == 0)
+    return WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING;
+  if (g_strcmp0 (state, "cancelled") == 0)
+    return WYL_POLICY_FACT_PHYSICAL_OPERATION_CANCELLED;
+  if (g_strcmp0 (state, "pending") == 0)
+    return WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING;
+  return WYL_POLICY_FACT_PHYSICAL_OPERATION_INVALID;
+}
+
+static wyrelog_error_t
+fact_physical_quota_usage_ensure (wyl_policy_store_t *store,
+    const gchar *tenant_id)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "INSERT INTO fact_tenant_physical_quota_usage "
+          "(tenant_id,committed_bytes,pending_bytes,reconciling_bytes) "
+          "VALUES (?,0,0,0) ON CONFLICT(tenant_id) DO NOTHING;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_physical_quota_usage_load (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint64 *out_committed, guint64 *out_pending,
+    guint64 *out_reconciling)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT committed_bytes,pending_bytes,reconciling_bytes "
+          "FROM fact_tenant_physical_quota_usage WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    sqlite3_int64 committed = sqlite3_column_int64 (stmt, 0);
+    sqlite3_int64 pending = sqlite3_column_int64 (stmt, 1);
+    sqlite3_int64 reconciling = sqlite3_column_int64 (stmt, 2);
+    if (sqlite3_column_type (stmt, 0) != SQLITE_INTEGER || committed < 0
+        || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER || pending < 0
+        || sqlite3_column_type (stmt, 2) != SQLITE_INTEGER || reconciling < 0)
+      rc = WYRELOG_E_IO;
+    else {
+      *out_committed = (guint64) committed;
+      *out_pending = (guint64) pending;
+      *out_reconciling = (guint64) reconciling;
+    }
+  } else if (rc == WYRELOG_E_OK)
+    rc = step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_physical_quota_usage_update (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint64 committed, guint64 pending,
+    guint64 reconciling)
+{
+  if (committed > G_MAXINT64 || pending > G_MAXINT64
+      || reconciling > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "UPDATE fact_tenant_physical_quota_usage SET committed_bytes=?,"
+          "pending_bytes=?,reconciling_bytes=? WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) committed) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 2, (sqlite3_int64) pending) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 3, (sqlite3_int64) reconciling)
+      != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, tenant_id);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_physical_quota_limit_load (wyl_policy_store_t *store,
+    const gchar *tenant_id, gboolean *out_has_limit, guint64 *out_limit)
+{
+  sqlite3_stmt *stmt = NULL;
+  *out_has_limit = FALSE;
+  *out_limit = 0;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT hard_limit FROM fact_tenant_physical_quota_limits "
+          "WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    sqlite3_int64 limit = sqlite3_column_int64 (stmt, 0);
+    if (sqlite3_column_type (stmt, 0) != SQLITE_INTEGER || limit < 0)
+      rc = WYRELOG_E_IO;
+    else {
+      *out_has_limit = TRUE;
+      *out_limit = (guint64) limit;
+    }
+  } else if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_physical_quota_operation_load (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    WylPolicyFactPhysicalOperationStatus *out_status, gboolean *out_found,
+    gboolean *out_matches)
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  if (out_matches != NULL)
+    *out_matches = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT tenant_id,graph_id,inventory_generation,inventory_digest,"
+          "requested_bytes,applied_bytes,state FROM fact_physical_quota_reservations "
+          "WHERE request_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, operation->request_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    if (out_found != NULL)
+      *out_found = TRUE;
+    const gchar *tenant = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *graph = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *generation = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *digest = (const gchar *) sqlite3_column_text (stmt, 3);
+    if (out_matches != NULL)
+      *out_matches = g_strcmp0 (tenant, operation->tenant_id) == 0
+          && g_strcmp0 (graph, operation->graph_id) == 0
+          && g_strcmp0 (generation, operation->inventory_generation) == 0
+          && g_strcmp0 (digest, operation->inventory_digest) == 0;
+    if (out_status != NULL) {
+      sqlite3_int64 requested = sqlite3_column_int64 (stmt, 4);
+      sqlite3_int64 applied = sqlite3_column_int64 (stmt, 5);
+      if (sqlite3_column_type (stmt, 4) != SQLITE_INTEGER || requested < 0
+          || sqlite3_column_type (stmt, 5) != SQLITE_INTEGER || applied < 0)
+        rc = WYRELOG_E_IO;
+      else {
+        out_status->requested_bytes = (guint64) requested;
+        out_status->applied_bytes = (guint64) applied;
+      }
+      out_status->state = fact_physical_quota_operation_state
+            ((const gchar *) sqlite3_column_text (stmt, 6));
+    }
+  } else if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+fact_physical_quota_commit (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    policy_store_make_terminal (store, rc);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_fact_physical_quota_status (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactPhysicalQuotaStatus *out_status)
+{
+  if (out_status == NULL || store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  *out_status = (WylPolicyFactPhysicalQuotaStatus) { 0 };
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_tenant_exists (store, tenant_id,
+          &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_NOT_FOUND;
+  rc = fact_physical_quota_limit_load (store, tenant_id,
+          &out_status->has_limit, &out_status->hard_limit);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_usage_load (store, tenant_id,
+            &out_status->committed_bytes, &out_status->pending_bytes,
+            &out_status->reconciling_bytes);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    out_status->committed_bytes = 0;
+    out_status->pending_bytes = 0;
+    out_status->reconciling_bytes = 0;
+    rc = WYRELOG_E_OK;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_fact_physical_quota (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    guint64 requested_bytes, WylPolicyFactPhysicalOperationStatus *out_status)
+{
+  if (out_status != NULL)
+    *out_status = (WylPolicyFactPhysicalOperationStatus) { 0 };
+  if (store == NULL || store->db == NULL
+      || !fact_physical_quota_operation_is_valid (operation))
+    return WYRELOG_E_INVALID;
+  if (requested_bytes > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  if (!sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyFactPhysicalOperationStatus current = { 0 };
+  gboolean found = FALSE, matches = FALSE;
+  rc = fact_physical_quota_operation_load (store, operation, &current,
+          &found, &matches);
+  if (rc == WYRELOG_E_OK && found && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_INVALID)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && found) {
+    if (!matches)
+      rc = WYRELOG_E_CONFLICT;
+    else if (current.requested_bytes != requested_bytes)
+      rc = WYRELOG_E_CONFLICT;
+    else {
+      current.replay = TRUE;
+      if (out_status != NULL)
+        *out_status = current;
+    }
+  }
+  if (rc == WYRELOG_E_OK && !found) {
+    guint64 committed = 0, pending = 0, reconciling = 0, total = 0;
+    gboolean has_limit = FALSE;
+    guint64 limit = 0;
+    rc = fact_physical_quota_usage_ensure (store, operation->tenant_id);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+              &committed, &pending, &reconciling);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_limit_load (store, operation->tenant_id,
+              &has_limit, &limit);
+    if (rc == WYRELOG_E_OK
+        && (committed > G_MAXUINT64 - pending
+        || committed + pending > G_MAXUINT64 - reconciling
+        || committed + pending + reconciling > G_MAXUINT64 - requested_bytes))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) {
+      total = committed + pending + reconciling + requested_bytes;
+      if (has_limit && total > limit)
+        rc = WYRELOG_E_POLICY;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = prepare_stmt (store->db,
+              "INSERT INTO fact_physical_quota_reservations "
+              "(request_id,tenant_id,graph_id,inventory_generation,inventory_digest,"
+              "requested_bytes,state,created_at,updated_at) VALUES (?,?,?,?,?,?,"
+              "'pending',unixepoch(),unixepoch());", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, operation->request_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, operation->tenant_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->graph_id);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, operation->inventory_generation);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, operation->inventory_digest);
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 6,
+        (sqlite3_int64) requested_bytes) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_update (store, operation->tenant_id,
+              committed, pending + requested_bytes, reconciling);
+    if (rc == WYRELOG_E_OK && out_status != NULL) {
+      out_status->state = WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING;
+      out_status->requested_bytes = requested_bytes;
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_commit (store);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_settle_fact_physical_quota (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    guint64 observed_bytes, gboolean stable_evidence,
+    WylPolicyFactPhysicalOperationStatus *out_status)
+{
+  if (out_status != NULL)
+    *out_status = (WylPolicyFactPhysicalOperationStatus) { 0 };
+  if (store == NULL || store->db == NULL
+      || !fact_physical_quota_operation_is_valid (operation))
+    return WYRELOG_E_INVALID;
+  if (observed_bytes > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  if (!sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyFactPhysicalOperationStatus current = { 0 };
+  gboolean found = FALSE, matches = FALSE;
+  rc = fact_physical_quota_operation_load (store, operation, &current,
+          &found, &matches);
+  if (rc == WYRELOG_E_OK && found && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_INVALID)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (!found || !matches))
+    rc = found ? WYRELOG_E_CONFLICT : WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING) {
+    guint64 committed = 0, pending = 0, reconciling = 0;
+    guint64 charge = observed_bytes > current.requested_bytes
+        ? observed_bytes : current.requested_bytes;
+    rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+            &committed, &pending, &reconciling);
+    if (rc == WYRELOG_E_OK && current.requested_bytes > pending)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && stable_evidence) {
+      if (committed > G_MAXUINT64 - observed_bytes)
+        rc = WYRELOG_E_IO;
+      else {
+        committed += observed_bytes;
+        pending -= current.requested_bytes;
+      }
+    } else if (rc == WYRELOG_E_OK) {
+      if (reconciling > G_MAXUINT64 - charge)
+        rc = WYRELOG_E_IO;
+      else {
+        reconciling += charge;
+        pending -= current.requested_bytes;
+        current.state = WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING;
+      }
+    }
+    if (rc == WYRELOG_E_OK && current.state !=
+        WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING)
+      current.state = WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED;
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_update (store, operation->tenant_id,
+              committed, pending, reconciling);
+    sqlite3_stmt *stmt = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = prepare_stmt (store->db,
+              "UPDATE fact_physical_quota_reservations SET applied_bytes=?,"
+              "state=?,updated_at=unixepoch() WHERE request_id=? AND state='pending';",
+              &stmt);
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 1,
+        (sqlite3_int64) (stable_evidence ? observed_bytes : charge)) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 2,
+        current.state == WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED
+          ? "settled" : "reconciling", -1, SQLITE_TRANSIENT) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->request_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    current.applied_bytes = stable_evidence ? observed_bytes : charge;
+    if (out_status != NULL)
+      *out_status = current;
+  } else if (rc == WYRELOG_E_OK && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING) {
+    guint64 committed = 0, pending = 0, reconciling = 0;
+    rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+            &committed, &pending, &reconciling);
+    if (rc == WYRELOG_E_OK && stable_evidence) {
+      if (current.applied_bytes > reconciling
+          || committed > G_MAXUINT64 - observed_bytes)
+        rc = WYRELOG_E_IO;
+      else {
+        reconciling -= current.applied_bytes;
+        committed += observed_bytes;
+        current.applied_bytes = observed_bytes;
+        current.state = WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED;
+      }
+    } else if (rc == WYRELOG_E_OK) {
+      guint64 charge = observed_bytes > current.applied_bytes
+          ? observed_bytes : current.applied_bytes;
+      if (charge > current.applied_bytes
+          && reconciling > G_MAXUINT64 - (charge - current.applied_bytes))
+        rc = WYRELOG_E_IO;
+      else if (charge > current.applied_bytes) {
+        reconciling += charge - current.applied_bytes;
+        current.applied_bytes = charge;
+      } else {
+        current.replay = TRUE;
+      }
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_update (store, operation->tenant_id,
+              committed, pending, reconciling);
+    sqlite3_stmt *stmt = NULL;
+    if (rc == WYRELOG_E_OK && !current.replay)
+      rc = prepare_stmt (store->db,
+              "UPDATE fact_physical_quota_reservations SET applied_bytes=?,"
+              "state=?,updated_at=unixepoch() WHERE request_id=? AND state='reconciling';",
+              &stmt);
+    if (rc == WYRELOG_E_OK && !current.replay
+        && sqlite3_bind_int64 (stmt, 1,
+        (sqlite3_int64) current.applied_bytes) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && !current.replay
+        && sqlite3_bind_text (stmt, 2,
+        current.state == WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED
+          ? "settled" : "reconciling", -1, SQLITE_TRANSIENT) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && !current.replay)
+      rc = bind_text (stmt, 3, operation->request_id);
+    if (rc == WYRELOG_E_OK && !current.replay
+        && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && out_status != NULL)
+      *out_status = current;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_CONFLICT;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_commit (store);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_cancel_fact_physical_quota (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    gboolean definite_noncommit,
+    WylPolicyFactPhysicalOperationStatus *out_status)
+{
+  if (out_status != NULL)
+    *out_status = (WylPolicyFactPhysicalOperationStatus) { 0 };
+  if (store == NULL || store->db == NULL
+      || !fact_physical_quota_operation_is_valid (operation))
+    return WYRELOG_E_INVALID;
+  if (!sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyFactPhysicalOperationStatus current = { 0 };
+  gboolean found = FALSE, matches = FALSE;
+  rc = fact_physical_quota_operation_load (store, operation, &current,
+          &found, &matches);
+  if (rc == WYRELOG_E_OK && found && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_INVALID)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (!found || !matches))
+    rc = found ? WYRELOG_E_CONFLICT : WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING) {
+    guint64 committed = 0, pending = 0, reconciling = 0;
+    rc = WYRELOG_E_OK;
+    if (!definite_noncommit)
+      current.state = WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING;
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_load (store, operation->tenant_id,
+              &committed, &pending, &reconciling);
+    if (rc == WYRELOG_E_OK && current.requested_bytes > pending)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) {
+      pending -= current.requested_bytes;
+      if (!definite_noncommit) {
+        if (reconciling > G_MAXUINT64 - current.requested_bytes)
+          rc = WYRELOG_E_IO;
+        else
+          reconciling += current.requested_bytes;
+      }
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = fact_physical_quota_usage_update (store, operation->tenant_id,
+              committed, pending, reconciling);
+    sqlite3_stmt *stmt = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = prepare_stmt (store->db,
+              "UPDATE fact_physical_quota_reservations SET state=?,"
+              "applied_bytes=?,updated_at=unixepoch() WHERE request_id=? AND state='pending';",
+              &stmt);
+    if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 1,
+        definite_noncommit ? "cancelled" : "reconciling", -1,
+        SQLITE_TRANSIENT) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2,
+        (sqlite3_int64) current.requested_bytes) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 3, operation->request_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK) {
+      current.state = definite_noncommit
+          ? WYL_POLICY_FACT_PHYSICAL_OPERATION_CANCELLED
+          : WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING;
+      if (out_status != NULL)
+        *out_status = current;
+    }
+  } else if (rc == WYRELOG_E_OK && current.state ==
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_CANCELLED) {
+    current.replay = TRUE;
+    if (out_status != NULL)
+      *out_status = current;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_CONFLICT;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = fact_physical_quota_commit (store);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_get_fact_quota_config (wyl_policy_store_t *store,
     const gchar *tenant_id, WylPolicyFactQuotaDimension dimension,
@@ -15496,6 +16228,16 @@ wyl_policy_store_get_fact_quota_config (wyl_policy_store_t *store,
     WylPolicyFactSchemaQuotaStatus status = { 0 };
     wyrelog_error_t rc = wyl_policy_store_get_fact_schema_quota_status (store,
             tenant_id, &status);
+    if (rc == WYRELOG_E_OK) {
+      out_config->has_limit = status.has_limit;
+      out_config->hard_limit = status.hard_limit;
+    }
+    return rc;
+  }
+  if (dimension == WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES) {
+    WylPolicyFactPhysicalQuotaStatus status = { 0 };
+    wyrelog_error_t rc = wyl_policy_store_get_fact_physical_quota_status
+          (store, tenant_id, &status);
     if (rc == WYRELOG_E_OK) {
       out_config->has_limit = status.has_limit;
       out_config->hard_limit = status.hard_limit;
