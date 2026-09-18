@@ -1801,6 +1801,35 @@ check_fact_store_persists_logical_bytes (void)
   const gint64 expected_bytes = 12;
   gint64 reported_bytes = -1;
 
+  guint64 estimated_bytes = 0;
+  if (wyl_fact_store_batch_logical_bytes (&schema, &batch, &estimated_bytes)
+      != WYRELOG_E_OK
+      || estimated_bytes != (guint64) expected_bytes)
+    return 3511;
+  wyl_fact_value_t empty_values[2] = { 0 };
+  empty_values[0].type = WYL_FACT_VALUE_STRING;
+  empty_values[0].as.text = "";
+  empty_values[1].type = WYL_FACT_VALUE_BOOL;
+  empty_values[1].as.bool_value = FALSE;
+  wyl_fact_row_t empty_rows[1] = { {empty_values, 2} };
+  wyl_fact_store_batch_t empty_batch = batch;
+  empty_batch.rows = empty_rows;
+  empty_batch.n_rows = 1;
+  estimated_bytes = G_MAXUINT64;
+  if (wyl_fact_store_batch_logical_bytes (&schema, &empty_batch,
+      &estimated_bytes) != WYRELOG_E_OK || estimated_bytes != 1)
+    return 3512;
+  wyl_fact_value_t null_values[2] = { 0 };
+  null_values[0].type = WYL_FACT_VALUE_NULL;
+  null_values[1] = values[1];
+  wyl_fact_row_t null_rows[1] = { {null_values, 2} };
+  wyl_fact_store_batch_t null_batch = batch;
+  null_batch.rows = null_rows;
+  estimated_bytes = G_MAXUINT64;
+  if (wyl_fact_store_batch_logical_bytes (&schema, &null_batch,
+      &estimated_bytes) != WYRELOG_E_INVALID || estimated_bytes != 0)
+    return 3513;
+
   {
     g_autoptr (wyl_fact_store_t) store = NULL;
     if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
