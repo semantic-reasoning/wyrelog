@@ -77,6 +77,93 @@ check_store_creates_authority_schema (void)
 }
 
 static gint
+check_store_reads_fact_logical_operation_status (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 270;
+
+  const WylPolicyFactLogicalQuotaOperation operation = {
+    .tenant_id = "__wr_default",
+    .graph_id = "graph-status",
+    .batch_id = "batch-status",
+    .request_id = "request-status",
+    .payload_digest =
+        "0000000000000000000000000000000000000000000000000000000000000000",
+  };
+  WylPolicyFactLogicalOperationStatus status = { 0 };
+  if (wyl_policy_store_reserve_fact_logical_quota (store, &operation, 3, 12,
+      &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING
+      || status.requested_rows != 3 || status.requested_bytes != 12)
+    return 271;
+
+  status = (WylPolicyFactLogicalOperationStatus) { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &operation, &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING
+      || status.requested_rows != 3 || status.requested_bytes != 12)
+    return 272;
+
+  WylPolicyFactLogicalQuotaOperation wrong_identity = operation;
+  wrong_identity.graph_id = "other-graph";
+  status = (WylPolicyFactLogicalOperationStatus) {
+    .state = WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED,
+    .requested_rows = 99,
+    .requested_bytes = 99,
+  };
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &wrong_identity, &status) != WYRELOG_E_CONFLICT
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING
+      || status.requested_rows != 0 || status.requested_bytes != 0)
+    return 273;
+
+  if (wyl_policy_store_settle_fact_logical_quota (store, &operation, 3, -1,
+      &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING)
+    return 274;
+  status = (WylPolicyFactLogicalOperationStatus) { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &operation, &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING
+      || status.applied_rows != 3 || status.applied_bytes != -1)
+    return 275;
+
+  if (wyl_policy_store_settle_fact_logical_quota (store, &operation, 3, 12,
+      &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED)
+    return 276;
+  status = (WylPolicyFactLogicalOperationStatus) { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &operation, &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED
+      || status.applied_rows != 3 || status.applied_bytes != 12)
+    return 277;
+
+  WylPolicyFactLogicalQuotaOperation cancelled = operation;
+  cancelled.request_id = "request-cancelled";
+  if (wyl_policy_store_reserve_fact_logical_quota (store, &cancelled, 1, 4,
+      &status) != WYRELOG_E_OK
+      || wyl_policy_store_cancel_fact_logical_quota (store, &cancelled, TRUE,
+      &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+    return 278;
+  status = (WylPolicyFactLogicalOperationStatus) { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &cancelled, &status) != WYRELOG_E_OK
+      || status.state != WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+    return 279;
+
+  WylPolicyFactLogicalQuotaOperation unknown = operation;
+  unknown.request_id = "request-unknown";
+  if (wyl_policy_store_get_fact_logical_quota_operation_status (store,
+      &unknown, &status) != WYRELOG_E_NOT_FOUND)
+    return 280;
+  return 0;
+}
+
+static gint
 check_template_schema_creates_state_tables (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -6731,6 +6818,8 @@ main (void)
   gint rc;
 
   if ((rc = check_store_creates_authority_schema ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_store_reads_fact_logical_operation_status ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_template_schema_creates_state_tables ()) != 0)
     return wyl_test_normalize_exit_status (rc);

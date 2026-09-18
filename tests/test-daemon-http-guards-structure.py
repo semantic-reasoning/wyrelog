@@ -353,7 +353,7 @@ if "service_token_exchange_prepare (ctx, credential_id,\n          credential_se
     fail("service-token exchange must use the wiping secret owner")
 
 for forbidden in (
-    "/operation-status",
+    "/service-credential-operations/operation-status",
     "/service-credential-operations/status",
 ):
     if forbidden in source:

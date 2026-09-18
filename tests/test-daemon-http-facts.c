@@ -2026,6 +2026,49 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (rc != 0 || status != 200)
     return 279;
 
+  /* #1093: operation status is authenticated and requires the complete
+   * durable identity, so a reused operation id cannot disclose another
+   * operation. */
+  const WylPolicyFactLogicalQuotaOperation status_operation = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .batch_id = "status-batch",
+    .request_id = "status-operation",
+    .payload_digest =
+        "0000000000000000000000000000000000000000000000000000000000000000",
+  };
+  WylPolicyFactLogicalOperationStatus status_operation_state = { 0 };
+  if (wyl_policy_store_reserve_fact_logical_quota (store,
+      &status_operation, 3, 12, &status_operation_state) != WYRELOG_E_OK)
+    return 280;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *operation_status_query = g_strdup_printf (
+    "tenant=%s&graph=orders&batch_id=status-batch&"
+    "operation_id=status-operation&payload_digest=%s&%s",
+    WYL_TENANT_DEFAULT, status_operation.payload_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", operation_status_query, admin_token,
+          NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"state\":\"pending\"") == NULL
+      || strstr (body, "\"requested_rows\":3") == NULL
+      || strstr (body, "\"requested_bytes\":12") == NULL)
+    return 281;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *operation_conflict_query = g_strdup_printf (
+    "tenant=%s&graph=other&batch_id=status-batch&"
+    "operation_id=status-operation&payload_digest=%s&%s",
+    WYL_TENANT_DEFAULT, status_operation.payload_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", operation_conflict_query, admin_token,
+          NULL, &status, &body);
+  if (rc != 0 || status != 409
+      || strstr (body, "\"error\":\"fact_quota_operation_conflict\"") == NULL)
+    return 282;
+  if (wyl_policy_store_cancel_fact_logical_quota (store, &status_operation,
+      TRUE, &status_operation_state) != WYRELOG_E_OK)
+    return 283;
+
   /* The same conflict remains typed after the relation contains facts. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *evolution_with_facts_query = g_strdup_printf

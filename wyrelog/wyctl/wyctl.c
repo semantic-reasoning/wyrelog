@@ -2104,9 +2104,18 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
           guard_timestamp, opts.guard_loc_class, guard_risk, &result);
   int exit_rc = fact_remote_exit (client, action, rc,
           retract ? "fact_retract_failed" : "fact_append_failed");
-  if (exit_rc == 0)
-    g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
-        "inserted" : "duplicate");
+  if (exit_rc == 0) {
+    if (wyl_client_fact_append_result_get_reconcile (result)) {
+      g_print ("committed-reconciling operation_id=%s batch_id=%s\n",
+          wyl_client_fact_append_result_get_operation_id (result) != NULL
+              ? wyl_client_fact_append_result_get_operation_id (result) : "",
+          wyl_client_fact_append_result_get_batch_id (result) != NULL
+              ? wyl_client_fact_append_result_get_batch_id (result) : "");
+    } else {
+      g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
+          "inserted" : "duplicate");
+    }
+  }
   return exit_rc;
 }
 
