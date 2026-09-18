@@ -57,7 +57,7 @@ EXPECTED_TOP_LEVEL_KEYS = {
 EXPECTED_JOB_KEYS = {
     "format": ("name", "runs-on", "timeout-minutes", "steps"),
     "build-posix": (
-        "name", "runs-on", "timeout-minutes", "env", "strategy", "steps"
+        "name", "runs-on", "env", "strategy", "steps"
     ),
     "duckdb-linux-link-closure": (
         "name", "runs-on", "timeout-minutes", "strategy", "steps"
