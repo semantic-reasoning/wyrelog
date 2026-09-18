@@ -81,6 +81,8 @@
  * granted.  set_json_error() consumes it to map the abandoned request onto the
  * correct terminal disposition. */
 #define WYL_DAEMON_POLICY_WRITE_CANCEL_DATA "wyl-daemon-policy-write-cancel"
+#define WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_RETRIES 8u
+#define WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_DELAY_US 1000u
 
 /*
  * Stable HTTP wire-format error codes for the tenant gate. They are
@@ -13154,6 +13156,29 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+static void
+set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
+    const wyl_fact_mutation_outcome_t *outcome)
+{
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 202,
+      "fact_quota_reconciling") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  attach_request_id_header (msg);
+  g_autoptr (GString) body = g_string_new
+        ("{\"ok\":true,\"committed\":true,\"reconcile\":true,"
+          "\"quota_state\":\"reconciling\",\"batch_id\":");
+  append_json_string (body, batch_id);
+  g_string_append_printf (body,
+      ",\"committed_row_delta\":%" G_GINT64_FORMAT
+      ",\"logical_byte_delta\":%" G_GINT64_FORMAT "}",
+      outcome->delta.committed_row_delta, outcome->delta.logical_byte_delta);
+  soup_server_message_set_status (msg, 202, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
 /* Forget's committed-vs-degraded response (issue #547), mirroring
  * set_fact_op_json.  The hard delete is durably committed once the store
  * returns; a post-commit refresh failure is committed-but-degraded, reported
@@ -13641,6 +13666,54 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .rows = rows,
     .n_rows = n_rows,
   };
+  g_autofree gchar *payload_digest =
+      wyl_fact_store_batch_content_hash (&schema, &batch);
+  guint64 requested_bytes = 0;
+  if (payload_digest == NULL
+      || wyl_fact_store_batch_logical_bytes (&schema, &batch,
+      &requested_bytes) != WYRELOG_E_OK) {
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  const WylPolicyFactLogicalQuotaOperation logical_quota_operation = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .batch_id = batch_id,
+    .request_id = idempotency_key,
+    .payload_digest = payload_digest,
+  };
+  WylPolicyFactLogicalOperationStatus logical_quota_status = { 0 };
+  rc = wyl_policy_store_reserve_fact_logical_quota (write.store,
+          &logical_quota_operation, n_rows, requested_bytes,
+          &logical_quota_status);
+  if (rc != WYRELOG_E_OK) {
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    set_json_error (msg, rc == WYRELOG_E_POLICY ? 429 :
+        (rc == WYRELOG_E_CONFLICT ? 409 : 500),
+        rc == WYRELOG_E_POLICY ? "fact_quota_exceeded" :
+        (rc == WYRELOG_E_CONFLICT ? "fact_batch_conflict" :
+        "fact_quota_admission_failed"));
+    return;
+  }
+  gboolean logical_quota_pending = logical_quota_status.state ==
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING;
+
+  g_autoptr (wyl_fact_store_t) fact_store = NULL;
+  rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_policy_write_observe_cleanup_resource (&write,
+        WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_create_schema (fact_store);
+  gboolean inserted = FALSE;
+  const gchar *request_id = ensure_request_id_header (msg);
   wyl_fact_mutation_outcome_t outcome;
   wyl_fact_mutation_outcome_init (&outcome);
   /* One internal entry point owns commit-then-refresh ordering and consumes
@@ -13649,6 +13722,28 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     rc = wyl_handle_commit_fact_mutation (ctx->handle, &fact_store, &schema,
             &batch, &lookup.info, &inserted, &outcome);
   g_clear_pointer (&fact_store, wyl_fact_store_close);
+  wyrelog_error_t logical_quota_settle_rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyFactLogicalOperationStatus settled = { 0 };
+    for (guint attempt = 0;
+        attempt <= WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_RETRIES; attempt++) {
+      logical_quota_settle_rc = wyl_policy_store_settle_fact_logical_quota
+            (write.store, &logical_quota_operation,
+              (guint64) MAX (outcome.delta.committed_row_delta, 0),
+              outcome.delta.logical_byte_delta, &settled);
+      if (logical_quota_settle_rc != WYRELOG_E_BUSY
+          || attempt == WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_RETRIES)
+        break;
+      g_usleep (WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_DELAY_US <<
+          MIN (attempt, 6u));
+    }
+  } else if (logical_quota_pending) {
+    WylPolicyFactLogicalOperationStatus cancelled = { 0 };
+    wyrelog_error_t cancel_rc = wyl_policy_store_cancel_fact_logical_quota
+          (write.store, &logical_quota_operation, TRUE, &cancelled);
+    if (cancel_rc != WYRELOG_E_OK)
+      logical_quota_settle_rc = cancel_rc;
+  }
   /* Issue #546: the audit result is kept SEPARATE from the commit result.
    * Folding it into |rc| let a durably committed batch be reported as a 409
    * conflict, a 400 invalid payload, or a 500 append failure, depending on
@@ -13683,6 +13778,10 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, fail_code);
+    return;
+  }
+  if (logical_quota_settle_rc != WYRELOG_E_OK) {
+    set_fact_quota_reconciling_json (msg, batch_id, &outcome);
     return;
   }
   if (audit_rc != WYRELOG_E_OK) {

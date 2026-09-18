@@ -63,6 +63,11 @@ typedef struct
 wyrelog_error_t wyl_fact_store_batch_logical_bytes
   (const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch, guint64 *out_bytes);
+/* Return the canonical payload digest used for idempotency and logical-quota
+ * operation identity.  The caller owns the returned string. */
+gchar *wyl_fact_store_batch_content_hash
+  (const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch);
 
 wyrelog_error_t wyl_fact_store_open (const gchar * path,
     wyl_fact_store_t ** out_store);
