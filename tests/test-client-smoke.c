@@ -1148,6 +1148,36 @@ main (void)
     return wyl_test_normalize_exit_status (285);
   http.oversized_chunked_response = FALSE;
 
+  WylClientFactGraphVerification verification = { 0 };
+  http.body = "{\"ok\":true,\"verified\":true,"
+      "\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\"}";
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",
+      123, "public", 49, &verification) != WYRELOG_E_OK
+      || !verification.verified
+      || g_strcmp0 (verification.tenant_id, "__wr_default") != 0
+      || g_strcmp0 (verification.graph_id, "orders") != 0
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/facts/verify") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
+    return wyl_test_normalize_exit_status (289);
+  wyl_client_fact_graph_verification_clear (&verification);
+  http.status = 404;
+  http.body = "{\"error\":\"graph_not_found\"}";
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",
+      123, "public", 49, &verification) != WYRELOG_E_NOT_FOUND
+      || verification.tenant_id != NULL || verification.graph_id != NULL
+      || verification.verified)
+    return wyl_test_normalize_exit_status (290);
+  http.status = 503;
+  http.body = "{\"error\":\"fact_graph_verification_unavailable\"}";
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",
+      123, "public", 49, &verification) != WYRELOG_E_BUSY
+      || verification.tenant_id != NULL || verification.graph_id != NULL
+      || verification.verified)
+    return wyl_test_normalize_exit_status (291);
+  http.status = 0;
+
   /* #1096: the schema-count quota client must keep its typed contract
    * distinct from graph-count and write-rate quotas. */
   WylClientFactSchemaQuotaStatus schema_quota = { 0 };
