@@ -264,6 +264,10 @@ wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
 wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_handle_reconcile_fact_graph (WylHandle * self,
+    WylServiceAuthWriteLease *write_lease,
+    const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
+    WylFactGraphReconcileOutcome *out_outcome);
 /* Activate one graph through the handle's replay coordinator. The caller
  * supplies a daemon policy write lease; the wrapper verifies that its pinned
  * store is this handle's current store before changing lifecycle state. */
