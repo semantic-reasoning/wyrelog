@@ -1128,11 +1128,11 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 38;
+  const guint expected_exact = 34;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 37;
   const guint expected_exact = 33;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 36;
-  const guint expected_exact = 32;
 #elif defined(WYL_HAS_AUDIT)
   const guint expected_total = 34;
   const guint expected_exact = 30;
@@ -1174,7 +1174,16 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/policy/roles/grant",
     "/policy/roles/revoke",
     "/audit/events",
+    /*
+     * Feature-gated paths stay at the tail: check_exact_route_shape's
+     * error base is 2281 + index * 13, so an entry inserted mid-list
+     * would renumber every following route differently per build
+     * variant.  /facts/verify is registered only under
+     * WYL_HAS_FACT_STORE, so probing it in an audit-only build hits an
+     * unregistered path.
+     */
 #ifdef WYL_HAS_FACT_STORE
+    "/facts/verify",
     "/service-credential-operations",
     "/service-credential-operations/reconcile",
     "/service-credential-operations/recover",
