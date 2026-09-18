@@ -1232,6 +1232,33 @@ main (void)
     return wyl_test_normalize_exit_status (290);
   wyl_client_fact_schema_quota_status_clear (&schema_quota);
 
+  /* #1098: concurrent-open quota keeps all durable state counters typed. */
+  WylClientFactConcurrentOpenQuotaStatus concurrent_quota = { 0 };
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"concurrent_opens\",\"limit\":3,"
+      "\"pending\":1,\"active\":2,\"acquiring\":1,"
+      "\"cleanup_pending\":0,\"charged\":4}";
+  if (wyl_client_fact_concurrent_open_quota_status (management_client,
+      "__wr_default", 123, "public", 49, &concurrent_quota) != WYRELOG_E_OK
+      || !concurrent_quota.has_limit || concurrent_quota.hard_limit != 3
+      || concurrent_quota.pending != 1 || concurrent_quota.active != 2
+      || concurrent_quota.acquiring != 1 || concurrent_quota.charged != 4
+      || g_strcmp0 (http.last_dimension, "concurrent_opens") != 0
+      || g_strcmp0 (http.last_method, "GET") != 0)
+    return wyl_test_normalize_exit_status (292);
+  http.body = "{\"tenant_id\":\"__wr_default\","
+      "\"dimension\":\"concurrent_opens\",\"limit\":4,"
+      "\"pending\":0,\"active\":0,\"acquiring\":0,"
+      "\"cleanup_pending\":0,\"charged\":0}";
+  if (wyl_client_fact_concurrent_open_quota_configure (management_client,
+      "__wr_default", 4, 123, "public", 49, &concurrent_quota) != WYRELOG_E_OK
+      || !concurrent_quota.has_limit || concurrent_quota.hard_limit != 4
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_dimension, "concurrent_opens") != 0
+      || g_strcmp0 (http.last_limit, "4") != 0)
+    return wyl_test_normalize_exit_status (293);
+  wyl_client_fact_concurrent_open_quota_status_clear (&concurrent_quota);
+
   /*
    * #1031: with a token the request must carry the bearer AND name the
    * tenant, because the daemon resolves an unnamed request tenant to
