@@ -574,8 +574,9 @@ validate_batch_shape (const wyl_policy_fact_relation_schema_options_t *schema,
   return WYRELOG_E_OK;
 }
 
-static gchar *
-batch_content_hash (const wyl_policy_fact_relation_schema_options_t *schema,
+gchar *
+wyl_fact_store_batch_content_hash
+  (const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch)
 {
   g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
@@ -2174,7 +2175,8 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
   rc = validate_batch_compound_refs (store, schema, batch);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_autofree gchar *content_hash = batch_content_hash (schema, batch);
+  g_autofree gchar *content_hash =
+      wyl_fact_store_batch_content_hash (schema, batch);
   if (content_hash == NULL)
     return WYRELOG_E_NOMEM;
 
@@ -2671,7 +2673,7 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
     }
   }
 
-  content_hash = batch_content_hash (schema, &batch_meta);
+  content_hash = wyl_fact_store_batch_content_hash (schema, &batch_meta);
   if (content_hash == NULL) {
     rc = WYRELOG_E_NOMEM;
     goto unlock_return;
