@@ -2141,7 +2141,7 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"dimension", 0, 0, G_OPTION_ARG_STRING, &opts.dimension,
-     "Quota dimension (graph_count, write_rate, or schema_count)", "DIMENSION"},
+     "Quota dimension (graph_count, write_rate, schema_count, or concurrent_opens)", "DIMENSION"},
     {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
      "Maximum graph count (0 denies graph creation)", "N"},
     {"rate-per-second", 0, 0, G_OPTION_ARG_STRING,
@@ -2184,7 +2184,8 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
       "graph_count";
   if (g_strcmp0 (dimension, "graph_count") != 0
       && g_strcmp0 (dimension, "write_rate") != 0
-      && g_strcmp0 (dimension, "schema_count") != 0) {
+      && g_strcmp0 (dimension, "schema_count") != 0
+      && g_strcmp0 (dimension, "concurrent_opens") != 0) {
     g_printerr ("wyctl: invalid --dimension\n");
     return 2;
   }
@@ -2201,10 +2202,13 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
       g_printerr ("wyctl: invalid --limit\n");
       return 2;
     }
-  } else if (g_strcmp0 (dimension, "schema_count") == 0) {
+  } else if (g_strcmp0 (dimension, "schema_count") == 0
+      || g_strcmp0 (dimension, "concurrent_opens") == 0) {
     if (opts.rate_per_second_arg != NULL || opts.burst_arg != NULL
         || (configure && opts.limit_arg == NULL)) {
-      g_printerr ("wyctl: schema_count requires --limit and rejects rate options\n");
+      g_printerr ("wyctl: %s requires --limit and rejects rate options\n",
+          g_strcmp0 (dimension, "concurrent_opens") == 0
+          ? "concurrent_opens" : "schema_count");
       return 2;
     }
     if (configure && !parse_nonnegative_int64 (opts.limit_arg, &parsed_limit)) {
@@ -2240,6 +2244,7 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   WylClientFactQuotaStatus status = { 0 };
   WylClientFactWriteRateQuotaStatus write_rate_status = { 0 };
   WylClientFactSchemaQuotaStatus schema_status = { 0 };
+  WylClientFactConcurrentOpenQuotaStatus concurrent_status = { 0 };
   wyrelog_error_t rc;
   if (g_strcmp0 (dimension, "write_rate") == 0) {
     rc = configure
@@ -2256,6 +2261,14 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
             guard_risk, &schema_status)
         : wyl_client_fact_schema_quota_status (client, tenant,
             guard_timestamp, opts.guard_loc_class, guard_risk, &schema_status);
+  } else if (g_strcmp0 (dimension, "concurrent_opens") == 0) {
+    rc = configure
+        ? wyl_client_fact_concurrent_open_quota_configure (client, tenant,
+            (guint64) parsed_limit, guard_timestamp, opts.guard_loc_class,
+            guard_risk, &concurrent_status)
+        : wyl_client_fact_concurrent_open_quota_status (client, tenant,
+            guard_timestamp, opts.guard_loc_class, guard_risk,
+            &concurrent_status);
   } else {
     rc = configure
         ? wyl_client_fact_quota_configure (client, tenant,
@@ -2283,6 +2296,19 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
     else
       g_print ("unlimited");
     g_print (" registered=%" G_GUINT64_FORMAT "\n", schema_status.registered);
+  } else if (exit_rc == 0 && g_strcmp0 (dimension, "concurrent_opens") == 0) {
+    g_print ("tenant=%s dimension=concurrent_opens limit=",
+        concurrent_status.tenant_id);
+    if (concurrent_status.has_limit)
+      g_print ("%" G_GUINT64_FORMAT, concurrent_status.hard_limit);
+    else
+      g_print ("unlimited");
+    g_print (" pending=%" G_GUINT64_FORMAT " active=%" G_GUINT64_FORMAT
+        " acquiring=%" G_GUINT64_FORMAT " cleanup_pending=%"
+        G_GUINT64_FORMAT " charged=%" G_GUINT64_FORMAT "\n",
+        concurrent_status.pending, concurrent_status.active,
+        concurrent_status.acquiring, concurrent_status.cleanup_pending,
+        concurrent_status.charged);
   } else if (exit_rc == 0) {
     g_print ("tenant=%s dimension=graph_count limit=", status.tenant_id);
     if (status.has_limit)
@@ -2295,6 +2321,7 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   wyl_client_fact_quota_status_clear (&status);
   wyl_client_fact_write_rate_quota_status_clear (&write_rate_status);
   wyl_client_fact_schema_quota_status_clear (&schema_status);
+  wyl_client_fact_concurrent_open_quota_status_clear (&concurrent_status);
   return exit_rc;
 }
 
