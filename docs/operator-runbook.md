@@ -1683,9 +1683,14 @@ and map to the client's `UNKNOWN` enum value until that client is updated.
 The decoder rejects snapshots larger than 4 MiB, more than 16,384 graphs, or
 status/reason names longer than 64 bytes; it never returns a truncated list.
 
-This adds the typed read-only status API only. It does not yet provide typed
-verification, reconciliation, or `wyctl fact status` commands; those remain in
-the open #550 scope.
+The typed C client also exposes the non-mutating graph verification endpoint
+through `wyl_client_fact_graph_verify()`. It requires credentials bound to the
+target tenant and returns only the verified tenant and graph identifiers; it
+never returns a physical path or a raw verification error.
+
+These are typed read-only status and verification APIs. They do not yet provide
+typed reconciliation or `wyctl` fact status/verification/reconciliation
+commands; those remain in the open #550 scope.
 
 | you want to know | endpoint | what it tells you |
 | --- | --- | --- |

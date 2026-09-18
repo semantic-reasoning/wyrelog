@@ -100,6 +100,13 @@ typedef struct
 typedef struct
 {
   gchar *tenant_id;
+  gchar *graph_id;
+  gboolean verified;
+} WylClientFactGraphVerification;
+
+typedef struct
+{
+  gchar *tenant_id;
   gboolean has_limit;
   guint64 hard_limit;
   guint64 committed;
@@ -471,6 +478,8 @@ wyrelog_error_t wyl_client_graph_create (WylClient * client,
 void wyl_client_fact_graph_status_clear (WylClientFactGraphStatus * status);
 void wyl_client_fact_status_clear (WylClientFactStatus * status);
 void wyl_client_fact_status_free (WylClientFactStatus * status);
+void wyl_client_fact_graph_verification_clear
+  (WylClientFactGraphVerification * verification);
 /* Fetches the local daemon's sanitized GET /facts/status response, and is
  * only suitable for the daemon's local listener.
  *
@@ -495,6 +504,13 @@ void wyl_client_fact_status_free (WylClientFactStatus * status);
 wyrelog_error_t wyl_client_fact_status (WylClient * client,
     const gchar * access_token, const gchar * tenant,
     WylClientFactStatus * out_status);
+/* Performs the daemon's non-mutating exact graph path/identity/schema
+ * verification. The client must carry credentials bound to tenant. The
+ * result is owned by the caller and must be cleared after use. */
+wyrelog_error_t wyl_client_fact_graph_verify (WylClient * client,
+    const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactGraphVerification * out_verification);
 wyrelog_error_t wyl_client_fact_quota_status (WylClient * client,
     const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
@@ -703,6 +719,8 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientFactStatus, wyl_client_fact_status_clear)
 G_DEFINE_AUTOPTR_CLEANUP_FUNC
   (WylClientFactStatus, wyl_client_fact_status_free)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactGraphVerification, wyl_client_fact_graph_verification_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientServicePrincipal, wyl_client_service_principal_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC

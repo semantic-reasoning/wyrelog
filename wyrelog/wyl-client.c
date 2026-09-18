@@ -2218,6 +2218,75 @@ wyl_client_fact_status (WylClient *client, const gchar *access_token,
   return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+void
+wyl_client_fact_graph_verification_clear
+  (WylClientFactGraphVerification *verification)
+{
+  if (verification == NULL)
+    return;
+  g_clear_pointer (&verification->tenant_id, g_free);
+  g_clear_pointer (&verification->graph_id, g_free);
+  *verification = (WylClientFactGraphVerification) { 0 };
+}
+
+wyrelog_error_t
+wyl_client_fact_graph_verify (WylClient *client, const gchar *tenant,
+    const gchar *graph, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactGraphVerification *out_verification)
+{
+  if (out_verification == NULL || graph == NULL || graph[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_graph_verification_clear (out_verification);
+
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf ("%s/facts/verify?%s&graph=%s",
+          base_url, guard_query, escaped_graph);
+  g_autoptr (SoupMessage) message = soup_message_new ("GET", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK) {
+    if (client->last_http_status == 404)
+      return WYRELOG_E_NOT_FOUND;
+    if (client->last_http_status == 503)
+      return WYRELOG_E_BUSY;
+    return rc;
+  }
+
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  gboolean ok = FALSE;
+  gboolean verified = FALSE;
+  g_autofree gchar *response_tenant = parse_simple_json_string_member
+        (data, size, "tenant_id");
+  g_autofree gchar *response_graph = parse_simple_json_string_member
+        (data, size, "graph_id");
+  if (!parse_simple_json_bool_member (data, size, "ok", &ok)
+      || !parse_simple_json_bool_member (data, size, "verified", &verified)
+      || !ok || !verified || g_strcmp0 (response_tenant, tenant) != 0
+      || g_strcmp0 (response_graph, graph) != 0)
+    return WYRELOG_E_IO;
+  out_verification->tenant_id = g_steal_pointer (&response_tenant);
+  out_verification->graph_id = g_steal_pointer (&response_graph);
+  out_verification->verified = verified;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_client_graph_create (WylClient *client, const gchar *tenant,
     const gchar *graph, gint64 guard_timestamp, const gchar *guard_loc_class,

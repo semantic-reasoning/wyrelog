@@ -39,6 +39,8 @@ REQUIRED = {
     "wyl_client_fact_status_clear",
     "wyl_client_fact_status_free",
     "wyl_client_fact_status",
+    "wyl_client_fact_graph_verification_clear",
+    "wyl_client_fact_graph_verify",
 }
 
 
