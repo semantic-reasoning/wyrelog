@@ -48,7 +48,7 @@ SERIALIZED_AGGREGATES = (
     ("policy-graph-authority-pre-windows-provisioning-migration", 90),
     ("policy-graph-authority-windows-provisioning-migration", 90),
     ("fact-store", 60),
-    ("fact-graph-seal", 90),
+    ("fact-graph-seal", 120),
 )
 # Hosted windows-2025 / clang-cl measurements from the normal full-suite
 # matrix.  Each row records the slowest observed run, the selected ceiling,
@@ -127,8 +127,12 @@ MEASUREMENT_EVIDENCE = {
             "run": 34865958498,
             "seconds": 60.13,
             "matrix": "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        }, {
+            "run": 35308864748,
+            "seconds": 90.13,
+            "matrix": "fact_store=enabled, secure_bridge=disabled, duckdb_source=prebuilt",
         },),
-        "ceiling": 90,
+        "ceiling": 120,
         "runs": (34863749796, 34875792111),
     },
 }
