@@ -1980,6 +1980,33 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED)
     return 276;
 
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *logical_tight_query = g_strdup_printf
+        ("tenant=%s&dimension=logical_bytes&row_limit=1&limit=12&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/quota",
+          logical_tight_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200)
+    return 277;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *logical_over_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=logical-over&"
+          "idempotency_key=logical-over&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", logical_over_query,
+          admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+  if (rc != 0 || status != 429
+      || strstr (body, "\"dimension\":\"logical_bytes\"") == NULL)
+    return 278;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *logical_restore_query = g_strdup_printf
+        ("tenant=%s&dimension=logical_bytes&row_limit=10000&limit=100000&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/quota",
+          logical_restore_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200)
+    return 279;
+
   /* The same conflict remains typed after the relation contains facts. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *evolution_with_facts_query = g_strdup_printf
