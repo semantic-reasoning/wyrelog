@@ -391,10 +391,199 @@ check_relation_schema_registration_and_validation (void)
   return 0;
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  guint ready;
+  gboolean go;
+} SchemaQuotaRaceGate;
+
+typedef struct
+{
+  const gchar *path;
+  const gchar *relation_name;
+  SchemaQuotaRaceGate *gate;
+  wyrelog_error_t rc;
+  gboolean quota_exceeded;
+} SchemaQuotaRaceAttempt;
+
+static gpointer
+schema_quota_race_worker (gpointer user_data)
+{
+  SchemaQuotaRaceAttempt *attempt = user_data;
+  wyl_policy_store_open_options_t options = { .path = attempt->path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  attempt->rc = wyl_policy_store_open_with_options (&options, &store);
+
+  g_mutex_lock (&attempt->gate->mutex);
+  attempt->gate->ready++;
+  g_cond_broadcast (&attempt->gate->condition);
+  while (!attempt->gate->go)
+    g_cond_wait (&attempt->gate->condition, &attempt->gate->mutex);
+  g_mutex_unlock (&attempt->gate->mutex);
+
+  if (attempt->rc != WYRELOG_E_OK)
+    return NULL;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"value", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = "tenant-a",
+    .graph_id = "graph-main",
+    .namespace_id = "race",
+    .relation_name = attempt->relation_name,
+    .schema_version = 1,
+    .relation_visible = FALSE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  for (guint retry = 0; retry < 8; retry++) {
+    attempt->rc = wyl_policy_store_register_fact_relation_schema_with_quota_result
+          (store, &schema, &attempt->quota_exceeded);
+    if (attempt->rc != WYRELOG_E_BUSY)
+      break;
+    g_usleep (1000u << MIN (retry, 6u));
+  }
+  return NULL;
+}
+
+static gint
+check_schema_quota_concurrent_registration (void)
+{
+  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-schema-quota-XXXXXX",
+          NULL);
+  if (root == NULL)
+    return 30;
+  g_autofree gchar *path = g_build_filename (root, "policy.sqlite", NULL);
+  g_autofree gchar *fact_root = g_build_filename (root, "facts", NULL);
+  if (g_mkdir (fact_root, 0700) != 0)
+    return 31;
+
+  wyl_policy_store_open_options_t options = { .path = path };
+  g_autoptr (wyl_policy_store_t) setup = NULL;
+  if (wyl_policy_store_open_with_options (&options, &setup) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
+    return 32;
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (setup, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 33;
+  const wyl_policy_fact_graph_column_t graph_columns[] = {
+    {"subject", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"site.edge", graph_columns, G_N_ELEMENTS (graph_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph = {
+    .tenant_id = "tenant-a",
+    .graph_id = "graph-main",
+    .fact_root = fact_root,
+    .schema_version = 1,
+    .owner_scope = "tenant-a",
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  wyrelog_error_t graph_rc = WYRELOG_E_BUSY;
+  /* Recovery can include a filesystem handoff before the policy row is
+   * visible as resumable.  Hosted macOS runners expose a longer scheduler
+   * gap than the local Linux fixture, so allow bounded backoff through the
+   * full recovery window rather than treating the transient policy result as
+   * a permanent setup failure. */
+  for (guint attempt = 0; attempt < 8; attempt++) {
+    graph_rc = wyl_policy_store_create_fact_graph (setup, &graph, NULL);
+    /* A failed materialization can leave the graph reservation visible until
+     * its cleanup boundary completes.  Retrying the identical request lets
+     * the durable resume path settle that transient POLICY result as well as
+     * the explicit busy/I/O outcomes. */
+    if (graph_rc != WYRELOG_E_BUSY && graph_rc != WYRELOG_E_IO
+        && graph_rc != WYRELOG_E_POLICY)
+      break;
+    g_usleep (1000u << MIN (attempt, 7u));
+  }
+  wyrelog_error_t quota_rc = wyl_policy_store_set_fact_quota_config (setup,
+          "tenant-a", WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT,
+          &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 1 });
+  if (graph_rc != WYRELOG_E_OK || quota_rc != WYRELOG_E_OK) {
+    g_printerr ("schema quota setup failed graph=%d quota=%d\n", graph_rc,
+        quota_rc);
+    g_clear_pointer (&setup, wyl_policy_store_close);
+    cleanup_fact_root (root);
+    return 34;
+  }
+  g_clear_pointer (&setup, wyl_policy_store_close);
+
+  SchemaQuotaRaceGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.condition);
+  SchemaQuotaRaceAttempt attempts[] = {
+    {path, "race_a", &gate, WYRELOG_E_INTERNAL, FALSE},
+    {path, "race_b", &gate, WYRELOG_E_INTERNAL, FALSE},
+  };
+  GThread *threads[] = {
+    g_thread_new ("schema-quota-a", schema_quota_race_worker, &attempts[0]),
+    g_thread_new ("schema-quota-b", schema_quota_race_worker, &attempts[1]),
+  };
+  g_mutex_lock (&gate.mutex);
+  while (gate.ready != G_N_ELEMENTS (threads))
+    g_cond_wait (&gate.condition, &gate.mutex);
+  gate.go = TRUE;
+  g_cond_broadcast (&gate.condition);
+  g_mutex_unlock (&gate.mutex);
+  g_thread_join (threads[0]);
+  g_thread_join (threads[1]);
+  g_cond_clear (&gate.condition);
+  g_mutex_clear (&gate.mutex);
+
+  guint admitted = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (attempts); i++) {
+    if (attempts[i].rc == WYRELOG_E_OK)
+      admitted++;
+    else if (attempts[i].rc != WYRELOG_E_POLICY
+        && attempts[i].rc != WYRELOG_E_BUSY
+        && attempts[i].rc != WYRELOG_E_IO) {
+      g_clear_pointer (&setup, wyl_policy_store_close);
+      cleanup_fact_root (root);
+      return 35;
+    }
+  }
+  if (admitted > 1) {
+    cleanup_fact_root (root);
+    return 36;
+  }
+
+  g_autoptr (wyl_policy_store_t) verify = NULL;
+  WylPolicyFactSchemaQuotaStatus status = { 0 };
+  if (wyl_policy_store_open_with_options (&options, &verify) != WYRELOG_E_OK
+      || (admitted == 0 && wyl_policy_store_register_fact_relation_schema
+        (verify, &(wyl_policy_fact_relation_schema_options_t) {
+    .tenant_id = "tenant-a",
+    .graph_id = "graph-main",
+    .namespace_id = "race",
+    .relation_name = "race_fallback",
+    .schema_version = 1,
+    .relation_visible = FALSE,
+    .columns = (const wyl_policy_fact_relation_schema_column_t[]) {
+      {"value", "symbol", FALSE, TRUE},
+    },
+    .n_columns = 1,
+  }) != WYRELOG_E_OK)
+      || wyl_policy_store_get_fact_schema_quota_status (verify, "tenant-a",
+      &status) != WYRELOG_E_OK || status.registered != 1) {
+    cleanup_fact_root (root);
+    return 37;
+  }
+  cleanup_fact_root (root);
+  return 0;
+}
+
 int
 main (void)
 {
   gint rc = check_relation_schema_registration_and_validation ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_schema_quota_concurrent_registration ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
