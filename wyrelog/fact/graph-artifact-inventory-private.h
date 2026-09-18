@@ -89,6 +89,23 @@ typedef struct
   guint64 allocated_bytes;
 } WylFactArtifactInventorySlotEvidence;
 
+/* Immutable, snapshot-derived evidence for physical-byte admission.  The
+ * textual fields are canonical values produced by the exporter; callers do
+ * not get to select a generation, digest, or stability claim. */
+typedef struct
+{
+  gchar generation[67];
+  gchar digest[65];
+  guint64 allocated_bytes;
+  WylFactArtifactInventoryObservation observation;
+  WylFactArtifactInventorySlotEvidence slots
+  [WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT];
+} WylFactArtifactPhysicalQuotaEvidence;
+
+wyrelog_error_t wyl_fact_artifact_inventory_snapshot_export_physical_quota
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactPhysicalQuotaEvidence *out_evidence);
+
 WylFactArtifactInventorySnapshot *
 wyl_fact_artifact_inventory_snapshot_new (guint max_anomalies);
 void wyl_fact_artifact_inventory_snapshot_free

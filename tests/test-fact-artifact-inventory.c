@@ -445,6 +445,41 @@ test_published_observation_binding (void)
         (&published.directory_identity, &neighbour));
 }
 
+static void
+test_physical_quota_evidence_is_canonical_and_fail_closed (void)
+{
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot =
+      wyl_fact_artifact_inventory_snapshot_new (4);
+  WylFactArtifactInventoryObservation point = observation (91);
+  populate_slots_except (snapshot, -1, &point);
+  wyl_fact_artifact_inventory_snapshot_end (snapshot, &point);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (snapshot),
+      ==, WYRELOG_E_OK);
+  WylFactArtifactPhysicalQuotaEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
+        (snapshot, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (evidence.allocated_bytes, ==, 6144);
+  g_assert_cmpuint (strlen (evidence.digest), ==, 64);
+  g_assert_true (g_str_has_prefix (evidence.generation, "v1:"));
+  WylFactArtifactPhysicalQuotaEvidence second = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
+        (snapshot, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (evidence.digest, ==, second.digest);
+  g_assert_cmpstr (evidence.generation, ==, second.generation);
+
+  g_autoptr (WylFactArtifactInventorySnapshot) unknown =
+      wyl_fact_artifact_inventory_snapshot_new (4);
+  populate_slots_except (unknown, -1, &point);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_add_anomaly (unknown,
+      WYL_FACT_ARTIFACT_INVENTORY_UNKNOWN_ENTRY), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_inventory_snapshot_end (unknown, &point);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_finalize (unknown),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_inventory_snapshot_export_physical_quota
+        (unknown, &second), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (second.digest[0], ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -469,5 +504,7 @@ main (int argc, char **argv)
       test_extended_identity_and_sparse_allocation);
   g_test_add_func ("/fact/artifact-inventory/published-observation-binding",
       test_published_observation_binding);
+  g_test_add_func ("/fact/artifact-inventory/physical-quota-evidence",
+      test_physical_quota_evidence_is_canonical_and_fail_closed);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
