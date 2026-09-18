@@ -13284,6 +13284,7 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
 
 static void
 set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
+    const gchar *operation_id, gboolean inserted,
     const wyl_fact_mutation_outcome_t *outcome)
 {
   if (wyl_daemon_policy_write_finalize_for_response (msg, 202,
@@ -13292,14 +13293,33 @@ set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
     return;
   }
   attach_request_id_header (msg);
+  const gchar *class_name =
+      wyl_fact_mutation_class_name (outcome->mutation_class);
+  gboolean degraded =
+      outcome->mutation_class == WYL_FACT_MUTATION_COMMITTED_DEGRADED;
   g_autoptr (GString) body = g_string_new
         ("{\"ok\":true,\"committed\":true,\"reconcile\":true,"
-          "\"quota_state\":\"reconciling\",\"batch_id\":");
+          "\"quota_state\":\"reconciling\",\"operation_id\":");
+  append_json_string (body, operation_id);
+  g_string_append (body, ",\"batch_id\":");
   append_json_string (body, batch_id);
+  g_string_append (body, ",\"inserted\":");
+  g_string_append (body, inserted ? "true" : "false");
+  g_string_append (body, ",\"mutation_class\":");
+  append_json_string (body, class_name);
+  g_string_append (body, ",\"queryable\":");
+  g_string_append (body, outcome->engine_queryable ? "true" : "false");
+  if (degraded) {
+    g_string_append (body, ",\"degraded_class\":");
+    append_json_string (body,
+        wyl_fact_graph_replay_class_name (outcome->degraded_class));
+  }
   g_string_append_printf (body,
       ",\"committed_row_delta\":%" G_GINT64_FORMAT
-      ",\"logical_byte_delta\":%" G_GINT64_FORMAT "}",
-      outcome->delta.committed_row_delta, outcome->delta.logical_byte_delta);
+      ",\"logical_byte_delta\":%" G_GINT64_FORMAT
+      ",\"engine_generation\":%" G_GUINT64_FORMAT "}",
+      outcome->delta.committed_row_delta, outcome->delta.logical_byte_delta,
+      outcome->engine_generation);
   soup_server_message_set_status (msg, 202, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
@@ -13908,7 +13928,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (logical_quota_settle_rc != WYRELOG_E_OK) {
-    set_fact_quota_reconciling_json (msg, batch_id, &outcome);
+    set_fact_quota_reconciling_json (msg, batch_id, idempotency_key, inserted,
+        &outcome);
     return;
   }
   if (audit_rc != WYRELOG_E_OK) {

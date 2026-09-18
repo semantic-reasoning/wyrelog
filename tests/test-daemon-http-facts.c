@@ -709,6 +709,25 @@ identity_http_post (SoupSession *session, const gchar *base_url,
   g_assert_nonnull (strstr (body, expected_body));
 }
 
+static void
+identity_http_post_committed (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *path, const gchar *query,
+    const gchar *payload)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (send_raw (session, "POST", base_url, path, query, token,
+      payload, &status, &body), ==, 0);
+  g_assert_true (status == 200 || status == 202);
+  g_assert_nonnull (strstr (body, "\"committed\":true"));
+  if (status == 202) {
+    g_assert_nonnull (strstr (body, "\"operation_id\":"));
+    g_assert_nonnull (strstr (body, "\"quota_state\":\"reconciling\""));
+  } else {
+    g_assert_nonnull (strstr (body, "\"inserted\":true"));
+  }
+}
+
 static gchar *
 identity_http_snapshot (duckdb_connection conn, const gchar *table)
 {
@@ -760,8 +779,8 @@ check_provisioned_http_identity (WylHandle *handle, SoupSession *session,
       NULL, 200, "\"created\":true");
   identity_http_post (session, base_url, token, "/facts/schema/register",
       schema_query, schema_body, 200, "\"ok\":true");
-  identity_http_post (session, base_url, token, path, control_query,
-      "order_id\tamount\nidentity-control\t17\n", 200, "\"inserted\":true");
+  identity_http_post_committed (session, base_url, token, path, control_query,
+      "order_id\tamount\nidentity-control\t17\n");
 
   wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
   GPtrArray *records = NULL;
