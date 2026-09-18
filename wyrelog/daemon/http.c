@@ -7532,6 +7532,8 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       dimension = WYL_POLICY_FACT_QUOTA_WRITE_RATE;
     else if (g_strcmp0 (dimension_arg, "schema_count") == 0)
       dimension = WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT;
+    else if (g_strcmp0 (dimension_arg, "concurrent_opens") == 0)
+      dimension = WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS;
     else {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
@@ -7561,7 +7563,8 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
   if (g_strcmp0 (method, "POST") == 0) {
     WylPolicyFactQuotaConfig config = { .has_limit = TRUE };
     if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT
-        || dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT) {
+        || dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT
+        || dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
       const gchar *limit_arg = query != NULL
           ? g_hash_table_lookup (query, "limit") : NULL;
       gint64 limit = -1;
