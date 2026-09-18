@@ -15969,7 +15969,9 @@ fact_physical_quota_evidence_is_valid
       && g_str_has_prefix (generation, "v1:")
       && strlen (generation) == 67
       && fact_logical_quota_hex_digest_is_valid (digest)
-      && g_strcmp0 (generation + 3, digest) == 0;
+      && g_strcmp0 (generation + 3, digest) == 0
+      && wyl_fact_artifact_physical_quota_evidence_tenant_id (evidence) != NULL
+      && wyl_fact_artifact_physical_quota_evidence_graph_id (evidence) != NULL;
   return valid;
 }
 
@@ -15982,6 +15984,11 @@ wyl_policy_store_reserve_fact_physical_quota_evidence
 {
   if (!fact_physical_quota_evidence_is_valid (evidence))
     return WYRELOG_E_POLICY;
+  if (g_strcmp0 (tenant_id,
+      wyl_fact_artifact_physical_quota_evidence_tenant_id (evidence)) != 0
+      || g_strcmp0 (graph_id,
+      wyl_fact_artifact_physical_quota_evidence_graph_id (evidence)) != 0)
+    return WYRELOG_E_CONFLICT;
   WylPolicyFactPhysicalQuotaOperation operation = {
     .tenant_id = tenant_id,
     .graph_id = graph_id,
@@ -16146,6 +16153,11 @@ wyl_policy_store_settle_fact_physical_quota_evidence
 {
   if (!fact_physical_quota_evidence_is_valid (evidence))
     return WYRELOG_E_POLICY;
+  if (g_strcmp0 (tenant_id,
+      wyl_fact_artifact_physical_quota_evidence_tenant_id (evidence)) != 0
+      || g_strcmp0 (graph_id,
+      wyl_fact_artifact_physical_quota_evidence_graph_id (evidence)) != 0)
+    return WYRELOG_E_CONFLICT;
   WylPolicyFactPhysicalQuotaOperation operation = {
     .tenant_id = tenant_id,
     .graph_id = graph_id,

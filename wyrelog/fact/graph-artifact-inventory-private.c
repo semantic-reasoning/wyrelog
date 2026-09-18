@@ -40,6 +40,8 @@ struct WylFactArtifactPhysicalQuotaEvidence
   gchar generation[68];
   gchar digest[65];
   guint64 allocated_bytes;
+  gchar *tenant_id;
+  gchar *graph_id;
   WylFactArtifactInventoryObservation observation;
   WylFactArtifactInventorySlotEvidence slots
   [WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT];
@@ -142,6 +144,8 @@ wyl_fact_artifact_physical_quota_evidence_free
   (WylFactArtifactPhysicalQuotaEvidence *evidence)
 {
   if (evidence != NULL) {
+    g_free (evidence->tenant_id);
+    g_free (evidence->graph_id);
     memset (evidence, 0, sizeof *evidence);
     g_free (evidence);
   }
@@ -166,6 +170,44 @@ wyl_fact_artifact_physical_quota_evidence_allocated_bytes
   (const WylFactArtifactPhysicalQuotaEvidence *evidence)
 {
   return evidence != NULL ? evidence->allocated_bytes : 0;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+  (const WylFactArtifactInventorySnapshot *snapshot, const gchar *tenant_id,
+    const gchar *graph_id, WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  if (tenant_id == NULL || tenant_id[0] == '\0'
+      || graph_id == NULL || graph_id[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_fact_artifact_inventory_snapshot_export_physical_quota (snapshot,
+          out_evidence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylFactArtifactPhysicalQuotaEvidence *evidence = *out_evidence;
+  evidence->tenant_id = g_strdup (tenant_id);
+  evidence->graph_id = g_strdup (graph_id);
+  if (evidence->tenant_id == NULL || evidence->graph_id == NULL) {
+    wyl_fact_artifact_physical_quota_evidence_free (evidence);
+    *out_evidence = NULL;
+    return WYRELOG_E_NOMEM;
+  }
+  return WYRELOG_E_OK;
+}
+
+const gchar *
+wyl_fact_artifact_physical_quota_evidence_tenant_id
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  return evidence != NULL ? evidence->tenant_id : NULL;
+}
+
+const gchar *
+wyl_fact_artifact_physical_quota_evidence_graph_id
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence)
+{
+  return evidence != NULL ? evidence->graph_id : NULL;
 }
 
 gboolean

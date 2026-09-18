@@ -102,11 +102,18 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactPhysicalQuotaEvidence,
 wyrelog_error_t wyl_fact_artifact_inventory_snapshot_export_physical_quota
   (const WylFactArtifactInventorySnapshot *snapshot,
     WylFactArtifactPhysicalQuotaEvidence **out_evidence);
+wyrelog_error_t wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+  (const WylFactArtifactInventorySnapshot *snapshot, const gchar *tenant_id,
+    const gchar *graph_id, WylFactArtifactPhysicalQuotaEvidence **out_evidence);
 const gchar *wyl_fact_artifact_physical_quota_evidence_generation
   (const WylFactArtifactPhysicalQuotaEvidence *evidence);
 const gchar *wyl_fact_artifact_physical_quota_evidence_digest
   (const WylFactArtifactPhysicalQuotaEvidence *evidence);
 guint64 wyl_fact_artifact_physical_quota_evidence_allocated_bytes
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence);
+const gchar *wyl_fact_artifact_physical_quota_evidence_tenant_id
+  (const WylFactArtifactPhysicalQuotaEvidence *evidence);
+const gchar *wyl_fact_artifact_physical_quota_evidence_graph_id
   (const WylFactArtifactPhysicalQuotaEvidence *evidence);
 
 WylFactArtifactInventorySnapshot *
