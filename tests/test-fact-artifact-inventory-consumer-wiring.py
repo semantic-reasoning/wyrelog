@@ -1591,7 +1591,7 @@ def validate_workflow(path: str, workflow: str) -> None:
     validate_job_profile(
         posix,
         "E_INVENTORY_CI_POSIX",
-        ("name", "runs-on", "timeout-minutes", "env", "strategy", "steps"),
+        ("name", "runs-on", "env", "strategy", "steps"),
     )
     validate_job_profile(
         sanitizer,

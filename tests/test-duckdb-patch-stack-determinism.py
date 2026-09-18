@@ -141,7 +141,6 @@ EXPECTED_BUILD_HEADERS = {
     ".github/workflows/ci-pr.yml": """  build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Relativise absolute paths baked into debug info so cache entries stay
@@ -161,10 +160,6 @@ EXPECTED_BUILD_HEADERS = {
     ".github/workflows/ci-main.yml": """  build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Fail fast on a wedged build instead of letting a hung compile burn the
-    # runner's full default lease (macOS still builds DuckDB from source in
-    # ~30 min, so keep comfortable headroom over that).
-    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Relativise absolute paths baked into debug info so cache entries stay
