@@ -71,8 +71,10 @@ def validate(root: pathlib.Path) -> None:
             "boot replay no longer routes provisioned graphs through policy")
     route_index = graph_open_body.index(provisioned_route)
     resolver_index = graph_open_body.find("resolve_fact_db_path")
-    raw_open_index = graph_open_body.find("wyl_fact_store_open (")
-    require(resolver_index > route_index and raw_open_index > resolver_index,
+    legacy_open_index = graph_open_body.find(
+        "wyl_fact_store_open_legacy_graph (")
+    require(resolver_index > route_index
+            and legacy_open_index > resolver_index,
             "boot replay resolves or path-opens before provisioned admission")
 
     test_name = "test_boot_converges_forget_on_sealed_provisioned_graph"
