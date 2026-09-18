@@ -11880,6 +11880,33 @@ set_fact_logical_quota_exceeded_json (SoupServerMessage *msg)
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
 }
+
+static void
+set_physical_quota_exceeded_json (SoupServerMessage *msg,
+    const WylPolicyFactPhysicalQuotaStatus *status)
+{
+  if (status == NULL || !status->has_limit) {
+    set_json_error (msg, 500, "fact_quota_status_failed");
+    return;
+  }
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 429,
+      "fact_quota_exceeded") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  guint64 observed = status->committed_bytes + status->pending_bytes
+      + status->reconciling_bytes;
+  g_autoptr (GString) body = g_string_new (
+    "{\"error\":\"fact_quota_exceeded\","
+    "\"dimension\":\"physical_bytes\",\"limit\":");
+  g_string_append_printf (body, "%" G_GUINT64_FORMAT
+      ",\"observed\":%" G_GUINT64_FORMAT "}", status->hard_limit,
+      observed);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 429, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
 #endif
 
 static void
@@ -13938,6 +13965,17 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
   schema_columns_clear (schema_columns, n_loaded);
   fact_rows_clear (rows, n_rows);
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  if (rc == WYRELOG_E_POLICY && outcome.delta.quota_exceeded) {
+    WylPolicyFactPhysicalQuotaStatus physical_status = { 0 };
+    if (wyl_policy_store_get_fact_physical_quota_status (write.store, tenant,
+        &physical_status) != WYRELOG_E_OK)
+      set_json_error (msg, 500, "fact_quota_status_failed");
+    else
+      set_physical_quota_exceeded_json (msg, &physical_status);
+    return;
+  }
+#endif
   if (rc == WYRELOG_E_POLICY) {
     set_json_error (msg, 409, "fact_batch_conflict");
     return;

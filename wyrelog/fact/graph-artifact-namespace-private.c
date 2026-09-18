@@ -78,6 +78,18 @@ wyl_fact_artifact_namespace_export_physical_quota_evidence
   return WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+  (WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  (void) namespace_;
+  (void) lease;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  return WYRELOG_E_POLICY;
+}
+
 gboolean
 wyl_fact_artifact_namespace_test_fault_was_consumed
   (WylFactArtifactNamespaceTestFault fault) {
@@ -5350,6 +5362,34 @@ inventory_temp_root_name_is_valid (const gchar *name)
   return memcmp (uuid, canonical, WYL_ID_STRING_LEN) == 0;
 }
 
+/* Provisioning leaves one policy-owned SQLite companion beside the DuckDB
+ * artifacts.  It is a known graph companion, not an arbitrary artifact; the
+ * exact UUID spelling is still required so hostile lookalikes remain unknown
+ * and fail closed. */
+static gboolean
+inventory_provisioning_name_is_valid (const gchar *name)
+{
+  static const gchar prefix[] = "provision-";
+  static const gchar suffix[] = ".sqlite";
+  const gchar *uuid;
+  gchar uuid_text[WYL_ID_STRING_LEN + 1];
+  wyl_id_t id;
+  gchar canonical[WYL_ID_STRING_BUF];
+  if (name == NULL || !g_str_has_prefix (name, prefix)
+      || !g_str_has_suffix (name, suffix))
+    return FALSE;
+  uuid = name + sizeof prefix - 1;
+  if (strlen (name) != (sizeof prefix - 1) + WYL_ID_STRING_LEN
+      + (sizeof suffix - 1))
+    return FALSE;
+  memcpy (uuid_text, uuid, WYL_ID_STRING_LEN);
+  uuid_text[WYL_ID_STRING_LEN] = '\0';
+  if (wyl_id_parse (uuid_text, &id) != WYRELOG_E_OK
+      || wyl_id_format (&id, canonical, sizeof canonical) != WYRELOG_E_OK)
+    return FALSE;
+  return strcmp (uuid_text, canonical) == 0;
+}
+
 static gboolean
 inventory_hash_stat (guint64 *hash, const gchar *name, const struct stat *st)
 {
@@ -5724,6 +5764,18 @@ wyl_fact_artifact_inventory_posix_capture
             break;
           continue;
         }
+        if (inventory_provisioning_name_is_valid (entry->d_name)) {
+          if (!S_ISREG (named.st_mode) || named.st_nlink < 1
+              || named.st_nlink > 2
+              || (named.st_mode & 07777) != 0600
+              || (guint64) named.st_uid != owner) {
+            result = wyl_fact_artifact_inventory_snapshot_add_anomaly
+                  (snapshot, WYL_FACT_ARTIFACT_INVENTORY_MALFORMED_ENTRY);
+            if (result != WYRELOG_E_OK)
+              break;
+          }
+          continue;
+        }
         if (S_ISLNK (named.st_mode) || !S_ISREG (named.st_mode)
             || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
             || (guint64) named.st_uid != owner) {
@@ -5834,6 +5886,30 @@ wyl_fact_artifact_namespace_export_physical_quota_evidence
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   wyrelog_error_t result = wyl_fact_artifact_namespace_inventory_snapshot
         (namespace_, &snapshot);
+  if (result != WYRELOG_E_OK)
+    return result;
+  return wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph
+           (snapshot, namespace_->tenant_id, namespace_->graph_id, out_evidence);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+  (WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence)
+{
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (namespace_ == NULL || lease == NULL || out_evidence == NULL
+      || namespace_->tenant_id == NULL || namespace_->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = lease_revalidate_unlocked (lease);
+  if (result == WYRELOG_E_OK)
+    result = wyl_fact_artifact_inventory_posix_capture (namespace_->fd,
+            namespace_->owner, namespace_->lock_pin_fd, NULL, NULL,
+            inventory_reader_revalidate, NULL, lease, &snapshot, NULL);
+  g_mutex_unlock (&lease->mutex);
   if (result != WYRELOG_E_OK)
     return result;
   return wyl_fact_artifact_inventory_snapshot_export_physical_quota_for_graph

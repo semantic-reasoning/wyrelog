@@ -69,6 +69,7 @@ typedef struct
   gboolean inserted;
   gint64 committed_row_delta;
   gint64 logical_byte_delta;
+  gboolean quota_exceeded;
 } wyl_fact_commit_delta_t;
 
 /*
@@ -137,6 +138,7 @@ wyl_fact_commit_delta_init (wyl_fact_commit_delta_t *delta)
     delta->inserted = FALSE;
     delta->committed_row_delta = 0;
     delta->logical_byte_delta = 0;
+    delta->quota_exceeded = FALSE;
   }
 }
 

@@ -2666,8 +2666,10 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
    * before the refresh rather than at the caller's scope exit. */
   g_clear_pointer (store, wyl_fact_store_close);
 
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    out_outcome->delta = delta;
     return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
+  }
 
   /* The fact commit is durable now.  Marker persistence is deliberately
    * decoupled from the mutation result; a failure leaves the fact committed

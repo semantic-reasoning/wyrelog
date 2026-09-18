@@ -88,7 +88,7 @@ typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 void wyl_fact_store_attach_physical_quota_context
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store,
-    WylFactArtifactNamespace *namespace_);
+    WylFactArtifactNamespace *namespace_, WylFactArtifactMutationLease *lease);
 void wyl_fact_store_attach_physical_quota_policy
   (wyl_fact_store_t *store, wyl_policy_store_t *policy_store);
 #endif

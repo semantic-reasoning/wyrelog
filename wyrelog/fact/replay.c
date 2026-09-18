@@ -749,7 +749,7 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
         out_store);
       if (lease_rc == WYRELOG_E_OK)
         wyl_fact_store_attach_physical_quota_context (*out_store, policy,
-            artifact_namespace);
+            artifact_namespace, artifact_lease);
       wyl_policy_graph_authority_record_free (authority);
       return lease_rc;
     }

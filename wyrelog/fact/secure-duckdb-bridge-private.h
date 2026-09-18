@@ -59,6 +59,8 @@ wyrelog_error_t wyl_secure_duckdb_bridge_open_live_with_lease
  * duckdb_close'd, so the shutdown checkpoint has already run under the lease. */
 wyrelog_error_t
 wyl_secure_duckdb_bridge_release_live (WylSecureDuckdbBridge * self);
+WylFactArtifactMutationLease *
+wyl_secure_duckdb_bridge_authority_lease (WylSecureDuckdbBridge * self);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSecureDuckdbBridge,
     wyl_secure_duckdb_bridge_free)

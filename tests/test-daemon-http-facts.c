@@ -1023,6 +1023,7 @@ static void
 check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_url,
     const gchar *token, const gchar *root)
 {
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   const gchar *create = "tenant=__wr_default&graph=tsv&" FACT_GUARD;
   tsv_post (session, base_url, token, "/graphs/create", create, "", 0,
       200, "\"created\":true");
@@ -1092,6 +1093,49 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
   tsv_post (session, base_url, token, append, header_batch, header_rows,
       strlen (header_rows), 200, "\"committed_row_delta\":1");
   tsv_check_store (root, "pair", "a", "b", 2, 2);
+
+  /* Physical admission is implemented by the secure DuckDB bridge.  The
+   * portable HTTP fixture also runs in builds without that bridge, where the
+   * quota status API remains available but cannot reserve artifact evidence.
+   * Keep this boundary assertion with the implementation it exercises. */
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  WylPolicyFactPhysicalQuotaStatus physical_before_guard = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      WYL_TENANT_DEFAULT, &physical_before_guard), ==, WYRELOG_E_OK);
+  g_assert_true (physical_before_guard.has_limit);
+  g_assert_cmpuint (physical_before_guard.pending_bytes, ==, 0);
+  g_assert_cmpuint (physical_before_guard.reconciling_bytes, ==, 0);
+  WylPolicyFactQuotaConfig physical_guard_quota = {
+    .has_limit = TRUE,
+    .hard_limit = physical_before_guard.committed_bytes,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      WYL_TENANT_DEFAULT, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &physical_guard_quota), ==, WYRELOG_E_OK);
+  g_autofree gchar *physical_guard_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&schema_version=1&"
+    "batch_id=quota-physical-boundary-9f4c&"
+    "idempotency_key=quota-physical-boundary-9f4c&%s", WYL_TENANT_DEFAULT,
+    FACT_GUARD);
+  tsv_post (session, base_url, token, append, physical_guard_query,
+      "a\tb\nphysical\tguard\n", strlen ("a\tb\nphysical\tguard\n"),
+      429, "\"dimension\":\"physical_bytes\"");
+  tsv_check_store (root, "pair", "a", "b", 2, 2);
+  WylPolicyFactPhysicalQuotaStatus physical_after_guard = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      WYL_TENANT_DEFAULT, &physical_after_guard), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (physical_after_guard.committed_bytes, ==,
+      physical_before_guard.committed_bytes);
+  g_assert_cmpuint (physical_after_guard.pending_bytes, ==, 0);
+  g_assert_cmpuint (physical_after_guard.reconciling_bytes, ==, 0);
+  WylPolicyFactQuotaConfig restore_physical_quota = {
+    .has_limit = TRUE,
+    .hard_limit = G_MAXINT64,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
+      WYL_TENANT_DEFAULT, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &restore_physical_quota), ==, WYRELOG_E_OK);
+#endif
 
   const gchar *bad_schemas[] = { "v\tstring\tfalse\ttrue   \n",
                                  "v\tstring\tfalse\ttrue\n\n", "\nv\tstring\tfalse\ttrue\n",
@@ -1309,6 +1353,19 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 186;
   }
   wyl_client_fact_physical_quota_status_clear (&physical_client_status);
+
+  /* The fidelity fixture intentionally exercises many writes.  Keep the
+   * endpoint contract assertion above at 4096, then give that fixture a
+   * generous bound; the focused admission check below restores the boundary
+   * against the actual committed usage. */
+  WylPolicyFactQuotaConfig fidelity_physical_quota = {
+    .has_limit = TRUE,
+    .hard_limit = G_MAXINT64,
+  };
+  if (wyl_policy_store_set_fact_quota_config (store, WYL_TENANT_DEFAULT,
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &fidelity_physical_quota)
+      != WYRELOG_E_OK)
+    return 1861;
 
   /* Write-rate configuration uses the same guarded endpoint but a distinct
    * typed response and storage dimension. */
@@ -1533,13 +1590,14 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || strstr (quota_body, "\"fact_quota_auth_required\"") == NULL)
     return 205;
 
-  check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
-
   guint status = 0;
   g_autofree gchar *body = NULL;
+  gint rc = 0;
+  check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
+
   g_autofree gchar *graphs_query = g_strdup_printf ("tenant=%s&%s",
           WYL_TENANT_DEFAULT, FACT_GUARD);
-  gint rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
+  rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
           NULL, NULL, &status, &body);
   if (rc != 0)
     return rc;

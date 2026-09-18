@@ -507,5 +507,9 @@ wyrelog_error_t wyl_fact_artifact_namespace_inventory_snapshot
   (WylFactArtifactNamespace *, WylFactArtifactInventorySnapshot **out_snapshot);
 wyrelog_error_t wyl_fact_artifact_namespace_export_physical_quota_evidence
   (WylFactArtifactNamespace *, WylFactArtifactPhysicalQuotaEvidence **out_evidence);
+wyrelog_error_t
+wyl_fact_artifact_namespace_export_physical_quota_evidence_with_lease
+  (WylFactArtifactNamespace *, WylFactArtifactMutationLease *,
+    WylFactArtifactPhysicalQuotaEvidence **out_evidence);
 
 G_END_DECLS

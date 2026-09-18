@@ -127,7 +127,7 @@ TOKEN_PASTE_ALLOWLIST = {
 
 CXX_SOURCE_DIGESTS = {
     "wyrelog/fact/secure-duckdb-bridge-private.cc":
-        "1b34d1326ed3a9a17ccd5a53e507a0d209ab382c524420155998f6cc365b4f9e",
+        "402a83d4ce2bbe79a3bf63589d66e7f2f046b5a999cf76f24b8278ee7f08cdff",
     "wyrelog/fact/secure-duckdb-file-handle-private.cc":
         "e8bc7ae828e424cf8ba18828d1b966e12b0e561d60237a5ea745499389968d36",
     "wyrelog/fact/secure-duckdb-file-handle-private.hpp":
@@ -2111,8 +2111,10 @@ def negative_mutations(root: pathlib.Path) -> list[tuple[str, dict[str, str]]]:
     add(
         "normal namespace isolation",
         namespace_name,
-        "namespace_->owner, namespace_->lock_pin_fd, NULL, NULL,",
-        'namespace_->owner, namespace_->lock_pin_fd, "stage", "rollback",',
+        "namespace_->owner, namespace_->lock_pin_fd, NULL, NULL,\n"
+        "          inventory_reader_revalidate, NULL, reader, out_snapshot, NULL);",
+        'namespace_->owner, namespace_->lock_pin_fd, "stage", "rollback",\n'
+        "          inventory_reader_revalidate, NULL, reader, out_snapshot, NULL);",
     )
     add("POSIX fresh process", posix_test_name, "g_spawn_sync", "g_spawn_async")
     add("Windows fresh process", windows_test_name, "CreateProcessW", "CreateThread")
