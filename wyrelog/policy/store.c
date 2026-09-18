@@ -15533,6 +15533,33 @@ wyl_policy_store_reserve_fact_logical_quota (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_get_fact_logical_quota_operation_status
+  (wyl_policy_store_t *store,
+    const WylPolicyFactLogicalQuotaOperation *operation,
+    WylPolicyFactLogicalOperationStatus *out_status)
+{
+  if (out_status != NULL)
+    *out_status = (WylPolicyFactLogicalOperationStatus) { 0 };
+  if (store == NULL || store->db == NULL || out_status == NULL
+      || !fact_logical_quota_operation_is_valid (operation))
+    return WYRELOG_E_INVALID;
+
+  WylPolicyFactLogicalOperationStatus loaded = { 0 };
+  gboolean found = FALSE;
+  gboolean matches = FALSE;
+  wyrelog_error_t rc = fact_logical_quota_operation_load (store, operation,
+          &loaded, &found, &matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_NOT_FOUND;
+  if (!matches)
+    return WYRELOG_E_CONFLICT;
+  *out_status = loaded;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_policy_store_settle_fact_logical_quota (wyl_policy_store_t *store,
     const WylPolicyFactLogicalQuotaOperation *operation,
     guint64 applied_rows, gint64 applied_bytes,

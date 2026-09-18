@@ -409,8 +409,9 @@ def main():
         "malformed-delimiter": source + "\nvoid malformed( {\n",
         "duplicate-function": source +
             "\nstatic void tenant_mutation_handler(void) { return; }\n",
-        "disabled-branch-change": source.replace(
-            '"fact_store_disabled"', '"fact_store_disabled_changed"', 1),
+        "disabled-branch-change": mutate_function(source,
+            "facts_quota_handler", '"fact_store_disabled"',
+            '"fact_store_disabled_changed"'),
         "conditional-directive-change": source.replace(
             "if (!wyl_policy_store_tenant_id_is_valid (tenant) ||\n"
             "#ifdef WYL_HAS_FACT_STORE",
