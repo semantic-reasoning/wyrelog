@@ -23,4 +23,12 @@ wyrelog_error_t wyl_fact_store_open_provisioned_graph
     const gchar * tenant_id, const gchar * graph_id, gboolean writable,
     wyl_fact_store_t ** out_store);
 
+/* Open a legacy path while charging the same durable concurrent-open
+ * reservation used by provisioned graphs.  The returned store owns the
+ * reservation and settles it after native DuckDB cleanup. */
+wyrelog_error_t wyl_fact_store_open_legacy_graph
+  (wyl_policy_store_t * policy_store, const gchar * path,
+    const gchar * fact_root, const gchar * tenant_id, const gchar * graph_id,
+    gboolean writable, wyl_fact_store_t ** out_store);
+
 G_END_DECLS;
