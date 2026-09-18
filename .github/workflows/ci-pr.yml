@@ -46,7 +46,6 @@ jobs:
   build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Relativise absolute paths baked into debug info so cache entries stay
