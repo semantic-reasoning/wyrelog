@@ -13917,6 +13917,16 @@ fact_open_state_name (WylPolicyFactOpenReservationState state)
   }
 }
 
+static gboolean
+fact_open_publication_statement_should_fail (wyl_policy_store_t *store)
+{
+  const guint mask = 1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT;
+  if ((store->fact_open_publication_fail_mask & mask) == 0)
+    return FALSE;
+  store->fact_open_publication_fail_mask &= ~mask;
+  return TRUE;
+}
+
 /* COMMIT is the durable linearization point. A writer-lease downgrade can
  * fail after SQLite has returned to autocommit; callers must not retry such a
  * mutation and accidentally duplicate a durable reservation. */
@@ -14104,7 +14114,10 @@ wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
             "WHERE owner_incarnation=?;", &stmt);
     if (rc == WYRELOG_E_OK)
       rc = bind_text (stmt, 1, owner_incarnation);
-    int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    int step_rc = rc == WYRELOG_E_OK
+        ? (fact_open_publication_statement_should_fail (store)
+            ? SQLITE_ERROR : sqlite3_step (stmt))
+        : SQLITE_ERROR;
     if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW)
       owner_active = sqlite3_column_int (stmt, 0) != 0;
     else if (rc == WYRELOG_E_OK && step_rc == SQLITE_DONE)
@@ -14132,7 +14145,9 @@ wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 4, graph_id);
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, root_identity);
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 6, token_identity);
-    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    if (rc == WYRELOG_E_OK
+        && (fact_open_publication_statement_should_fail (store)
+        || sqlite3_step (stmt) != SQLITE_DONE))
       rc = WYRELOG_E_IO;
     sqlite3_finalize (stmt);
   }
@@ -14186,7 +14201,9 @@ wyl_policy_store_transition_fact_open (wyl_policy_store_t *store,
       rc = bind_text (stmt, 4, recovery_claim);
   }
   if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 5, expected);
-  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+  if (rc == WYRELOG_E_OK
+      && (fact_open_publication_statement_should_fail (store)
+      || sqlite3_step (stmt) != SQLITE_DONE))
     rc = WYRELOG_E_IO;
   gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
   sqlite3_finalize (stmt);
@@ -14232,7 +14249,9 @@ wyl_policy_store_claim_fact_open_recovery (wyl_policy_store_t *store,
       rc = bind_text (stmt, 5, expected_claim);
   }
   if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 6, recovery_owner);
-  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+  if (rc == WYRELOG_E_OK
+      && (fact_open_publication_statement_should_fail (store)
+      || sqlite3_step (stmt) != SQLITE_DONE))
     rc = WYRELOG_E_IO;
   gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
   sqlite3_finalize (stmt);
@@ -14264,7 +14283,10 @@ wyl_policy_store_settle_fact_open (wyl_policy_store_t *store,
             "SELECT settlement_owner,recovery_claim FROM fact_open_settlements "
             "WHERE reservation_id=?;", &stmt);
     if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, reservation_id);
-    int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+    int step_rc = rc == WYRELOG_E_OK
+        ? (fact_open_publication_statement_should_fail (store)
+            ? SQLITE_ERROR : sqlite3_step (stmt))
+        : SQLITE_ERROR;
     if (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
       gboolean same_owner = g_strcmp0 ((const gchar *) sqlite3_column_text
                 (stmt, 0), settlement_owner) == 0;
@@ -14315,7 +14337,9 @@ wyl_policy_store_settle_fact_open (wyl_policy_store_t *store,
         rc = bind_text (stmt, 3, recovery_claim);
     }
   }
-  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+  if (rc == WYRELOG_E_OK
+      && (fact_open_publication_statement_should_fail (store)
+      || sqlite3_step (stmt) != SQLITE_DONE))
     rc = WYRELOG_E_IO;
   gboolean changed = rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 0;
   sqlite3_finalize (stmt);

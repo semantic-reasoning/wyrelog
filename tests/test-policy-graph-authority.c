@@ -4027,6 +4027,86 @@ test_fact_open_publication_faults (void)
 }
 
 static void
+test_fact_open_statement_faults (void)
+{
+  g_autofree gchar *root = NULL;
+  g_autofree gchar *path = make_store_path (&root);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  open_fact_open_fault_fixture (path, &store);
+
+  g_autofree gchar *reservation_id = NULL;
+  wyl_policy_store_fact_open_publication_fail_once (store,
+      WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "statement-reserve", "fault-owner", "fault-tenant",
+      "graph-statement-reserve", "root-statement-reserve",
+      "token-statement-reserve", &reservation_id), ==, WYRELOG_E_IO);
+  g_assert_null (reservation_id);
+  g_assert_true (wyl_policy_store_is_autocommit (store));
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_open_reservations "
+      "WHERE reservation_id='statement-reserve';"), ==, 0);
+
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store,
+      "statement-transition", "fault-owner", "fault-tenant",
+      "graph-statement-transition", "root-statement-transition",
+      "token-statement-transition", &reservation_id), ==, WYRELOG_E_OK);
+  wyl_policy_store_fact_open_publication_fail_once (store,
+      WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "fault-owner", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACQUIRING), ==, WYRELOG_E_IO);
+  g_autofree gchar *state = scalar_text (wyl_policy_store_get_db (store),
+          "SELECT state FROM fact_open_reservations "
+          "WHERE reservation_id='statement-transition';");
+  g_assert_cmpstr (state, ==, "pending");
+
+  g_assert_cmpint (wyl_policy_store_register_fact_open_owner (store,
+      "statement-recovery-owner"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "fault-owner", NULL, WYL_POLICY_FACT_OPEN_PENDING,
+      WYL_POLICY_FACT_OPEN_ACQUIRING), ==, WYRELOG_E_OK);
+  wyl_policy_store_fact_open_publication_fail_once (store,
+      WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT);
+  g_assert_cmpint (wyl_policy_store_claim_fact_open_recovery (store,
+      reservation_id, "fault-owner", NULL, "statement-recovery-owner",
+      "statement-recovery-claim"), ==, WYRELOG_E_IO);
+  g_autofree gchar *owner = scalar_text (wyl_policy_store_get_db (store),
+          "SELECT owner_incarnation FROM fact_open_reservations "
+          "WHERE reservation_id='statement-transition';");
+  g_assert_cmpstr (owner, ==, "fault-owner");
+  g_assert_cmpint (wyl_policy_store_claim_fact_open_recovery (store,
+      reservation_id, "fault-owner", NULL, "statement-recovery-owner",
+      "statement-recovery-claim"), ==, WYRELOG_E_OK);
+  g_clear_pointer (&owner, g_free);
+
+  g_assert_cmpint (wyl_policy_store_transition_fact_open (store,
+      reservation_id, "statement-recovery-owner", "statement-recovery-claim",
+      WYL_POLICY_FACT_OPEN_ACQUIRING,
+      WYL_POLICY_FACT_OPEN_CLEANUP_PENDING), ==, WYRELOG_E_OK);
+  wyl_policy_store_fact_open_publication_fail_once (store,
+      WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT);
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store, reservation_id,
+      "statement-recovery-owner", "statement-recovery-claim", TRUE), ==,
+      WYRELOG_E_IO);
+  g_clear_pointer (&state, g_free);
+  state = scalar_text (wyl_policy_store_get_db (store),
+          "SELECT state FROM fact_open_reservations "
+          "WHERE reservation_id='statement-transition';");
+  g_assert_cmpstr (state, ==, "cleanup_pending");
+  g_assert_cmpint (wyl_policy_store_settle_fact_open (store, reservation_id,
+      "statement-recovery-owner", "statement-recovery-claim", TRUE), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM fact_open_settlements "
+      "WHERE reservation_id='statement-transition';"), ==, 1);
+
+  g_clear_pointer (&reservation_id, g_free);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (root, path);
+}
+
+static void
 remove_quota_test_tree (const gchar *path)
 {
   g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
@@ -6421,6 +6501,8 @@ main (int argc, char **argv)
       test_fact_concurrent_open_quota_cross_handle_reopen);
   g_test_add_func ("/policy/graph-authority/fact-open-publication-faults",
       test_fact_open_publication_faults);
+  g_test_add_func ("/policy/graph-authority/fact-open-statement-faults",
+      test_fact_open_statement_faults);
   g_test_add_func
     ("/policy/graph-authority/fact-open-reservation-retryable-teardown",
       test_fact_open_reservation_owns_retryable_teardown);
