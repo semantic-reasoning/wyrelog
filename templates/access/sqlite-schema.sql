@@ -555,6 +555,53 @@ CREATE TABLE IF NOT EXISTS fact_logical_quota_operations (
 CREATE INDEX IF NOT EXISTS idx_fact_logical_quota_operations_state
     ON fact_logical_quota_operations (tenant_id, state);
 
+-- Durable conservative physical-byte reservations.  Inventory generation and
+-- digest bind each reservation to one typed artifact observation; unstable or
+-- over-limit observations remain charged in reconciling_bytes.
+CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_limits (
+    tenant_id       TEXT PRIMARY KEY,
+    hard_limit      INTEGER NOT NULL CHECK (
+        typeof(hard_limit) = 'integer' AND hard_limit >= 0),
+    updated_at      INTEGER NOT NULL,
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_tenant_physical_quota_usage (
+    tenant_id        TEXT PRIMARY KEY,
+    committed_bytes  INTEGER NOT NULL CHECK (
+        typeof(committed_bytes) = 'integer' AND committed_bytes >= 0),
+    pending_bytes    INTEGER NOT NULL CHECK (
+        typeof(pending_bytes) = 'integer' AND pending_bytes >= 0),
+    reconciling_bytes INTEGER NOT NULL CHECK (
+        typeof(reconciling_bytes) = 'integer' AND reconciling_bytes >= 0),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE TABLE IF NOT EXISTS fact_physical_quota_reservations (
+    request_id           TEXT PRIMARY KEY,
+    tenant_id            TEXT NOT NULL,
+    graph_id             TEXT NOT NULL,
+    inventory_generation TEXT NOT NULL,
+    inventory_digest     TEXT NOT NULL CHECK (
+        typeof(inventory_digest) = 'text' AND length(inventory_digest) = 64 AND
+        inventory_digest = lower(inventory_digest) AND
+        inventory_digest NOT GLOB '*[^0-9a-f]*'),
+    requested_bytes      INTEGER NOT NULL CHECK (
+        typeof(requested_bytes) = 'integer' AND requested_bytes >= 0),
+    applied_bytes        INTEGER NOT NULL DEFAULT 0 CHECK (
+        typeof(applied_bytes) = 'integer' AND applied_bytes >= 0),
+    state                TEXT NOT NULL CHECK (state IN ('pending',
+        'reconciling', 'settled', 'cancelled')),
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    UNIQUE (tenant_id, graph_id, request_id, inventory_generation,
+        inventory_digest),
+    FOREIGN KEY (tenant_id, graph_id) REFERENCES fact_graphs (tenant_id, graph_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_physical_quota_reservations_state
+    ON fact_physical_quota_reservations (tenant_id, state);
+
 CREATE TABLE IF NOT EXISTS fact_graph_create_reservations (
     tenant_id     TEXT NOT NULL,
     graph_id      TEXT NOT NULL,

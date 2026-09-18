@@ -2412,6 +2412,7 @@ typedef enum
   WYL_POLICY_FACT_QUOTA_WRITE_RATE,
   WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS,
   WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT,
+  WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
 } WylPolicyFactQuotaDimension;
 typedef struct
 {
@@ -2427,6 +2428,40 @@ typedef struct
   guint64 hard_limit;
   guint64 registered;
 } WylPolicyFactSchemaQuotaStatus;
+typedef struct
+{
+  gboolean has_limit;
+  guint64 hard_limit;
+  guint64 committed_bytes;
+  guint64 pending_bytes;
+  guint64 reconciling_bytes;
+} WylPolicyFactPhysicalQuotaStatus;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *request_id;
+  const gchar *inventory_generation;
+  const gchar *inventory_digest;
+} WylPolicyFactPhysicalQuotaOperation;
+
+typedef enum
+{
+  WYL_POLICY_FACT_PHYSICAL_OPERATION_INVALID = -1,
+  WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING = 0,
+  WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED,
+  WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING,
+  WYL_POLICY_FACT_PHYSICAL_OPERATION_CANCELLED,
+} WylPolicyFactPhysicalOperationState;
+
+typedef struct
+{
+  WylPolicyFactPhysicalOperationState state;
+  gboolean replay;
+  guint64 requested_bytes;
+  guint64 applied_bytes;
+} WylPolicyFactPhysicalOperationStatus;
 typedef struct
 {
   gboolean has_limit;
@@ -2532,6 +2567,24 @@ wyrelog_error_t wyl_policy_store_cancel_fact_logical_quota
     const WylPolicyFactLogicalQuotaOperation *operation,
     gboolean definite_noncommit,
     WylPolicyFactLogicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_get_fact_physical_quota_status
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    WylPolicyFactPhysicalQuotaStatus *out_status);
+wyrelog_error_t wyl_policy_store_reserve_fact_physical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    guint64 requested_bytes,
+    WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_settle_fact_physical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    guint64 observed_bytes, gboolean stable_evidence,
+    WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_cancel_fact_physical_quota
+  (wyl_policy_store_t *store,
+    const WylPolicyFactPhysicalQuotaOperation *operation,
+    gboolean definite_noncommit,
+    WylPolicyFactPhysicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
     const wyl_policy_fact_graph_create_options_t * opts,
     gchar ** out_storage_uri);

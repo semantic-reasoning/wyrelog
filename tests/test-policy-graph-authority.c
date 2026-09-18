@@ -6242,6 +6242,136 @@ test_fact_write_rate_admission_persists_and_bounds (void)
 }
 
 static void
+test_fact_physical_quota_ledger (void)
+{
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-a",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-b",
+      &created), ==, WYRELOG_E_OK);
+  exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,sealed,created_at,updated_at) VALUES "
+      "('physical-a','graph-a','file:///physical-a','/physical-a',1,"
+      "'physical-a',0,1,1),"
+      "('physical-b','graph-b','file:///physical-b','/physical-b',1,"
+      "'physical-b',0,1,1);");
+
+  WylPolicyFactQuotaConfig config = { .has_limit = TRUE, .hard_limit = 100 };
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "physical-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &config), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "missing",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES, &config), ==, WYRELOG_E_NOT_FOUND);
+
+  WylPolicyFactPhysicalQuotaOperation first = {
+    .tenant_id = "physical-a",
+    .graph_id = "graph-a",
+    .request_id = "physical-request-a",
+    .inventory_generation = "generation-1",
+    .inventory_digest =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  };
+  WylPolicyFactPhysicalOperationStatus op_status = { 0 };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &first, 60, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_PENDING);
+  WylPolicyFactPhysicalQuotaStatus quota = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-a", &quota), ==, WYRELOG_E_OK);
+  g_assert_true (quota.has_limit);
+  g_assert_cmpuint (quota.pending_bytes, ==, 60);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &first, 60, &op_status), ==, WYRELOG_E_OK);
+  g_assert_true (op_status.replay);
+
+  WylPolicyFactPhysicalQuotaOperation second = first;
+  second.request_id = "physical-request-b";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &second, 50, &op_status), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
+      &first, 40, TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &second, 50, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
+      &second, 120, FALSE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING);
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-a", &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.committed_bytes, ==, 40);
+  g_assert_cmpuint (quota.pending_bytes, ==, 0);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 120);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
+      &second, 50, TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-a", &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.committed_bytes, ==, 90);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 0);
+  g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store, "physical-a",
+      WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
+      &(WylPolicyFactQuotaConfig) { .has_limit = TRUE, .hard_limit = 100 }),
+      ==, WYRELOG_E_OK);
+
+  WylPolicyFactPhysicalQuotaOperation third = first;
+  third.request_id = "physical-request-c";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &third, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_physical_quota (store,
+      &third, FALSE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_RECONCILING);
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-a", &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 5);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
+      &third, 5, TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  WylPolicyFactPhysicalQuotaOperation overflow = third;
+  overflow.request_id = "physical-request-overflow";
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &overflow, G_MAXINT64 + (guint64) 1, &op_status), ==,
+      WYRELOG_E_INVALID);
+
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-b", &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.committed_bytes, ==, 0);
+  g_assert_cmpuint (quota.pending_bytes, ==, 0);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 0);
+  WylPolicyFactPhysicalQuotaOperation stable_overage = {
+    .tenant_id = "physical-b",
+    .graph_id = "graph-b",
+    .request_id = "physical-request-overage",
+    .inventory_generation = "generation-b",
+    .inventory_digest =
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_physical_quota (store,
+      &stable_overage, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_physical_quota (store,
+      &stable_overage, 9, TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_PHYSICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
+      "physical-b", &quota), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (quota.committed_bytes, ==, 9);
+  g_assert_cmpuint (quota.reconciling_bytes, ==, 0);
+  cleanup_store_path (store_root, store_path);
+}
+
+static void
 test_fact_logical_quota_ledger (void)
 {
   g_autofree gchar *store_root = NULL;
@@ -6514,6 +6644,8 @@ main (int argc, char **argv)
       test_fact_write_rate_admission_clock_remainder);
   g_test_add_func ("/policy/graph-authority/fact-logical-quota-ledger",
       test_fact_logical_quota_ledger);
+  g_test_add_func ("/policy/graph-authority/fact-physical-quota-ledger",
+      test_fact_physical_quota_ledger);
   g_test_add_func
     ("/policy/graph-authority/graph-quota-reservation-reopen",
       test_graph_quota_reservation_survives_reopen);
