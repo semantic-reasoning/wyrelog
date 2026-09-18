@@ -7645,23 +7645,6 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
             auth_tenant, &concurrent_status);
     config.has_limit = concurrent_status.has_limit;
     config.hard_limit = concurrent_status.hard_limit;
-  } else if (dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
-    g_string_append (body,
-        ",\"dimension\":\"concurrent_opens\",\"limit\":");
-    if (config.has_limit)
-      g_string_append_printf (body, "%" G_GUINT64_FORMAT,
-          config.hard_limit);
-    else
-      g_string_append (body, "null");
-    g_string_append_printf (body,
-        ",\"pending\":%" G_GUINT64_FORMAT
-        ",\"active\":%" G_GUINT64_FORMAT
-        ",\"acquiring\":%" G_GUINT64_FORMAT
-        ",\"cleanup_pending\":%" G_GUINT64_FORMAT
-        ",\"charged\":%" G_GUINT64_FORMAT "}",
-        concurrent_status.pending, concurrent_status.active,
-        concurrent_status.acquiring, concurrent_status.cleanup_pending,
-        concurrent_status.charged);
   } else {
     rc = wyl_policy_store_get_fact_quota_config
           (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
@@ -7689,6 +7672,23 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
     else
       g_string_append (body, "null");
     g_string_append_c (body, '}');
+  } else if (dimension == WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS) {
+    g_string_append (body,
+        ",\"dimension\":\"concurrent_opens\",\"limit\":");
+    if (config.has_limit)
+      g_string_append_printf (body, "%" G_GUINT64_FORMAT,
+          config.hard_limit);
+    else
+      g_string_append (body, "null");
+    g_string_append_printf (body,
+        ",\"pending\":%" G_GUINT64_FORMAT
+        ",\"active\":%" G_GUINT64_FORMAT
+        ",\"acquiring\":%" G_GUINT64_FORMAT
+        ",\"cleanup_pending\":%" G_GUINT64_FORMAT
+        ",\"charged\":%" G_GUINT64_FORMAT "}",
+        concurrent_status.pending, concurrent_status.active,
+        concurrent_status.acquiring, concurrent_status.cleanup_pending,
+        concurrent_status.charged);
   } else {
     const gchar *name = dimension == WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT
         ? "schema_count" : "graph_count";
