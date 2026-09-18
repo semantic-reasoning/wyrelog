@@ -108,6 +108,7 @@ typedef struct
   gchar *tenant;
   gchar *dimension;
   gchar *limit_arg;
+  gchar *row_limit_arg;
   gchar *rate_per_second_arg;
   gchar *burst_arg;
   gchar *access_token_file;
@@ -306,6 +307,7 @@ wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
   g_clear_pointer (&opts->tenant, g_free);
   g_clear_pointer (&opts->dimension, g_free);
   g_clear_pointer (&opts->limit_arg, g_free);
+  g_clear_pointer (&opts->row_limit_arg, g_free);
   g_clear_pointer (&opts->rate_per_second_arg, g_free);
   g_clear_pointer (&opts->burst_arg, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
@@ -2141,9 +2143,11 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"dimension", 0, 0, G_OPTION_ARG_STRING, &opts.dimension,
-     "Quota dimension (graph_count, write_rate, schema_count, or concurrent_opens)", "DIMENSION"},
+     "Quota dimension (graph_count, write_rate, schema_count, concurrent_opens, or logical_bytes)", "DIMENSION"},
     {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
      "Maximum graph count (0 denies graph creation)", "N"},
+    {"row-limit", 0, 0, G_OPTION_ARG_STRING, &opts.row_limit_arg,
+     "Maximum logical fact rows (paired with logical_bytes)", "N"},
     {"rate-per-second", 0, 0, G_OPTION_ARG_STRING,
      &opts.rate_per_second_arg, "Fact writes per second", "N"},
     {"burst", 0, 0, G_OPTION_ARG_STRING, &opts.burst_arg,
@@ -2185,14 +2189,30 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   if (g_strcmp0 (dimension, "graph_count") != 0
       && g_strcmp0 (dimension, "write_rate") != 0
       && g_strcmp0 (dimension, "schema_count") != 0
-      && g_strcmp0 (dimension, "concurrent_opens") != 0) {
+      && g_strcmp0 (dimension, "concurrent_opens") != 0
+      && g_strcmp0 (dimension, "logical_bytes") != 0) {
     g_printerr ("wyctl: invalid --dimension\n");
     return 2;
   }
   gint64 parsed_limit = 0;
+  gint64 parsed_row_limit = 0;
   gint64 parsed_rate = 0;
   gint64 parsed_burst = 0;
-  if (g_strcmp0 (dimension, "graph_count") == 0) {
+  if (g_strcmp0 (dimension, "logical_bytes") == 0) {
+    if (opts.rate_per_second_arg != NULL || opts.burst_arg != NULL
+        || (configure && (opts.limit_arg == NULL
+        || opts.row_limit_arg == NULL))
+        || (!configure && (opts.limit_arg != NULL
+        || opts.row_limit_arg != NULL))) {
+      g_printerr ("wyctl: logical_bytes requires --limit and --row-limit when configuring\n");
+      return 2;
+    }
+    if (configure && (!parse_nonnegative_int64 (opts.limit_arg, &parsed_limit)
+        || !parse_nonnegative_int64 (opts.row_limit_arg, &parsed_row_limit))) {
+      g_printerr ("wyctl: invalid logical_bytes quota\n");
+      return 2;
+    }
+  } else if (g_strcmp0 (dimension, "graph_count") == 0) {
     if (opts.rate_per_second_arg != NULL || opts.burst_arg != NULL
         || (configure && opts.limit_arg == NULL)) {
       g_printerr ("wyctl: graph_count requires --limit and rejects rate options\n");
@@ -2242,11 +2262,21 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   if (client_rc != 0)
     return client_rc;
   WylClientFactQuotaStatus status = { 0 };
+  WylClientFactLogicalQuotaStatus logical_status = { 0 };
   WylClientFactWriteRateQuotaStatus write_rate_status = { 0 };
   WylClientFactSchemaQuotaStatus schema_status = { 0 };
   WylClientFactConcurrentOpenQuotaStatus concurrent_status = { 0 };
   wyrelog_error_t rc;
-  if (g_strcmp0 (dimension, "write_rate") == 0) {
+  if (g_strcmp0 (dimension, "logical_bytes") == 0) {
+    rc = configure
+        ? wyl_client_fact_logical_quota_configure (client, tenant,
+            (guint64) parsed_row_limit, (guint64) parsed_limit,
+            guard_timestamp, opts.guard_loc_class, guard_risk,
+            &logical_status)
+        : wyl_client_fact_logical_quota_status (client, tenant,
+            guard_timestamp, opts.guard_loc_class, guard_risk,
+            &logical_status);
+  } else if (g_strcmp0 (dimension, "write_rate") == 0) {
     rc = configure
         ? wyl_client_fact_write_rate_quota_configure (client, tenant,
             (guint64) parsed_rate, (guint64) parsed_burst, guard_timestamp,
@@ -2280,7 +2310,24 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   int exit_rc = fact_remote_exit (client,
           configure ? "fact quota configure" : "fact quota status", rc,
           "fact_quota_failed");
-  if (exit_rc == 0 && g_strcmp0 (dimension, "write_rate") == 0) {
+  if (exit_rc == 0 && g_strcmp0 (dimension, "logical_bytes") == 0) {
+    g_print ("tenant=%s dimension=logical_bytes row_limit=", logical_status.tenant_id);
+    if (logical_status.has_limit)
+      g_print ("%" G_GUINT64_FORMAT, logical_status.logical_row_limit);
+    else
+      g_print ("unlimited");
+    g_print (" byte_limit=");
+    if (logical_status.has_limit)
+      g_print ("%" G_GUINT64_FORMAT, logical_status.logical_byte_limit);
+    else
+      g_print ("unlimited");
+    g_print (" committed_rows=%" G_GUINT64_FORMAT
+        " committed_bytes=%" G_GUINT64_FORMAT
+        " pending_rows=%" G_GUINT64_FORMAT
+        " pending_bytes=%" G_GUINT64_FORMAT "\n",
+        logical_status.committed_rows, logical_status.committed_bytes,
+        logical_status.pending_rows, logical_status.pending_bytes);
+  } else if (exit_rc == 0 && g_strcmp0 (dimension, "write_rate") == 0) {
     g_print ("tenant=%s dimension=write_rate rate_per_second=",
         write_rate_status.tenant_id);
     if (write_rate_status.has_limit) {
@@ -2319,6 +2366,7 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
         "\n", status.committed, status.pending);
   }
   wyl_client_fact_quota_status_clear (&status);
+  wyl_client_fact_logical_quota_status_clear (&logical_status);
   wyl_client_fact_write_rate_quota_status_clear (&write_rate_status);
   wyl_client_fact_schema_quota_status_clear (&schema_status);
   wyl_client_fact_concurrent_open_quota_status_clear (&concurrent_status);

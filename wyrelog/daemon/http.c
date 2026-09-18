@@ -7527,6 +7527,7 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       ? g_hash_table_lookup (query, "dimension") : NULL;
   WylPolicyFactQuotaDimension dimension =
       WYL_POLICY_FACT_QUOTA_GRAPH_COUNT;
+  gboolean logical_bytes_dimension = FALSE;
   if (dimension_arg != NULL) {
     if (g_strcmp0 (dimension_arg, "graph_count") == 0)
       dimension = WYL_POLICY_FACT_QUOTA_GRAPH_COUNT;
@@ -7536,16 +7537,25 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       dimension = WYL_POLICY_FACT_QUOTA_SCHEMA_COUNT;
     else if (g_strcmp0 (dimension_arg, "concurrent_opens") == 0)
       dimension = WYL_POLICY_FACT_QUOTA_CONCURRENT_OPENS;
+    else if (g_strcmp0 (dimension_arg, "logical_bytes") == 0)
+      logical_bytes_dimension = TRUE;
     else {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
     }
   }
-  if (g_strcmp0 (method, "GET") == 0 && query != NULL
+  gboolean invalid_get_quota_options = query != NULL
       && (g_hash_table_lookup (query, "rate_per_second") != NULL
-      || g_hash_table_lookup (query, "burst") != NULL
-      || (dimension != WYL_POLICY_FACT_QUOTA_GRAPH_COUNT
-      && g_hash_table_lookup (query, "limit") != NULL))) {
+      || g_hash_table_lookup (query, "burst") != NULL);
+  if (logical_bytes_dimension)
+    invalid_get_quota_options = invalid_get_quota_options
+        || g_hash_table_lookup (query, "limit") != NULL
+        || g_hash_table_lookup (query, "row_limit") != NULL;
+  else if (dimension != WYL_POLICY_FACT_QUOTA_GRAPH_COUNT)
+    invalid_get_quota_options = invalid_get_quota_options
+        || g_hash_table_lookup (query, "limit") != NULL;
+  if (g_strcmp0 (method, "GET") == 0 && query != NULL
+      && invalid_get_quota_options) {
     set_json_error (msg, 400, "invalid_fact_quota_request");
     return;
   }
@@ -7559,6 +7569,108 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *auth_tenant = auth.tenant;
   if (!wyl_policy_store_tenant_id_is_valid (auth_tenant)) {
     set_json_error (msg, 403, "fact_quota_denied");
+    return;
+  }
+
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (g_strcmp0 (method, "POST") == 0) {
+    rc = wyl_daemon_policy_write_acquire (ctx, msg,
+            WYL_DAEMON_POLICY_WRITE_OWNER_FACT_QUOTA_CONFIGURE, &write);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_quota_configuration_failed");
+      return;
+    }
+  }
+
+  if (logical_bytes_dimension) {
+    WylPolicyFactLogicalQuotaConfig logical_config = { 0 };
+    wyrelog_error_t logical_rc = WYRELOG_E_OK;
+    if (g_strcmp0 (method, "POST") == 0) {
+      if (g_hash_table_lookup (query, "rate_per_second") != NULL
+          || g_hash_table_lookup (query, "burst") != NULL) {
+        set_json_error (msg, 400, "invalid_fact_quota_request");
+        return;
+      }
+      const gchar *byte_limit_arg = query != NULL
+          ? g_hash_table_lookup (query, "limit") : NULL;
+      const gchar *row_limit_arg = query != NULL
+          ? g_hash_table_lookup (query, "row_limit") : NULL;
+      gint64 byte_limit = -1;
+      gint64 row_limit = -1;
+      if (byte_limit_arg == NULL || row_limit_arg == NULL
+          || !parse_int64_query_param (byte_limit_arg, &byte_limit)
+          || !parse_int64_query_param (row_limit_arg, &row_limit)
+          || byte_limit < 0 || row_limit < 0) {
+        set_json_error (msg, 400, "invalid_fact_quota_request");
+        return;
+      }
+      logical_config.has_limit = TRUE;
+      logical_config.logical_byte_limit = (guint64) byte_limit;
+      logical_config.logical_row_limit = (guint64) row_limit;
+      logical_rc = wyl_policy_store_set_fact_logical_quota (write.store,
+              auth_tenant, &logical_config);
+    } else {
+      logical_rc = wyl_policy_store_get_fact_logical_quota
+            (wyl_handle_get_policy_store (ctx->handle), auth_tenant,
+              &logical_config);
+    }
+    if (logical_rc == WYRELOG_E_INVALID) {
+      set_json_error (msg, 400, "invalid_fact_quota_request");
+      return;
+    }
+    if (logical_rc == WYRELOG_E_NOT_FOUND) {
+      set_json_error (msg, 404, "tenant_invalid");
+      return;
+    }
+    if (logical_rc == WYRELOG_E_CONFLICT) {
+      set_json_error (msg, 409, "fact_quota_limit_below_usage");
+      return;
+    }
+    if (logical_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_quota_configuration_failed");
+      return;
+    }
+    WylPolicyFactLogicalQuotaStatus logical_status = { 0 };
+    logical_rc = wyl_policy_store_get_fact_logical_quota_status
+          (wyl_handle_get_policy_store (ctx->handle), auth_tenant,
+            &logical_status);
+    if (logical_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_quota_status_failed");
+      return;
+    }
+    if (g_strcmp0 (method, "POST") == 0
+        && wyl_daemon_policy_write_finalize_for_response (msg, 200,
+        "success") != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "policy_write_cleanup_failed");
+      return;
+    }
+    g_autoptr (GString) logical_body = g_string_new
+          ("{\"ok\":true,\"tenant_id\":");
+    append_json_string (logical_body, auth_tenant);
+    g_string_append (logical_body,
+        ",\"dimension\":\"logical_bytes\",\"row_limit\":");
+    if (logical_config.has_limit)
+      g_string_append_printf (logical_body, "%" G_GUINT64_FORMAT,
+          logical_config.logical_row_limit);
+    else
+      g_string_append (logical_body, "null");
+    g_string_append (logical_body, ",\"limit\":");
+    if (logical_config.has_limit)
+      g_string_append_printf (logical_body, "%" G_GUINT64_FORMAT,
+          logical_config.logical_byte_limit);
+    else
+      g_string_append (logical_body, "null");
+    g_string_append_printf (logical_body,
+        ",\"committed_rows\":%" G_GUINT64_FORMAT
+        ",\"committed_bytes\":%" G_GUINT64_FORMAT
+        ",\"pending_rows\":%" G_GUINT64_FORMAT
+        ",\"pending_bytes\":%" G_GUINT64_FORMAT "}",
+        logical_status.committed_rows, logical_status.committed_bytes,
+        logical_status.pending_rows, logical_status.pending_bytes);
+    attach_request_id_header (msg);
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, logical_body->str, logical_body->len);
     return;
   }
 
@@ -7596,11 +7708,8 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
       config.rate_per_second = (guint64) rate;
       config.burst = (guint64) burst;
     }
-    wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
-            WYL_DAEMON_POLICY_WRITE_OWNER_FACT_QUOTA_CONFIGURE, &write);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_policy_store_set_fact_quota_config (write.store, auth_tenant,
-              dimension, &config);
+    rc = wyl_policy_store_set_fact_quota_config (write.store, auth_tenant,
+            dimension, &config);
     if (rc == WYRELOG_E_INVALID) {
       set_json_error (msg, 400, "invalid_fact_quota_request");
       return;
@@ -11731,6 +11840,23 @@ set_concurrent_open_quota_exceeded_json (SoupServerMessage *msg,
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body->str, body->len);
 }
+
+static void
+set_fact_logical_quota_exceeded_json (SoupServerMessage *msg)
+{
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 429,
+      "fact_quota_exceeded") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  g_autoptr (GString) body = g_string_new
+        ("{\"error\":\"fact_quota_exceeded\","
+          "\"dimension\":\"logical_bytes\"}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 429, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
 #endif
 
 static void
@@ -13695,11 +13821,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     schema_columns_clear (schema_columns, n_loaded);
     fact_rows_clear (rows, n_rows);
-    set_json_error (msg, rc == WYRELOG_E_POLICY ? 429 :
-        (rc == WYRELOG_E_CONFLICT ? 409 : 500),
-        rc == WYRELOG_E_POLICY ? "fact_quota_exceeded" :
-        (rc == WYRELOG_E_CONFLICT ? "fact_batch_conflict" :
-        "fact_quota_admission_failed"));
+    if (rc == WYRELOG_E_POLICY)
+      set_fact_logical_quota_exceeded_json (msg);
+    else
+      set_json_error (msg, rc == WYRELOG_E_CONFLICT ? 409 : 500,
+          rc == WYRELOG_E_CONFLICT ? "fact_batch_conflict" :
+          "fact_quota_admission_failed");
     return;
   }
   gboolean logical_quota_pending = logical_quota_status.state ==
