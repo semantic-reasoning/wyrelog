@@ -2448,6 +2448,10 @@ typedef enum
 typedef enum
 {
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_NONE = 0,
+  /* Fail the next fact-open SQL statement before sqlite3_step().  This keeps
+   * statement execution failure distinct from commit/rollback cleanup faults
+   * so callers can prove the publication transaction is rolled back. */
+  WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_STATEMENT,
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_COMMIT,
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_AUTOROLLBACK,
   WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK,
