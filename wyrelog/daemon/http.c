@@ -12617,6 +12617,8 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
 {
   *out_store = NULL;
   wyrelog_error_t rc = WYRELOG_E_OK;
+  g_autofree gchar *path = NULL;
+  gboolean needs_hardening = FALSE;
   if (out_quota_exceeded != NULL)
     *out_quota_exceeded = FALSE;
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
@@ -12634,8 +12636,6 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
   }
   wyl_policy_graph_authority_record_free (authority);
 #endif
-  g_autofree gchar *path = NULL;
-  gboolean needs_hardening = FALSE;
   rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
           graph, TRUE, &path, &needs_hardening);
   trace_http_fact_store ("resolve", rc);
