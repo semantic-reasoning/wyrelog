@@ -168,6 +168,10 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
   if (rc == WYRELOG_E_OK)
     rc = open_provisioned_active (fact_root, authority, record, writable,
             out_store);
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  if (rc == WYRELOG_E_OK)
+    wyl_fact_store_attach_physical_quota_policy (*out_store, policy_store);
+#endif
   gboolean reservation_attached = FALSE;
   if (rc == WYRELOG_E_OK){
     wyl_fact_store_open_reservation_attach (*out_store, adapter,

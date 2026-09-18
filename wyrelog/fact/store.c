@@ -62,6 +62,11 @@ struct wyl_fact_store_t
   WylSecureDuckdbBridge *provisioned_bridge;
   WylFactOpenReservation *open_reservation;
   FactOpenReservationAdapter *open_reservation_adapter;
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  wyl_policy_store_t *physical_quota_policy;
+  WylFactArtifactNamespace *physical_quota_namespace;
+  gboolean physical_quota_namespace_owned;
+#endif
   enum
   {
     WYL_FACT_STORE_HEALTHY = 0,
@@ -297,6 +302,28 @@ wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
   store->open_reservation_adapter = adapter;
   store->open_reservation = reservation;
 }
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+void
+wyl_fact_store_attach_physical_quota_context
+  (wyl_fact_store_t *store, wyl_policy_store_t *policy_store,
+    WylFactArtifactNamespace *namespace_)
+{
+  if (store == NULL)
+    return;
+  store->physical_quota_policy = policy_store;
+  store->physical_quota_namespace = namespace_;
+}
+
+void
+wyl_fact_store_attach_physical_quota_policy
+  (wyl_fact_store_t *store, wyl_policy_store_t *policy_store)
+{
+  if (store == NULL)
+    return;
+  store->physical_quota_policy = policy_store;
+}
+#endif
 
 void
 wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
@@ -1073,8 +1100,8 @@ wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
   duckdb_connection conn = NULL;
   rc = wyl_secure_duckdb_bridge_open_live_pair (namespace_, writable, &bridge,
           &db, &conn);
-  wyl_fact_artifact_namespace_free (namespace_);
   if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_namespace_free (namespace_);
     wyl_fact_store_identity_process_guard_unlock ();
     return rc;
   }
@@ -1083,6 +1110,8 @@ wyl_fact_store_open_provisioned_pair (WylFactGraphProvisionedPair *pair,
   self->db = db;
   self->conn = conn;
   self->provisioned_bridge = bridge;
+  self->physical_quota_namespace = namespace_;
+  self->physical_quota_namespace_owned = TRUE;
   g_mutex_init (&self->lock);
   rc = reject_audit_database_unlocked (self);
   if (rc != WYRELOG_E_OK) {
@@ -1139,6 +1168,7 @@ wyl_fact_store_open_provisioned_namespace_with_lease
   self->db = db;
   self->conn = conn;
   self->provisioned_bridge = bridge;
+  self->physical_quota_namespace = namespace_;
   g_mutex_init (&self->lock);
   rc = reject_audit_database_unlocked (self);
   if (rc != WYRELOG_E_OK) {
@@ -1245,6 +1275,10 @@ fact_store_close_checked (wyl_fact_store_t *store, gboolean forced)
   g_free (store->identity_tenant_id);
   g_free (store->identity_graph_id);
   g_free (store->identity_store_uuid);
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  if (store->physical_quota_namespace_owned)
+    wyl_fact_artifact_namespace_free (store->physical_quota_namespace);
+#endif
   g_free (store);
   return rc;
 }
@@ -2234,6 +2268,94 @@ take_batch_fault_unlocked (wyl_fact_store_t *store)
 }
 #endif
 
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+typedef struct
+{
+  gboolean active;
+  WylFactArtifactPhysicalQuotaEvidence *reservation_evidence;
+} WylFactPhysicalQuotaAdmission;
+
+static wyrelog_error_t
+fact_store_physical_quota_reserve (wyl_fact_store_t *store,
+    const wyl_fact_store_batch_t *batch,
+    WylFactPhysicalQuotaAdmission *admission)
+{
+  if (admission == NULL)
+    return WYRELOG_E_INVALID;
+  *admission = (WylFactPhysicalQuotaAdmission) { 0 };
+  if (store->physical_quota_policy == NULL
+      || store->physical_quota_namespace == NULL)
+    return WYRELOG_E_OK;
+  WylPolicyFactPhysicalQuotaStatus status = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_get_fact_physical_quota_status
+        (store->physical_quota_policy, batch->tenant_id, &status);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* An unconfigured tenant has no physical admission to perform.  Avoid
+   * inventory enumeration in that case: an unstable snapshot is not a quota
+   * failure, and legacy/provisioning tests may legitimately mutate artifacts
+   * while no physical limit is active. */
+  if (!status.has_limit)
+    return WYRELOG_E_OK;
+  rc = wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (store->physical_quota_namespace, &admission->reservation_evidence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (status.committed_bytes > G_MAXUINT64 - status.pending_bytes
+      || status.committed_bytes + status.pending_bytes
+      > G_MAXUINT64 - status.reconciling_bytes)
+    return WYRELOG_E_IO;
+  guint64 used = status.committed_bytes + status.pending_bytes
+      + status.reconciling_bytes;
+  if (used >= status.hard_limit)
+    return WYRELOG_E_POLICY;
+  guint64 bound = status.hard_limit - used;
+  WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
+  rc = wyl_policy_store_reserve_fact_physical_quota_evidence
+        (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
+          batch->request_id, admission->reservation_evidence, bound,
+          &operation_status);
+  if (rc == WYRELOG_E_OK)
+    admission->active = !operation_status.replay;
+  return rc;
+}
+
+static wyrelog_error_t
+fact_store_physical_quota_finish (wyl_fact_store_t *store,
+    const wyl_fact_store_batch_t *batch,
+    WylFactPhysicalQuotaAdmission *admission, gboolean mutation_committed)
+{
+  if (admission == NULL || !admission->active)
+    return WYRELOG_E_OK;
+  WylPolicyFactPhysicalQuotaOperation operation = {
+    .tenant_id = batch->tenant_id,
+    .graph_id = batch->graph_id,
+    .request_id = batch->request_id,
+    .inventory_generation =
+        wyl_fact_artifact_physical_quota_evidence_generation
+          (admission->reservation_evidence),
+    .inventory_digest =
+        wyl_fact_artifact_physical_quota_evidence_digest
+          (admission->reservation_evidence),
+  };
+  WylPolicyFactPhysicalOperationStatus operation_status = { 0 };
+  if (!mutation_committed)
+    return wyl_policy_store_cancel_fact_physical_quota
+             (store->physical_quota_policy, &operation, FALSE, &operation_status);
+  g_autoptr (WylFactArtifactPhysicalQuotaEvidence) observed = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_artifact_namespace_export_physical_quota_evidence
+        (store->physical_quota_namespace, &observed);
+  if (rc != WYRELOG_E_OK)
+    return wyl_policy_store_cancel_fact_physical_quota
+             (store->physical_quota_policy, &operation, FALSE, &operation_status);
+  return wyl_policy_store_settle_fact_physical_quota_observation
+           (store->physical_quota_policy, batch->tenant_id, batch->graph_id,
+             batch->request_id, admission->reservation_evidence, observed,
+             &operation_status);
+}
+#endif
+
 wyrelog_error_t
 wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -2293,6 +2415,18 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
     wyl_fact_store_connection_session_end (&session);
     return rc;
   }
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  WylFactPhysicalQuotaAdmission physical_admission = { 0 };
+  rc = fact_store_physical_quota_reserve (store, batch,
+          &physical_admission);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_pointer (&physical_admission.reservation_evidence,
+        wyl_fact_artifact_physical_quota_evidence_free);
+    wyl_fact_store_connection_session_end (&session);
+    return rc;
+  }
+#endif
 
   WylFactStoreTransaction transaction = { 0 };
   rc = wyl_fact_store_transaction_begin (&session,
@@ -2366,6 +2500,14 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
 #endif
   rc = wyl_fact_store_transaction_finish (&transaction, rc);
   wyl_fact_store_connection_session_end (&session);
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, batch,
+          &physical_admission, rc == WYRELOG_E_OK);
+  if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
+    rc = physical_rc;
+  g_clear_pointer (&physical_admission.reservation_evidence,
+      wyl_fact_artifact_physical_quota_evidence_free);
+#endif
   if (rc == WYRELOG_E_OK) {
     if (out_inserted != NULL)
       *out_inserted = TRUE;

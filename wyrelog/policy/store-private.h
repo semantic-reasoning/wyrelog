@@ -2592,6 +2592,12 @@ wyrelog_error_t wyl_policy_store_settle_fact_physical_quota_evidence
     const gchar *request_id,
     const WylFactArtifactPhysicalQuotaEvidence *evidence,
     WylPolicyFactPhysicalOperationStatus *out_status);
+wyrelog_error_t wyl_policy_store_settle_fact_physical_quota_observation
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *request_id,
+    const WylFactArtifactPhysicalQuotaEvidence *reservation_evidence,
+    const WylFactArtifactPhysicalQuotaEvidence *observed_evidence,
+    WylPolicyFactPhysicalOperationStatus *out_status);
 wyrelog_error_t wyl_policy_store_cancel_fact_physical_quota
   (wyl_policy_store_t *store,
     const WylPolicyFactPhysicalQuotaOperation *operation,
