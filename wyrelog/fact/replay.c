@@ -11,9 +11,7 @@
 #define WYL_FACT_STORE_CONNECTION_ROLE 1
 #include "store-connection-private.h"
 #undef WYL_FACT_STORE_CONNECTION_ROLE
-#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
 #include "fact/store-open-private.h"
-#endif
 
 #ifdef G_OS_WIN32
 #include <io.h>
