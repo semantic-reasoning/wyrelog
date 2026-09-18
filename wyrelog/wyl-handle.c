@@ -2487,6 +2487,45 @@ wyl_handle_refresh_fact_graph (WylHandle *self,
 }
 
 wyrelog_error_t
+wyl_handle_reconcile_fact_graph (WylHandle *self,
+    WylServiceAuthWriteLease *write_lease,
+    const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
+    WylFactGraphReconcileOutcome *out_outcome)
+{
+  if (out_outcome != NULL)
+    memset (out_outcome, 0, sizeof *out_outcome);
+  if (self == NULL || !WYL_IS_HANDLE (self) || graph_info == NULL
+      || self->fact_graph_runtime == NULL
+      || self->fact_tenant_admission == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (WylFactTenantAdmissionLease) tenant_lease = NULL;
+  wyrelog_error_t rc = wyl_fact_tenant_admission_acquire_write
+        (self->fact_tenant_admission, graph_info->tenant_id, NULL,
+          &tenant_lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_policy_store_t *policy = NULL;
+  wyl_policy_store_t *lease_policy = NULL;
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+  rc = wyl_service_auth_write_lease_get_policy_store (write_lease, self,
+          &lease_policy);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc == WYRELOG_E_OK && policy != lease_policy)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_reconcile_degraded (policy, self->fact_root,
+            self->fact_root_writer_lease, graph_info,
+            self->fact_graph_runtime, drain_timeout_us, out_outcome);
+  if (policy != NULL)
+    wyl_handle_policy_store_unpin (self, policy);
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_handle_unseal_fact_graph (WylHandle *self,
     WylServiceAuthWriteLease *write_lease,
     const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,

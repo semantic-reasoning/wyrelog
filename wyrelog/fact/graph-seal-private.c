@@ -623,6 +623,205 @@ acquire_graph_artifact_lease (wyl_policy_store_t *policy,
   return rc;
 }
 
+void
+wyl_fact_graph_reconcile_outcome_clear (WylFactGraphReconcileOutcome *outcome)
+{
+  if (outcome == NULL)
+    return;
+  wyl_fact_graph_runtime_status_clear (&outcome->status);
+  memset (outcome, 0, sizeof *outcome);
+}
+
+static void
+reconcile_discard_closed_publication
+  (WylFactGraphRuntimePublication *publication,
+    WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphReconcileOutcome *outcome)
+{
+  if (publication == NULL || !publication->active)
+    return;
+  wyl_fact_graph_runtime_publication_release_writer (publication);
+  gboolean evicted = FALSE;
+  wyrelog_error_t rc = wyl_fact_graph_runtime_manager_evict_closed
+        (manager, key, &evicted);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_OK;
+  if (outcome != NULL)
+    outcome->engine_evicted = evicted;
+  if (rc != WYRELOG_E_OK && outcome != NULL) {
+    outcome->compensation_failed = TRUE;
+    outcome->compensation_error = rc;
+  }
+  wyl_fact_graph_runtime_publication_abort (publication);
+}
+
+wyrelog_error_t
+wyl_fact_graph_reconcile_degraded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphReconcileOutcome *out_outcome)
+{
+  if (out_outcome != NULL) {
+    memset (out_outcome, 0, sizeof *out_outcome);
+    out_outcome->policy_result =
+        WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  }
+  if (policy == NULL || graph_info == NULL || manager == NULL
+      || graph_info->tenant_id == NULL || graph_info->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (root_lease != NULL) {
+    wyrelog_error_t root_rc = wyl_fact_root_writer_lease_verify (root_lease);
+    if (root_rc != WYRELOG_E_OK)
+      return root_rc;
+  }
+
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (policy,
+          graph_info->tenant_id, graph_info->graph_id, &authority);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED
+      || !authority->has_store_identity) {
+    wyl_policy_graph_authority_record_free (authority);
+    return WYRELOG_E_POLICY;
+  }
+  guint64 expected_lifecycle_generation = authority->lifecycle_generation;
+  guint64 expected_reconciliation_generation =
+      authority->reconciliation_generation;
+  wyl_policy_graph_authority_record_free (authority);
+
+  WylFactGraphKey key = { 0 };
+  rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
+          graph_info->graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylFactArtifactNamespace *artifact_namespace = NULL;
+  WylFactArtifactMutationLease *artifact_lease = NULL;
+  rc = acquire_graph_artifact_lease (policy, fact_root, graph_info,
+          &artifact_namespace, &artifact_lease);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+
+  WylFactGraphUnsealPreparation preparation = { 0 };
+  rc = wyl_fact_graph_runtime_unseal_prepare (manager, &key, &preparation);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  WylFactGraphRuntimeStatus drained = { 0 };
+  rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
+          drain_timeout_us, &drained);
+  wyl_fact_graph_runtime_status_clear (&drained);
+  if (rc != WYRELOG_E_OK)
+    goto preparation_finish;
+
+  WylFactGraphRuntimePublication publication = { 0 };
+  rc = wyl_fact_graph_runtime_unseal_claim (&preparation, &publication);
+  if (rc != WYRELOG_E_OK)
+    goto preparation_finish;
+
+  wyl_policy_fact_graph_info_t current = { 0 };
+  rc = read_unsealed_graph_info (policy, graph_info->tenant_id,
+          graph_info->graph_id, &current);
+  if (rc == WYRELOG_E_OK && artifact_lease != NULL)
+    rc = wyl_fact_replay_validate_graph_with_artifact_lease (policy, fact_root,
+            &current, artifact_namespace, artifact_lease);
+  else if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+  if (rc == WYRELOG_E_OK) {
+    WylFactGraphRuntimeStatus status = { 0 };
+    rc = wyl_fact_replay_refresh_graph_publication (policy, fact_root,
+            &current, &publication, artifact_namespace, artifact_lease,
+            &status);
+    if (out_outcome != NULL) {
+      out_outcome->status = status;
+      memset (&status, 0, sizeof status);
+      out_outcome->engine_published = rc == WYRELOG_E_OK;
+    }
+    wyl_fact_graph_runtime_status_clear (&status);
+  }
+  clear_unseal_graph_info (&current);
+  if (rc != WYRELOG_E_OK)
+    goto publication_abort;
+
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  rc = wyl_policy_store_reconcile_graph_authority (policy,
+          graph_info->tenant_id, graph_info->graph_id,
+          expected_lifecycle_generation, expected_reconciliation_generation,
+          &result);
+  if (out_outcome != NULL)
+    out_outcome->policy_result = result;
+  if (rc != WYRELOG_E_OK)
+    goto publication_discard;
+  if (result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+    rc = result == WYL_POLICY_AUTHORITY_MUTATION_STALE
+        ? WYRELOG_E_BUSY : WYRELOG_E_POLICY;
+    goto publication_discard;
+  }
+  if (out_outcome != NULL)
+    out_outcome->durable_reconcile_applied = TRUE;
+
+  rc = wyl_fact_graph_runtime_publication_open_retaining (&publication);
+  if (rc == WYRELOG_E_OK) {
+    if (out_outcome != NULL)
+      out_outcome->runtime_admission_open = TRUE;
+    goto preparation_finish;
+  }
+
+  /* The authority CAS succeeded but the runtime could not cross its final
+   * barrier.  Close the publication, remove the unpublished engine, and
+   * explicitly return the authority to DEGRADED so ACTIVE never describes a
+   * graph which cannot serve. */
+  reconcile_discard_closed_publication (&publication, manager, &key,
+      out_outcome);
+  {
+    WylPolicyGraphAuthorityRecord *active = NULL;
+    wyrelog_error_t repair_rc = wyl_policy_store_read_graph_authority (policy,
+            graph_info->tenant_id, graph_info->graph_id, &active);
+    if (repair_rc == WYRELOG_E_OK && active != NULL) {
+      WylPolicyAuthorityMutationResult repair_result =
+          WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+      repair_rc = wyl_policy_store_transition_graph_authority (policy,
+              graph_info->tenant_id, graph_info->graph_id,
+              WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+              WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+              WYL_POLICY_GRAPH_ERROR_RECOVERY, active->lifecycle_generation,
+              active->reconciliation_generation, &repair_result);
+      if (repair_rc == WYRELOG_E_OK
+          && repair_result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
+        repair_rc = WYRELOG_E_BUSY;
+    }
+    wyl_policy_graph_authority_record_free (active);
+    if (repair_rc != WYRELOG_E_OK && out_outcome != NULL) {
+      out_outcome->compensation_failed = TRUE;
+      out_outcome->compensation_error = repair_rc;
+    }
+  }
+  goto preparation_finish;
+
+publication_discard:
+  reconcile_discard_closed_publication (&publication, manager, &key,
+      out_outcome);
+  goto preparation_finish;
+
+publication_abort:
+  wyl_fact_graph_runtime_publication_abort (&publication);
+preparation_finish:
+  wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+finish:
+  if (out_outcome != NULL) {
+    wyl_fact_graph_runtime_status_clear (&out_outcome->status);
+    (void) wyl_fact_graph_runtime_manager_get_status (manager, &key,
+        &out_outcome->status);
+  }
+  wyl_fact_artifact_mutation_lease_free (artifact_lease);
+  wyl_fact_artifact_namespace_free (artifact_namespace);
+  wyl_fact_graph_key_clear (&key);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactRootWriterLease *root_lease,

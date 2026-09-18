@@ -1375,6 +1375,57 @@ test_unseal_rebuilds_before_reopening (void)
   remove_tree (root);
 }
 
+static void
+test_reconcile_degraded_rebuilds_before_reopening (void)
+{
+  SealFixture fixture = { 0 };
+  authority_seal_fixture_init (&fixture, "wyl-graph-reconcile-success-XXXXXX");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &authority), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult mutation =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_REPLAY,
+      authority->lifecycle_generation, authority->reconciliation_generation,
+      &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  wyl_policy_graph_authority_record_free (authority);
+
+  WylFactGraphReconcileOutcome outcome = { 0 };
+  g_assert_cmpint (wyl_fact_graph_reconcile_degraded (fixture.policy,
+      fixture.root, NULL, &info, fixture.manager, -1, &outcome), ==,
+      WYRELOG_E_OK);
+  g_assert_true (outcome.durable_reconcile_applied);
+  g_assert_true (outcome.engine_published);
+  g_assert_true (outcome.runtime_admission_open);
+  g_assert_cmpint (outcome.policy_result,
+      ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (outcome.status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint (outcome.status.admission, ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true (outcome.status.queryable);
+
+  authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      info.tenant_id, info.graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
+  g_assert_cmpuint (authority->reconciliation_generation, ==, 1);
+  g_assert_cmpint (authority->last_error_class, ==,
+      WYL_POLICY_GRAPH_ERROR_NONE);
+  wyl_policy_graph_authority_record_free (authority);
+  wyl_fact_graph_reconcile_outcome_clear (&outcome);
+  g_autofree gchar *root = g_strdup (fixture.root);
+  seal_fixture_clear (&fixture);
+  remove_tree (root);
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -3521,6 +3572,8 @@ main (int argc, char **argv)
       test_aborted_seal_does_not_reopen_an_already_sealed_graph);
   g_test_add_func ("/fact-graph-seal/unseal-rebuilds-before-reopening",
       test_unseal_rebuilds_before_reopening);
+  g_test_add_func ("/fact-graph-seal/reconcile-degraded-rebuilds-before-reopening",
+      test_reconcile_degraded_rebuilds_before_reopening);
   g_test_add_func ("/fact-graph-seal/concurrent-unseal-converges",
       test_concurrent_unseal_converges_after_loser_abort);
   g_test_add_func ("/fact-graph-seal/publication-blocks-external-open",

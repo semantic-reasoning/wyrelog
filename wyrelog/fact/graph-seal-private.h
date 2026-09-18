@@ -109,6 +109,33 @@ typedef struct
 void wyl_fact_graph_unseal_outcome_clear
   (WylFactGraphUnsealOutcome * outcome);
 
+typedef struct
+{
+  gboolean durable_reconcile_applied;
+  gboolean engine_published;
+  gboolean engine_evicted;
+  gboolean runtime_admission_open;
+  gboolean compensation_failed;
+  wyrelog_error_t compensation_error;
+  WylPolicyAuthorityMutationResult policy_result;
+  WylFactGraphRuntimeStatus status;
+} WylFactGraphReconcileOutcome;
+
+void wyl_fact_graph_reconcile_outcome_clear
+  (WylFactGraphReconcileOutcome *outcome);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylFactGraphReconcileOutcome,
+    wyl_fact_graph_reconcile_outcome_clear)
+
+/* Verify and rebuild one degraded graph while its runtime admission remains
+ * closed, then commit the sole DEGRADED -> ACTIVE authority transition before
+ * reopening it.  The caller must serialize this with lifecycle writers. */
+wyrelog_error_t wyl_fact_graph_reconcile_degraded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphReconcileOutcome *out_outcome);
+
 /* Activate one authority-managed sealed graph, rebuild its engine while the
  * runtime barrier remains closed, and reopen only after publication.  The
  * caller must hold the daemon's policy write lease and serialize this call
