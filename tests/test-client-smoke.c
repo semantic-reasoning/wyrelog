@@ -1259,6 +1259,66 @@ main (void)
     return wyl_test_normalize_exit_status (293);
   wyl_client_fact_concurrent_open_quota_status_clear (&concurrent_quota);
 
+  /* #1093: durable logical quota operations are queried with the complete
+   * identity, and the typed result preserves reconciling's unknown byte
+   * sentinel. */
+  WylClientFactLogicalOperationStatus operation_status = { 0 };
+  http.status = 200;
+  http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"orders\",\"batch_id\":\"batch-1\","
+      "\"operation_id\":\"request-1\",\"state\":\"reconciling\","
+      "\"replay\":false,\"requested_rows\":3,\"requested_bytes\":12,"
+      "\"applied_rows\":3,\"applied_bytes\":-1}";
+  if (wyl_client_fact_logical_operation_status (management_client,
+      "__wr_default", "orders", "batch-1", "request-1",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      123, "public", 49, &operation_status) != WYRELOG_E_OK
+      || operation_status.state !=
+      WYL_CLIENT_FACT_LOGICAL_OPERATION_RECONCILING
+      || operation_status.applied_rows != 3
+      || operation_status.applied_bytes != -1
+      || g_strcmp0 (operation_status.graph_id, "orders") != 0
+      || g_strcmp0 (operation_status.operation_id, "request-1") != 0
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path,
+      "/facts/quota/operation-status") != 0)
+    return wyl_test_normalize_exit_status (294);
+  wyl_client_fact_logical_operation_status_clear (&operation_status);
+  http.status = 404;
+  http.body = "{\"error\":\"fact_quota_operation_not_found\"}";
+  if (wyl_client_fact_logical_operation_status (management_client,
+      "__wr_default", "orders", "batch-1", "missing",
+      "0000000000000000000000000000000000000000000000000000000000000000",
+      123, "public", 49, &operation_status) != WYRELOG_E_NOT_FOUND
+      || operation_status.tenant_id != NULL)
+    return wyl_test_normalize_exit_status (295);
+  g_autoptr (WylClientFactAppendResult) mutation_result = NULL;
+  http.status = 202;
+  http.body = "{\"ok\":true,\"committed\":true,\"reconcile\":true,"
+      "\"quota_state\":\"reconciling\",\"operation_id\":\"request-1\","
+      "\"batch_id\":\"batch-1\",\"inserted\":true,"
+      "\"mutation_class\":\"committed\",\"queryable\":false,"
+      "\"committed_row_delta\":3,\"logical_byte_delta\":12,"
+      "\"engine_generation\":7}";
+  const guint8 mutation_payload[] = "value\n1\n";
+  if (wyl_client_fact_put_batch (management_client, "__wr_default", "orders",
+      "shop", "orders", 1, "batch-1", "request-1", mutation_payload,
+      sizeof mutation_payload - 1, 123, "public", 49, &mutation_result)
+      != WYRELOG_E_OK
+      || !wyl_client_fact_append_result_get_committed (mutation_result)
+      || !wyl_client_fact_append_result_get_reconcile (mutation_result)
+      || wyl_client_fact_append_result_get_queryable (mutation_result)
+      || g_strcmp0 (wyl_client_fact_append_result_get_operation_id
+        (mutation_result), "request-1") != 0
+      || wyl_client_fact_append_result_get_committed_row_delta
+        (mutation_result) != 3
+      || wyl_client_fact_append_result_get_logical_byte_delta
+        (mutation_result) != 12
+      || wyl_client_fact_append_result_get_engine_generation
+        (mutation_result) != 7)
+    return wyl_test_normalize_exit_status (296);
+  http.status = 200;
+
   /*
    * #1031: with a token the request must carry the bearer AND name the
    * tenant, because the daemon resolves an unnamed request tenant to

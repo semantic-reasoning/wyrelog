@@ -7498,6 +7498,113 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static void
+facts_quota_operation_status_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+#ifndef WYL_HAS_FACT_STORE
+  (void) server;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+  return;
+#else
+  WylDaemonHttpContext *ctx = user_data;
+  if (!require_method (msg, "GET"))
+    return;
+
+  const gchar *tenant = query != NULL
+      ? g_hash_table_lookup (query, "tenant") : NULL;
+  const gchar *graph = query != NULL
+      ? g_hash_table_lookup (query, "graph") : NULL;
+  const gchar *batch_id = query != NULL
+      ? g_hash_table_lookup (query, "batch_id") : NULL;
+  const gchar *operation_id = query != NULL
+      ? g_hash_table_lookup (query, "operation_id") : NULL;
+  const gchar *payload_digest = query != NULL
+      ? g_hash_table_lookup (query, "payload_digest") : NULL;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)
+      || graph == NULL || graph[0] == '\0'
+      || batch_id == NULL || batch_id[0] == '\0'
+      || operation_id == NULL || operation_id[0] == '\0'
+      || payload_digest == NULL || strlen (payload_digest) != 64) {
+    set_json_error (msg, 400, "invalid_fact_quota_operation_request");
+    return;
+  }
+  for (const gchar *p = payload_digest; *p != '\0'; p++) {
+    if (!g_ascii_isxdigit (*p)) {
+      set_json_error (msg, 400, "invalid_fact_quota_operation_request");
+      return;
+    }
+  }
+
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+      "wr.sys.admin", tenant, "fact_quota_auth_required",
+      "invalid_fact_quota_auth", "fact_quota_denied",
+      "fact_quota_auth_failed", &auth, &actor, NULL, NULL, NULL, NULL))
+    return;
+  if (!wyl_policy_store_tenant_id_is_valid (auth.tenant)) {
+    set_json_error (msg, 403, "fact_quota_denied");
+    return;
+  }
+
+  const WylPolicyFactLogicalQuotaOperation operation = {
+    .tenant_id = auth.tenant,
+    .graph_id = graph,
+    .batch_id = batch_id,
+    .request_id = operation_id,
+    .payload_digest = payload_digest,
+  };
+  WylPolicyFactLogicalOperationStatus status = { 0 };
+  wyrelog_error_t rc =
+      wyl_policy_store_get_fact_logical_quota_operation_status
+        (wyl_handle_get_policy_store (ctx->handle), &operation, &status);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, "fact_quota_operation_not_found");
+    return;
+  }
+  if (rc == WYRELOG_E_CONFLICT) {
+    set_json_error (msg, 409, "fact_quota_operation_conflict");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "fact_quota_operation_status_failed");
+    return;
+  }
+  const gchar *state = "pending";
+  if (status.state == WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED)
+    state = "settled";
+  else if (status.state == WYL_POLICY_FACT_LOGICAL_OPERATION_RECONCILING)
+    state = "reconciling";
+  else if (status.state == WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+    state = "cancelled";
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
+  append_json_string (body, auth.tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append (body, ",\"batch_id\":");
+  append_json_string (body, batch_id);
+  g_string_append (body, ",\"operation_id\":");
+  append_json_string (body, operation_id);
+  g_string_append_printf (body,
+      ",\"state\":\"%s\",\"replay\":%s"
+      ",\"requested_rows\":%" G_GUINT64_FORMAT
+      ",\"requested_bytes\":%" G_GUINT64_FORMAT
+      ",\"applied_rows\":%" G_GUINT64_FORMAT
+      ",\"applied_bytes\":%" G_GINT64_FORMAT "}", state,
+      status.replay ? "true" : "false", status.requested_rows,
+      status.requested_bytes, status.applied_rows, status.applied_bytes);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      body->str, body->len);
+#endif
+}
+
+static void
 facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
@@ -17784,6 +17891,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
 #endif
   wyl_daemon_http_add_exact_handler (server, "/facts/quota",
       facts_quota_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/facts/quota/operation-status",
+      facts_quota_operation_status_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,
