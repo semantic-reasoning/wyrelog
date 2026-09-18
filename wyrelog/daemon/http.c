@@ -40,9 +40,9 @@
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/store-open-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "wyrelog/fact/provisioning-run-private.h"
-#include "wyrelog/fact/store-open-private.h"
 #endif
 #include "wyrelog/auth/service-credential-operation-coordinator-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-recovery-private.h"
@@ -12676,7 +12676,9 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       trace_http_fact_store ("duckdb-reopen", rc);
     }
   }
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 quota_check:
+#endif
   if (rc == WYRELOG_E_POLICY && out_quota_exceeded != NULL) {
     WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
     if (wyl_policy_store_get_fact_concurrent_open_quota (policy_store, tenant,
