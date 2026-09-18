@@ -125,6 +125,28 @@ typedef struct
   guint64 pending_bytes;
 } WylClientFactLogicalQuotaStatus;
 
+typedef enum
+{
+  WYL_CLIENT_FACT_LOGICAL_OPERATION_PENDING = 0,
+  WYL_CLIENT_FACT_LOGICAL_OPERATION_SETTLED,
+  WYL_CLIENT_FACT_LOGICAL_OPERATION_RECONCILING,
+  WYL_CLIENT_FACT_LOGICAL_OPERATION_CANCELLED,
+} WylClientFactLogicalOperationState;
+
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *batch_id;
+  gchar *operation_id;
+  WylClientFactLogicalOperationState state;
+  gboolean replay;
+  guint64 requested_rows;
+  guint64 requested_bytes;
+  guint64 applied_rows;
+  gint64 applied_bytes;
+} WylClientFactLogicalOperationStatus;
+
 typedef struct
 {
   gchar *tenant_id;
@@ -565,6 +587,14 @@ wyrelog_error_t wyl_client_fact_logical_quota_configure
     WylClientFactLogicalQuotaStatus * out_status);
 void wyl_client_fact_logical_quota_status_clear
   (WylClientFactLogicalQuotaStatus * status);
+wyrelog_error_t wyl_client_fact_logical_operation_status
+  (WylClient * client, const gchar * tenant, const gchar * graph,
+    const gchar * batch_id, const gchar * operation_id,
+    const gchar * payload_digest, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalOperationStatus * out_status);
+void wyl_client_fact_logical_operation_status_clear
+  (WylClientFactLogicalOperationStatus * status);
 wyrelog_error_t wyl_client_fact_write_rate_quota_status (WylClient * client,
     const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
@@ -666,6 +696,24 @@ gboolean wyl_client_fact_append_result_get_inserted
 const gchar *wyl_client_fact_append_result_get_batch_id
   (const WylClientFactAppendResult * result);
 gchar *wyl_client_fact_append_result_dup_batch_id
+  (const WylClientFactAppendResult * result);
+gboolean wyl_client_fact_append_result_get_committed
+  (const WylClientFactAppendResult * result);
+gboolean wyl_client_fact_append_result_get_queryable
+  (const WylClientFactAppendResult * result);
+gboolean wyl_client_fact_append_result_get_reconcile
+  (const WylClientFactAppendResult * result);
+const gchar *wyl_client_fact_append_result_get_operation_id
+  (const WylClientFactAppendResult * result);
+const gchar *wyl_client_fact_append_result_get_mutation_class
+  (const WylClientFactAppendResult * result);
+const gchar *wyl_client_fact_append_result_get_degraded_class
+  (const WylClientFactAppendResult * result);
+gint64 wyl_client_fact_append_result_get_committed_row_delta
+  (const WylClientFactAppendResult * result);
+gint64 wyl_client_fact_append_result_get_logical_byte_delta
+  (const WylClientFactAppendResult * result);
+guint64 wyl_client_fact_append_result_get_engine_generation
   (const WylClientFactAppendResult * result);
 void wyl_client_service_credential_operation_reconcile_request_clear
   (WylClientServiceCredentialOperationReconcileRequest * request);

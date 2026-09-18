@@ -44,7 +44,16 @@ struct _WylClientDecision
 struct _WylClientFactAppendResult
 {
   gboolean inserted;
+  gboolean committed;
+  gboolean queryable;
+  gboolean reconcile;
   gchar *batch_id;
+  gchar *operation_id;
+  gchar *mutation_class;
+  gchar *degraded_class;
+  gint64 committed_row_delta;
+  gint64 logical_byte_delta;
+  guint64 engine_generation;
 };
 
 struct _WylClientServiceCredentialOperationReconcileResult
@@ -1744,6 +1753,33 @@ parse_simple_json_uint64_member (const gchar *data, gsize size,
   return TRUE;
 }
 
+static gboolean
+parse_simple_json_int64_member (const gchar *data, gsize size,
+    const gchar *member, gint64 *out_value)
+{
+  if (data == NULL || member == NULL || out_value == NULL)
+    return FALSE;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\":", member);
+  const gchar *start = g_strstr_len (data, (gssize) size, needle);
+  if (start == NULL)
+    return FALSE;
+  start += strlen (needle);
+  const gchar *limit = data + size;
+  while (start < limit && g_ascii_isspace (*start))
+    start++;
+  if (start == limit)
+    return FALSE;
+  g_autofree gchar *number = g_strndup (start, (gsize) (limit - start));
+  errno = 0;
+  gchar *end = NULL;
+  gint64 value = g_ascii_strtoll (number, &end, 10);
+  if (errno != 0 || end == number
+      || (*end != ',' && *end != '}' && !g_ascii_isspace (*end)))
+    return FALSE;
+  *out_value = value;
+  return TRUE;
+}
+
 void
 wyl_client_fact_quota_status_clear (WylClientFactQuotaStatus *status)
 {
@@ -1972,6 +2008,131 @@ wyl_client_fact_logical_quota_configure
   return client_fact_logical_quota_request (client, tenant, TRUE,
              logical_row_limit, logical_byte_limit, guard_timestamp, guard_loc_class,
              guard_risk, out_status);
+}
+
+void
+wyl_client_fact_logical_operation_status_clear
+  (WylClientFactLogicalOperationStatus *status)
+{
+  if (status == NULL)
+    return;
+  g_clear_pointer (&status->tenant_id, g_free);
+  g_clear_pointer (&status->graph_id, g_free);
+  g_clear_pointer (&status->batch_id, g_free);
+  g_clear_pointer (&status->operation_id, g_free);
+  *status = (WylClientFactLogicalOperationStatus) { 0 };
+}
+
+static gboolean
+client_fact_logical_operation_state (const gchar *state,
+    WylClientFactLogicalOperationState *out_state)
+{
+  if (g_strcmp0 (state, "pending") == 0)
+    *out_state = WYL_CLIENT_FACT_LOGICAL_OPERATION_PENDING;
+  else if (g_strcmp0 (state, "settled") == 0)
+    *out_state = WYL_CLIENT_FACT_LOGICAL_OPERATION_SETTLED;
+  else if (g_strcmp0 (state, "reconciling") == 0)
+    *out_state = WYL_CLIENT_FACT_LOGICAL_OPERATION_RECONCILING;
+  else if (g_strcmp0 (state, "cancelled") == 0)
+    *out_state = WYL_CLIENT_FACT_LOGICAL_OPERATION_CANCELLED;
+  else
+    return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+client_fact_logical_operation_decode (const gchar *data, gsize size,
+    const gchar *expected_tenant, const gchar *expected_graph,
+    const gchar *expected_batch, const gchar *expected_operation,
+    WylClientFactLogicalOperationStatus *out_status)
+{
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size,
+          "tenant_id");
+  g_autofree gchar *graph = parse_simple_json_string_member (data, size,
+          "graph_id");
+  g_autofree gchar *batch = parse_simple_json_string_member (data, size,
+          "batch_id");
+  g_autofree gchar *operation = parse_simple_json_string_member (data, size,
+          "operation_id");
+  g_autofree gchar *state = parse_simple_json_string_member (data, size,
+          "state");
+  if (g_strcmp0 (tenant, expected_tenant) != 0
+      || g_strcmp0 (graph, expected_graph) != 0
+      || g_strcmp0 (batch, expected_batch) != 0
+      || g_strcmp0 (operation, expected_operation) != 0
+      || !client_fact_logical_operation_state (state, &out_status->state)
+      || !parse_simple_json_bool_member (data, size, "replay",
+      &out_status->replay)
+      || !parse_simple_json_uint64_member (data, size, "requested_rows",
+      &out_status->requested_rows)
+      || !parse_simple_json_uint64_member (data, size, "requested_bytes",
+      &out_status->requested_bytes)
+      || !parse_simple_json_uint64_member (data, size, "applied_rows",
+      &out_status->applied_rows)
+      || !parse_simple_json_int64_member (data, size, "applied_bytes",
+      &out_status->applied_bytes))
+    return WYRELOG_E_IO;
+  out_status->tenant_id = g_steal_pointer (&tenant);
+  out_status->graph_id = g_steal_pointer (&graph);
+  out_status->batch_id = g_steal_pointer (&batch);
+  out_status->operation_id = g_steal_pointer (&operation);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_fact_logical_operation_status
+  (WylClient *client, const gchar *tenant, const gchar *graph,
+    const gchar *batch_id, const gchar *operation_id,
+    const gchar *payload_digest, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactLogicalOperationStatus *out_status)
+{
+  if (out_status == NULL || graph == NULL || graph[0] == '\0'
+      || batch_id == NULL || batch_id[0] == '\0'
+      || operation_id == NULL || operation_id[0] == '\0'
+      || payload_digest == NULL || strlen (payload_digest) != 64)
+    return WYRELOG_E_INVALID;
+  for (const gchar *p = payload_digest; *p != '\0'; p++) {
+    if (!g_ascii_isxdigit (*p))
+      return WYRELOG_E_INVALID;
+  }
+  wyl_client_fact_logical_operation_status_clear (out_status);
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, FALSE);
+  g_autofree gchar *escaped_batch = g_uri_escape_string (batch_id, NULL, FALSE);
+  g_autofree gchar *escaped_operation = g_uri_escape_string (operation_id,
+          NULL, FALSE);
+  g_autofree gchar *uri = g_strdup_printf
+        ("%s/facts/quota/operation-status?%s&graph=%s&batch_id=%s"
+          "&operation_id=%s&payload_digest=%s", base_url, guard_query,
+          escaped_graph, escaped_batch, escaped_operation, payload_digest);
+  g_autoptr (SoupMessage) message = soup_message_new ("GET", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK) {
+    if (client->last_http_status == 404)
+      return WYRELOG_E_NOT_FOUND;
+    if (client->last_http_status == 409)
+      return WYRELOG_E_CONFLICT;
+    return rc;
+  }
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  return client_fact_logical_operation_decode (data, size, tenant, graph,
+             batch_id, operation_id, out_status);
 }
 
 void
@@ -2785,14 +2946,61 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
     gsize size = 0;
     const gchar *data = g_bytes_get_data (response_body, &size);
     gboolean inserted = FALSE;
+    gboolean committed = TRUE;
+    gboolean queryable = TRUE;
+    gboolean reconcile = FALSE;
     g_autofree gchar *response_batch = parse_simple_json_string_member (data,
             size, "batch_id");
     if (!parse_simple_json_bool_member (data, size, "inserted", &inserted) ||
         response_batch == NULL)
       return WYRELOG_E_IO;
+    const gboolean has_committed = g_strstr_len (data, (gssize) size,
+            "\"committed\":") != NULL;
+    const gboolean has_queryable = g_strstr_len (data, (gssize) size,
+            "\"queryable\":") != NULL;
+    const gboolean has_reconcile = g_strstr_len (data, (gssize) size,
+            "\"reconcile\":") != NULL;
+    if ((has_committed && !parse_simple_json_bool_member (data, size,
+        "committed", &committed))
+        || (has_queryable && !parse_simple_json_bool_member (data, size,
+        "queryable", &queryable))
+        || (has_reconcile && !parse_simple_json_bool_member (data, size,
+        "reconcile", &reconcile)))
+      return WYRELOG_E_IO;
+    g_autofree gchar *operation_id = parse_simple_json_string_member (data,
+            size, "operation_id");
+    g_autofree gchar *mutation_class = parse_simple_json_string_member (data,
+            size, "mutation_class");
+    g_autofree gchar *degraded_class = parse_simple_json_string_member (data,
+            size, "degraded_class");
+    gint64 committed_row_delta = 0;
+    gint64 logical_byte_delta = 0;
+    guint64 engine_generation = 0;
+    const gboolean has_row_delta = g_strstr_len (data, (gssize) size,
+            "\"committed_row_delta\":") != NULL;
+    const gboolean has_byte_delta = g_strstr_len (data, (gssize) size,
+            "\"logical_byte_delta\":") != NULL;
+    const gboolean has_engine_generation = g_strstr_len (data, (gssize) size,
+            "\"engine_generation\":") != NULL;
+    if ((has_row_delta && !parse_simple_json_int64_member (data, size,
+        "committed_row_delta", &committed_row_delta))
+        || (has_byte_delta && !parse_simple_json_int64_member (data, size,
+        "logical_byte_delta", &logical_byte_delta))
+        || (has_engine_generation && !parse_simple_json_uint64_member (data,
+        size, "engine_generation", &engine_generation)))
+      return WYRELOG_E_IO;
     WylClientFactAppendResult *result = g_new0 (WylClientFactAppendResult, 1);
     result->inserted = inserted;
+    result->committed = committed;
+    result->queryable = queryable;
+    result->reconcile = reconcile;
     result->batch_id = g_steal_pointer (&response_batch);
+    result->operation_id = g_steal_pointer (&operation_id);
+    result->mutation_class = g_steal_pointer (&mutation_class);
+    result->degraded_class = g_steal_pointer (&degraded_class);
+    result->committed_row_delta = committed_row_delta;
+    result->logical_byte_delta = logical_byte_delta;
+    result->engine_generation = engine_generation;
     *out_result = result;
   }
   return WYRELOG_E_OK;
@@ -2883,6 +3091,9 @@ wyl_client_fact_append_result_free (WylClientFactAppendResult *result)
   if (result == NULL)
     return;
   g_free (result->batch_id);
+  g_free (result->operation_id);
+  g_free (result->mutation_class);
+  g_free (result->degraded_class);
   g_free (result);
 }
 
@@ -2903,6 +3114,69 @@ gchar *wyl_client_fact_append_result_dup_batch_id
   (const WylClientFactAppendResult * result)
 {
   return g_strdup (wyl_client_fact_append_result_get_batch_id (result));
+}
+
+gboolean
+wyl_client_fact_append_result_get_committed
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL && result->committed;
+}
+
+gboolean
+wyl_client_fact_append_result_get_queryable
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL && result->queryable;
+}
+
+gboolean
+wyl_client_fact_append_result_get_reconcile
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL && result->reconcile;
+}
+
+const gchar *
+wyl_client_fact_append_result_get_operation_id
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->operation_id : NULL;
+}
+
+const gchar *
+wyl_client_fact_append_result_get_mutation_class
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->mutation_class : NULL;
+}
+
+const gchar *
+wyl_client_fact_append_result_get_degraded_class
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->degraded_class : NULL;
+}
+
+gint64
+wyl_client_fact_append_result_get_committed_row_delta
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->committed_row_delta : 0;
+}
+
+gint64
+wyl_client_fact_append_result_get_logical_byte_delta
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->logical_byte_delta : 0;
+}
+
+guint64
+wyl_client_fact_append_result_get_engine_generation
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->engine_generation : 0;
 }
 
 void wyl_client_service_credential_operation_reconcile_request_clear
