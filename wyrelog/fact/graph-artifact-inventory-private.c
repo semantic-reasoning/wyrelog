@@ -56,6 +56,74 @@ inventory_identity_valid (const WylFactArtifactInventoryIdentity *identity)
              sizeof identity->object_bytes) == 0;
 }
 
+static void
+append_identity (GString *canonical,
+    const WylFactArtifactInventoryIdentity *identity)
+{
+  g_string_append_printf (canonical, "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT
+      ":%u:", identity->domain, identity->object, identity->object_width);
+  for (guint i = 0; i < sizeof identity->object_bytes; i++)
+    g_string_append_printf (canonical, "%02x", identity->object_bytes[i]);
+}
+
+static void
+append_observation (GString *canonical,
+    const WylFactArtifactInventoryObservation *observation)
+{
+  append_identity (canonical, &observation->directory_identity);
+  g_string_append_c (canonical, ':');
+  append_identity (canonical, &observation->guard_identity);
+  g_string_append_printf (canonical, ":%" G_GUINT64_FORMAT,
+      observation->entry_fingerprint);
+}
+
+static gboolean snapshot_published
+  (const WylFactArtifactInventorySnapshot *snapshot);
+
+wyrelog_error_t
+wyl_fact_artifact_inventory_snapshot_export_physical_quota
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    WylFactArtifactPhysicalQuotaEvidence *out_evidence)
+{
+  if (out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_evidence, 0, sizeof *out_evidence);
+  if (snapshot == NULL
+      || snapshot->status != WYL_FACT_ARTIFACT_INVENTORY_STATUS_STABLE
+      || !snapshot_published (snapshot)
+      || snapshot->allocation_unsupported)
+    return WYRELOG_E_POLICY;
+  for (guint i = 0; i < WYL_FACT_ARTIFACT_INVENTORY_ANOMALY_COUNT; i++)
+    if (snapshot->anomalies[i] != 0)
+      return WYRELOG_E_POLICY;
+  if (!inventory_identity_valid (&snapshot->begin.directory_identity)
+      || !inventory_identity_valid (&snapshot->begin.guard_identity))
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GString) canonical = g_string_new ("wyrelog-physical-quota-v1|");
+  append_observation (canonical, &snapshot->begin);
+  for (guint i = 0; i < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; i++) {
+    const WylFactArtifactInventorySlotState *slot = &snapshot->slots[i];
+    g_string_append_printf (canonical, "|%u:%u:%" G_GUINT64_FORMAT ":%"
+        G_GUINT64_FORMAT ":%u", i, slot->present, slot->logical_bytes,
+        slot->allocated_bytes, slot->allocation_supported);
+    append_identity (canonical, &slot->identity);
+  }
+  g_autofree gchar *digest = g_compute_checksum_for_string
+        (G_CHECKSUM_SHA256, canonical->str, canonical->len);
+  if (digest == NULL || strlen (digest) != 64)
+    return WYRELOG_E_IO;
+  g_strlcpy (out_evidence->digest, digest, sizeof out_evidence->digest);
+  g_snprintf (out_evidence->generation, sizeof out_evidence->generation,
+      "v1:%s", digest);
+  out_evidence->allocated_bytes = snapshot->allocated_bytes;
+  out_evidence->observation = snapshot->begin;
+  for (guint i = 0; i < WYL_FACT_ARTIFACT_INVENTORY_SLOT_COUNT; i++)
+    wyl_fact_artifact_inventory_snapshot_get_slot_evidence (snapshot, i,
+        &out_evidence->slots[i]);
+  return WYRELOG_E_OK;
+}
+
 gboolean
 wyl_fact_artifact_inventory_identity_equal
   (const WylFactArtifactInventoryIdentity *left,
