@@ -7737,7 +7737,6 @@ facts_quota_handler (SoupServer *server, SoupServerMessage *msg,
   WylPolicyGraphQuotaStatus graph_status = { 0 };
   WylPolicyFactSchemaQuotaStatus schema_status = { 0 };
   WylPolicyFactConcurrentOpenQuotaStatus concurrent_status = { 0 };
-  wyrelog_error_t rc;
   if (dimension == WYL_POLICY_FACT_QUOTA_GRAPH_COUNT) {
     rc = wyl_policy_store_get_graph_quota_status
           (ctx->handle != NULL ? wyl_handle_get_policy_store (ctx->handle) : NULL,
@@ -13789,6 +13788,15 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     fact_rows_clear (rows, n_rows);
     return;
   }
+  if (rc != WYRELOG_E_OK) {
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    set_json_error (msg, rc == WYRELOG_E_POLICY ? 409 : 500,
+        rc == WYRELOG_E_POLICY ? "fact_batch_conflict" : fail_code);
+    return;
+  }
   if (rc == WYRELOG_E_OK)
     wyl_daemon_policy_write_observe_cleanup_resource (&write,
         WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
@@ -13852,15 +13860,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   gboolean logical_quota_pending = logical_quota_status.state ==
       WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING;
 
-  g_autoptr (wyl_fact_store_t) fact_store = NULL;
-  rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
-  if (rc == WYRELOG_E_OK)
-    wyl_daemon_policy_write_observe_cleanup_resource (&write,
-        WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_store_create_schema (fact_store);
-  gboolean inserted = FALSE;
-  const gchar *request_id = ensure_request_id_header (msg);
   wyl_fact_mutation_outcome_t outcome;
   wyl_fact_mutation_outcome_init (&outcome);
   /* One internal entry point owns commit-then-refresh ordering and consumes
