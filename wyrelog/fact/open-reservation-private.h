@@ -48,6 +48,14 @@ WylFactOpenReservation *wyl_fact_open_reservation_new
 void wyl_fact_open_reservation_free (WylFactOpenReservation *reservation);
 /* The object must be closed (or have fail() retried to success) before it is
  * freed.  free() refuses to discard an unsettled retry context. */
+/* Release native resources once, without attempting the durable settlement.
+ * This is used only while abandoning the local retry context; the durable row
+ * remains in its last state for recovery. */
+wyrelog_error_t wyl_fact_open_reservation_release_native
+  (WylFactOpenReservation *reservation);
+/* Abandon an unsettled local retry context after its callbacks are no longer
+ * available.  The durable row is intentionally left for recovery. */
+void wyl_fact_open_reservation_abandon (WylFactOpenReservation *reservation);
 WylFactOpenReservationState wyl_fact_open_reservation_get_state
   (const WylFactOpenReservation *reservation);
 const gchar *wyl_fact_open_reservation_get_id

@@ -52,3 +52,8 @@ wyrelog_error_t wyl_fact_store_test_query_text (wyl_fact_store_t * store,
 void
 wyl_fact_store_test_arm_metadata_value_column_rename_once
   (wyl_fact_store_t * store);
+
+void wyl_fact_store_open_reservation_refuse_transitions_once_for_test
+  (guint skip, guint count);
+void wyl_fact_store_refuse_open_reservation_transitions_for_test
+  (wyl_fact_store_t * store, guint skip, guint count);
