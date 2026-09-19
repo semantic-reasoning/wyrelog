@@ -149,7 +149,18 @@ struct wyl_policy_store_t
    * coexist while mutations can fail closed when another runtime is live. */
   wyl_policy_store_lease_t *runtime_lease;
   guint runtime_writer_depth;
-  guint policy_mutation_depth;
+  /* Every transaction this store begins through its own entry points is
+   * serialized across threads on graph_authority_mutex; these two fields
+   * are the frame count of the thread holding it and that thread.  The
+   * owner is read from other threads (atomically) to answer "is the calling
+   * thread inside a transaction?", which is the only question a cross-thread
+   * reader can ask of a shared connection. */
+  gpointer transaction_owner;
+  guint transaction_depth;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  WylPolicyStoreTransactionContentionHook transaction_contention_hook;
+  gpointer transaction_contention_hook_data;
+#endif
   gchar *canonical_path;
   gchar *work_path;
   /* Directory fd anchoring Wyrelog-owned openat()/renameat() calls against
@@ -8066,41 +8077,115 @@ wyl_policy_store_coordinator_fence_clear (
       WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
 }
 
+/* A transaction on the shared connection is a thread-local fact only while
+ * one thread at a time can have one.  The mutation savepoint, the
+ * publication transaction, graph-authority mutations and the write-rate
+ * admission take graph_authority_mutex through here and hold it until the
+ * matching end, so a caller on another thread waits for such a transaction
+ * to finish instead of being refused (sqlite3_get_autocommit read across
+ * threads), failing BEGIN against it (WYRELOG_E_IO) or nesting a SAVEPOINT
+ * into it.  Service credential exchange, the service-authority transaction,
+ * bootstrap and the provisioning migration keep their own locking and are
+ * not seen here.  The mutex is recursive: a SAVEPOINT inside this thread's own
+ * publication transaction still nests, and the fences that already hold the
+ * mutex recurse through here without changing their order (authority mutex,
+ * then the SQLite connection mutex).  transaction_depth counts this thread's
+ * open frames; transaction_owner names the thread while the count is
+ * nonzero. */
+static void
+policy_store_transaction_enter (wyl_policy_store_t *store)
+{
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  /* A recursive mutex held by this thread is taken without contention, so
+   * the hook fires only for a genuine cross-thread wait. */
+  if (!g_rec_mutex_trylock (&store->graph_authority_mutex)) {
+    if (store->transaction_contention_hook != NULL)
+      store->transaction_contention_hook (store,
+          store->transaction_contention_hook_data);
+    g_rec_mutex_lock (&store->graph_authority_mutex);
+  }
+#else
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+#endif
+  if (store->transaction_depth++ == 0)
+    g_atomic_pointer_set (&store->transaction_owner, g_thread_self ());
+}
+
+static void
+policy_store_transaction_leave (wyl_policy_store_t *store)
+{
+  g_return_if_fail (store->transaction_depth > 0);
+  if (--store->transaction_depth == 0)
+    g_atomic_pointer_set (&store->transaction_owner, NULL);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+}
+
+gboolean
+wyl_policy_store_transaction_owned_by_caller (wyl_policy_store_t *store)
+{
+  return store != NULL
+         && g_atomic_pointer_get (&store->transaction_owner) == g_thread_self ();
+}
+
+/* An end must come from the thread that began: a commit or rollback issued
+ * from another thread would end that thread's transaction under it. */
+static gboolean
+policy_store_transaction_frame_owned (wyl_policy_store_t *store)
+{
+  return wyl_policy_store_transaction_owned_by_caller (store)
+         && store->transaction_depth > 0;
+}
+
 wyrelog_error_t
 wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
+  policy_store_transaction_enter (store);
   wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
+  if (rc == WYRELOG_E_OK) {
+    rc = exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
+    if (rc != WYRELOG_E_OK)
+      (void) policy_store_runtime_writer_end (store);
+  }
   if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
-  if (rc != WYRELOG_E_OK)
-    (void) policy_store_runtime_writer_end (store);
-  else
-    store->policy_mutation_depth++;
+    policy_store_transaction_leave (store);
   return rc;
 }
 
 wyrelog_error_t
 wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
 {
-  if (store == NULL || store->db == NULL)
+  if (store == NULL || store->db == NULL
+      || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = exec_sql (store->db,
           "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+  if (rc != WYRELOG_E_OK) {
+    /* A refused RELEASE is a fault on the connection, and not every caller
+     * rolls back after a failed commit, so the frame cannot be left to them:
+     * a frame that is the held authority mutex would stop every other
+     * thread's transaction for good.  Discard the savepoint as far as SQLite
+     * allows, mark the store terminal, and end the frame here; the caller's
+     * own rollback then finds no frame to end and does nothing. */
+    if (!sqlite3_get_autocommit (store->db))
+      (void) exec_sql (store->db,
+          "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;"
+          "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+    policy_store_make_terminal (store, rc);
+  }
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
-  if (rc == WYRELOG_E_OK && store->policy_mutation_depth != 0)
-    store->policy_mutation_depth--;
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
+  policy_store_transaction_leave (store);
   return rc;
 }
 
 void
 wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
 {
-  if (store == NULL || store->db == NULL)
+  if (store == NULL || store->db == NULL
+      || !policy_store_transaction_frame_owned (store))
     return;
   wyrelog_error_t rc = exec_sql (store->db,
           "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;");
@@ -8108,10 +8193,9 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
     rc = exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
   if (rc == WYRELOG_E_OK)
     rc = policy_store_runtime_writer_end (store);
-  if (rc == WYRELOG_E_OK && store->policy_mutation_depth != 0)
-    store->policy_mutation_depth--;
   if (rc != WYRELOG_E_OK)
     policy_store_make_terminal (store, rc);
+  policy_store_transaction_leave (store);
 }
 
 gboolean
@@ -8127,45 +8211,76 @@ wyl_policy_store_publication_transaction_begin (wyl_policy_store_t *store)
   wyrelog_error_t terminal = policy_store_terminal_gate (store);
   if (terminal != WYRELOG_E_OK)
     return terminal;
-  if (!wyl_policy_store_is_autocommit (store))
+  policy_store_transaction_enter (store);
+  /* Under the mutex an open transaction is this thread's own: nesting a
+   * publication transaction is refused.  The depth check also covers a
+   * frame whose SAVEPOINT SQLite already rolled back on its own, which
+   * autocommit alone would not show. */
+  if (store->transaction_depth > 1 || !wyl_policy_store_is_autocommit (store)) {
+    policy_store_transaction_leave (store);
     return WYRELOG_E_BUSY;
+  }
   wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
+  if (rc == WYRELOG_E_OK) {
+    rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+    if (rc != WYRELOG_E_OK)
+      (void) policy_store_runtime_writer_end (store);
+  }
   if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
-  if (rc != WYRELOG_E_OK)
-    (void) policy_store_runtime_writer_end (store);
+    policy_store_transaction_leave (store);
   return rc;
 }
 
 wyrelog_error_t
 wyl_policy_store_publication_transaction_commit (wyl_policy_store_t *store)
 {
-  if (store == NULL || store->db == NULL || sqlite3_get_autocommit (store->db))
+  if (store == NULL || store->db == NULL
+      || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
+  if (sqlite3_get_autocommit (store->db)) {
+    /* SQLite already rolled the transaction back under a failed statement.
+     * There is nothing to commit, but the writer lease and this frame are
+     * still the caller's and end here, as rollback_checked ends them. */
+    (void) policy_store_runtime_writer_end (store);
+    policy_store_transaction_leave (store);
+    return WYRELOG_E_INVALID;
+  }
   wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
   if (rc == WYRELOG_E_OK)
     rc = lease_rc;
+  /* The frame ends with the transaction.  A COMMIT that failed while the
+   * transaction stayed open (a vetoed commit, say) keeps the frame for the
+   * owner's rollback, which every publication caller performs -- the fences
+   * abort, the handle wrappers roll back -- unlike the savepoint commit
+   * above; one SQLite rolled back on its own has ended it. */
+  if (sqlite3_get_autocommit (store->db))
+    policy_store_transaction_leave (store);
   return rc;
 }
 
 wyrelog_error_t
 wyl_policy_store_publication_transaction_rollback_checked
   (wyl_policy_store_t * store) {
-  if (store == NULL || store->db == NULL)
+  if (store == NULL || store->db == NULL
+      || !policy_store_transaction_frame_owned (store))
     return WYRELOG_E_INVALID;
-  if (sqlite3_get_autocommit (store->db))
+  wyrelog_error_t rc;
+  if (sqlite3_get_autocommit (store->db)) {
     /* SQLite may have already rolled the transaction back as a consequence
      * of a failed statement.  The transaction is gone, but the runtime writer
      * lease acquired by publication_transaction_begin still belongs to this
      * operation and must be balanced. */
-    return policy_store_runtime_writer_end (store);
-  wyrelog_error_t rc = exec_sql (store->db, "ROLLBACK;");
-  if (rc != WYRELOG_E_OK || !sqlite3_get_autocommit (store->db))
-    return rc == WYRELOG_E_OK ? WYRELOG_E_INTERNAL : rc;
-  wyrelog_error_t release_rc = policy_store_runtime_writer_end (store);
-  return release_rc == WYRELOG_E_OK ? WYRELOG_E_OK : release_rc;
+    rc = policy_store_runtime_writer_end (store);
+  } else {
+    rc = exec_sql (store->db, "ROLLBACK;");
+    if (rc == WYRELOG_E_OK && !sqlite3_get_autocommit (store->db))
+      rc = WYRELOG_E_INTERNAL;
+    if (rc == WYRELOG_E_OK)
+      rc = policy_store_runtime_writer_end (store);
+  }
+  policy_store_transaction_leave (store);
+  return rc;
 }
 
 /* Called only after this fence owns the transaction and authority mutex. */
@@ -8190,9 +8305,14 @@ wyl_policy_store_graph_publication_fence_begin
     *out_fence = (WylPolicyGraphPublicationFence)
         WYL_POLICY_GRAPH_PUBLICATION_FENCE_INIT;
   if (store == NULL || out_fence == NULL || tenant_id == NULL
-      || graph_id == NULL || !wyl_policy_store_is_autocommit (store))
+      || graph_id == NULL)
     return WYRELOG_E_INVALID;
   g_rec_mutex_lock (&store->graph_authority_mutex);
+  /* Read under the mutex, an open transaction can only be this thread's. */
+  if (!wyl_policy_store_is_autocommit (store)) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_INVALID;
+  }
   wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
   if (rc != WYRELOG_E_OK) {
     g_rec_mutex_unlock (&store->graph_authority_mutex);
@@ -9520,6 +9640,17 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_policy_store_set_transaction_contention_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreTransactionContentionHook hook,
+    gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->transaction_contention_hook = hook;
+  store->transaction_contention_hook_data = data;
+}
+
 void
 wyl_policy_store_set_image_release_observer_for_test (wyl_policy_store_t *store,
     WylPolicyStoreImageReleaseObserver observer, gpointer data)
@@ -14122,12 +14253,14 @@ fact_open_publication_commit (wyl_policy_store_t *store)
     if (rollback_rc != WYRELOG_E_OK || lease_rc != WYRELOG_E_OK)
       policy_store_make_terminal (store, rollback_rc != WYRELOG_E_OK
           ? rollback_rc : lease_rc);
+    policy_store_transaction_leave (store);
     return commit_rc;
   }
   wyrelog_error_t lease_rc = policy_store_runtime_writer_end (store);
   store->fact_open_publication_cleanup_active = FALSE;
   if (lease_rc != WYRELOG_E_OK)
     policy_store_make_terminal (store, lease_rc);
+  policy_store_transaction_leave (store);
   /* The database commit is durable even when writer-lease cleanup fails. */
   return WYRELOG_E_OK;
 }
@@ -14143,6 +14276,10 @@ fact_open_publication_rollback (wyl_policy_store_t *store,
     store->fact_open_publication_fail_mask &=
         ~(1u << WYL_POLICY_FACT_OPEN_PUBLICATION_FAIL_ROLLBACK);
     cleanup_rc = WYRELOG_E_IO;
+    /* The injected failure skips the rollback that would have ended this
+     * frame; end it here so the seam leaves the SQL state, not the mutex,
+     * as the fault it models. */
+    policy_store_transaction_leave (store);
   } else {
     cleanup_rc = wyl_policy_store_publication_transaction_rollback_checked
           (store);
@@ -14247,8 +14384,6 @@ wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
       || root_identity == NULL || root_identity[0] == '\0'
       || token_identity == NULL || token_identity[0] == '\0')
     return WYRELOG_E_INVALID;
-  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
-    return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -14323,8 +14458,6 @@ wyl_policy_store_transition_fact_open (wyl_policy_store_t *store,
       || owner_incarnation == NULL || expected == NULL || next == NULL
       || expected_state == next_state)
     return WYRELOG_E_INVALID;
-  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
-    return WYRELOG_E_BUSY;
   if (!((expected_state == WYL_POLICY_FACT_OPEN_PENDING
       && (next_state == WYL_POLICY_FACT_OPEN_ACQUIRING
       || next_state == WYL_POLICY_FACT_OPEN_CLEANUP_PENDING))
@@ -14376,8 +14509,6 @@ wyl_policy_store_claim_fact_open_recovery (wyl_policy_store_t *store,
       || recovery_owner == NULL || recovery_owner[0] == '\0'
       || recovery_claim == NULL || recovery_claim[0] == '\0')
     return WYRELOG_E_INVALID;
-  if (store->policy_mutation_depth != 0 || !wyl_policy_store_is_autocommit (store))
-    return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
   if (rc != WYRELOG_E_OK) return rc;
   sqlite3_stmt *stmt = NULL;
@@ -14422,9 +14553,6 @@ wyl_policy_store_settle_fact_open (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || reservation_id == NULL
       || settlement_owner == NULL || settlement_owner[0] == '\0')
     return WYRELOG_E_INVALID;
-  if (store->policy_mutation_depth != 0
-      || !wyl_policy_store_is_autocommit (store))
-    return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
   if (rc != WYRELOG_E_OK) return rc;
   sqlite3_stmt *stmt = NULL;
@@ -14641,11 +14769,18 @@ fact_write_rate_retry_after_us (guint64 rate_per_second,
 static wyrelog_error_t
 fact_write_rate_transaction_begin (wyl_policy_store_t *store)
 {
+  policy_store_transaction_enter (store);
+  if (store->transaction_depth > 1 || !wyl_policy_store_is_autocommit (store)) {
+    policy_store_transaction_leave (store);
+    return WYRELOG_E_BUSY;
+  }
   wyrelog_error_t rc = policy_store_runtime_writer_begin (store);
   if (rc == WYRELOG_E_OK)
     rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
     (void) policy_store_runtime_writer_end (store);
+    policy_store_transaction_leave (store);
+  }
   return rc;
 }
 
@@ -14664,6 +14799,7 @@ fact_write_rate_transaction_commit (wyl_policy_store_t *store)
     WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
         "fact write-rate admission committed but writer lease cleanup failed");
   }
+  policy_store_transaction_leave (store);
   return rc;
 }
 
@@ -14672,6 +14808,7 @@ fact_write_rate_transaction_rollback (wyl_policy_store_t *store)
 {
   (void) exec_sql (store->db, "ROLLBACK;");
   (void) policy_store_runtime_writer_end (store);
+  policy_store_transaction_leave (store);
 }
 
 wyrelog_error_t
@@ -15307,10 +15444,9 @@ fact_logical_quota_rollback (wyl_policy_store_t *store)
     rc = exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
   if (rc == WYRELOG_E_OK)
     rc = policy_store_runtime_writer_end (store);
-  if (rc == WYRELOG_E_OK && store->policy_mutation_depth != 0)
-    store->policy_mutation_depth--;
   if (rc != WYRELOG_E_OK)
     policy_store_make_terminal (store, rc);
+  policy_store_transaction_leave (store);
 }
 
 wyrelog_error_t
@@ -18224,14 +18360,14 @@ graph_authority_mutation_begin (wyl_policy_store_t *store,
   *frame = (GraphAuthorityMutationFrame) {
     0
   };
-  g_rec_mutex_lock (&store->graph_authority_mutex);
+  policy_store_transaction_enter (store);
   frame->locked = TRUE;
   frame->owns_transaction = sqlite3_get_autocommit (store->db) != 0;
   const gchar *sql = frame->owns_transaction ? "BEGIN IMMEDIATE;" :
       "SAVEPOINT wyrelog_graph_authority_mutation;";
   int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
   if (sqlite_rc != SQLITE_OK) {
-    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    policy_store_transaction_leave (store);
     frame->locked = FALSE;
     return graph_authority_sqlite_error (sqlite_rc);
   }
@@ -18251,7 +18387,7 @@ graph_authority_mutation_finish (wyl_policy_store_t *store,
         "RELEASE SAVEPOINT wyrelog_graph_authority_mutation;";
     int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
     frame->active = FALSE;
-    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    policy_store_transaction_leave (store);
     frame->locked = FALSE;
     return sqlite_rc == SQLITE_OK ? WYRELOG_E_OK :
            graph_authority_sqlite_error (sqlite_rc);
@@ -18261,7 +18397,7 @@ graph_authority_mutation_finish (wyl_policy_store_t *store,
   int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
   if (sqlite_rc == SQLITE_OK) {
     frame->active = FALSE;
-    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    policy_store_transaction_leave (store);
     frame->locked = FALSE;
     return WYRELOG_E_OK;
   }

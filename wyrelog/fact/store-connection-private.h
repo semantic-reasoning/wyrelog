@@ -29,6 +29,14 @@ typedef enum
   WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE,
   WYL_FACT_STORE_TRANSACTION_FORGET_STATE_MIGRATION,
   WYL_FACT_STORE_TRANSACTION_SCHEMA_MIGRATION,
+  /* The #1103 rebuild that converges a migrated store's
+   * fact_batches.logical_bytes to NOT NULL.  Deliberately distinct from
+   * SCHEMA_MIGRATION above: a fault injected at that kind targets the
+   * ALTER block, and sharing one kind would make its injected-failure
+   * count depend on the store's shape.  Kept parallel with
+   * WylFactStoreTransactionTestKind, which transaction_test_hook_unlocked
+   * casts to positionally. */
+  WYL_FACT_STORE_TRANSACTION_LOGICAL_BYTES_MIGRATION,
 } WylFactStoreTransactionKind;
 
 typedef enum

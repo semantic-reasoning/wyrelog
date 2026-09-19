@@ -3993,7 +3993,9 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   rc = wyl_handle_policy_store_capture_generation (self, store, &generation);
   if (rc != WYRELOG_E_OK)
     goto out;
-  if (!wyl_policy_store_is_autocommit (store)) {
+  /* Another thread's transaction is waited out inside the store; only this
+   * thread's own open transaction is a reason to refuse. */
+  if (wyl_policy_store_transaction_owned_by_caller (store)) {
     rc = WYRELOG_E_BUSY;
     goto out;
   }
@@ -4001,7 +4003,7 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   if (rc == WYRELOG_E_OK) {
     begun = TRUE;
     rc = mutate (store, mutate_data);
-  } else if (!wyl_policy_store_is_autocommit (store)) {
+  } else if (wyl_policy_store_transaction_owned_by_caller (store)) {
     poison_engine_pair_locked (self);
   }
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -4018,8 +4020,8 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t rollback_rc = begun ?
         wyl_policy_store_publication_transaction_rollback_checked (store) :
-        wyl_policy_store_is_autocommit (store) ? WYRELOG_E_OK :
-        WYRELOG_E_INTERNAL;
+        wyl_policy_store_transaction_owned_by_caller (store) ?
+        WYRELOG_E_INTERNAL : WYRELOG_E_OK;
     if (rollback_rc != WYRELOG_E_OK) {
       poison_engine_pair_locked (self);
       rc = rollback_rc;
@@ -4051,10 +4053,14 @@ wyl_engine_session_run_committed_publication (WylEngineSession *session,
   } else
 #endif
   rc = wyl_policy_store_publication_transaction_commit (store);
-  if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
+  /* Judged on this thread's own transaction: once the store has released it
+   * another thread's transaction may already be open on the connection, and
+   * that is not this publication's ambiguity. */
+  if (rc != WYRELOG_E_OK
+      || wyl_policy_store_transaction_owned_by_caller (store)) {
     /* RELEASE ambiguity is committed-state uncertainty even if a recovery
      * rollback succeeds. */
-    if (!wyl_policy_store_is_autocommit (store))
+    if (wyl_policy_store_transaction_owned_by_caller (store))
       (void) wyl_policy_store_publication_transaction_rollback_checked (store);
 #ifdef WYL_TEST_HANDLE_SEAMS
     if (!commit_rejected_cleanly)
@@ -4137,7 +4143,8 @@ wyl_engine_session_repair_committed_publication (WylEngineSession *session,
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_policy_store_validate_generation (self, expected_store,
             expected_generation);
-  if (rc == WYRELOG_E_OK && !wyl_policy_store_is_autocommit (expected_store))
+  if (rc == WYRELOG_E_OK
+      && wyl_policy_store_transaction_owned_by_caller (expected_store))
     rc = WYRELOG_E_BUSY;
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -4256,7 +4263,9 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   rc = wyl_handle_policy_store_capture_generation (self, store, &generation);
   if (rc != WYRELOG_E_OK)
     goto out;
-  if (!wyl_policy_store_is_autocommit (store)) {
+  /* Another thread's transaction is waited out inside the store; only this
+   * thread's own open transaction is a reason to refuse. */
+  if (wyl_policy_store_transaction_owned_by_caller (store)) {
     rc = WYRELOG_E_BUSY;
     goto out;
   }
@@ -4264,7 +4273,7 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   if (rc == WYRELOG_E_OK) {
     begun = TRUE;
     rc = mutate (store, mutate_data);
-  } else if (!wyl_policy_store_is_autocommit (store)) {
+  } else if (wyl_policy_store_transaction_owned_by_caller (store)) {
     poison_engine_pair_locked (self);
   }
   if (rc == WYRELOG_E_OK)
@@ -4277,8 +4286,8 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t rollback_rc = begun ?
         wyl_policy_store_publication_transaction_rollback_checked (store) :
-        wyl_policy_store_is_autocommit (store) ? WYRELOG_E_OK :
-        WYRELOG_E_INTERNAL;
+        wyl_policy_store_transaction_owned_by_caller (store) ?
+        WYRELOG_E_INTERNAL : WYRELOG_E_OK;
     if (rollback_rc != WYRELOG_E_OK) {
       poison_engine_pair_locked (self);
       rc = rollback_rc;
@@ -4291,8 +4300,9 @@ wyl_engine_session_run_committed_audit_publication (WylEngineSession *session,
   }
 
   rc = wyl_policy_store_publication_transaction_commit (store);
-  if (rc != WYRELOG_E_OK || !wyl_policy_store_is_autocommit (store)) {
-    if (!wyl_policy_store_is_autocommit (store))
+  if (rc != WYRELOG_E_OK
+      || wyl_policy_store_transaction_owned_by_caller (store)) {
+    if (wyl_policy_store_transaction_owned_by_caller (store))
       (void) wyl_policy_store_publication_transaction_rollback_checked (store);
     poison_engine_pair_locked (self);
     if (store_rank_active) {

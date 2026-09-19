@@ -983,6 +983,89 @@ fact_identity_execute (gpointer context, const gchar *sql,
   return WYRELOG_E_OK;
 }
 
+/* The column lists of fact_batches and fact_event_log, shared by the fresh
+ * CREATE TABLE and by the #1103 rebuild that converges a migrated store's
+ * logical_bytes to NOT NULL.  One definition each, for the reason given above
+ * FACT_FORGET_INTENT_COLUMNS below: a rebuild that restated the columns could
+ * silently drop the primary key, the UNIQUE, the op CHECK -- or, for
+ * fact_event_log, the foreign key that is the whole reason the rebuild exists.
+ * Keeping the FOREIGN KEY inside the shared macro means the rebuild's recreate
+ * and the fresh DDL are textually the same string, so it cannot drift away.
+ *
+ * logical_bytes carries the batch's logical fact-byte cost, so a quota settle
+ * can recover what a committed batch consumed after a restart instead of only
+ * from the committing call's return value (#1013).  Distinct from the physical
+ * artifact inventory of #622, which measures storage rather than fact payload.
+ * The rationale lives here rather than inside the macro so the macro body stays
+ * string literals only, the shape the forget boundary test pins. */
+#define FACT_BATCHES_COLUMNS \
+  "  batch_id VARCHAR PRIMARY KEY," \
+  "  tenant_id VARCHAR NOT NULL," \
+  "  graph_id VARCHAR NOT NULL," \
+  "  namespace_id VARCHAR NOT NULL," \
+  "  relation_name VARCHAR NOT NULL," \
+  "  schema_version BIGINT NOT NULL," \
+  "  source VARCHAR," \
+  "  request_id VARCHAR," \
+  "  idempotency_key VARCHAR NOT NULL UNIQUE," \
+  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract'))," \
+  "  row_count BIGINT NOT NULL," \
+  "  logical_bytes BIGINT NOT NULL," \
+  "  content_hash VARCHAR NOT NULL," \
+  "  created_at_us BIGINT NOT NULL"
+
+/* The same fourteen names, in the same order, for the explicit
+ * INSERT (...) SELECT ... of the rebuild and for its equality proof.  Never
+ * SELECT *: a migrated store carries logical_bytes last (ADD COLUMN appends)
+ * while this list carries it third from last, and DuckDB 1.5.5 compares an
+ * EXCEPT positionally rather than refusing the mismatch -- measured to return
+ * a false empty difference on one shape and a spurious one on another.  The
+ * names are what make the proof mean anything. */
+#define FACT_BATCHES_COLUMN_NAMES \
+  "batch_id, tenant_id, graph_id, namespace_id, relation_name, " \
+  "schema_version, source, request_id, idempotency_key, op, row_count, " \
+  "logical_bytes, content_hash, created_at_us"
+
+/* How many columns the two macros above account for.  C cannot count the items
+ * of a string macro, so the convergence migration compares the live table
+ * against this and refuses rather than copying a subset; the macro-consistency
+ * gate pins it to the macro's actual length so it cannot drift into agreeing
+ * with the wrong number. */
+#define FACT_BATCHES_COLUMN_COUNT 14
+
+#define FACT_EVENT_LOG_COLUMNS \
+  "  seq BIGINT PRIMARY KEY," \
+  "  batch_id VARCHAR NOT NULL," \
+  "  tenant_id VARCHAR NOT NULL," \
+  "  graph_id VARCHAR NOT NULL," \
+  "  namespace_id VARCHAR NOT NULL," \
+  "  relation_name VARCHAR NOT NULL," \
+  "  schema_version BIGINT NOT NULL," \
+  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract'))," \
+  "  created_at_us BIGINT NOT NULL," \
+  "  valid BOOLEAN NOT NULL," \
+  "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)"
+
+/* fact_event_log without the foreign key, for the staging table that carries
+ * its rows across the window where the real table must not exist.  The staging
+ * table is data-only ballast and never becomes a real table, so it is the one
+ * place a keyless copy is correct. */
+#define FACT_EVENT_LOG_STAGE_COLUMNS \
+  "  seq BIGINT," \
+  "  batch_id VARCHAR," \
+  "  tenant_id VARCHAR," \
+  "  graph_id VARCHAR," \
+  "  namespace_id VARCHAR," \
+  "  relation_name VARCHAR," \
+  "  schema_version BIGINT," \
+  "  op VARCHAR," \
+  "  created_at_us BIGINT," \
+  "  valid BOOLEAN"
+
+#define FACT_EVENT_LOG_COLUMN_NAMES \
+  "seq, batch_id, tenant_id, graph_id, namespace_id, relation_name, " \
+  "schema_version, op, created_at_us, valid"
+
 /* The column list of fact_forget_intent, shared by CREATE TABLE and by the
  * rebuild that widens its state CHECK.  One definition: a rebuild that
  * restated the columns could silently drop the primary key or a constraint,
@@ -1026,6 +1109,95 @@ static const gchar fact_forget_intent_rebuild_sql[] =
     "idempotency_key, operator, reason, rows_purged, state, created_at_us, "
     "completed_at_us, actor_subject_id, request_id, operator_annotation "
     "FROM fact_forget_intent;";
+
+/* Converge a migrated store's fact_batches.logical_bytes to NOT NULL (#1103).
+ *
+ * DuckDB 1.5.5 closes every direct route: ADD COLUMN refuses a constraint,
+ * SET NOT NULL refuses a table with dependents, DROP CONSTRAINT is not
+ * implemented, and DROP TABLE refuses while fact_event_log's foreign key
+ * references fact_batches.  What is open is rebuilding both tables, because
+ * dropping fact_event_log removes the dependency that blocks the other four.
+ * v1.5.5 is also the newest release, so this is not a wait-for-DuckDB problem.
+ *
+ * Phase A is purely additive: every destructive statement is in phase B, after
+ * both equality proofs have passed against the original tables.  Neither real
+ * table is ever produced by CREATE TABLE AS SELECT -- fact_batches_rebuild is
+ * created from the shared FACT_BATCHES_COLUMNS and renamed into place (RENAME
+ * preserves PRIMARY KEY, UNIQUE, CHECK and NOT NULL on 1.5.5), and
+ * fact_event_log is recreated from the shared FACT_EVENT_LOG_COLUMNS so its
+ * foreign key resolves against the new table.  Only fact_event_log_stage is
+ * keyless, and it never becomes a real table.
+ *
+ * The head drops are defensive rather than the recovery mechanism, exactly as
+ * for fact_forget_intent above: DDL participates in the transaction, so a
+ * rollback leaves no orphan and a crash is rolled back from the WAL on reopen.
+ */
+static const gchar fact_batches_logical_bytes_stage_sql[] =
+    "DROP TABLE IF EXISTS fact_batches_rebuild;"
+    "DROP TABLE IF EXISTS fact_event_log_stage;"
+    "CREATE TABLE fact_event_log_stage (" FACT_EVENT_LOG_STAGE_COLUMNS ");"
+    "INSERT INTO fact_event_log_stage (" FACT_EVENT_LOG_COLUMN_NAMES ") "
+    "SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log;"
+    "CREATE TABLE fact_batches_rebuild (" FACT_BATCHES_COLUMNS ");"
+    "INSERT INTO fact_batches_rebuild (" FACT_BATCHES_COLUMN_NAMES ") "
+    "SELECT " FACT_BATCHES_COLUMN_NAMES " FROM fact_batches;";
+
+/* EXCEPT is set-based and blind to duplicate multiplicity, so each proof also
+ * compares COUNT(*).  fact_event_log_stage is deliberately keyless, so for it
+ * that conjunct is what makes the proof bag-exact rather than merely
+ * set-exact.
+ *
+ * Both halves run in phase A, while the originals still exist.  Proving the
+ * stage copy only against the table recreated from it in phase B would prove
+ * nothing at all: by then the original fact_event_log is gone, so a stage copy
+ * that had silently taken no rows would compare equal to an empty recreated
+ * table and the audit trail would be lost with the proof passing. */
+static const gchar fact_batches_logical_bytes_proof_sql[] =
+    "SELECT CASE WHEN ("
+    "  (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_BATCHES_COLUMN_NAMES " FROM fact_batches"
+    "     EXCEPT SELECT " FACT_BATCHES_COLUMN_NAMES
+    "     FROM fact_batches_rebuild)) = 0"
+    "  AND (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_BATCHES_COLUMN_NAMES " FROM fact_batches_rebuild"
+    "     EXCEPT SELECT " FACT_BATCHES_COLUMN_NAMES " FROM fact_batches)) = 0"
+    "  AND (SELECT COUNT(*) FROM fact_batches)"
+    "      = (SELECT COUNT(*) FROM fact_batches_rebuild)"
+    ") THEN 1 ELSE error('fact_batches rebuild lost rows') END;"
+    "SELECT CASE WHEN ("
+    "  (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log"
+    "     EXCEPT SELECT " FACT_EVENT_LOG_COLUMN_NAMES
+    "     FROM fact_event_log_stage)) = 0"
+    "  AND (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log_stage"
+    "     EXCEPT SELECT " FACT_EVENT_LOG_COLUMN_NAMES
+    "     FROM fact_event_log)) = 0"
+    "  AND (SELECT COUNT(*) FROM fact_event_log)"
+    "      = (SELECT COUNT(*) FROM fact_event_log_stage)"
+    ") THEN 1 ELSE error('fact_event_log stage copy lost rows') END;";
+
+static const gchar fact_batches_logical_bytes_swap_sql[] =
+    "DROP TABLE fact_event_log;"
+    "DROP TABLE fact_batches;"
+    "ALTER TABLE fact_batches_rebuild RENAME TO fact_batches;"
+    "CREATE TABLE fact_event_log (" FACT_EVENT_LOG_COLUMNS ");"
+    "INSERT INTO fact_event_log (" FACT_EVENT_LOG_COLUMN_NAMES ") "
+    "SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log_stage;";
+
+static const gchar fact_event_log_logical_bytes_proof_sql[] =
+    "SELECT CASE WHEN ("
+    "  (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log"
+    "     EXCEPT SELECT " FACT_EVENT_LOG_COLUMN_NAMES
+    "     FROM fact_event_log_stage)) = 0"
+    "  AND (SELECT COUNT(*) FROM ("
+    "     SELECT " FACT_EVENT_LOG_COLUMN_NAMES " FROM fact_event_log_stage"
+    "     EXCEPT SELECT " FACT_EVENT_LOG_COLUMN_NAMES
+    "     FROM fact_event_log)) = 0"
+    "  AND (SELECT COUNT(*) FROM fact_event_log)"
+    "      = (SELECT COUNT(*) FROM fact_event_log_stage)"
+    ") THEN 1 ELSE error('fact_event_log rebuild lost rows') END;";
 
 static void
 fact_identity_validation_barrier (gpointer context)
@@ -1431,6 +1603,17 @@ wyl_fact_store_validate_scope (wyl_fact_store_t *store,
   return rc;
 }
 
+/* transaction_test_hook_unlocked casts positionally between these two
+ * enumerations, so a kind appended to one and not the other would silently
+ * misroute every hook at and past that index.  Guarded like the cast
+ * itself: the test-seam enumeration only exists in that build. */
+#if defined(WYL_TEST_HANDLE_SEAMS)
+G_STATIC_ASSERT ((int) WYL_FACT_STORE_TRANSACTION_LOGICAL_BYTES_MIGRATION
+    == (int) WYL_FACT_STORE_TRANSACTION_TEST_LOGICAL_BYTES_MIGRATION);
+G_STATIC_ASSERT ((int) WYL_FACT_STORE_TRANSACTION_SCHEMA_MIGRATION
+    == (int) WYL_FACT_STORE_TRANSACTION_TEST_SCHEMA_MIGRATION);
+#endif
+
 static wyrelog_error_t
 transaction_test_hook_unlocked (wyl_fact_store_t *store,
     WylFactStoreTransactionKind kind, WylFactStoreTransactionPhase phase)
@@ -1657,6 +1840,229 @@ rename_metadata_value_column_once_unlocked (wyl_fact_store_t *store)
 }
 #endif
 
+/* Has this store's fact_batches.logical_bytes already been converged?
+ *
+ * Nullability only, by design: it is the one property the fresh DDL and the
+ * ALTER-based migration disagree about, and it is the property the rebuild
+ * establishes.  A store whose column is already NOT NULL does no work at all
+ * here -- not even a BEGIN -- which is what keeps this off the cost of every
+ * subsequent open.
+ *
+ * database_name <> 'temp' excludes a same-named temp table, whose schema_name
+ * is also 'main'.  Nothing in the tree creates one today; the qualification
+ * costs nothing and removes the question.  Not current_database(): the
+ * hardened configuration the secure DuckDB bridge opens rejects that function,
+ * so a probe built on it fails closed on every open of a bridge store. */
+static wyrelog_error_t
+fact_batches_logical_bytes_is_current (wyl_fact_store_t *store,
+    gboolean *out_current)
+{
+  *out_current = FALSE;
+  duckdb_prepared_statement stmt = NULL;
+  static const gchar *sql =
+      "SELECT 1 FROM duckdb_columns() "
+      "WHERE database_name <> 'temp' "
+      "AND schema_name = 'main' "
+      "AND table_name = 'fact_batches' "
+      "AND column_name = 'logical_bytes' "
+      "AND NOT is_nullable;";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_result result = { 0 };
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  *out_current = duckdb_row_count (&result) > 0;
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
+/* Count, before any transaction is opened, the data conditions a real store can
+ * reach that the rebuild cannot survive -- so that refusing leaves the store
+ * provably untouched.
+ *
+ * These two are not the only way the rebuild can abort.  The rule is that
+ * every constraint the recreated tables declare must already hold, and any row
+ * violating one of the others fails the same way: the transaction rolls back,
+ * the store is unchanged, and the finish: log line names the migration.  They
+ * are singled out because they are the two a store can plausibly be carrying
+ * already, and because their engine-level diagnostics are the misleading
+ * ones.
+ *
+ * out_columns is not a data condition at all: it reports how many columns
+ * fact_batches actually has, so the caller can refuse a table wider than the
+ * column list the rebuild copies.  It is counted here only because it shares
+ * the statement.
+ *
+ * Both data conditions would otherwise surface as a constraint violation from
+ * deep inside the rebuild, flattened by exec_sql to WYRELOG_E_IO and carrying
+ * a DuckDB message that names the wrong row -- measured, for the orphan case,
+ * to name a batch_id that is present rather than the one that is missing.
+ *
+ * Assumes fact_batches.logical_bytes exists, which the CREATE TABLE and ALTER
+ * blocks of wyl_fact_store_create_schema have both already guaranteed by the
+ * time this runs. */
+static wyrelog_error_t
+fact_batches_logical_bytes_blockers (wyl_fact_store_t *store,
+    gint64 *out_unrecorded, gint64 *out_orphans, gint64 *out_columns)
+{
+  *out_unrecorded = 0;
+  *out_orphans = 0;
+  *out_columns = 0;
+  duckdb_prepared_statement stmt = NULL;
+  static const gchar *sql =
+      "SELECT (SELECT COUNT(*) FROM fact_batches "
+      "        WHERE logical_bytes IS NULL), "
+      "       (SELECT COUNT(*) FROM fact_event_log e "
+      "        WHERE NOT EXISTS (SELECT 1 FROM fact_batches b "
+      "                          WHERE b.batch_id = e.batch_id)), "
+      "       (SELECT COUNT(*) FROM duckdb_columns() "
+      "        WHERE database_name <> 'temp' AND schema_name = 'main' "
+      "        AND table_name = 'fact_batches');";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_result result = { 0 };
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (duckdb_row_count (&result) != 1) {
+    rc = WYRELOG_E_IO;
+  } else {
+    *out_unrecorded = duckdb_value_int64 (&result, 0, 0);
+    *out_orphans = duckdb_value_int64 (&result, 1, 0);
+    *out_columns = duckdb_value_int64 (&result, 2, 0);
+  }
+  duckdb_destroy_result (&result);
+  return rc;
+}
+
+/* Converge fact_batches.logical_bytes so a store created before #1013 and one
+ * created after it report the same column definition (#1103).
+ *
+ * Fails closed rather than repairing.  A NULL logical_bytes means no writer
+ * ever recorded a cost; the -1 the #1013 migration backfills means a cost was
+ * recorded as unrecoverable.  Those are different facts, and coercing the
+ * first into the second would invent a record, so this refuses and says so.
+ *
+ * WYRELOG_E_INTERNAL rather than WYRELOG_E_POLICY: the fact HTTP route renders
+ * WYRELOG_E_POLICY from wyl_fact_store_create_schema as 409
+ * fact_batch_conflict, which would tell every client of an affected store that
+ * their batch conflicts -- a false answer to a question they did not ask.
+ * E_INTERNAL falls through to the route's generic 500, which is the honest
+ * report: a server-side condition an operator has to resolve.  The log line is
+ * what names the actual condition. */
+static wyrelog_error_t
+migrate_fact_batches_logical_bytes_unlocked (wyl_fact_store_t *store,
+    WylFactStoreConnectionSession *session)
+{
+  gboolean current = FALSE;
+  wyrelog_error_t rc = fact_batches_logical_bytes_is_current (store, &current);
+  if (rc != WYRELOG_E_OK || current)
+    return rc;
+
+  gint64 unrecorded = 0;
+  gint64 orphans = 0;
+  gint64 columns = 0;
+  rc = fact_batches_logical_bytes_blockers (store, &unrecorded, &orphans,
+          &columns);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* The rebuild copies exactly the columns FACT_BATCHES_COLUMN_NAMES lists, so
+   * a column some later migration adds through the ALTER block above without
+   * also adding it to the macros would be dropped here, with its data, and
+   * neither equality proof could see it -- both sides read the same list.
+   * Refusing on a column count the macro does not account for turns that into
+   * a stop instead of a silent loss. */
+  if (columns != FACT_BATCHES_COLUMN_COUNT) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact_batches has %" G_GINT64_FORMAT " columns but the rebuild knows "
+        "%d; refusing to converge logical_bytes (#1103) rather than copy a "
+        "subset.  A migration that added a column must add it to "
+        "FACT_BATCHES_COLUMNS and FACT_BATCHES_COLUMN_NAMES, and raise "
+        "FACT_BATCHES_COLUMN_COUNT, which the macro-consistency gate checks.",
+        columns, FACT_BATCHES_COLUMN_COUNT);
+    return WYRELOG_E_INTERNAL;
+  }
+  if (unrecorded > 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact_batches holds %" G_GINT64_FORMAT " row(s) whose logical_bytes "
+        "was never recorded; refusing to converge the column to NOT NULL "
+        "(#1103).  NULL is not the -1 that records an unrecoverable cost, so "
+        "no value can be inferred for them here.  Every open of this store "
+        "will keep failing until an operator decides what those rows cost "
+        "and writes it.", unrecorded);
+    return WYRELOG_E_INTERNAL;
+  }
+  if (orphans > 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact_event_log holds %" G_GINT64_FORMAT " row(s) referencing a "
+        "batch_id absent from fact_batches; refusing to converge "
+        "fact_batches.logical_bytes (#1103) because recreating the foreign "
+        "key would reject them.  Every open of this store will keep failing "
+        "until an operator resolves those rows.", orphans);
+    return WYRELOG_E_INTERNAL;
+  }
+
+  WylFactStoreTransaction transaction = { 0 };
+  rc = wyl_fact_store_transaction_begin (session,
+          WYL_FACT_STORE_TRANSACTION_LOGICAL_BYTES_MIGRATION, &transaction);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* Each step gates the next: after a constraint abort the connection refuses
+   * every later statement anyway, so chaining would only replace one honest
+   * failure with a run of misleading ones. */
+  rc = exec_sql (store->conn, fact_batches_logical_bytes_stage_sql);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = exec_sql (store->conn, fact_batches_logical_bytes_proof_sql);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = exec_sql (store->conn, fact_batches_logical_bytes_swap_sql);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = exec_sql (store->conn, fact_event_log_logical_bytes_proof_sql);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = exec_sql (store->conn, "DROP TABLE fact_event_log_stage;");
+finish:
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
+  /* After transaction_finish, not before: a commit that fails -- the
+   * realistic out-of-space case, and what the poison test injects -- arrives
+   * here with rc still OK and turns non-OK only inside that call, so logging
+   * earlier would miss exactly the abort most worth reporting.
+   *
+   * exec_sql flattens every DuckDB failure to WYRELOG_E_IO, and
+   * transaction_finish itself logs only when the rollback fails.  Without
+   * this line an aborted rebuild reaches the operator as a bare I/O error on
+   * a store the rollback left perfectly intact, with nothing to say a
+   * migration was what refused. */
+  /* Branch on the health flag rather than on rc: a failed ROLLBACK is the one
+   * abort after which the store is NOT what it was, and it is the flag, not
+   * the return code, that records it.  Inferring it from WYRELOG_E_INTERNAL
+   * would be true only for as long as transaction_finish returns that code
+   * for nothing else. */
+  if (store->health == WYL_FACT_STORE_POISONED)
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact_batches logical_bytes convergence failed and could not be "
+        "rolled back (#1103); the store is poisoned");
+  else if (rc != WYRELOG_E_OK)
+    WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
+        "fact_batches logical_bytes convergence failed and was rolled back "
+        "(#1103); the store is unchanged");
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_store_create_schema (wyl_fact_store_t *store)
 {
@@ -1677,38 +2083,9 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
             "INSERT OR IGNORE INTO fact_store_metadata (key, value) "
             "VALUES ('store_kind', 'wyrelog.fact');"
             "CREATE TABLE IF NOT EXISTS fact_batches ("
-            "  batch_id VARCHAR PRIMARY KEY,"
-            "  tenant_id VARCHAR NOT NULL,"
-            "  graph_id VARCHAR NOT NULL,"
-            "  namespace_id VARCHAR NOT NULL,"
-            "  relation_name VARCHAR NOT NULL,"
-            "  schema_version BIGINT NOT NULL,"
-            "  source VARCHAR,"
-            "  request_id VARCHAR,"
-            "  idempotency_key VARCHAR NOT NULL UNIQUE,"
-            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-            "  row_count BIGINT NOT NULL,"
-            /* The batch's logical fact-byte cost, so a quota settle can
-             * recover what a committed batch consumed after a restart
-             * instead of only from the committing call's return value
-             * (#1013).  Distinct from the physical artifact inventory of
-             * #622, which measures storage rather than fact payload. */
-            "  logical_bytes BIGINT NOT NULL,"
-            "  content_hash VARCHAR NOT NULL,"
-            "  created_at_us BIGINT NOT NULL"
-            ");"
+            FACT_BATCHES_COLUMNS ");"
             "CREATE TABLE IF NOT EXISTS fact_event_log ("
-            "  seq BIGINT PRIMARY KEY,"
-            "  batch_id VARCHAR NOT NULL,"
-            "  tenant_id VARCHAR NOT NULL,"
-            "  graph_id VARCHAR NOT NULL,"
-            "  namespace_id VARCHAR NOT NULL,"
-            "  relation_name VARCHAR NOT NULL,"
-            "  schema_version BIGINT NOT NULL,"
-            "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
-            "  created_at_us BIGINT NOT NULL,"
-            "  valid BOOLEAN NOT NULL,"
-            "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");"
+            FACT_EVENT_LOG_COLUMNS ");"
             "CREATE TABLE IF NOT EXISTS fact_forget_audit ("
             "  id            BIGINT PRIMARY KEY,"
             "  batch_id      VARCHAR NOT NULL,"
@@ -1751,25 +2128,30 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
               "request_id VARCHAR;"
               "ALTER TABLE fact_forget_intent ADD COLUMN IF NOT EXISTS "
               "operator_annotation VARCHAR;"
-              /* DuckDB 1.5.5 refuses ADD COLUMN with a constraint, and
-               * refuses SET NOT NULL on fact_batches at all while
-               * fact_event_log's foreign key references it, so a migrated
-               * store's column stays nullable where a fresh one is NOT
-               * NULL.  The shapes cannot be converged; the invariant is
-               * held in C instead, where insert_batch_unlocked always
-               * binds the column.
+              /* DuckDB 1.5.5 refuses ADD COLUMN with a constraint, so this
+               * step can only add logical_bytes as nullable.
+               * migrate_fact_batches_logical_bytes_unlocked below then
+               * converges it to NOT NULL by rebuilding both tables, which is
+               * the one route the pinned version leaves open (#1103).
                *
                * DEFAULT -1 backfills rows that predate the column with an
                * explicit "cost unknown" rather than 0, which is a real
                * charge an empty-valued batch can have.  DROP DEFAULT then
-               * removes it, so a future omitted bind writes NULL and fails
-               * loudly instead of silently minting the sentinel. */
+               * removes it, so an omitted bind cannot silently mint the
+               * sentinel; convergence is what then makes that omission fail
+               * at the write rather than at whoever later reads a NULL. */
               "ALTER TABLE fact_batches ADD COLUMN IF NOT EXISTS "
               "logical_bytes BIGINT DEFAULT -1;"
               "ALTER TABLE fact_batches ALTER COLUMN logical_bytes "
               "DROP DEFAULT;");
     rc = wyl_fact_store_transaction_finish (&migration, rc);
   }
+  /* After the ALTER block, which is what creates the column and backfills the
+   * sentinel, and in its own transaction: a store this refuses still keeps
+   * that backfill, so refusing to converge leaves it behaving exactly as it
+   * did before rather than below it. */
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_fact_batches_logical_bytes_unlocked (store, &session);
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   wyl_fact_store_connection_session_end (&session);
