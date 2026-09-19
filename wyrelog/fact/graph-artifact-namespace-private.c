@@ -1470,9 +1470,12 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
    * a different inode for this held graph directory. */
   wyrelog_error_t lock_result = pin_lock_domain (n);
   if (lock_result != WYRELOG_E_OK) {
-    close (n->fd);
-    close (n->main_fd);
-    g_free (n);
+    /* n already owns the identity strings bound above and, on the paths
+     * where open_checked_lock parked its descriptor before refusing, the
+     * lock pin; pin_lock_domain leaves lock_domain NULL and registers
+     * nothing, so the ordinary teardown is exact here.  Freeing the struct
+     * by hand leaked both. */
+    namespace_unref (n);
     return lock_result;
   }
   if (check (n) != WYRELOG_E_OK) {
