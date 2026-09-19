@@ -3,8 +3,11 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <string.h>
 
 #include "wyrelog/fact/legacy-store-identity-private.h"
+#include "wyrelog/fact/open-reservation-private.h"
+#include "wyrelog/fact/store-open-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
@@ -4617,10 +4620,182 @@ check_projection_batch_count_validates_scope (void)
   return 0;
 }
 
+typedef struct
+{
+  gchar *dir;
+  gchar *policy_path;
+  gchar *fact_path;
+  wyl_policy_store_t *policy;
+} OpenReservationFixture;
+
+static gint
+open_reservation_fixture_init (OpenReservationFixture *fixture,
+    const gchar *template_, gint base)
+{
+  g_autoptr (GError) error = NULL;
+  memset (fixture, 0, sizeof (*fixture));
+  fixture->dir = g_dir_make_tmp (template_, &error);
+  if (fixture->dir == NULL)
+    return base;
+  fixture->policy_path = g_build_filename (fixture->dir, "policy.sqlite", NULL);
+  fixture->fact_path = g_build_filename (fixture->dir, "facts.duckdb", NULL);
+  if (wyl_policy_store_open (fixture->policy_path, &fixture->policy)
+      != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (fixture->policy) != WYRELOG_E_OK)
+    return base + 1;
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (fixture->policy, "tenant-a", &created)
+      != WYRELOG_E_OK)
+    return base + 2;
+  return 0;
+}
+
+static void
+open_reservation_fixture_clear (OpenReservationFixture *fixture)
+{
+  g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+  if (fixture->policy_path != NULL)
+    g_remove (fixture->policy_path);
+  if (fixture->fact_path != NULL)
+    g_remove (fixture->fact_path);
+  if (fixture->dir != NULL)
+    g_rmdir (fixture->dir);
+  g_free (fixture->policy_path);
+  g_free (fixture->fact_path);
+  g_free (fixture->dir);
+}
+
+static gint
+open_reservation_quota (const OpenReservationFixture *fixture,
+    WylPolicyFactConcurrentOpenQuotaStatus *out_status, gint error_rc)
+{
+  memset (out_status, 0, sizeof (*out_status));
+  return wyl_policy_store_get_fact_concurrent_open_quota (fixture->policy,
+             "tenant-a", out_status) == WYRELOG_E_OK ? 0 : error_rc;
+}
+
+static gint
+check_refused_reservation_unwind_is_freed (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture, "wyl-fact-open-busy-XXXXXX",
+          2900);
+  if (rc != 0)
+    goto out;
+
+  wyl_fact_store_open_reservation_refuse_transitions_once_for_test (0,
+      G_MAXUINT);
+  WylFactOpenReservation *reservation = NULL;
+  wyrelog_error_t reservation_rc = WYRELOG_E_OK;
+  FactOpenReservationAdapter *adapter = wyl_fact_store_open_reservation_begin
+        (fixture.policy, "tenant-a", "orders", fixture.dir, fixture.fact_path,
+          &reservation, &reservation_rc);
+  if (adapter != NULL || reservation != NULL || reservation_rc != WYRELOG_E_BUSY)
+    rc = 2903;
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if (rc == 0 && (rc = open_reservation_quota (&fixture, &status, 2904)) == 0
+      && (status.pending != 1 || status.charged != 1))
+    rc = 2905;
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+static gint
+check_forced_close_finishes_refused_cleanup (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture, "wyl-fact-close-busy-XXXXXX",
+          2920);
+  if (rc != 0)
+    goto out;
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 2923;
+    goto out;
+  }
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2924)) != 0)
+    goto close_store;
+  if (status.active != 1 || status.charged != 1) {
+    rc = 2925;
+    goto close_store;
+  }
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0,
+      G_MAXUINT);
+  if (wyl_fact_store_close_checked (store) != WYRELOG_E_BUSY) {
+    rc = 2926;
+    store = NULL;
+    goto out;
+  }
+  gint64 one = 0;
+  if (wyl_fact_store_test_query_int64 (store, "SELECT 1", &one) != WYRELOG_E_OK
+      || one != 1) {
+    rc = 2927;
+    goto close_store;
+  }
+  wyl_fact_store_close (store);
+  store = NULL;
+  if ((rc = open_reservation_quota (&fixture, &status, 2928)) != 0)
+    goto out;
+  if (status.active != 1 || status.charged != 1) {
+    rc = 2929;
+    goto out;
+  }
+  goto out;
+close_store:
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0, 0);
+  wyl_fact_store_close (store);
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+static gint
+check_forced_close_after_refused_settle_is_freed (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-settle-busy-XXXXXX", 2940);
+  if (rc != 0)
+    goto out;
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 2943;
+    goto out;
+  }
+  /* Acquisition passes once; close's transition passes and settlement fails. */
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 1,
+      G_MAXUINT);
+  wyl_fact_store_close (store);
+  store = NULL;
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2944)) != 0)
+    goto out;
+  if (status.cleanup_pending != 1 || status.charged != 1)
+    rc = 2945;
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
 int
 main (void)
 {
   gint rc = check_fact_store_thread_budget ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_refused_reservation_unwind_is_freed ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_forced_close_finishes_refused_cleanup ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_forced_close_after_refused_settle_is_freed ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();

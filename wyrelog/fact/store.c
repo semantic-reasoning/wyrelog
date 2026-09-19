@@ -39,6 +39,10 @@ struct FactOpenReservationAdapter
   wyl_policy_store_t *policy_store;
   wyl_fact_store_t *store;
   gchar *owner_incarnation;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  guint refuse_skip;
+  guint refuse_count;
+#endif
 };
 
 struct wyl_fact_store_t
@@ -101,6 +105,26 @@ fact_open_policy_state (WylFactOpenReservationState state)
   return WYL_POLICY_FACT_OPEN_CLEANUP_PENDING;
 }
 
+#if defined(WYL_TEST_HANDLE_SEAMS)
+static guint fact_open_reservation_refuse_skip;
+static guint fact_open_reservation_refuse_count;
+G_LOCK_DEFINE_STATIC (fact_open_reservation_refusal);
+
+static gboolean
+fact_open_reservation_refuse_for_test (FactOpenReservationAdapter *adapter)
+{
+  if (adapter->refuse_skip > 0) {
+    adapter->refuse_skip--;
+    return FALSE;
+  }
+  if (adapter->refuse_count == 0)
+    return FALSE;
+  if (adapter->refuse_count != G_MAXUINT)
+    adapter->refuse_count--;
+  return TRUE;
+}
+#endif
+
 static wyrelog_error_t
 fact_store_open_reservation_transition (gpointer user_data,
     const gchar *reservation_id, const gchar *owner,
@@ -111,6 +135,10 @@ fact_store_open_reservation_transition (gpointer user_data,
       || adapter->owner_incarnation == NULL
       || g_strcmp0 (owner, adapter->owner_incarnation) != 0)
     return WYRELOG_E_INVALID;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (fact_open_reservation_refuse_for_test (adapter))
+    return WYRELOG_E_BUSY;
+#endif
   return wyl_policy_store_transition_fact_open (adapter->policy_store,
              reservation_id, owner, NULL, fact_open_policy_state (expected),
              fact_open_policy_state (target));
@@ -123,6 +151,10 @@ fact_store_open_reservation_settle (gpointer user_data,
   FactOpenReservationAdapter *adapter = user_data;
   if (adapter == NULL || adapter->policy_store == NULL)
     return WYRELOG_E_INVALID;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  if (fact_open_reservation_refuse_for_test (adapter))
+    return WYRELOG_E_BUSY;
+#endif
   return wyl_policy_store_settle_fact_open (adapter->policy_store,
              reservation_id, owner, NULL, TRUE);
 }
@@ -153,6 +185,18 @@ fact_store_open_reservation_release (gpointer user_data,
   FactOpenReservationAdapter *adapter = user_data;
   return adapter == NULL ? WYRELOG_E_INVALID
       : fact_store_release_native (adapter->store, out_released);
+}
+
+static void
+fact_store_open_reservation_discard (WylFactOpenReservation *reservation)
+{
+  if (reservation == NULL)
+    return;
+  if (wyl_fact_open_reservation_get_state (reservation)
+      == WYL_FACT_OPEN_RESERVATION_SETTLED)
+    wyl_fact_open_reservation_free (reservation);
+  else
+    wyl_fact_open_reservation_abandon (reservation);
 }
 
 FactOpenReservationAdapter *
@@ -197,6 +241,14 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
   FactOpenReservationAdapter *adapter = g_new0 (FactOpenReservationAdapter, 1);
   adapter->policy_store = policy_store;
   adapter->owner_incarnation = g_steal_pointer (&owner);
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  G_LOCK (fact_open_reservation_refusal);
+  adapter->refuse_skip = fact_open_reservation_refuse_skip;
+  adapter->refuse_count = fact_open_reservation_refuse_count;
+  fact_open_reservation_refuse_skip = 0;
+  fact_open_reservation_refuse_count = 0;
+  G_UNLOCK (fact_open_reservation_refusal);
+#endif
   WylFactOpenReservationCallbacks callbacks = {
     fact_store_open_reservation_transition,
     fact_store_open_reservation_settle,
@@ -222,9 +274,7 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
   rc = wyl_fact_open_reservation_begin_acquisition (reservation);
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t fail_rc = wyl_fact_open_reservation_fail (reservation);
-    if (wyl_fact_open_reservation_get_state (reservation)
-        == WYL_FACT_OPEN_RESERVATION_SETTLED)
-      wyl_fact_open_reservation_free (reservation);
+    fact_store_open_reservation_discard (reservation);
     wyl_policy_store_retire_fact_open_owner (policy_store,
         adapter->owner_incarnation);
     g_free (adapter->owner_incarnation);
@@ -256,9 +306,7 @@ wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
     return;
   if (reservation != NULL) {
     (void) wyl_fact_open_reservation_fail (reservation);
-    if (wyl_fact_open_reservation_get_state (reservation)
-        == WYL_FACT_OPEN_RESERVATION_SETTLED)
-      wyl_fact_open_reservation_free (reservation);
+    fact_store_open_reservation_discard (reservation);
   }
   if (adapter->policy_store != NULL && adapter->owner_incarnation != NULL)
     (void) wyl_policy_store_retire_fact_open_owner (adapter->policy_store,
@@ -367,6 +415,26 @@ create_hardened_duckdb_config (gboolean read_only, duckdb_config *out_config,
 }
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
+void
+wyl_fact_store_open_reservation_refuse_transitions_once_for_test (guint skip,
+    guint count)
+{
+  G_LOCK (fact_open_reservation_refusal);
+  fact_open_reservation_refuse_skip = skip;
+  fact_open_reservation_refuse_count = count;
+  G_UNLOCK (fact_open_reservation_refusal);
+}
+
+void
+wyl_fact_store_refuse_open_reservation_transitions_for_test
+  (wyl_fact_store_t *store, guint skip, guint count)
+{
+  if (store == NULL || store->open_reservation_adapter == NULL)
+    return;
+  store->open_reservation_adapter->refuse_skip = skip;
+  store->open_reservation_adapter->refuse_count = count;
+}
+
 void
 wyl_fact_store_duckdb_config_fail_once_for_test
   (WylFactStoreDuckdbConfigSetting setting)
@@ -1133,7 +1201,7 @@ wyl_fact_store_open (const gchar *path, wyl_fact_store_t **out_store)
 }
 
 static wyrelog_error_t
-fact_store_close_checked (wyl_fact_store_t *store)
+fact_store_close_checked (wyl_fact_store_t *store, gboolean forced)
 {
   if (store == NULL)
     return WYRELOG_E_INVALID;
@@ -1141,10 +1209,22 @@ fact_store_close_checked (wyl_fact_store_t *store)
   if (store->open_reservation != NULL) {
     rc = wyl_fact_open_reservation_close (store->open_reservation);
     if (wyl_fact_open_reservation_get_state (store->open_reservation)
-        != WYL_FACT_OPEN_RESERVATION_SETTLED)
-      return rc;
-    g_clear_pointer (&store->open_reservation,
-        wyl_fact_open_reservation_free);
+        != WYL_FACT_OPEN_RESERVATION_SETTLED) {
+      if (!forced)
+        return rc;
+      /* The void cleanup API has no caller that can retry the durable row.
+       * Release native resources exactly once, then discard the local retry
+       * context.  The row remains charged for recovery. */
+      wyrelog_error_t release_rc =
+          wyl_fact_open_reservation_release_native (store->open_reservation);
+      if (rc == WYRELOG_E_OK)
+        rc = release_rc;
+      g_clear_pointer (&store->open_reservation,
+          wyl_fact_open_reservation_abandon);
+    } else {
+      g_clear_pointer (&store->open_reservation,
+          wyl_fact_open_reservation_free);
+    }
     if (store->open_reservation_adapter != NULL) {
       wyrelog_error_t retire_rc = wyl_policy_store_retire_fact_open_owner
             (store->open_reservation_adapter->policy_store,
@@ -1172,13 +1252,13 @@ fact_store_close_checked (wyl_fact_store_t *store)
 wyrelog_error_t
 wyl_fact_store_close_checked (wyl_fact_store_t *store)
 {
-  return fact_store_close_checked (store);
+  return fact_store_close_checked (store, FALSE);
 }
 
 void
 wyl_fact_store_close (wyl_fact_store_t *store)
 {
-  (void) fact_store_close_checked (store);
+  (void) fact_store_close_checked (store, TRUE);
 }
 
 wyrelog_error_t

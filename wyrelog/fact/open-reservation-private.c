@@ -48,7 +48,7 @@ wyl_fact_open_reservation_new (const gchar *reservation_id,
   reservation->callbacks = *callbacks;
   reservation->state = WYL_FACT_OPEN_RESERVATION_PENDING;
   if (reservation->reservation_id == NULL || reservation->owner == NULL) {
-    wyl_fact_open_reservation_free (reservation);
+    wyl_fact_open_reservation_abandon (reservation);
     return NULL;
   }
   return reservation;
@@ -60,6 +60,33 @@ wyl_fact_open_reservation_free (WylFactOpenReservation *reservation)
   if (reservation == NULL)
     return;
   g_return_if_fail (reservation->state == WYL_FACT_OPEN_RESERVATION_SETTLED);
+  g_free (reservation->reservation_id);
+  g_free (reservation->owner);
+  g_free (reservation);
+}
+
+wyrelog_error_t
+wyl_fact_open_reservation_release_native (WylFactOpenReservation *reservation)
+{
+  if (!reservation_valid (reservation))
+    return WYRELOG_E_INVALID;
+  if (!reservation->native_acquired || reservation->native_released)
+    return WYRELOG_E_OK;
+  gboolean released = FALSE;
+  wyrelog_error_t rc = reservation->callbacks.release
+        (reservation->callbacks.user_data, &released);
+  if (released)
+    reservation->native_released = TRUE;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return reservation->native_released ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+void
+wyl_fact_open_reservation_abandon (WylFactOpenReservation *reservation)
+{
+  if (reservation == NULL)
+    return;
   g_free (reservation->reservation_id);
   g_free (reservation->owner);
   g_free (reservation);
@@ -119,18 +146,11 @@ cleanup (WylFactOpenReservation *reservation)
     if (rc != WYRELOG_E_OK)
       return rc;
   }
-  if (reservation->native_acquired && !reservation->native_released) {
-    gboolean released = FALSE;
-    wyrelog_error_t rc = reservation->callbacks.release
-          (reservation->callbacks.user_data, &released);
-    if (released)
-      reservation->native_released = TRUE;
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    if (!reservation->native_released)
-      return WYRELOG_E_IO;
-  }
-  wyrelog_error_t rc = reservation->callbacks.settle
+  wyrelog_error_t rc =
+      wyl_fact_open_reservation_release_native (reservation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reservation->callbacks.settle
         (reservation->callbacks.user_data, reservation->reservation_id,
           reservation->owner);
   if (rc != WYRELOG_E_OK)
