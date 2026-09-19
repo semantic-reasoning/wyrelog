@@ -60,6 +60,16 @@ typedef struct
   gboolean locked;
 } WylPolicyStoreReadSnapshot;
 
+/* Called on the thread that is about to wait for another thread's policy
+ * transaction, before it blocks.  Test use only: it lets a check order two
+ * threads on the mutex without sleeping.  Declared unconditionally like the
+ * fact-store seams; the definition exists only in the seams build. */
+typedef void (*WylPolicyStoreTransactionContentionHook)
+  (wyl_policy_store_t *store, gpointer data);
+void wyl_policy_store_set_transaction_contention_hook_for_test
+  (wyl_policy_store_t *store, WylPolicyStoreTransactionContentionHook hook,
+    gpointer data);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
 {
@@ -1570,10 +1580,34 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
 
 sqlite3 *wyl_policy_store_get_db (wyl_policy_store_t * store);
 
+/* Transactions begun through the store's own entry points -- the mutation
+ * savepoint, the publication transaction, graph-authority mutations and the
+ * write-rate admission -- are serialized across threads on the store's
+ * authority mutex: a caller on another thread waits for the open transaction
+ * to end instead of being refused.  WYRELOG_E_BUSY from a begin therefore
+ * means the calling thread already holds a transaction on this connection
+ * (a savepoint inside its own publication transaction still nests), close
+ * is pending, or one of the families that keep their own locking (service
+ * credential exchange, the service-authority transaction, bootstrap, the
+ * provisioning migration) is open on another thread.  A commit or rollback
+ * must come from the thread that began.  A savepoint commit whose RELEASE
+ * is refused discards the savepoint as far as SQLite allows, marks the
+ * store terminal and ends its frame either way, so a caller need not roll
+ * back after a failed commit (and a rollback it does issue then finds
+ * nothing to end); a publication transaction whose COMMIT is refused while
+ * the transaction stays open keeps it for the caller's rollback. */
 wyrelog_error_t wyl_policy_store_begin_mutation (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
 void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
+/* A snapshot of the connection's state.  From a thread that does not own
+ * the open transaction it is transient and must not drive a decision; ask
+ * wyl_policy_store_transaction_owned_by_caller instead. */
 gboolean wyl_policy_store_is_autocommit (wyl_policy_store_t * store);
+/* TRUE iff the calling thread has begun and not yet ended a serialized
+ * transaction on this store.  This is the one correct way to ask "am I
+ * inside a policy transaction" from another thread's point of view. */
+gboolean wyl_policy_store_transaction_owned_by_caller
+  (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_begin
   (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_publication_transaction_commit

@@ -1397,6 +1397,381 @@ test_coordinator_fence_owns_connection_transaction (void)
   g_assert_cmpint (released_attempt.result, ==, SQLITE_OK);
 }
 
+/* Two threads on the one policy connection.  The store serializes its
+ * transactions on the authority mutex, so the second thread waits for the
+ * first thread's transaction instead of being refused (or, for a savepoint,
+ * nesting into it).  These checks order the threads on that mutex through the
+ * contention seam and condition variables, never by sleeping. */
+typedef struct
+{
+  wyl_policy_store_t *store;
+  GMutex mutex;
+  GCond cond;
+  gboolean held;
+  gboolean release;
+  gboolean waited;
+  gboolean begun;
+  gboolean done;
+  gboolean owned_seen;
+  wyrelog_error_t rc;
+} TransactionRaceGate;
+
+static void
+transaction_race_gate_init (TransactionRaceGate *gate,
+    wyl_policy_store_t *store)
+{
+  memset (gate, 0, sizeof (*gate));
+  gate->store = store;
+  g_mutex_init (&gate->mutex);
+  g_cond_init (&gate->cond);
+}
+
+static void
+transaction_race_gate_clear (TransactionRaceGate *gate)
+{
+  wyl_policy_store_set_transaction_contention_hook_for_test (gate->store,
+      NULL, NULL);
+  g_cond_clear (&gate->cond);
+  g_mutex_clear (&gate->mutex);
+}
+
+static void
+transaction_race_gate_set (TransactionRaceGate *gate, gboolean *flag)
+{
+  g_mutex_lock (&gate->mutex);
+  *flag = TRUE;
+  g_cond_broadcast (&gate->cond);
+  g_mutex_unlock (&gate->mutex);
+}
+
+/* Wait until either flag is set; the second may be NULL. */
+static void
+transaction_race_gate_wait (TransactionRaceGate *gate, gboolean *flag,
+    gboolean *or_flag)
+{
+  g_mutex_lock (&gate->mutex);
+  while (!*flag && (or_flag == NULL || !*or_flag))
+    g_cond_wait (&gate->cond, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static gboolean
+transaction_race_gate_read (TransactionRaceGate *gate, gboolean *flag)
+{
+  g_mutex_lock (&gate->mutex);
+  gboolean value = *flag;
+  g_mutex_unlock (&gate->mutex);
+  return value;
+}
+
+/* Fires on the thread about to wait for the holder: record it and let the
+ * holder finish, so a waiting thread is the only thing that ends the hold. */
+static void
+transaction_race_release_on_contention (wyl_policy_store_t *store,
+    gpointer data)
+{
+  (void) store;
+  TransactionRaceGate *gate = data;
+  transaction_race_gate_set (gate, &gate->waited);
+  transaction_race_gate_set (gate, &gate->release);
+}
+
+static gpointer
+run_savepoint_holder (gpointer data)
+{
+  TransactionRaceGate *gate = data;
+  gate->rc = wyl_policy_store_begin_mutation (gate->store);
+  transaction_race_gate_set (gate, &gate->held);
+  transaction_race_gate_wait (gate, &gate->release, NULL);
+  if (gate->rc == WYRELOG_E_OK)
+    gate->rc = wyl_policy_store_commit_mutation (gate->store);
+  transaction_race_gate_set (gate, &gate->done);
+  return NULL;
+}
+
+static gpointer
+run_savepoint_waiter (gpointer data)
+{
+  TransactionRaceGate *gate = data;
+  gate->rc = wyl_policy_store_begin_mutation (gate->store);
+  transaction_race_gate_set (gate, &gate->begun);
+  if (gate->rc == WYRELOG_E_OK)
+    gate->rc = wyl_policy_store_commit_mutation (gate->store);
+  transaction_race_gate_set (gate, &gate->done);
+  return NULL;
+}
+
+static gpointer
+run_concurrent_open_limit_setter (gpointer data)
+{
+  TransactionRaceGate *gate = data;
+  gate->rc = wyl_policy_store_set_fact_concurrent_open_quota (gate->store,
+          "tenant-a", 3);
+  transaction_race_gate_set (gate, &gate->done);
+  return NULL;
+}
+
+static gpointer
+run_transaction_owner_reader (gpointer data)
+{
+  TransactionRaceGate *gate = data;
+  gate->owned_seen =
+      wyl_policy_store_transaction_owned_by_caller (gate->store);
+  transaction_race_gate_set (gate, &gate->done);
+  return NULL;
+}
+
+static void
+test_publication_transaction_waits_for_foreign_savepoint (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  wyl_policy_store_set_transaction_contention_hook_for_test (store,
+      transaction_race_release_on_contention, &gate);
+
+  /* Another thread holds a savepoint; our publication transaction waits for
+   * it to end rather than being refused. */
+  GThread *holder = g_thread_new ("savepoint-holder", run_savepoint_holder,
+          &gate);
+  transaction_race_gate_wait (&gate, &gate.held, NULL);
+  wyrelog_error_t rc = wyl_policy_store_publication_transaction_begin (store);
+  /* Both outcomes must let the holder finish; only then is rc judged. */
+  transaction_race_gate_set (&gate, &gate.release);
+  g_thread_join (holder);
+  g_assert_cmpint (gate.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  g_assert_true (transaction_race_gate_read (&gate, &gate.waited));
+  g_assert_cmpint (wyl_policy_store_publication_transaction_commit (store),
+      ==, WYRELOG_E_OK);
+
+  /* The mirror: while this thread holds a publication transaction, another
+   * thread's savepoint waits and only begins once we have committed. */
+  transaction_race_gate_clear (&gate);
+  transaction_race_gate_init (&gate, store);
+  wyl_policy_store_set_transaction_contention_hook_for_test (store,
+      transaction_race_release_on_contention, &gate);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  GThread *waiter = g_thread_new ("savepoint-waiter", run_savepoint_waiter,
+          &gate);
+  transaction_race_gate_wait (&gate, &gate.waited, &gate.begun);
+  g_assert_false (transaction_race_gate_read (&gate, &gate.begun));
+  g_assert_cmpint (wyl_policy_store_publication_transaction_commit (store),
+      ==, WYRELOG_E_OK);
+  g_thread_join (waiter);
+  g_assert_true (transaction_race_gate_read (&gate, &gate.begun));
+  g_assert_cmpint (gate.rc, ==, WYRELOG_E_OK);
+  transaction_race_gate_clear (&gate);
+}
+
+static void
+test_savepoint_never_nests_into_foreign_publication_transaction (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
+      &created), ==, WYRELOG_E_OK);
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  wyl_policy_store_set_transaction_contention_hook_for_test (store,
+      transaction_race_release_on_contention, &gate);
+
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  GThread *setter = g_thread_new ("open-limit-setter",
+          run_concurrent_open_limit_setter, &gate);
+  /* Serialized, the setter is waiting on us; unserialized it has already
+   * nested its savepoint into our transaction and returned. */
+  transaction_race_gate_wait (&gate, &gate.waited, &gate.done);
+  g_assert_cmpint
+    (wyl_policy_store_publication_transaction_rollback_checked (store), ==,
+      WYRELOG_E_OK);
+  g_thread_join (setter);
+  g_assert_cmpint (gate.rc, ==, WYRELOG_E_OK);
+  /* The setter's own commit must have survived our rollback. */
+  WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_concurrent_open_quota (store,
+      "tenant-a", &status), ==, WYRELOG_E_OK);
+  g_assert_true (status.has_limit);
+  g_assert_cmpuint (status.hard_limit, ==, 3);
+  transaction_race_gate_clear (&gate);
+}
+
+static void
+test_same_thread_nesting_still_refused (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  /* Inside this thread's own savepoint a publication transaction, and the
+   * fact-open reservation built on one, are refused as before. */
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_BUSY);
+  g_autofree gchar *persisted = NULL;
+  g_assert_cmpint (wyl_policy_store_reserve_fact_open (store, "res-1",
+      "owner-1", "tenant-a", "orders", "root", "token", &persisted), ==,
+      WYRELOG_E_BUSY);
+  wyl_policy_store_rollback_mutation (store);
+  /* A publication transaction refuses a second one, but a savepoint nests. */
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_commit (store),
+      ==, WYRELOG_E_OK);
+  g_assert_true (wyl_policy_store_is_autocommit (store));
+}
+
+static void
+test_transaction_commit_requires_owner (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  GThread *holder = g_thread_new ("savepoint-holder", run_savepoint_holder,
+          &gate);
+  transaction_race_gate_wait (&gate, &gate.held, NULL);
+  /* Ending another thread's transaction is refused before any SQL runs. */
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint
+    (wyl_policy_store_publication_transaction_rollback_checked (store), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_commit (store),
+      ==, WYRELOG_E_INVALID);
+  transaction_race_gate_set (&gate, &gate.release);
+  g_thread_join (holder);
+  g_assert_cmpint (gate.rc, ==, WYRELOG_E_OK);
+  transaction_race_gate_clear (&gate);
+}
+
+static void
+test_transaction_owned_by_caller (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_policy_store_transaction_owned_by_caller (store));
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  GThread *reader = g_thread_new ("owner-reader",
+          run_transaction_owner_reader, &gate);
+  g_thread_join (reader);
+  g_assert_false (gate.owned_seen);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==,
+      WYRELOG_E_OK);
+  g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
+  transaction_race_gate_clear (&gate);
+}
+
+static int
+deny_savepoint_release (void *data, int action, const char *arg1,
+    const char *arg2, const char *database, const char *trigger)
+{
+  (void) arg2;
+  (void) database;
+  (void) trigger;
+  guint *rejected = data;
+  if (action == SQLITE_SAVEPOINT && g_strcmp0 (arg1, "RELEASE") == 0) {
+    (*rejected)++;
+    return SQLITE_DENY;
+  }
+  return SQLITE_OK;
+}
+
+/* A savepoint commit whose RELEASE is refused must end its transaction
+ * frame: the frame is the held authority mutex, and not every caller rolls
+ * back after a failed commit, so a kept frame would stop every other
+ * thread's transaction for good.  The other thread's begin has to return,
+ * not wait; the deadline only turns a regression into a failure instead of
+ * a hang. */
+static void
+test_failed_savepoint_commit_ends_the_frame (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  guint rejected = 0;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_set_authorizer (db, deny_savepoint_release,
+      &rejected), ==, SQLITE_OK);
+  wyrelog_error_t rc = wyl_policy_store_commit_mutation (store);
+  sqlite3_set_authorizer (db, NULL, NULL);
+  g_assert_cmpuint (rejected, >=, 1);
+  g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+  g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
+
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  GThread *waiter = g_thread_new ("savepoint-after-failed-commit",
+          run_savepoint_waiter, &gate);
+  g_mutex_lock (&gate.mutex);
+  gint64 deadline = g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND;
+  while (!gate.done
+      && g_cond_wait_until (&gate.cond, &gate.mutex, deadline)) {
+  }
+  gboolean returned = gate.done;
+  g_mutex_unlock (&gate.mutex);
+  g_assert_true (returned);
+  g_thread_join (waiter);
+  /* The caller's own rollback after the failed commit finds no frame. */
+  wyl_policy_store_rollback_mutation (store);
+  transaction_race_gate_clear (&gate);
+}
+
+/* A publication COMMIT asked for after SQLite already rolled the
+ * transaction back has nothing to commit, but the frame and the writer
+ * lease are still the caller's: they end here, exactly as rollback_checked
+ * ends them, or the publication fence that took this branch would keep an
+ * authority-mutex level for good. */
+static void
+test_publication_commit_after_auto_rollback_ends_the_frame (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
+      ==, WYRELOG_E_OK);
+  /* Stand in for the statement failure that makes SQLite roll back. */
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), "ROLLBACK;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_true (wyl_policy_store_is_autocommit (store));
+  g_assert_true (wyl_policy_store_transaction_owned_by_caller (store));
+  g_assert_cmpint (wyl_policy_store_publication_transaction_commit (store),
+      ==, WYRELOG_E_INVALID);
+  g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
+
+  TransactionRaceGate gate;
+  transaction_race_gate_init (&gate, store);
+  GThread *waiter = g_thread_new ("savepoint-after-auto-rollback",
+          run_savepoint_waiter, &gate);
+  g_mutex_lock (&gate.mutex);
+  gint64 deadline = g_get_monotonic_time () + 10 * G_TIME_SPAN_SECOND;
+  while (!gate.done
+      && g_cond_wait_until (&gate.cond, &gate.mutex, deadline)) {
+  }
+  gboolean returned = gate.done;
+  g_mutex_unlock (&gate.mutex);
+  g_assert_true (returned);
+  g_thread_join (waiter);
+  g_assert_cmpint (gate.rc, ==, WYRELOG_E_OK);
+  transaction_race_gate_clear (&gate);
+}
+
 static void
 test_darwin_evidence_policy_persistence (void)
 {
@@ -6600,6 +6975,24 @@ main (int argc, char **argv)
       test_darwin_evidence_encrypted_immediate_publication);
   g_test_add_func ("/policy/graph-authority/coordinator-fence-transaction",
       test_coordinator_fence_owns_connection_transaction);
+  g_test_add_func
+    ("/policy/graph-authority/publication-transaction-waits-for-savepoint",
+      test_publication_transaction_waits_for_foreign_savepoint);
+  g_test_add_func
+    ("/policy/graph-authority/savepoint-never-nests-into-foreign-transaction",
+      test_savepoint_never_nests_into_foreign_publication_transaction);
+  g_test_add_func ("/policy/graph-authority/same-thread-nesting-refused",
+      test_same_thread_nesting_still_refused);
+  g_test_add_func ("/policy/graph-authority/transaction-commit-requires-owner",
+      test_transaction_commit_requires_owner);
+  g_test_add_func ("/policy/graph-authority/transaction-owned-by-caller",
+      test_transaction_owned_by_caller);
+  g_test_add_func
+    ("/policy/graph-authority/failed-savepoint-commit-ends-the-frame",
+      test_failed_savepoint_commit_ends_the_frame);
+  g_test_add_func
+    ("/policy/graph-authority/publication-commit-after-auto-rollback",
+      test_publication_commit_after_auto_rollback_ends_the_frame);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-preflight",
       test_provisioning_migration_preflight_is_fail_closed);
   g_test_add_func ("/policy/graph-authority/provisioning-migration-sql-fence",

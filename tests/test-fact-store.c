@@ -5632,6 +5632,175 @@ out:
   return rc;
 }
 
+/* Two threads on the one policy connection: another thread's transaction
+ * makes a reservation step wait, not fail.  The holder thread opens a
+ * transaction and keeps it until a waiting thread reaches the store's
+ * contention seam, so nothing here depends on timing. */
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  GMutex mutex;
+  GCond cond;
+  gboolean held;
+  gboolean release;
+  gboolean waited;
+  gboolean publication;
+  wyrelog_error_t rc;
+} ReservationRaceGate;
+
+static void
+reservation_race_gate_set (ReservationRaceGate *gate, gboolean *flag)
+{
+  g_mutex_lock (&gate->mutex);
+  *flag = TRUE;
+  g_cond_broadcast (&gate->cond);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static void
+reservation_race_gate_wait (ReservationRaceGate *gate, gboolean *flag)
+{
+  g_mutex_lock (&gate->mutex);
+  while (!*flag)
+    g_cond_wait (&gate->cond, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
+static void
+reservation_race_release_on_contention (wyl_policy_store_t *store,
+    gpointer data)
+{
+  (void) store;
+  ReservationRaceGate *gate = data;
+  reservation_race_gate_set (gate, &gate->waited);
+  reservation_race_gate_set (gate, &gate->release);
+}
+
+static gpointer
+run_reservation_race_holder (gpointer data)
+{
+  ReservationRaceGate *gate = data;
+  gate->rc = gate->publication
+      ? wyl_policy_store_publication_transaction_begin (gate->policy)
+      : wyl_policy_store_begin_mutation (gate->policy);
+  reservation_race_gate_set (gate, &gate->held);
+  reservation_race_gate_wait (gate, &gate->release);
+  if (gate->rc == WYRELOG_E_OK)
+    gate->rc = gate->publication
+        ? wyl_policy_store_publication_transaction_commit (gate->policy)
+        : wyl_policy_store_commit_mutation (gate->policy);
+  return NULL;
+}
+
+static GThread *
+reservation_race_hold (ReservationRaceGate *gate, wyl_policy_store_t *policy,
+    gboolean publication)
+{
+  memset (gate, 0, sizeof (*gate));
+  gate->policy = policy;
+  gate->publication = publication;
+  g_mutex_init (&gate->mutex);
+  g_cond_init (&gate->cond);
+  wyl_policy_store_set_transaction_contention_hook_for_test (policy,
+      reservation_race_release_on_contention, gate);
+  GThread *holder = g_thread_new ("reservation-race-holder",
+          run_reservation_race_holder, gate);
+  reservation_race_gate_wait (gate, &gate->held);
+  return holder;
+}
+
+/* Let the holder finish whatever the waiting call returned, so a refusal is
+ * judged on its rc rather than turning into a hang. */
+static wyrelog_error_t
+reservation_race_finish (ReservationRaceGate *gate, GThread *holder)
+{
+  reservation_race_gate_set (gate, &gate->release);
+  g_thread_join (holder);
+  wyl_policy_store_set_transaction_contention_hook_for_test (gate->policy,
+      NULL, NULL);
+  g_cond_clear (&gate->cond);
+  g_mutex_clear (&gate->mutex);
+  return gate->rc;
+}
+
+static gint
+check_fact_open_reservation_waits_for_another_threads_transaction (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-open-race-XXXXXX", 3700);
+  if (rc != 0)
+    goto out;
+
+  /* The acquisition: a savepoint is open on another thread. */
+  ReservationRaceGate gate;
+  GThread *holder = reservation_race_hold (&gate, fixture.policy, FALSE);
+  WylFactOpenReservation *reservation = NULL;
+  wyrelog_error_t reservation_rc = WYRELOG_E_OK;
+  FactOpenReservationAdapter *adapter = wyl_fact_store_open_reservation_begin
+        (fixture.policy, "tenant-a", "orders", fixture.dir, fixture.fact_path,
+          &reservation, &reservation_rc);
+  gboolean waited = gate.waited;
+  if (reservation_race_finish (&gate, holder) != WYRELOG_E_OK) {
+    rc = 3703;
+    goto out_adapter;
+  }
+  if (adapter == NULL) {
+    /* Refused instead of waiting: the pre-serialization behaviour. */
+    rc = 3704;
+    goto out;
+  }
+  if (!waited) {
+    rc = 3705;
+    goto out_adapter;
+  }
+  wyl_fact_store_open_reservation_abort (adapter, reservation);
+  adapter = NULL;
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 3706)) != 0)
+    goto out;
+  if (status.charged != 0) {
+    rc = 3707;
+    goto out;
+  }
+
+  /* The close: a publication transaction is open on another thread while an
+   * ACTIVE store closes; its transition and settle wait, so the row settles
+   * and the charge is released. */
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 3708;
+    goto out;
+  }
+  holder = reservation_race_hold (&gate, fixture.policy, TRUE);
+  wyl_fact_store_close (store);
+  waited = gate.waited;
+  if (reservation_race_finish (&gate, holder) != WYRELOG_E_OK) {
+    rc = 3709;
+    goto out;
+  }
+  if (!waited) {
+    rc = 3710;
+    goto out;
+  }
+  if ((rc = open_reservation_quota (&fixture, &status, 3711)) != 0)
+    goto out;
+  if (status.charged != 0) {
+    rc = 3712;
+    goto out;
+  }
+  goto out;
+
+out_adapter:
+  if (adapter != NULL)
+    wyl_fact_store_open_reservation_abort (adapter, reservation);
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
 int
 main (void)
 {
@@ -5657,6 +5826,9 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_close_checked_does_not_retry ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_open_reservation_waits_for_another_threads_transaction ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
