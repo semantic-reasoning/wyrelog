@@ -7,6 +7,16 @@
 
 G_BEGIN_DECLS;
 
+/* The budget both sides of a reservation wait out when a durable transition
+ * is refused with WYRELOG_E_BUSY: the acquisition in the legacy open, and the
+ * unwind in begin(), abort() and the void store close.  A refusal is another
+ * thread's short policy transaction on the shared connection, so a bounded
+ * wait with backoff normally outlasts it.  Retries are the attempts after
+ * the first; the delay doubles per retry up to 1 << 6 units, so the sum is
+ * about 191 ms per unwind.  Shared here so the two sides cannot drift. */
+#define WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES 8u
+#define WYL_FACT_OPEN_RESERVATION_BUSY_DELAY_US 1000u
+
 /* Local ownership states mirror the durable fact_open_reservations FSM.  The
  * coordinator deliberately does not retain a policy-store pointer: its
  * persistence callbacks are owned by the caller and must outlive this object.

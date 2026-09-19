@@ -3,9 +3,6 @@
 
 #include "fact/open-reservation-private.h"
 
-#define WYL_FACT_LEGACY_OPEN_BUSY_RETRIES 8u
-#define WYL_FACT_LEGACY_OPEN_BUSY_DELAY_US 1000u
-
 wyrelog_error_t
 wyl_fact_store_open_legacy_graph (wyl_policy_store_t *policy_store,
     const gchar *path, const gchar *fact_root, const gchar *tenant_id,
@@ -27,7 +24,7 @@ wyl_fact_store_open_legacy_graph (wyl_policy_store_t *policy_store,
   if (!wyl_policy_store_is_autocommit (policy_store))
     return wyl_fact_store_open (path, out_store);
 
-  for (guint attempt = 0; attempt <= WYL_FACT_LEGACY_OPEN_BUSY_RETRIES;
+  for (guint attempt = 0; attempt <= WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES;
       attempt++) {
     WylFactOpenReservation *reservation = NULL;
     wyrelog_error_t reservation_rc = WYRELOG_E_OK;
@@ -36,9 +33,9 @@ wyl_fact_store_open_legacy_graph (wyl_policy_store_t *policy_store,
             graph_id, fact_root, path, &reservation, &reservation_rc);
     if (adapter == NULL) {
       if (reservation_rc != WYRELOG_E_BUSY
-          || attempt == WYL_FACT_LEGACY_OPEN_BUSY_RETRIES)
+          || attempt == WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES)
         return reservation_rc;
-      g_usleep (WYL_FACT_LEGACY_OPEN_BUSY_DELAY_US << MIN (attempt, 6u));
+      g_usleep (WYL_FACT_OPEN_RESERVATION_BUSY_DELAY_US << MIN (attempt, 6u));
       continue;
     }
 
@@ -62,9 +59,9 @@ wyl_fact_store_open_legacy_graph (wyl_policy_store_t *policy_store,
     if (!attached)
       wyl_fact_store_open_reservation_abort (adapter, reservation);
     if (rc != WYRELOG_E_BUSY
-        || attempt == WYL_FACT_LEGACY_OPEN_BUSY_RETRIES)
+        || attempt == WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES)
       return rc;
-    g_usleep (WYL_FACT_LEGACY_OPEN_BUSY_DELAY_US << MIN (attempt, 6u));
+    g_usleep (WYL_FACT_OPEN_RESERVATION_BUSY_DELAY_US << MIN (attempt, 6u));
   }
   (void) writable;
   return WYRELOG_E_BUSY;

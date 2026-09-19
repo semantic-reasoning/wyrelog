@@ -205,6 +205,32 @@ fact_store_open_reservation_discard (WylFactOpenReservation *reservation)
     wyl_fact_open_reservation_abandon (reservation);
 }
 
+/* Retry an unwind step while it is refused with WYRELOG_E_BUSY, within the
+ * budget the acquisition already waits out.  A BUSY refusal is another
+ * thread's short policy transaction and ends on its own, so a retry normally
+ * settles the row and releases the tenant's charge that abandoning would
+ * leave behind.  Anything else is returned as it came: an E_IO from the same
+ * race means the row's durable state is unknown, and one attempt is the
+ * contract there.  |rc| is the result of the attempt already made, so a step
+ * that succeeded first time costs nothing here.
+ *
+ * The sleep runs under whatever the caller holds -- the replay coordinator
+ * lock when reached from a refresh -- as the acquisition's own retries
+ * already do.  Inside the legacy open loop every attempt can spend this
+ * budget on its unwind, so that loop's bound is about 1.9 s while the
+ * connection stays busy, not 191 ms. */
+static wyrelog_error_t
+fact_store_open_reservation_retry_refused (WylFactOpenReservation *reservation,
+    wyrelog_error_t (*step) (WylFactOpenReservation *), wyrelog_error_t rc)
+{
+  for (guint attempt = 0; rc == WYRELOG_E_BUSY
+      && attempt < WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES; attempt++) {
+    g_usleep (WYL_FACT_OPEN_RESERVATION_BUSY_DELAY_US << MIN (attempt, 6u));
+    rc = step (reservation);
+  }
+  return rc;
+}
+
 FactOpenReservationAdapter *
 wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
     const gchar *tenant_id, const gchar *graph_id, const gchar *root_identity,
@@ -279,7 +305,9 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
   }
   rc = wyl_fact_open_reservation_begin_acquisition (reservation);
   if (rc != WYRELOG_E_OK) {
-    wyrelog_error_t fail_rc = wyl_fact_open_reservation_fail (reservation);
+    wyrelog_error_t fail_rc = fact_store_open_reservation_retry_refused
+          (reservation, wyl_fact_open_reservation_fail,
+            wyl_fact_open_reservation_fail (reservation));
     fact_store_open_reservation_discard (reservation);
     wyl_policy_store_retire_fact_open_owner (policy_store,
         adapter->owner_incarnation);
@@ -334,7 +362,9 @@ wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
   if (adapter == NULL)
     return;
   if (reservation != NULL) {
-    (void) wyl_fact_open_reservation_fail (reservation);
+    (void) fact_store_open_reservation_retry_refused (reservation,
+        wyl_fact_open_reservation_fail,
+        wyl_fact_open_reservation_fail (reservation));
     fact_store_open_reservation_discard (reservation);
   }
   if (adapter->policy_store != NULL && adapter->owner_incarnation != NULL)
@@ -1248,6 +1278,13 @@ fact_store_close_checked (wyl_fact_store_t *store, gboolean forced)
         != WYL_FACT_OPEN_RESERVATION_SETTLED) {
       if (!forced)
         return rc;
+      /* The void close is the last caller this reservation will have, so
+       * it spends the unwind budget itself before giving the row up. */
+      rc = fact_store_open_reservation_retry_refused
+            (store->open_reservation, wyl_fact_open_reservation_close, rc);
+    }
+    if (wyl_fact_open_reservation_get_state (store->open_reservation)
+        != WYL_FACT_OPEN_RESERVATION_SETTLED) {
       /* The void cleanup API has no caller that can retry the durable row.
        * Release native resources exactly once, then discard the local retry
        * context.  The row remains charged for recovery. */
