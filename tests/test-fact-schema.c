@@ -451,14 +451,13 @@ schema_quota_race_worker (gpointer user_data)
 static gint
 check_schema_quota_concurrent_registration (void)
 {
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-schema-quota-XXXXXX",
-          NULL);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-schema-quota-XXXXXX", &error);
   if (root == NULL)
     return 30;
   g_autofree gchar *path = g_build_filename (root, "policy.sqlite", NULL);
-  g_autofree gchar *fact_root = g_build_filename (root, "facts", NULL);
-  if (g_mkdir (fact_root, 0700) != 0)
-    return 31;
+  const gchar *fact_root = root;
 
   wyl_policy_store_open_options_t options = { .path = path };
   g_autoptr (wyl_policy_store_t) setup = NULL;
