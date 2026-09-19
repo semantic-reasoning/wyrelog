@@ -15,13 +15,14 @@ wyl_fact_store_open_legacy_graph (wyl_policy_store_t *policy_store,
       || tenant_id == NULL || graph_id == NULL || out_store == NULL)
     return WYRELOG_E_INVALID;
 
-  /* Replay and unseal can validate a legacy store while the policy
-   * publication fence already owns the policy transaction.  Starting the
-   * cross-process open reservation would be a nested transaction on the same
-   * SQLite connection and is rejected as WYRELOG_E_BUSY.  That internal path
-   * is already serialized by the publication fence; ordinary native opens
-   * remain on the durable reservation path below. */
-  if (!wyl_policy_store_is_autocommit (policy_store))
+  /* Seal and unseal validate a legacy store from inside the publication
+   * fence's transaction on this same thread, where starting the durable open
+   * reservation would nest a transaction and be refused as WYRELOG_E_BUSY;
+   * that path opens uncharged, serialized by the fence.  The question is
+   * whether the calling thread owns the open transaction, not whether the
+   * connection has one: another thread's transaction is waited out by the
+   * reservation below and must not admit this open without a charge. */
+  if (wyl_policy_store_transaction_owned_by_caller (policy_store))
     return wyl_fact_store_open (path, out_store);
 
   for (guint attempt = 0; attempt <= WYL_FACT_OPEN_RESERVATION_BUSY_RETRIES;
