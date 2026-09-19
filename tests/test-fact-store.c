@@ -4783,6 +4783,202 @@ out:
   return rc;
 }
 
+/* An unwind refused with WYRELOG_E_BUSY is refused by a transaction another
+ * thread is inside, and that transaction ends.  Retrying within the bounded
+ * budget the acquisition already uses settles the row and releases the
+ * tenant's charge in the ordinary case, instead of leaving a phantom row
+ * behind on the first refusal.  Three refusals here, then the connection is
+ * free again. */
+static gint
+check_fact_store_close_settles_after_transient_refusals (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-close-retry-XXXXXX", 2960);
+  if (rc != 0)
+    goto out;
+
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 2963;
+    goto out;
+  }
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0, 3);
+  wyl_fact_store_close (store);
+  store = NULL;
+
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2964)) != 0)
+    goto out;
+  if (status.charged != 0 || status.active != 0
+      || status.cleanup_pending != 0) {
+    rc = 2965;
+    goto out;
+  }
+
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+/* The same budget unwinds a refused acquisition: the first refusal fails
+ * begin(), the next two refuse the cleanup that unwinds it, and the retry
+ * after those settles the row.  The caller still sees the acquisition fail
+ * with BUSY -- what changes is that the tenant is no longer charged for it. */
+static gint
+check_fact_open_reservation_begin_settles_a_refused_acquisition (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-open-retry-XXXXXX", 2970);
+  if (rc != 0)
+    goto out;
+
+  wyl_fact_store_open_reservation_refuse_transitions_once_for_test (0, 3);
+  WylFactOpenReservation *reservation = NULL;
+  wyrelog_error_t reservation_rc = WYRELOG_E_OK;
+  FactOpenReservationAdapter *adapter =
+      wyl_fact_store_open_reservation_begin (fixture.policy, "tenant-a",
+          "orders", fixture.dir, fixture.fact_path, &reservation,
+          &reservation_rc);
+  if (adapter != NULL) {
+    wyl_fact_store_open_reservation_abort (adapter, reservation);
+    rc = 2973;
+    goto out;
+  }
+  if (reservation != NULL || reservation_rc != WYRELOG_E_BUSY) {
+    rc = 2974;
+    goto out;
+  }
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2975)) != 0)
+    goto out;
+  if (status.charged != 0 || status.pending != 0) {
+    rc = 2976;
+    goto out;
+  }
+
+  /* And an abort after a successful acquisition: the acquisition passes,
+   * the unwinding fail() is refused three times, then settles. */
+  wyl_fact_store_open_reservation_refuse_transitions_once_for_test (1, 3);
+  adapter = wyl_fact_store_open_reservation_begin (fixture.policy,
+          "tenant-a", "orders", fixture.dir, fixture.fact_path, &reservation,
+          &reservation_rc);
+  if (adapter == NULL || reservation == NULL) {
+    rc = 2977;
+    goto out;
+  }
+  wyl_fact_store_open_reservation_abort (adapter, reservation);
+  if ((rc = open_reservation_quota (&fixture, &status, 2978)) != 0)
+    goto out;
+  if (status.charged != 0) {
+    rc = 2979;
+    goto out;
+  }
+
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+/* The budget is a bound, not a promise: a connection that stays busy past it
+ * still gets the handle abandoned and the row left charged, and the close
+ * returns within the budget rather than spinning on a lock nobody promised
+ * to release.  The wall-clock bound is generous against the ~191 ms the
+ * budget sums to, and far below the suite timeout an unbounded loop would
+ * otherwise be caught by. */
+static gint
+check_fact_store_close_abandons_after_the_budget (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-close-budget-XXXXXX", 2980);
+  if (rc != 0)
+    goto out;
+
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 2983;
+    goto out;
+  }
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0,
+      G_MAXUINT);
+  gint64 started = g_get_monotonic_time ();
+  wyl_fact_store_close (store);
+  store = NULL;
+  gint64 elapsed_us = g_get_monotonic_time () - started;
+  if (elapsed_us > 5 * G_USEC_PER_SEC) {
+    rc = 2984;
+    goto out;
+  }
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2985)) != 0)
+    goto out;
+  if (status.active != 1 || status.charged != 1) {
+    rc = 2986;
+    goto out;
+  }
+
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+/* The checked close is the one that does not retry: it reports the first
+ * refusal and keeps the store so that its caller decides when to try again.
+ * A single refusal, then the caller's second call succeeds and settles. */
+static gint
+check_fact_store_close_checked_does_not_retry (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-close-once-XXXXXX", 2990);
+  if (rc != 0)
+    goto out;
+
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 2993;
+    goto out;
+  }
+  wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0, 1);
+  wyrelog_error_t checked_rc = wyl_fact_store_close_checked (store);
+  if (checked_rc != WYRELOG_E_BUSY) {
+    if (checked_rc == WYRELOG_E_OK)
+      store = NULL;
+    rc = 2994;
+    goto out_store;
+  }
+  if (wyl_fact_store_close_checked (store) != WYRELOG_E_OK) {
+    rc = 2995;
+    goto out_store;
+  }
+  store = NULL;
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 2996)) != 0)
+    goto out;
+  if (status.charged != 0) {
+    rc = 2997;
+    goto out;
+  }
+  goto out;
+
+out_store:
+  if (store != NULL) {
+    wyl_fact_store_refuse_open_reservation_transitions_for_test (store, 0, 0);
+    wyl_fact_store_close (store);
+  }
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
 int
 main (void)
 {
@@ -4796,6 +4992,18 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_forced_close_after_refused_settle_is_freed ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_close_settles_after_transient_refusals ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_open_reservation_begin_settles_a_refused_acquisition ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_close_abandons_after_the_budget ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_close_checked_does_not_retry ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
