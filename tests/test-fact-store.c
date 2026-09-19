@@ -5801,6 +5801,132 @@ out:
   return rc;
 }
 
+/* The uncharged path through the legacy open exists for one caller: the
+ * thread that already owns the policy publication transaction (seal and
+ * unseal validation under the fence), for which a reservation would nest.
+ * It used to be keyed on the connection's autocommit flag, which another
+ * thread's transaction also clears, so a client or replay open that raced
+ * one was admitted without a charge.  Now only the caller's own transaction
+ * takes the bypass; an open that races another thread's transaction waits
+ * for it and is charged. */
+static gint
+check_legacy_open_is_charged_under_another_threads_transaction (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-legacy-race-XXXXXX", 3720);
+  if (rc != 0)
+    goto out;
+
+  ReservationRaceGate gate;
+  GThread *holder = reservation_race_hold (&gate, fixture.policy, FALSE);
+  wyl_fact_store_t *store = NULL;
+  wyrelog_error_t open_rc = wyl_fact_store_open_legacy_graph (fixture.policy,
+          fixture.fact_path, fixture.dir, "tenant-a", "orders", TRUE, &store);
+  if (reservation_race_finish (&gate, holder) != WYRELOG_E_OK) {
+    rc = 3723;
+    goto out_store;
+  }
+  if (open_rc != WYRELOG_E_OK || store == NULL) {
+    rc = 3724;
+    goto out;
+  }
+  /* Charged: the row is active.  Before the fix the bypass admitted the open
+   * uncharged, and nothing here would have been counted. */
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 3725)) != 0)
+    goto out_store;
+  if (status.active != 1 || status.charged != 1) {
+    rc = 3726;
+    goto out_store;
+  }
+  wyl_fact_store_close (store);
+  store = NULL;
+  if ((rc = open_reservation_quota (&fixture, &status, 3727)) != 0)
+    goto out;
+  if (status.charged != 0) {
+    rc = 3728;
+    goto out;
+  }
+  goto out;
+
+out_store:
+  if (store != NULL)
+    wyl_fact_store_close (store);
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+/* The bypass itself is kept for the thread that owns the transaction: a
+ * legacy open from inside this thread's publication transaction proceeds
+ * uncharged, as seal and unseal validation rely on. */
+static gint
+check_legacy_open_bypasses_only_inside_the_callers_transaction (void)
+{
+  OpenReservationFixture fixture;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-legacy-own-XXXXXX", 3740);
+  if (rc != 0)
+    goto out;
+
+  if (wyl_policy_store_publication_transaction_begin (fixture.policy)
+      != WYRELOG_E_OK) {
+    rc = 3743;
+    goto out;
+  }
+  wyl_fact_store_t *store = NULL;
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 3744;
+    goto out_rollback;
+  }
+  WylPolicyFactConcurrentOpenQuotaStatus status;
+  if ((rc = open_reservation_quota (&fixture, &status, 3745)) != 0)
+    goto out_store;
+  if (status.charged != 0) {
+    rc = 3746;
+    goto out_store;
+  }
+  wyl_fact_store_close (store);
+  store = NULL;
+  if (wyl_policy_store_publication_transaction_rollback_checked
+        (fixture.policy) != WYRELOG_E_OK) {
+    rc = 3747;
+    goto out;
+  }
+  /* And outside any transaction the same open is charged. */
+  if (wyl_fact_store_open_legacy_graph (fixture.policy, fixture.fact_path,
+      fixture.dir, "tenant-a", "orders", TRUE, &store) != WYRELOG_E_OK
+      || store == NULL) {
+    rc = 3748;
+    goto out;
+  }
+  if ((rc = open_reservation_quota (&fixture, &status, 3749)) != 0)
+    goto out_store;
+  if (status.active != 1 || status.charged != 1) {
+    rc = 3750;
+    goto out_store;
+  }
+  wyl_fact_store_close (store);
+  goto out;
+
+out_store:
+  if (store != NULL)
+    wyl_fact_store_close (store);
+  /* A failure inside the transaction must not close the fixture with it
+   * still open, or the close aborts and the code above is lost. */
+  if (!wyl_policy_store_transaction_owned_by_caller (fixture.policy))
+    goto out;
+out_rollback:
+  (void) wyl_policy_store_publication_transaction_rollback_checked
+    (fixture.policy);
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
 int
 main (void)
 {
@@ -5829,6 +5955,12 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_open_reservation_waits_for_another_threads_transaction ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_legacy_open_is_charged_under_another_threads_transaction ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_legacy_open_bypasses_only_inside_the_callers_transaction ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_legacy_identity_binding_is_atomic_and_recoverable ();
