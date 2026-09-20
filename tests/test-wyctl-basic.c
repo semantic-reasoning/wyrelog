@@ -217,16 +217,18 @@ test_status_rejects_invalid_timeout (void)
 
 /*
  * Join a test server thread that may still be parked in
- * g_socket_listener_accept.  Every server below accepts exactly one
- * connection, so the thread only returns on its own if the wyctl under test
- * actually connected.  It need not: these cases drive wyctl with a deliberately
- * tight --timeout-ms, and a client that exhausts its budget before the connect
- * completes exits without ever touching the listener.  The accept has no
- * deadline of its own, so an unconditional join would block forever and the
- * whole binary would die on the meson timeout rather than fail a case.
- * Cancelling first is what bounds it - the cancellable is the documented,
- * thread-safe way to break a blocking accept, whereas closing the listener from
- * another thread races with the accept itself.
+ * g_socket_listener_accept.  A server below returns on its own only once the
+ * wyctl under test has connected.  The policy-check server, alone among
+ * them, keeps accepting until a connection actually delivers a request; the
+ * others answer whatever they get, so a bare connection is enough to let
+ * them return with request still NULL.  The client need not connect at all:
+ * one that fails locally, or that exhausts its request budget before the
+ * connect completes, exits without ever touching the listener.  The accept
+ * has no deadline of its own, so an unconditional join would block forever
+ * and the whole binary would die on the meson timeout rather than fail a
+ * case.  Cancelling first is what bounds it - the cancellable is the
+ * documented, thread-safe way to break a blocking accept, whereas closing
+ * the listener from another thread races with the accept itself.
  */
 static void
 stop_test_server (GThread *thread, GCancellable *cancel)
@@ -265,7 +267,12 @@ slow_healthz_server_thread (gpointer data)
   GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
 
   (void) g_input_stream_read (input, buffer, sizeof buffer, NULL, NULL);
-  g_usleep (250 * 1000);
+  /* Longer than the client's budget below, so the case proves a wait for a
+   * response that never came in time. wyctl reports a refused connect and a
+   * cancelled request with the same "daemon unavailable" line, so only the
+   * budget separates that proof from a child cancelled before it
+   * connected. */
+  g_usleep (1500 * 1000);
   (void) g_output_stream_write (output,
       "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 40, NULL, NULL);
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
@@ -351,7 +358,7 @@ test_status_times_out (void)
     "--daemon-url",
     daemon_url,
     "--timeout-ms",
-    "50",
+    "1000",
     "status",
     NULL,
   };
@@ -1301,9 +1308,16 @@ test_policy_check (void)
   run_policy_decision_case ("check",
       "{\"decision\":0,\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\"}", "deny\n", FALSE, 0, "1000");
+  /* This case asserts that the server recorded the request, so the child
+   * needs a budget to connect and send on a contended runner: the client's
+   * deadline starts before it connects and cancels the whole request, so a
+   * 50 ms budget expired mid-connect under load and left nothing to record.
+   * Give it the same 1000 ms the success cases assume and make the server
+   * the slow side: it records the request first and only then delays past
+   * that deadline. */
   run_policy_decision_case ("check",
       "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "", FALSE,
-      250 * 1000, "50");
+      1500 * 1000, "1000");
   run_policy_decision_case ("explain",
       "{\"decision\":0,\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\"}",
@@ -1420,7 +1434,9 @@ test_audit_query (void)
       "\"deny_origin\":null,"
       "\"request_id\":null," "\"decision\":1}]\n", 0, "1000", "1");
   run_audit_query_case ("[]", "[]\n", 0, "1000", "100");
-  run_audit_query_case ("[]", "", 250 * 1000, "50", "100");
+  /* Same budget rule as the policy-check timeout case: the server records
+   * the request, then delays past the client's 1000 ms deadline. */
+  run_audit_query_case ("[]", "", 1500 * 1000, "1000", "100");
 }
 
 typedef struct
