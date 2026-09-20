@@ -160,6 +160,7 @@ struct wyl_policy_store_t
 #if defined(WYL_TEST_HANDLE_SEAMS)
   WylPolicyStoreTransactionContentionHook transaction_contention_hook;
   gpointer transaction_contention_hook_data;
+  gboolean fact_logical_settle_fail_once;
 #endif
   gchar *canonical_path;
   gchar *work_path;
@@ -9652,6 +9653,14 @@ wyl_policy_store_set_transaction_contention_hook_for_test
 }
 
 void
+wyl_policy_store_fail_next_fact_logical_settle_for_test
+  (wyl_policy_store_t *store)
+{
+  if (store != NULL)
+    store->fact_logical_settle_fail_once = TRUE;
+}
+
+void
 wyl_policy_store_set_image_release_observer_for_test (wyl_policy_store_t *store,
     WylPolicyStoreImageReleaseObserver observer, gpointer data)
 {
@@ -15449,6 +15458,86 @@ fact_logical_quota_rollback (wyl_policy_store_t *store)
   policy_store_transaction_leave (store);
 }
 
+/* Decide whether one more (requested_rows, requested_bytes) fits under the
+ * tenant's logical limits, returning the usage the caller then updates. A
+ * fresh reservation and the reopening of a cancelled one share this rule so
+ * the two cannot drift: POLICY when it does not fit, INVALID on arithmetic
+ * overflow. Runs inside the caller's mutation. */
+static wyrelog_error_t
+fact_logical_quota_admit (wyl_policy_store_t *store, const gchar *tenant_id,
+    guint64 requested_rows, guint64 requested_bytes,
+    guint64 *committed_rows, guint64 *committed_bytes,
+    guint64 *pending_rows, guint64 *pending_bytes)
+{
+  WylPolicyFactLogicalQuotaConfig config = { 0 };
+  wyrelog_error_t rc = fact_logical_quota_config_load (store, tenant_id,
+          &config);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_logical_quota_usage_ensure (store, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_logical_quota_usage_load (store, tenant_id, committed_rows,
+            committed_bytes, pending_rows, pending_bytes);
+  if (rc == WYRELOG_E_OK && config.has_limit
+      && (*committed_rows > config.logical_row_limit
+      || *pending_rows > config.logical_row_limit - *committed_rows
+      || requested_rows > config.logical_row_limit - *committed_rows
+      - *pending_rows
+      || *committed_bytes > config.logical_byte_limit
+      || *pending_bytes > config.logical_byte_limit - *committed_bytes
+      || requested_bytes > config.logical_byte_limit - *committed_bytes
+      - *pending_bytes))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && (*committed_rows > G_MAXINT64 - *pending_rows
+      || requested_rows > G_MAXINT64 - *committed_rows - *pending_rows
+      || *committed_bytes > G_MAXINT64 - *pending_bytes
+      || requested_bytes > G_MAXINT64 - *committed_bytes - *pending_bytes))
+    rc = WYRELOG_E_INVALID;
+  return rc;
+}
+
+/* A reservation cancelled after a failed commit is the identity of a request
+ * that never applied; the identical request reopens it as a live pending
+ * reservation under the same admission rule as a fresh one, so the retry
+ * settles or cancels through the normal path and is charged exactly once
+ * (ADR 0004). Refusal leaves the row cancelled and usage untouched. */
+static wyrelog_error_t
+fact_logical_quota_reopen_cancelled (wyl_policy_store_t *store,
+    const WylPolicyFactLogicalQuotaOperation *operation,
+    WylPolicyFactLogicalOperationStatus *current)
+{
+  guint64 committed_rows = 0, committed_bytes = 0;
+  guint64 pending_rows = 0, pending_bytes = 0;
+  wyrelog_error_t rc = fact_logical_quota_admit (store, operation->tenant_id,
+          current->requested_rows, current->requested_bytes, &committed_rows,
+          &committed_bytes, &pending_rows, &pending_bytes);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_logical_quota_operations SET state='pending',"
+            "applied_rows=0,applied_bytes=-1,updated_at=unixepoch() "
+            "WHERE request_id=? AND state='cancelled';", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, operation->request_id);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_step (stmt) != SQLITE_DONE
+      || sqlite3_changes (store->db) != 1))
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = fact_logical_quota_usage_update (store, operation->tenant_id,
+            committed_rows, committed_bytes,
+            pending_rows + current->requested_rows,
+            pending_bytes + current->requested_bytes);
+  if (rc == WYRELOG_E_OK) {
+    current->state = WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING;
+    current->replay = FALSE;
+    current->applied_rows = 0;
+    current->applied_bytes = -1;
+  }
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_reserve_fact_logical_quota (wyl_policy_store_t *store,
     const WylPolicyFactLogicalQuotaOperation *operation,
@@ -15474,42 +15563,24 @@ wyl_policy_store_reserve_fact_logical_quota (wyl_policy_store_t *store,
     if (!matches || current.requested_rows != requested_rows
         || current.requested_bytes != requested_bytes)
       rc = WYRELOG_E_CONFLICT;
-    else {
+    else if (current.state == WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+      rc = fact_logical_quota_reopen_cancelled (store, operation, &current);
+    else
       current.replay = TRUE;
-      if (out_status != NULL)
-        *out_status = current;
-    }
+    if (rc == WYRELOG_E_OK && out_status != NULL)
+      *out_status = current;
     if (rc == WYRELOG_E_OK)
       rc = fact_logical_quota_commit (store);
     else
       wyl_policy_store_rollback_mutation (store);
     return rc;
   }
-  WylPolicyFactLogicalQuotaConfig config = { 0 };
   guint64 committed_rows = 0, committed_bytes = 0;
   guint64 pending_rows = 0, pending_bytes = 0;
   if (rc == WYRELOG_E_OK)
-    rc = fact_logical_quota_config_load (store, operation->tenant_id, &config);
-  if (rc == WYRELOG_E_OK)
-    rc = fact_logical_quota_usage_ensure (store, operation->tenant_id);
-  if (rc == WYRELOG_E_OK)
-    rc = fact_logical_quota_usage_load (store, operation->tenant_id,
-            &committed_rows, &committed_bytes, &pending_rows, &pending_bytes);
-  if (rc == WYRELOG_E_OK && config.has_limit
-      && (committed_rows > config.logical_row_limit
-      || pending_rows > config.logical_row_limit - committed_rows
-      || requested_rows > config.logical_row_limit - committed_rows - pending_rows
-      || committed_bytes > config.logical_byte_limit
-      || pending_bytes > config.logical_byte_limit - committed_bytes
-      || requested_bytes > config.logical_byte_limit - committed_bytes
-      - pending_bytes))
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK
-      && (committed_rows > G_MAXINT64 - pending_rows
-      || requested_rows > G_MAXINT64 - committed_rows - pending_rows
-      || committed_bytes > G_MAXINT64 - pending_bytes
-      || requested_bytes > G_MAXINT64 - committed_bytes - pending_bytes))
-    rc = WYRELOG_E_INVALID;
+    rc = fact_logical_quota_admit (store, operation->tenant_id, requested_rows,
+            requested_bytes, &committed_rows, &committed_bytes, &pending_rows,
+            &pending_bytes);
   if (rc == WYRELOG_E_OK)
     rc = fact_logical_quota_operation_insert (store, operation,
             requested_rows, requested_bytes);
@@ -15582,6 +15653,14 @@ wyl_policy_store_settle_fact_logical_quota (wyl_policy_store_t *store,
           &found, &matches);
   if (rc == WYRELOG_E_OK && (!found || !matches))
     rc = found ? WYRELOG_E_CONFLICT : WYRELOG_E_NOT_FOUND;
+#if defined(WYL_TEST_HANDLE_SEAMS)
+  /* One-shot settlement failure: the reservation stays pending so a test
+   * can drive the committed-but-reconciling response and its retry. */
+  if (rc == WYRELOG_E_OK && store->fact_logical_settle_fail_once) {
+    store->fact_logical_settle_fail_once = FALSE;
+    rc = WYRELOG_E_IO;
+  }
+#endif
   if (rc == WYRELOG_E_OK && current.state !=
       WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING) {
     if (current.state == WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED
