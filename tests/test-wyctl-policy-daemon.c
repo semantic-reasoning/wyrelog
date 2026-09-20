@@ -656,6 +656,71 @@ main (void)
   assert_wyctl_stdout (fact_concurrent_quota_status_argv,
       "tenant=__wr_default dimension=concurrent_opens limit=2 pending=0 active=0 acquiring=0 cleanup_pending=0 charged=0\n");
 
+  /* logical_bytes is one paired dimension: configure takes both limits and
+   * status reports both, so an operator can read the row and byte budget
+   * from one line. The limits are large so the mutations below stay
+   * admitted; committed usage is asserted after them. */
+  gchar *fact_logical_quota_configure_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "logical_bytes",
+    "--limit", "100000",
+    "--row-limit", "10000",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_logical_quota_configure_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=0 committed_bytes=0 pending_rows=0 pending_bytes=0\n");
+  gchar *fact_logical_quota_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "logical_bytes",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=0 committed_bytes=0 pending_rows=0 pending_bytes=0\n");
+  gchar *fact_logical_quota_missing_row_limit_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "configure",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "logical_bytes",
+    "--limit", "100000",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_logical_quota_missing_row_limit_argv,
+      "wyctl: logical_bytes requires --limit and --row-limit when configuring\n");
+  gchar *fact_logical_quota_status_with_limit_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--dimension", "logical_bytes",
+    "--limit", "100000",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_logical_quota_status_with_limit_argv,
+      "wyctl: logical_bytes requires --limit and --row-limit when configuring\n");
+
   gchar *fact_schema_quota_missing_limit_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -742,6 +807,10 @@ main (void)
   assert_wyctl_stdout (fact_put_argv, "inserted\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
     return wyl_test_normalize_exit_status (104);
+  /* One committed row priced at its schema values: "o-1" is 3 logical
+   * bytes and the int64 amount is 8. Nothing is pending once settled. */
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=1 committed_bytes=11 pending_rows=0 pending_bytes=0\n");
   gchar *datalog_query_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -762,6 +831,9 @@ main (void)
   assert_wyctl_stdout (fact_put_argv, "duplicate\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
     return wyl_test_normalize_exit_status (105);
+  /* A replayed batch reports the stored cost and is not charged again. */
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=1 committed_bytes=11 pending_rows=0 pending_bytes=0\n");
   gchar *fact_retract_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
