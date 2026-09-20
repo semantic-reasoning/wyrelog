@@ -2293,6 +2293,71 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (rc != 0 || status != 200 || g_strcmp0 (body, logical_before) != 0)
     return 374;
 
+  /* #1098 at the HTTP boundary: a per-tenant concurrent-open limit of zero
+   * refuses the physical open every append needs, with the common quota
+   * envelope from the real responder. The refusal precedes the logical
+   * reservation and commits nothing, leaves no charged reservation behind,
+   * and the limit is then raised far above anything the rest of this
+   * function opens; it cannot be unset once configured. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *open_zero_query = g_strdup_printf
+        ("tenant=%s&dimension=concurrent_opens&limit=0&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/quota", open_zero_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"dimension\":\"concurrent_opens\",\"limit\":0")
+      == NULL
+      || strstr (body, "\"charged\":0") == NULL)
+    return 375;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *open_over_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=open-over&"
+          "idempotency_key=open-over&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", open_over_query,
+          admin_token, "order_id\tamount\no-8\t8\n", &status, &body);
+  if (rc != 0 || status != 429
+      || g_strcmp0 (body, "{\"error\":\"fact_quota_exceeded\","
+      "\"dimension\":\"concurrent_opens\",\"limit\":0,\"observed\":0}")
+      != 0)
+    return 376;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *open_over_status_query = g_strdup_printf (
+    "tenant=%s&graph=orders&batch_id=open-over&operation_id=open-over&"
+    "payload_digest=%s&%s", WYL_TENANT_DEFAULT,
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", open_over_status_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 404
+      || strstr (body, "\"error\":\"fact_quota_operation_not_found\"")
+      == NULL)
+    return 377;
+  rc = check_fact_projection_batch_rows (fact_root, "orders", "open-over", 0);
+  if (rc != 0)
+    return rc;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *open_status_query = g_strdup_printf
+        ("tenant=%s&dimension=concurrent_opens&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
+  rc = send_raw (session, "GET", base_url, "/facts/quota", open_status_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200 || strstr (body, "\"charged\":0") == NULL)
+    return 378;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *open_restore_query = g_strdup_printf
+        ("tenant=%s&dimension=concurrent_opens&limit=1000&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/quota",
+          open_restore_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"dimension\":\"concurrent_opens\",\"limit\":1000")
+      == NULL
+      || strstr (body, "\"charged\":0") == NULL)
+    return 379;
+
   /* The same conflict remains typed after the relation contains facts. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *evolution_with_facts_query = g_strdup_printf
