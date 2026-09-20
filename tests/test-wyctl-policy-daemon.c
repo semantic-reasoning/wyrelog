@@ -185,6 +185,54 @@ check_fact_projection_batch_rows (WylHandle *handle, const gchar *batch_id,
   return rows == expected_rows ? 0 : 103;
 }
 
+/* The payload digest the daemon binds to a logical quota operation is the
+ * store's canonical batch content hash, computed here with the same function
+ * over the same schema-typed values so the test asks operation-status about
+ * the identity the daemon actually recorded. The daemon hashes tenant, graph,
+ * namespace, relation, schema version, op and the typed values; batch and
+ * request identifiers are not part of it. Caller owns the result. */
+static gchar *
+fact_test_batch_payload_digest (wyl_fact_store_op_t op, const gchar *batch_id,
+    const gchar *key, const gchar *order_id, gint64 amount)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .relation_visible = TRUE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  const wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = amount},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, G_N_ELEMENTS (values)},
+  };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .source = "http",
+    .request_id = key,
+    .idempotency_key = key,
+    .op = op,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  return wyl_fact_store_batch_content_hash (&schema, &batch);
+}
+
 static void
 remove_tree (const gchar *path)
 {
@@ -310,6 +358,23 @@ assert_wyctl_rejected (gchar **argv, const gchar *expected_stderr)
   run_wyctl (argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_true (WIFEXITED (wait_status));
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
+}
+
+/* A remote failure: wyctl exits with the documented code for the daemon's
+ * answer and names the daemon's error code on stderr. */
+static void
+assert_wyctl_failed (gchar **argv, gint expected_status,
+    const gchar *expected_stderr)
+{
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_wyctl (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_status);
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_cmpstr (stderr_buf, ==, expected_stderr);
 }
@@ -834,6 +899,84 @@ main (void)
   /* A replayed batch reports the stored cost and is not charged again. */
   assert_wyctl_stdout (fact_logical_quota_status_argv,
       "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=1 committed_bytes=11 pending_rows=0 pending_bytes=0\n");
+
+  /* One settled operation, inspected by its complete identity: the
+   * operation id is the mutation's idempotency key and the digest is the
+   * daemon's content hash of batch-1. The row was priced at 1 row and 11
+   * bytes and applied in full; the status read never reports a replay. */
+  g_autofree gchar *batch_1_digest = fact_test_batch_payload_digest
+        (WYL_FACT_STORE_OP_ASSERT, "batch-1", "key-1", "o-1", 42);
+  gchar *fact_quota_operation_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "operation-status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--batch-id", "batch-1",
+    "--operation-id", "key-1",
+    "--payload-digest", batch_1_digest,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_quota_operation_status_argv,
+      "tenant=__wr_default graph=orders batch_id=batch-1 operation_id=key-1 state=settled replay=false requested_rows=1 requested_bytes=11 applied_rows=1 applied_bytes=11\n");
+  /* An unknown operation id is not found; a known one under another graph
+   * is an identity conflict. Both are remote failures with exit 5. */
+  gchar *fact_quota_operation_missing_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "operation-status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--batch-id", "batch-1",
+    "--operation-id", "missing",
+    "--payload-digest", batch_1_digest,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_failed (fact_quota_operation_missing_argv, 5,
+      "wyctl: fact quota operation-status failed: fact_quota_operation_not_found\n");
+  gchar *fact_quota_operation_conflict_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "operation-status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "other",
+    "--batch-id", "batch-1",
+    "--operation-id", "key-1",
+    "--payload-digest", batch_1_digest,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_failed (fact_quota_operation_conflict_argv, 5,
+      "wyctl: fact quota operation-status failed: fact_quota_operation_conflict\n");
+  /* The digest is validated locally before any request is sent. */
+  gchar *fact_quota_operation_bad_digest_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "operation-status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--batch-id", "batch-1",
+    "--operation-id", "key-1",
+    "--payload-digest", "abc",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_quota_operation_bad_digest_argv,
+      "wyctl: invalid --payload-digest\n");
   gchar *fact_retract_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,

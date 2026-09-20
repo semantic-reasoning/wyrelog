@@ -33,6 +33,10 @@ EXPECTED_FIELDS = {
          "rate_per_second_arg",
          "burst_arg", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
+    "WyctlFactQuotaOperationOptions":
+        ("tenant", "graph", "batch_id", "operation_id", "payload_digest",
+         "access_token_file", "guard_timestamp_arg", "guard_loc_class",
+         "guard_risk_arg"),
     "WyctlFactPutOptions":
         ("tenant", "graph", "namespace_id", "relation", "schema_version_arg",
          "batch_id", "idempotency_key", "format", "input",
@@ -70,6 +74,7 @@ EXPECTED_PARSE_SITES = {
     "run_graph_create": "WyctlGraphOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
     "run_fact_quota": "WyctlFactQuotaOptions",
+    "run_fact_quota_operation_status": "WyctlFactQuotaOperationOptions",
     "run_fact_mutation": "WyctlFactPutOptions",
     "run_datalog_query": "WyctlDatalogQueryOptions",
     "run_audit_query": "WyctlAuditOptions",
@@ -94,7 +99,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 164
+EXPECTED_STRING_DESTINATIONS = 173
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
