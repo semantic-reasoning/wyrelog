@@ -476,10 +476,33 @@ typedef struct
   gboolean sealed_compatibility;
 } WylPolicyGraphAuthorityRecord;
 
+/* One transactionally consistent policy view for an offline fact backup.
+ * Graphs are ordered bytewise by graph_id.  A schema digest covers the exact
+ * active relation-schema set; registered but inactive versions are excluded. */
+typedef struct
+{
+  WylPolicyGraphAuthorityRecord *authority;
+  gchar *active_schema_digest;
+} WylPolicyFactBackupGraphSnapshot;
+
+typedef struct
+{
+  WylPolicyTenantAuthorityRecord *tenant;
+  GPtrArray *graphs;
+} WylPolicyFactBackupSnapshot;
+
 void wyl_policy_tenant_authority_record_free
   (WylPolicyTenantAuthorityRecord * record);
 void wyl_policy_graph_authority_record_free
   (WylPolicyGraphAuthorityRecord * record);
+void wyl_policy_fact_backup_snapshot_free
+  (WylPolicyFactBackupSnapshot *snapshot);
+/* Reads tenant authority, the complete graph authority set, and every active
+ * schema digest from one SQLite read snapshot.  It refuses an existing caller
+ * transaction rather than accidentally joining a wider mutation. */
+wyrelog_error_t wyl_policy_store_read_fact_backup_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id,
+    WylPolicyFactBackupSnapshot **out_snapshot);
 wyrelog_error_t wyl_policy_store_read_tenant_authority
   (wyl_policy_store_t * store, const gchar * tenant_id,
     WylPolicyTenantAuthorityRecord ** out_record);

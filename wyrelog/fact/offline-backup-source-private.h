@@ -19,6 +19,7 @@ typedef struct
   const gchar *store_uuid;
   guint64 format_version;
   guint64 path_encoding_version;
+  const gchar *schema_digest;
   guint64 logical_bytes;
   guint64 physical_bytes;
 } WylFactOfflineBackupSourceArtifact;
