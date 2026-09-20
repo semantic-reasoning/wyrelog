@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
+
 #include <glib.h>
 
 #include "wyrelog/fact/offline-backup-manifest-private.h"
@@ -69,5 +71,5 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/offline-backup-manifest/round-trip", round_trip);
   g_test_add_func ("/fact/offline-backup-manifest/rejects-invalid",
       rejects_duplicates_and_unknown_fields);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
