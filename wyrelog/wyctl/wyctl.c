@@ -121,6 +121,19 @@ typedef struct
 {
   gchar *tenant;
   gchar *graph;
+  gchar *batch_id;
+  gchar *operation_id;
+  gchar *payload_digest;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactQuotaOperationOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
   gchar *namespace_id;
   gchar *relation;
   gchar *schema_version_arg;
@@ -318,6 +331,24 @@ wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactQuotaOptions,
     wyctl_fact_quota_options_clear);
+
+static void
+wyctl_fact_quota_operation_options_clear
+  (WyctlFactQuotaOperationOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->batch_id, g_free);
+  g_clear_pointer (&opts->operation_id, g_free);
+  g_clear_pointer (&opts->payload_digest, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactQuotaOperationOptions,
+    wyctl_fact_quota_operation_options_clear);
 
 static void
 wyctl_fact_put_options_clear (WyctlFactPutOptions *opts)
@@ -2415,6 +2446,130 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   return exit_rc;
 }
 
+static const gchar *
+fact_logical_operation_state_name (WylClientFactLogicalOperationState state)
+{
+  switch (state) {
+    case WYL_CLIENT_FACT_LOGICAL_OPERATION_SETTLED:
+      return "settled";
+    case WYL_CLIENT_FACT_LOGICAL_OPERATION_RECONCILING:
+      return "reconciling";
+    case WYL_CLIENT_FACT_LOGICAL_OPERATION_CANCELLED:
+      return "cancelled";
+    case WYL_CLIENT_FACT_LOGICAL_OPERATION_PENDING:
+    default:
+      return "pending";
+  }
+}
+
+/* The daemon binds a logical quota operation to a 64-hex-character payload
+ * digest; anything else is refused here so no request carries an identity
+ * the daemon would reject anyway. */
+static gboolean
+payload_digest_is_valid (const gchar *digest)
+{
+  if (digest == NULL || strlen (digest) != 64)
+    return FALSE;
+  for (const gchar *p = digest; *p != '\0'; p++) {
+    if (!g_ascii_isxdigit (*p))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static int
+run_fact_quota_operation_status (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlFactQuotaOperationOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id, "Batch id",
+     "ID"},
+    {"operation-id", 0, 0, G_OPTION_ARG_STRING, &opts.operation_id,
+     "Operation id (the mutation's idempotency key)", "KEY"},
+    {"payload-digest", 0, 0, G_OPTION_ARG_STRING, &opts.payload_digest,
+     "Payload digest from the committed-reconciling response", "HEX"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING,
+     &opts.access_token_file, "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_loc_class, "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (
+    "- wyrelog fact quota operation-status");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact quota operation-status argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (
+    global_opts->daemon_url, global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg = wyctl_resolve_uint_option_as_string (
+    global_opts->timeout_ms_arg, global_opts->settings,
+    "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+          global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file = wyctl_resolve_string_option (
+    opts.access_token_file, global_opts->settings, "access-token-file");
+  if (graph == NULL || graph[0] == '\0' || opts.batch_id == NULL
+      || opts.batch_id[0] == '\0' || opts.operation_id == NULL
+      || opts.operation_id[0] == '\0') {
+    g_printerr ("wyctl: missing fact quota operation-status target option\n");
+    return 2;
+  }
+  if (!payload_digest_is_valid (opts.payload_digest)) {
+    g_printerr ("wyctl: invalid --payload-digest\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  WylClientFactLogicalOperationStatus status = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_logical_operation_status (client,
+          tenant, graph, opts.batch_id, opts.operation_id,
+          opts.payload_digest, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &status);
+  int exit_rc = fact_remote_exit (client, "fact quota operation-status", rc,
+          "fact_quota_operation_status_failed");
+  if (exit_rc == 0) {
+    g_print ("tenant=%s graph=%s batch_id=%s operation_id=%s state=%s"
+        " replay=%s requested_rows=%" G_GUINT64_FORMAT
+        " requested_bytes=%" G_GUINT64_FORMAT
+        " applied_rows=%" G_GUINT64_FORMAT
+        " applied_bytes=%" G_GINT64_FORMAT "\n",
+        status.tenant_id != NULL ? status.tenant_id : "",
+        status.graph_id != NULL ? status.graph_id : "",
+        status.batch_id != NULL ? status.batch_id : "",
+        status.operation_id != NULL ? status.operation_id : "",
+        fact_logical_operation_state_name (status.state),
+        status.replay ? "true" : "false", status.requested_rows,
+        status.requested_bytes, status.applied_rows, status.applied_bytes);
+  }
+  wyl_client_fact_logical_operation_status_clear (&status);
+  return exit_rc;
+}
+
 static int
 run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -2427,6 +2582,8 @@ run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
     return run_fact_quota (global_opts, TRUE, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "status") == 0)
     return run_fact_quota (global_opts, FALSE, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "operation-status") == 0)
+    return run_fact_quota_operation_status (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown fact quota command: %s\n", argv[1]);
   return 2;
 }
