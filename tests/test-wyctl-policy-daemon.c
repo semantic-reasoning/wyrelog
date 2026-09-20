@@ -1003,11 +1003,12 @@ main (void)
 
   /* #553: a committed-but-reconciling mutation prints the payload digest
    * that completes its operation identity, for put and retract alike. The
-   * 202 is reached deterministically: the seam reservation is cancelled as
-   * a definite non-commit, the identical retract replays it, the store
-   * commits, and settlement refuses the cancelled row. The row and the
-   * uncharged tombstone batch are test-only state; nothing later reads
-   * them. */
+   * 202 is reached deterministically: the seam reservation is settled in
+   * advance at a cost of nothing, the identical retract replays it, the
+   * store commits, and settlement refuses the settled row whose applied cost
+   * differs. A dedupe replay always reports the settled cost, so the state is
+   * unreachable in production; the row and the uncharged tombstone batch are
+   * test-only state, and nothing later reads them. */
   g_autoptr (GError) seam_error = NULL;
   gchar *seam_input_path = NULL;
   gint seam_fd = g_file_open_tmp ("wyctl-facts-seam-XXXXXX",
@@ -1033,9 +1034,11 @@ main (void)
   g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota
         (wyl_handle_get_policy_store (handle), &seam_operation, 1, 11,
       &seam_state), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota
-        (wyl_handle_get_policy_store (handle), &seam_operation, TRUE,
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota
+        (wyl_handle_get_policy_store (handle), &seam_operation, 0, 0,
       &seam_state), ==, WYRELOG_E_OK);
+  g_assert_cmpint (seam_state.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED);
   gchar *fact_seam_retract_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -1059,8 +1062,7 @@ main (void)
         ("committed-reconciling operation_id=seam-key-1 batch_id=seam-1 "
           "payload_digest=%s\n", seam_digest);
   assert_wyctl_stdout (fact_seam_retract_argv, seam_expected);
-  /* The cancelled row still carries the reservation's unknown-bytes
-   * sentinel, which the signed applied_bytes field preserves. */
+  /* The settled row reports the cost it was settled at, not the batch's. */
   gchar *fact_seam_status_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -1077,7 +1079,7 @@ main (void)
     NULL,
   };
   assert_wyctl_stdout (fact_seam_status_argv,
-      "tenant=__wr_default graph=orders batch_id=seam-1 operation_id=seam-key-1 state=cancelled replay=false requested_rows=1 requested_bytes=11 applied_rows=0 applied_bytes=-1\n");
+      "tenant=__wr_default graph=orders batch_id=seam-1 operation_id=seam-key-1 state=settled replay=false requested_rows=1 requested_bytes=11 applied_rows=0 applied_bytes=0\n");
   g_unlink (seam_input_path);
   g_unlink (input_path);
 #endif
