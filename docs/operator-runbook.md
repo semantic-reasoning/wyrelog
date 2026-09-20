@@ -1171,9 +1171,9 @@ done
 ```
 
 Graph-count admission can be bounded independently of fact bytes and rows. Only
-a principal with system-administrator authority (`wr.system_admin`) may read or
-change a tenant's quota. Configure a limit and inspect its usage before creating
-graphs:
+a principal holding the `wr.sys.admin` permission on the tenant (the packaged
+`wr.system_admin` role carries it) may read or change a tenant's quota.
+Configure a limit and inspect its usage before creating graphs:
 
 ```sh
 wyctl --daemon-url "$BASE_URL" fact quota configure \
@@ -1198,8 +1198,10 @@ refused with HTTP `409` and
 `error=fact_quota_limit_below_usage`; existing graphs are never removed. At
 capacity, `POST /graphs/create` returns HTTP `429` with
 `error=fact_quota_exceeded`, `dimension=graph_count`, `limit`, and `observed`,
-before graph artifacts are created. This first quota dimension limits graph
-count only; it does not limit per-graph fact rows or bytes.
+before graph artifacts are created. Graph count is one of six tenant quota
+dimensions; the others, the refusal and committed-but-reconciling contracts,
+and the operation-status route are described in the Tenant Resource
+Quotas section below.
 
 Run the graph, schema, fact, and query commands through `wyctl`:
 
@@ -1455,7 +1457,8 @@ So a retry loop that mints a fresh `batch_id` *and* a fresh
 `idempotency_key` each attempt is not replaying -- it is appending a new
 tombstone every time, and each one is charged. (Minting only one of the two
 does not append at all; by the rule above it is refused `409`.) The graph-count
-quota described above does not cap fact rows, bytes, or mutation batches.
+quota described above does not cap fact rows, bytes, or mutation batches; the
+`logical_bytes` quota in the Tenant Resource Quotas section does.
 
 `logical_byte_delta` measures the request, not the effect. It sizes each value
 by that value's own type, so it is not a byte count of the payload: fixed-width
@@ -1602,6 +1605,216 @@ was never reconciled. Restart re-probes it. This is not a state the daemon can
 detect while running, which is why the startup `BOOT` lines are worth
 collecting.
 
+## Tenant Resource Quotas
+
+A tenant is the admission boundary for shared resources. Six per-tenant quota
+dimensions are enforced at the HTTP daemon, which is the only entry point
+to them: `wyctl` reaches every quota through the daemon and has no local
+quota path. Each dimension is read and configured through one route,
+`GET|POST /facts/quota?tenant=<tenant>&dimension=<dimension>`, and one
+command pair, `wyctl fact quota status|configure --tenant <tenant>
+--dimension <dimension>`. Both require a principal holding the `wr.sys.admin`
+permission on that tenant; the packaged `wr.system_admin` role carries it.
+
+The policy store and the graph DuckDB files do not share a transaction, so
+quota accounting follows ADR 0004: an operation reserves capacity in the
+policy store before it mutates a graph, settles the reservation from the
+committed outcome, and converges by retrying the identical request. ADR 0008
+describes the durable open reservations behind the `concurrent_opens`
+dimension.
+
+### Dimensions
+
+| dimension | enforced at | configure | status fields |
+| --- | --- | --- | --- |
+| `graph_count` | `POST /graphs/create` | `--limit N` | `limit`, `committed`, `pending` |
+| `schema_count` | `POST /facts/schema/register` | `--limit N` | `limit`, `registered` |
+| `write_rate` | every fact append and retract | `--rate-per-second N --burst N` | `rate_per_second`, `burst` |
+| `concurrent_opens` | every physical fact-store open a request performs | `--limit N` | `limit`, `pending`, `active`, `acquiring`, `cleanup_pending`, `charged` |
+| `logical_bytes` | every fact append and retract | `--row-limit N --limit BYTES` | `row_limit`, `limit`, `committed_rows`, `committed_bytes`, `pending_rows`, `pending_bytes` |
+| `physical_bytes` | artifact growth during a fact mutation commit | `--limit BYTES` | `limit`, `committed_bytes`, `pending_bytes`, `reconciling_bytes` |
+
+`wyctl fact quota status` prints one line per call in the form
+`tenant=<tenant> dimension=<dimension> <field>=<value> ...` with the fields
+above; a dimension with no limit prints `unlimited`. For `logical_bytes` the
+byte limit is printed as `byte_limit=`. `wyctl fact quota configure` prints
+the same line after the change is durable.
+
+Configuration rules that apply to every dimension:
+
+- A tenant with no configured limit for a dimension is unlimited in it.
+- A configured limit cannot be removed; raise it instead.
+- `limit`, `--row-limit`, `--rate-per-second` and `--burst` take integers;
+  `rate_per_second` and `burst` must be positive, the others may be `0`.
+  Malformed or mismatched parameters return HTTP `400`
+  `invalid_fact_quota_request`, and `wyctl` refuses them locally with exit
+  code `2` before sending anything.
+- A tenant the caller is not authorized in answers `403` (`tenant_denied`
+  or `fact_quota_denied`); an authorized tenant that has no registry row
+  answers `404 tenant_invalid`; a method other than `GET` or `POST` returns
+  `405`.
+- A limit below current usage is refused with `409
+  fact_quota_limit_below_usage` for `graph_count` (committed plus pending),
+  `schema_count` (registered) and `physical_bytes` (committed plus pending
+  plus reconciling). The other three dimensions accept any limit: a
+  `concurrent_opens` or `logical_bytes` limit below current usage refuses
+  new work until usage drains, and `write_rate` has no stored usage.
+
+### Refusals
+
+A request that would exceed a limit is refused before anything is committed,
+with HTTP `429` and a JSON body of the form
+
+```json
+{"error":"fact_quota_exceeded","dimension":"graph_count",
+ "limit":100,"observed":100}
+```
+
+- `graph_count`, `schema_count`, `concurrent_opens` and `physical_bytes`
+  carry `limit` and `observed`. `observed` is committed plus pending graphs,
+  registered schemas, charged open reservations, or committed plus pending
+  plus reconciling bytes respectively.
+- `write_rate` carries `dimension` only and adds a `Retry-After` header in
+  whole seconds, rounded up, when the bucket reports a wait.
+- `logical_bytes` carries `dimension` only, because one reservation covers
+  both the row and the byte limit of the paired dimension.
+
+A refusal commits nothing: no graph artifacts (`graph_count`), no schema row
+(`schema_count`), no batch and no logical operation (`write_rate`,
+`concurrent_opens`), and no store commit (`logical_bytes`, `physical_bytes`). A
+write refused by `write_rate` consumes no token. A refusal at commit
+(`physical_bytes`, or a store error) leaves the request's logical operation
+`cancelled` and visible in `/facts/quota/operation-status`; the identical retry
+reopens it.
+
+### Per-dimension notes
+
+**graph_count.** `pending` counts graphs still provisioning and fallback
+graph-create reservations; both survive a daemon restart and retrying the
+identical create resumes its durable operation. The retry must use the same
+fact root; the policy store binds to one root, so restore the original
+daemon root if it was changed while a reservation is pending. A limit of `0`
+denies all new graph creates. Existing graphs are never removed by a quota
+change.
+
+**schema_count.** `registered` is the number of relation schema versions
+registered for the tenant across all of its graphs. A limit of `0` denies all
+new registrations.
+
+**write_rate.** A token bucket per tenant: it starts full at `burst`, refills
+at `rate_per_second`, and never holds more than `burst`. Each admitted append
+or retract takes one token; `forget` is not rate-admitted. Changing either
+value resets the bucket to the new `burst`.
+
+**concurrent_opens.** Every fact append, retract and forget opens the graph's
+store for the request and reserves one durable slot before the open, released
+when the request's handle closes. `charged` is the number of reservations in
+the `pending`, `acquiring`, `active` or `cleanup_pending` states, and the
+open is refused when `charged` has reached the limit, so a limit of `0`
+refuses every open. A reservation whose owner crashed is reclaimed by the
+lease protocol in ADR 0008; a `cleanup_pending` row is still charged until
+that happens.
+
+**logical_bytes.** The row and byte limits are one paired dimension and are
+always configured together. An append or retract reserves the rows and logical
+bytes of the batch it carries before the store commits, and is refused when
+committed plus pending plus requested would exceed either limit. Logical bytes
+are the sum over the batch's schema columns of each value's size: the UTF-8
+length of a symbol or string, `8` for an int64 or a compound_ref, `1` for a
+bool. Two consequences follow. A retract that matches no live row is charged for
+the rows and bytes it supplied, exactly like one that removed rows, because
+pricing measures the request, not the projection. A replay of the same
+`batch_id` and `idempotency_key` with identical content is deduplicated: it
+reports the stored cost and is not charged again, while reusing either key with
+different content is refused with `409 fact_batch_conflict`.
+
+**physical_bytes.** Admission measures the graph's artifact set through the
+bounded evidence of the artifact inventory and fails closed: when evidence
+cannot be taken, the mutation is an error, never an admission. A mutation is
+refused when committed plus pending plus reconciling bytes have reached the
+limit, or when the bytes the evidence bounds for it exceed the remaining
+headroom, and it settles from the size observed after the commit. When the
+post-commit observation cannot be taken, the reservation's bytes move to
+`reconciling_bytes`, which keeps counting against the limit and is never
+lowered by unverified evidence. This dimension is enforced only by builds
+with the secure DuckDB bridge; other builds accept the configuration and
+report it, but never refuse on it.
+
+### Committed but reconciling
+
+When a fact append or retract has committed but its logical settlement could
+not be recorded, the daemon answers HTTP `202` instead of `200`:
+
+```json
+{"ok":true,"committed":true,"reconcile":true,"quota_state":"reconciling",
+ "operation_id":"orders-1","batch_id":"orders-1",
+ "payload_digest":"<64 hex characters>","inserted":true,
+ "mutation_class":"committed","queryable":true,
+ "committed_row_delta":1,"logical_byte_delta":11,"engine_generation":7}
+```
+
+The data is durable, and `queryable`, `mutation_class` and the deltas mean
+exactly what they mean on a `200`; a `202` is never a refusal. `wyctl fact put`
+and `wyctl fact retract` print `committed-reconciling operation_id=<key>
+batch_id=<id> payload_digest=<hex>` for it; a non-empty `payload_digest` marks
+the quota `202`, because the same line with an empty `operation_id` and
+`payload_digest` reports a `200` whose runtime needs a reconcile. `operation_id`
+is the request's idempotency key, and `payload_digest` is the daemon's digest of
+the batch content. Retain the digest: it is returned only on the `202`, and it
+completes the identity the status route below requires. Retrying the identical
+request converges the operation without repeating the digest: while the
+operation is `pending`, the retry deduplicates the batch, settles the
+reservation, and answers `200` with `duplicate`.
+
+A mutation refused at commit, for example by a `physical_bytes` `429`, a `409
+fact_batch_conflict`, or a store error, cancels its logical reservation and
+leaves the operation `cancelled`. The identical request later reopens that
+reservation under the same limit check and, once the cause has cleared, commits
+and settles it, so the retry answers `200` and is charged exactly once; a cause
+that has not cleared refuses and cancels it again, and if the reservation no
+longer fits, the retry answers `429` for `logical_bytes` and commits nothing.
+
+Convergence of a logical operation is retry-driven. There is no startup sweep
+of pending logical operations and no route or command that cancels one. If
+the daemon stops between the reservation and its settlement, the pending row
+keeps charging `pending_rows` and `pending_bytes` until the identical request
+is retried; the operator remedy is to retry that request, or to raise the
+limit. This fails closed and does not weaken enforcement.
+
+### Inspecting one operation
+
+`GET /facts/quota/operation-status` takes `tenant`, `graph`, `batch_id`,
+`operation_id` and `payload_digest` (64 hex characters); the complete
+identity is required so a reused operation id cannot disclose another
+operation's status. It requires the same `wr.sys.admin` permission as the
+quota routes. A missing or malformed parameter is `400
+invalid_fact_quota_operation_request`, an unknown operation is `404
+fact_quota_operation_not_found`, and a known operation id under a different
+identity is `409 fact_quota_operation_conflict`. The body reports
+`state` (`pending`, `settled`, `reconciling`, or `cancelled`, which means the
+commit failed and an identical retry reopens the reservation), `replay`,
+`requested_rows`, `requested_bytes`, `applied_rows` and `applied_bytes`;
+`applied_bytes` is `-1` while the applied bytes are unknown.
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact quota operation-status \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --batch-id orders-1 --operation-id orders-1 \
+  --payload-digest "$DIGEST" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(date +%s)" --guard-loc-class trusted --guard-risk 29
+```
+
+The command prints one line,
+`tenant=<tenant> graph=<graph> batch_id=<id> operation_id=<key>
+state=<state> replay=<true|false> requested_rows=N requested_bytes=N
+applied_rows=N applied_bytes=N`, and exits `0`. It exits `2` for a missing
+target option or a digest that is not 64 hex characters, `3` when the daemon
+rejects the request as malformed, `4` when the daemon denies the caller
+(`403 fact_quota_denied`), `5` when the operation is not found or the
+identity conflicts, and `6` when no valid access token is presented (`401`).
+The daemon's error code is printed on stderr for every remote failure.
+
 ## Day-2 Operations
 
 - Template validation from an operator shell. Use `file:` for manual checks;
@@ -1690,7 +1903,9 @@ never returns a physical path or a raw verification error.
 
 These are typed read-only status and verification APIs. They do not yet provide
 typed reconciliation or `wyctl` fact status/verification/reconciliation
-commands; those remain in the open #550 scope.
+commands; those remain in the open #550 scope. Quota operation status is
+separate: it has a typed route and a `wyctl` command, described in the
+Tenant Resource Quotas section above.
 
 | you want to know | endpoint | what it tells you |
 | --- | --- | --- |
@@ -1698,6 +1913,8 @@ commands; those remain in the open #550 scope.
 | is any graph degraded | `GET /readyz?format=json` | `subsystems.facts` carries `graphs_total`, `graphs_ready`, `graphs_degraded`, `graphs_sealed` |
 | did an audit record go missing | `GET /readyz?format=json` | `audit_errors`, monotonic; non-zero means at least one emission failed |
 | which graph, and why | `GET /facts/status` | per-graph `state` and the aggregate; the per-graph rows require a credential and are scoped to the caller's tenant, so an anonymous caller receives the aggregate alone |
+| what a tenant may still consume | `GET /facts/quota?tenant=..&dimension=..` | one quota dimension's configured limit and its usage fields; `POST` with the same query configures it |
+| did a reconciling mutation settle | `GET /facts/quota/operation-status` | one logical quota operation's `state` and applied rows and bytes, addressed by its complete identity including the `payload_digest` from the `202` |
 
 Three consequences worth knowing before you wire an alert.
 
