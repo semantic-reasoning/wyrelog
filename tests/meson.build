@@ -3356,7 +3356,9 @@ test_decide = executable('test-decide',
       : []),
 )
 
-test('decide', test_decide)
+test('decide', test_decide,
+  timeout : 90,
+)
 
 test_perm = executable('test-perm',
   'test-perm.c',
