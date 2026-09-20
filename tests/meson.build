@@ -30,6 +30,14 @@ if enable_secure_duckdb_bridge_opt.enabled() and \
       timeout : 120)
   endif
 endif
+
+test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
+  'test-fact-offline-backup-manifest.c',
+  '../wyrelog/fact/offline-backup-manifest-private.c',
+  include_directories : [include_directories('..')],
+  dependencies : [glib_dep],
+)
+test('fact-offline-backup-manifest', test_offline_backup_manifest)
 # END duckdb-patch-stack-determinism
 
 meson_exe = find_program('meson')
