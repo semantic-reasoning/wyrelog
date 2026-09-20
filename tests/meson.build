@@ -30,6 +30,9 @@ if enable_secure_duckdb_bridge_opt.enabled() and \
       timeout : 120)
   endif
 endif
+# END duckdb-patch-stack-determinism
+
+meson_exe = find_program('meson')
 
 test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   'test-fact-offline-backup-manifest.c',
@@ -38,9 +41,6 @@ test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   dependencies : [glib_dep],
 )
 test('fact-offline-backup-manifest', test_offline_backup_manifest)
-# END duckdb-patch-stack-determinism
-
-meson_exe = find_program('meson')
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
 # locale's codec.  This asserts strictness; it does not change the default.
