@@ -60,6 +60,7 @@ tests/test-fact-graph-locator-windows.c
 tests/test-fact-graph-locator.c
 tests/test-fact-graph-seal.c
 tests/test-fact-offline-backup-manifest.c
+tests/test-fact-offline-backup-source.c
 tests/test-fact-open-concurrent-process.c
 tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
@@ -256,6 +257,8 @@ wyrelog/fact/legacy-store-identity-private.h
 wyrelog/fact/mutation-outcome-private.h
 wyrelog/fact/offline-backup-manifest-private.c
 wyrelog/fact/offline-backup-manifest-private.h
+wyrelog/fact/offline-backup-source-private.c
+wyrelog/fact/offline-backup-source-private.h
 wyrelog/fact/open-reservation-private.c
 wyrelog/fact/open-reservation-private.h
 wyrelog/fact/provisioning-construct-private.c

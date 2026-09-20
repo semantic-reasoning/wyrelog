@@ -41,6 +41,7 @@ test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   dependencies : [glib_dep],
 )
 test('fact-offline-backup-manifest', test_offline_backup_manifest)
+
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
 # locale's codec.  This asserts strictness; it does not change the default.
@@ -273,6 +274,21 @@ fact_test_support_c_args = []
 if host_machine.system() == 'windows'
   fact_test_support_deps += advapi32_dep
   fact_test_support_c_args += '-D_WIN32_WINNT=0x0602'
+endif
+
+if get_option('enable_fact_store').allowed() and \
+    get_option('enable_secure_duckdb_bridge').enabled()
+  test_offline_backup_source = executable('test-fact-offline-backup-source',
+    'test-fact-offline-backup-source.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep, duckdb_dep]
+      + fact_test_support_deps,
+  )
+  test('fact-offline-backup-source', test_offline_backup_source,
+    timeout : 120,
+  )
 endif
 
 test_smoke = executable('test-smoke',
