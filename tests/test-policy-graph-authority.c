@@ -6286,6 +6286,169 @@ test_relation_activation_typed_api (void)
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND);
 }
 
+static WylPolicyFactBackupGraphSnapshot *
+backup_snapshot_graph (WylPolicyFactBackupSnapshot *snapshot,
+    const gchar *graph_id)
+{
+  for (guint i = 0; i < snapshot->graphs->len; i++) {
+    WylPolicyFactBackupGraphSnapshot *graph =
+        g_ptr_array_index (snapshot->graphs, i);
+    if (g_strcmp0 (graph->authority->graph_id, graph_id) == 0)
+      return graph;
+  }
+  return NULL;
+}
+
+static void
+activate_backup_schema (wyl_policy_store_t *store, const gchar *graph_id)
+{
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_reserve_relation_activation (store,
+      "tenant-backup", graph_id, "shop", "orders", &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-backup", graph_id, "shop", "orders",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-backup", graph_id, "shop", "orders",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, 1,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, TRUE, 1, FALSE, 0,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+}
+
+static void
+insert_backup_schema (sqlite3 *db, const gchar *graph_id, gboolean reverse)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "INSERT INTO fact_namespaces "
+    "(tenant_id,graph_id,namespace_id,visibility,created_at,updated_at) "
+    "VALUES ('tenant-backup','%s','shop',1,1,1);"
+    "INSERT INTO fact_relation_schemas "
+    "(tenant_id,graph_id,namespace_id,relation_name,schema_version,arity,"
+    "relation_visible,created_at,updated_at) "
+    "VALUES ('tenant-backup','%s','shop','orders',1,2,1,1,1);"
+    "INSERT INTO fact_relation_schema_columns "
+    "(tenant_id,graph_id,namespace_id,relation_name,schema_version,"
+    "column_index,column_name,column_type,nullable,visible) VALUES "
+    "('tenant-backup','%s','shop','orders',1,%d,'%s','%s',0,1),"
+    "('tenant-backup','%s','shop','orders',1,%d,'%s','%s',0,1);"
+    "INSERT INTO fact_relation_query_allowlist "
+    "(tenant_id,graph_id,namespace_id,relation_name,schema_version,"
+    "query_name,required_permission_id,max_rows) VALUES "
+    "('tenant-backup','%s','shop','orders',1,'orders_by_id',"
+    "'wr.datalog.query',100);",
+    graph_id, graph_id,
+    graph_id, reverse ? 1 : 0, reverse ? "amount" : "id",
+    reverse ? "int64" : "symbol",
+    graph_id, reverse ? 0 : 1, reverse ? "id" : "amount",
+    reverse ? "symbol" : "int64", graph_id);
+  exec_ok (db, sql);
+}
+
+static void
+test_fact_backup_snapshot_schema_digest (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-backup", "graph-a", FALSE);
+
+  WylPolicyFactBackupSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_OK);
+  WylPolicyFactBackupGraphSnapshot *graph =
+      backup_snapshot_graph (snapshot, "graph-a");
+  g_assert_nonnull (graph);
+  g_assert_cmpstr (graph->active_schema_digest, ==,
+      "sha256:aa6a70e4a3ad66e830a339e1b0dfdac12d76dcce721c53aa2b7dedd30ec09210");
+  wyl_policy_fact_backup_snapshot_free (snapshot);
+
+  insert_backup_schema (db, "graph-a", FALSE);
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reserve_relation_activation (store,
+      "tenant-backup", "graph-a", "shop", "orders", &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-backup", "graph-a", "shop", "orders",
+      WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, FALSE, 0, TRUE, 1,
+      "none", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-backup", "graph-a", "shop", "orders",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, 1,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, TRUE, 1, FALSE, 0,
+      "none", &result), ==, WYRELOG_E_OK);
+
+  exec_ok (db, "INSERT INTO fact_graphs "
+      "(tenant_id,graph_id,storage_uri,storage_path,schema_version,owner_scope,"
+      "sealed,created_at,updated_at,sealed_at) VALUES "
+      "('tenant-backup','graph-b','file:///legacy-b','/legacy-b',1,"
+      "'tenant-backup',0,1,1,NULL);");
+  insert_backup_schema (db, "graph-b", TRUE);
+  activate_backup_schema (store, "graph-b");
+
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_OK);
+  WylPolicyFactBackupGraphSnapshot *graph_a =
+      backup_snapshot_graph (snapshot, "graph-a");
+  WylPolicyFactBackupGraphSnapshot *graph_b =
+      backup_snapshot_graph (snapshot, "graph-b");
+  g_assert_nonnull (graph_a);
+  g_assert_nonnull (graph_b);
+  g_assert_cmpstr (graph_a->active_schema_digest, ==,
+      "sha256:46209a204c82013fab67c8212ab8009338a710a4abb9869da58c9e8d7badbef3");
+  g_assert_cmpstr (graph_b->active_schema_digest, ==,
+      graph_a->active_schema_digest);
+  g_autofree gchar *before = g_strdup (graph_a->active_schema_digest);
+  wyl_policy_fact_backup_snapshot_free (snapshot);
+
+  exec_ok (db, "UPDATE fact_relation_query_allowlist SET max_rows=101 "
+      "WHERE tenant_id='tenant-backup' AND graph_id='graph-a';");
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_OK);
+  graph_a = backup_snapshot_graph (snapshot, "graph-a");
+  g_assert_cmpstr (graph_a->active_schema_digest, !=, before);
+  wyl_policy_fact_backup_snapshot_free (snapshot);
+
+  exec_ok (db, "BEGIN;");
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  exec_ok (db, "ROLLBACK;");
+
+  exec_ok (db, "UPDATE fact_relation_activation SET last_error_class='schema' "
+      "WHERE tenant_id='tenant-backup' AND graph_id='graph-a' "
+      "AND namespace_id='shop' AND relation_name='orders';");
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  exec_ok (db, "UPDATE fact_relation_activation SET last_error_class='none' "
+      "WHERE tenant_id='tenant-backup' AND graph_id='graph-a' "
+      "AND namespace_id='shop' AND relation_name='orders';");
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation (store,
+      "tenant-backup", "graph-a", "shop", "orders",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE, 2,
+      WYL_POLICY_RELATION_ACTIVATION_DEGRADED, TRUE, 1, FALSE, 0,
+      "schema", &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+      "tenant-backup", &snapshot), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+}
+
 static void
 test_fact_write_rate_quota_persists (void)
 {
@@ -7279,5 +7442,7 @@ main (int argc, char **argv)
       test_relation_activation_fsm_is_fail_closed);
   g_test_add_func ("/policy/graph-authority/relation-activation-typed-api",
       test_relation_activation_typed_api);
+  g_test_add_func ("/policy/graph-authority/fact-backup-snapshot-digest",
+      test_fact_backup_snapshot_schema_digest);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

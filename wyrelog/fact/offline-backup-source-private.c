@@ -26,6 +26,7 @@ typedef struct
   WylPolicyGraphLifecycleState lifecycle_state;
   guint64 format_version;
   guint64 path_encoding_version;
+  gchar *schema_digest;
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
   WylPolicyGraphErrorClass last_error_class;
@@ -63,6 +64,7 @@ offline_backup_graph_free (OfflineBackupGraph *graph)
   g_free (graph->tenant_id);
   g_free (graph->graph_id);
   g_free (graph->store_uuid);
+  g_free (graph->schema_digest);
   g_free (graph);
 }
 
@@ -95,8 +97,10 @@ tenant_record_equal (const WylFactOfflineBackupSource *source,
 
 static gboolean
 graph_record_equal (const OfflineBackupGraph *graph,
-    const WylPolicyGraphAuthorityRecord *record)
+    const WylPolicyFactBackupGraphSnapshot *snapshot)
 {
+  const WylPolicyGraphAuthorityRecord *record = snapshot == NULL ? NULL :
+      snapshot->authority;
   return record != NULL
          && g_strcmp0 (graph->tenant_id, record->tenant_id) == 0
          && g_strcmp0 (graph->graph_id, record->graph_id) == 0
@@ -109,7 +113,9 @@ graph_record_equal (const OfflineBackupGraph *graph,
          && graph->last_error_class == record->last_error_class
          && graph->materialization_state == record->materialization_state
          && graph->has_store_identity == record->has_store_identity
-         && graph->sealed_compatibility == record->sealed_compatibility;
+         && graph->sealed_compatibility == record->sealed_compatibility
+         && g_strcmp0 (graph->schema_digest,
+             snapshot->active_schema_digest) == 0;
 }
 
 static gboolean
@@ -134,7 +140,8 @@ graph_record_is_backup_source (const WylPolicyGraphAuthorityRecord *record)
 }
 
 static OfflineBackupGraph *
-offline_backup_graph_new (const WylPolicyGraphAuthorityRecord *record)
+offline_backup_graph_new (const WylPolicyGraphAuthorityRecord *record,
+    const gchar *schema_digest)
 {
   OfflineBackupGraph *graph = g_try_new0 (OfflineBackupGraph, 1);
   if (graph == NULL)
@@ -142,8 +149,9 @@ offline_backup_graph_new (const WylPolicyGraphAuthorityRecord *record)
   graph->tenant_id = g_strdup (record->tenant_id);
   graph->graph_id = g_strdup (record->graph_id);
   graph->store_uuid = g_strdup (record->store_uuid);
+  graph->schema_digest = g_strdup (schema_digest);
   if (graph->tenant_id == NULL || graph->graph_id == NULL
-      || graph->store_uuid == NULL) {
+      || graph->store_uuid == NULL || graph->schema_digest == NULL) {
     offline_backup_graph_free (graph);
     return NULL;
   }
@@ -413,25 +421,21 @@ open_graph_source (WylFactOfflineBackupSource *source,
 static wyrelog_error_t
 revalidate_policy (WylFactOfflineBackupSource *source)
 {
-  WylPolicyTenantAuthorityRecord *tenant = NULL;
-  GPtrArray *records = NULL;
-  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (source->policy,
-          source->tenant_id, &tenant);
-  if (rc == WYRELOG_E_OK && !tenant_record_equal (source, tenant))
+  WylPolicyFactBackupSnapshot *snapshot = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_fact_backup_snapshot
+        (source->policy, source->tenant_id, &snapshot);
+  if (rc == WYRELOG_E_OK && !tenant_record_equal (source, snapshot->tenant))
     rc = WYRELOG_E_BUSY;
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_list_graph_authorities (source->policy,
-            source->tenant_id, &records);
-  if (rc == WYRELOG_E_OK && records->len != source->graphs->len)
+  if (rc == WYRELOG_E_OK && snapshot->graphs->len != source->graphs->len)
     rc = WYRELOG_E_BUSY;
-  for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
+  for (guint i = 0; rc == WYRELOG_E_OK && i < snapshot->graphs->len; i++) {
     OfflineBackupGraph *graph = g_ptr_array_index (source->graphs, i);
-    WylPolicyGraphAuthorityRecord *record = g_ptr_array_index (records, i);
-    if (!graph_record_equal (graph, record))
+    WylPolicyFactBackupGraphSnapshot *current =
+        g_ptr_array_index (snapshot->graphs, i);
+    if (!graph_record_equal (graph, current))
       rc = WYRELOG_E_BUSY;
   }
-  g_clear_pointer (&records, g_ptr_array_unref);
-  g_clear_pointer (&tenant, wyl_policy_tenant_authority_record_free);
+  g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);
   return rc;
 }
 
@@ -441,14 +445,14 @@ wyl_fact_offline_backup_source_revalidate (WylFactOfflineBackupSource *source)
   if (source == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (source->root_lease);
-  if (rc == WYRELOG_E_OK)
-    rc = revalidate_policy (source);
   for (guint i = 0; rc == WYRELOG_E_OK && i < source->graphs->len; i++) {
     OfflineBackupGraph *graph = g_ptr_array_index (source->graphs, i);
     rc = wyl_fact_artifact_namespace_revalidate (graph->namespace_);
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_artifact_mutation_lease_revalidate (graph->reader_guard);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = revalidate_policy (source);
   return rc;
 }
 
@@ -485,8 +489,7 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
     deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
         now + drain_timeout_us;
   }
-  WylPolicyTenantAuthorityRecord *tenant = NULL;
-  GPtrArray *records = NULL;
+  WylPolicyFactBackupSnapshot *snapshot = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root,
           &source->root_lease);
@@ -499,22 +502,27 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
     rc = wyl_fact_root_writer_lease_authorizes_resolver (source->root_lease,
             &resolver);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_read_tenant_authority (policy, tenant_id, &tenant);
+    rc = wyl_policy_store_read_fact_backup_snapshot (policy, tenant_id,
+            &snapshot);
   if (rc == WYRELOG_E_OK
-      && (tenant->lifecycle_state != WYL_POLICY_TENANT_LIFECYCLE_SEALED
-      || !tenant->sealed_compatibility || tenant->lifecycle_generation == 0))
+      && (snapshot->tenant->lifecycle_state
+      != WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      || !snapshot->tenant->sealed_compatibility
+      || snapshot->tenant->lifecycle_generation == 0))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
-    source->tenant_state = tenant->lifecycle_state;
-    source->tenant_lifecycle_generation = tenant->lifecycle_generation;
+    source->tenant_state = snapshot->tenant->lifecycle_state;
+    source->tenant_lifecycle_generation =
+        snapshot->tenant->lifecycle_generation;
     source->tenant_reconciliation_generation =
-        tenant->reconciliation_generation;
-    source->tenant_sealed_compatibility = tenant->sealed_compatibility;
-    rc = wyl_policy_store_list_graph_authorities (policy, tenant_id,
-            &records);
+        snapshot->tenant->reconciliation_generation;
+    source->tenant_sealed_compatibility =
+        snapshot->tenant->sealed_compatibility;
   }
-  for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
-    WylPolicyGraphAuthorityRecord *record = g_ptr_array_index (records, i);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < snapshot->graphs->len; i++) {
+    WylPolicyFactBackupGraphSnapshot *graph_snapshot =
+        g_ptr_array_index (snapshot->graphs, i);
+    WylPolicyGraphAuthorityRecord *record = graph_snapshot->authority;
     if (!graph_record_is_backup_source (record)) {
       rc = WYRELOG_E_POLICY;
       break;
@@ -522,7 +530,8 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
     rc = drain_graph (source, record, drain_timeout_us, deadline);
     if (rc != WYRELOG_E_OK)
       break;
-    OfflineBackupGraph *graph = offline_backup_graph_new (record);
+    OfflineBackupGraph *graph = offline_backup_graph_new (record,
+            graph_snapshot->active_schema_digest);
     if (graph == NULL) {
       rc = WYRELOG_E_NOMEM;
       break;
@@ -535,8 +544,7 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_offline_backup_source_revalidate (source);
   wyl_fact_graph_resolver_clear (&resolver);
-  g_clear_pointer (&records, g_ptr_array_unref);
-  g_clear_pointer (&tenant, wyl_policy_tenant_authority_record_free);
+  g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_offline_backup_source_free (source);
     return rc;
@@ -578,6 +586,7 @@ wyl_fact_offline_backup_source_get (const WylFactOfflineBackupSource *source,
   out_artifact->store_uuid = graph->store_uuid;
   out_artifact->format_version = graph->format_version;
   out_artifact->path_encoding_version = graph->path_encoding_version;
+  out_artifact->schema_digest = graph->schema_digest;
   out_artifact->logical_bytes = graph->logical_bytes;
   out_artifact->physical_bytes = graph->physical_bytes;
   return TRUE;

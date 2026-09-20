@@ -17942,6 +17942,335 @@ wyl_policy_graph_authority_record_free (WylPolicyGraphAuthorityRecord *record)
   g_free (record);
 }
 
+static void
+policy_fact_backup_graph_snapshot_free (
+  WylPolicyFactBackupGraphSnapshot *graph)
+{
+  if (graph == NULL)
+    return;
+  wyl_policy_graph_authority_record_free (graph->authority);
+  g_free (graph->active_schema_digest);
+  g_free (graph);
+}
+
+void
+wyl_policy_fact_backup_snapshot_free (WylPolicyFactBackupSnapshot *snapshot)
+{
+  if (snapshot == NULL)
+    return;
+  wyl_policy_tenant_authority_record_free (snapshot->tenant);
+  g_clear_pointer (&snapshot->graphs, g_ptr_array_unref);
+  g_free (snapshot);
+}
+
+static void
+backup_digest_u8 (GChecksum *checksum, guint8 value)
+{
+  g_checksum_update (checksum, &value, sizeof value);
+}
+
+static void
+backup_digest_u32 (GChecksum *checksum, guint32 value)
+{
+  guint32 encoded = GUINT32_TO_BE (value);
+  g_checksum_update (checksum, (const guchar *) &encoded, sizeof encoded);
+}
+
+static void
+backup_digest_u64 (GChecksum *checksum, guint64 value)
+{
+  guint64 encoded = GUINT64_TO_BE (value);
+  g_checksum_update (checksum, (const guchar *) &encoded, sizeof encoded);
+}
+
+static gboolean
+backup_digest_string (GChecksum *checksum, const gchar *value)
+{
+  if (value == NULL)
+    return FALSE;
+  gsize length = strlen (value);
+  if (length > G_MAXUINT32)
+    return FALSE;
+  backup_digest_u32 (checksum, (guint32) length);
+  g_checksum_update (checksum, (const guchar *) value, length);
+  return TRUE;
+}
+
+/* Called only while graph_authority_mutex and the caller's read transaction
+ * are held.  The encoding is a domain-separated binary stream: byte row tag,
+ * big-endian fixed-width integers, and u32-length-prefixed UTF-8 strings. */
+static wyrelog_error_t
+active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, gchar **out_digest)
+{
+  *out_digest = NULL;
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!backup_digest_string (checksum, "wyrelog.fact.active-schema.v1"))
+    return WYRELOG_E_INTERNAL;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *authority_sql =
+      "SELECT namespace_id,relation_name,active_schema_version,"
+      "pending_schema_version,lifecycle_state,last_error_class "
+      "FROM fact_relation_activation WHERE tenant_id=? AND graph_id=? "
+      "ORDER BY namespace_id COLLATE BINARY,relation_name COLLATE BINARY;";
+  wyrelog_error_t rc = prepare_stmt (store->db, authority_sql, &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  guint authority_count = 0;
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    if (sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 2) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 3) != SQLITE_NULL
+        || sqlite3_column_type (stmt, 4) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 5) != SQLITE_TEXT
+        || sqlite3_column_int64 (stmt, 2) <= 0
+        || g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
+        "active") != 0
+        || g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 5),
+        "none") != 0)
+      rc = WYRELOG_E_POLICY;
+    authority_count++;
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+
+  static const gchar *relation_sql =
+      "SELECT a.namespace_id,n.visibility,a.relation_name,"
+      "a.active_schema_version,s.relation_visible,s.arity,"
+      "(SELECT count(*) FROM fact_relation_schema_columns c "
+      " WHERE c.tenant_id=a.tenant_id AND c.graph_id=a.graph_id "
+      " AND c.namespace_id=a.namespace_id "
+      " AND c.relation_name=a.relation_name "
+      " AND c.schema_version=a.active_schema_version) "
+      "FROM fact_relation_activation a JOIN fact_namespaces n "
+      " ON n.tenant_id=a.tenant_id AND n.graph_id=a.graph_id "
+      " AND n.namespace_id=a.namespace_id JOIN fact_relation_schemas s "
+      " ON s.tenant_id=a.tenant_id AND s.graph_id=a.graph_id "
+      " AND s.namespace_id=a.namespace_id "
+      " AND s.relation_name=a.relation_name "
+      " AND s.schema_version=a.active_schema_version "
+      "WHERE a.tenant_id=? AND a.graph_id=? "
+      "ORDER BY a.namespace_id COLLATE BINARY,a.relation_name COLLATE BINARY;";
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, relation_sql, &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  guint relation_count = 0;
+  step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *namespace_id =
+        (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *relation_name =
+        (const gchar *) sqlite3_column_text (stmt, 2);
+    gint64 version = sqlite3_column_int64 (stmt, 3);
+    gint64 arity = sqlite3_column_int64 (stmt, 5);
+    gint64 columns = sqlite3_column_int64 (stmt, 6);
+    if (namespace_id == NULL || relation_name == NULL || version <= 0
+        || arity <= 0 || columns != arity
+        || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u8 (checksum, 'R');
+    if (!backup_digest_string (checksum, namespace_id)
+        || !backup_digest_string (checksum, relation_name)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u8 (checksum, sqlite3_column_int (stmt, 1) != 0);
+    backup_digest_u64 (checksum, (guint64) version);
+    backup_digest_u8 (checksum, sqlite3_column_int (stmt, 4) != 0);
+    backup_digest_u64 (checksum, (guint64) arity);
+    relation_count++;
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && relation_count != authority_count)
+    rc = WYRELOG_E_POLICY;
+
+  static const gchar *column_sql =
+      "SELECT c.namespace_id,c.relation_name,c.schema_version,c.column_index,"
+      "c.column_name,c.column_type,c.nullable,c.visible "
+      "FROM fact_relation_activation a JOIN fact_relation_schema_columns c "
+      " ON c.tenant_id=a.tenant_id AND c.graph_id=a.graph_id "
+      " AND c.namespace_id=a.namespace_id "
+      " AND c.relation_name=a.relation_name "
+      " AND c.schema_version=a.active_schema_version "
+      "WHERE a.tenant_id=? AND a.graph_id=? "
+      "ORDER BY c.namespace_id COLLATE BINARY,c.relation_name COLLATE BINARY,"
+      "c.column_index;";
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, column_sql, &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *namespace_id =
+        (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *relation_name =
+        (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *column_name =
+        (const gchar *) sqlite3_column_text (stmt, 4);
+    const gchar *column_type =
+        (const gchar *) sqlite3_column_text (stmt, 5);
+    gint64 version = sqlite3_column_int64 (stmt, 2);
+    gint64 index = sqlite3_column_int64 (stmt, 3);
+    if (namespace_id == NULL || relation_name == NULL || column_name == NULL
+        || column_type == NULL || version <= 0 || index < 0) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u8 (checksum, 'C');
+    if (!backup_digest_string (checksum, namespace_id)
+        || !backup_digest_string (checksum, relation_name)
+        || !backup_digest_string (checksum, column_name)
+        || !backup_digest_string (checksum, column_type)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u64 (checksum, (guint64) version);
+    backup_digest_u64 (checksum, (guint64) index);
+    backup_digest_u8 (checksum, sqlite3_column_int (stmt, 6) != 0);
+    backup_digest_u8 (checksum, sqlite3_column_int (stmt, 7) != 0);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+
+  static const gchar *query_sql =
+      "SELECT q.namespace_id,q.relation_name,q.schema_version,q.query_name,"
+      "q.required_permission_id,q.max_rows "
+      "FROM fact_relation_activation a JOIN fact_relation_query_allowlist q "
+      " ON q.tenant_id=a.tenant_id AND q.graph_id=a.graph_id "
+      " AND q.namespace_id=a.namespace_id "
+      " AND q.relation_name=a.relation_name "
+      " AND q.schema_version=a.active_schema_version "
+      "WHERE a.tenant_id=? AND a.graph_id=? "
+      "ORDER BY q.namespace_id COLLATE BINARY,q.relation_name COLLATE BINARY,"
+      "q.query_name COLLATE BINARY;";
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, query_sql, &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *namespace_id =
+        (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *relation_name =
+        (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *query_name =
+        (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *permission =
+        (const gchar *) sqlite3_column_text (stmt, 4);
+    gint64 version = sqlite3_column_int64 (stmt, 2);
+    gint64 max_rows = sqlite3_column_int64 (stmt, 5);
+    if (namespace_id == NULL || relation_name == NULL || query_name == NULL
+        || permission == NULL || version <= 0 || max_rows <= 0) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u8 (checksum, 'Q');
+    if (!backup_digest_string (checksum, namespace_id)
+        || !backup_digest_string (checksum, relation_name)
+        || !backup_digest_string (checksum, query_name)
+        || !backup_digest_string (checksum, permission)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    backup_digest_u64 (checksum, (guint64) version);
+    backup_digest_u64 (checksum, (guint64) max_rows);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *hex = g_checksum_get_string (checksum);
+  *out_digest = g_strdup_printf ("sha256:%s", hex);
+  return *out_digest == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactBackupSnapshot **out_snapshot)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (store == NULL || store->db == NULL || tenant_id == NULL
+      || out_snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  if (sqlite3_get_autocommit (store->db) == 0) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  if (sqlite3_exec (store->db, "BEGIN DEFERRED;", NULL, NULL, NULL)
+      != SQLITE_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_IO;
+  }
+  WylPolicyFactBackupSnapshot *snapshot = g_try_new0
+        (WylPolicyFactBackupSnapshot, 1);
+  wyrelog_error_t rc = snapshot == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
+  GPtrArray *authorities = NULL;
+  if (rc == WYRELOG_E_OK) {
+    snapshot->graphs = g_ptr_array_new_with_free_func
+          ((GDestroyNotify) policy_fact_backup_graph_snapshot_free);
+    if (snapshot->graphs == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_tenant_authority (store, tenant_id,
+            &snapshot->tenant);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_list_graph_authorities (store, tenant_id,
+            &authorities);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < authorities->len; i++) {
+    WylPolicyFactBackupGraphSnapshot *graph = g_try_new0
+          (WylPolicyFactBackupGraphSnapshot, 1);
+    if (graph == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      break;
+    }
+    graph->authority = g_ptr_array_index (authorities, i);
+    g_ptr_array_index (authorities, i) = NULL;
+    rc = active_fact_schema_digest_unlocked (store, tenant_id,
+            graph->authority->graph_id, &graph->active_schema_digest);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (snapshot->graphs, graph);
+    else
+      policy_fact_backup_graph_snapshot_free (graph);
+  }
+  g_clear_pointer (&authorities, g_ptr_array_unref);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_exec (store->db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK)
+    (void) sqlite3_exec (store->db, "ROLLBACK;", NULL, NULL, NULL);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_fact_backup_snapshot_free (snapshot);
+    return rc;
+  }
+  *out_snapshot = snapshot;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 tenant_authority_record_from_row (sqlite3_stmt *stmt,
     WylPolicyTenantAuthorityRecord **out_record)
