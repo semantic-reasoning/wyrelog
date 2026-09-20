@@ -13441,7 +13441,7 @@ set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
 
 static void
 set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
-    const gchar *operation_id, gboolean inserted,
+    const gchar *operation_id, const gchar *payload_digest, gboolean inserted,
     const wyl_fact_mutation_outcome_t *outcome)
 {
   if (wyl_daemon_policy_write_finalize_for_response (msg, 202,
@@ -13460,6 +13460,11 @@ set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
   append_json_string (body, operation_id);
   g_string_append (body, ",\"batch_id\":");
   append_json_string (body, batch_id);
+  /* The digest completes the operation identity that
+   * /facts/quota/operation-status requires; only the caller that supplied
+   * the payload receives it, and only on this response. */
+  g_string_append (body, ",\"payload_digest\":");
+  append_json_string (body, payload_digest);
   g_string_append (body, ",\"inserted\":");
   g_string_append (body, inserted ? "true" : "false");
   g_string_append (body, ",\"mutation_class\":");
@@ -14096,8 +14101,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (logical_quota_settle_rc != WYRELOG_E_OK) {
-    set_fact_quota_reconciling_json (msg, batch_id, idempotency_key, inserted,
-        &outcome);
+    set_fact_quota_reconciling_json (msg, batch_id, idempotency_key,
+        payload_digest, inserted, &outcome);
     return;
   }
   if (audit_rc != WYRELOG_E_OK) {
