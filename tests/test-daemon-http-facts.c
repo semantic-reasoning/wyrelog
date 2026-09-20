@@ -1164,6 +1164,50 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
   tsv_check_store (root, "single", "   ", NULL, 4, 3);
 }
 
+/* The digest the daemon binds to the seam batch below: the store's canonical
+ * content hash over the same schema-typed values, computed with the daemon's
+ * own function. Identifiers are not part of it. Caller owns the result. */
+static gchar *
+seam_batch_payload_digest (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "seam",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .relation_visible = TRUE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  const wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-9"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 9},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, G_N_ELEMENTS (values)},
+  };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "seam-1",
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "seam",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .source = "http",
+    .request_id = "seam-1",
+    .idempotency_key = "seam-1",
+    .op = WYL_FACT_STORE_OP_RETRACT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  return wyl_fact_store_batch_content_hash (&schema, &batch);
+}
+
 static gint
 check_fact_http_contract (WylHandle *handle, SoupServer *server,
     const gchar *fact_root, const gchar *base_url)
@@ -2163,6 +2207,91 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (wyl_policy_store_cancel_fact_logical_quota (store, &status_operation,
       TRUE, &status_operation_state) != WYRELOG_E_OK)
     return 283;
+
+  /* #553: the committed-but-reconciling response discloses the payload
+   * digest, completing the identity the operation-status route requires.
+   * The real responder is reached deterministically: a reservation for the
+   * seam batch is cancelled as a definite non-commit, the identical request
+   * then replays that reservation, the store commits, and settlement finds
+   * a cancelled row and refuses, which is the 202 path. The cancelled row
+   * and the uncharged committed batch are test-only state, kept on a
+   * dedicated graph so the absolute row counts on orders are untouched. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *seam_create_query = g_strdup_printf
+        ("tenant=%s&graph=seam&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+          seam_create_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 367;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *seam_schema_query = g_strdup_printf
+        ("tenant=%s&graph=seam&namespace=shop&relation=orders&"
+          "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+          seam_schema_query, admin_token,
+          "column_name\tcolumn_type\tnullable\tvisible\n"
+          "order_id\tsymbol\tfalse\ttrue\n" "amount\tint64\tfalse\ttrue\n",
+          &status, &body);
+  if (rc != 0 || status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 368;
+  g_autofree gchar *seam_digest = seam_batch_payload_digest ();
+  if (seam_digest == NULL)
+    return 369;
+  const WylPolicyFactLogicalQuotaOperation seam_operation = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "seam",
+    .batch_id = "seam-1",
+    .request_id = "seam-1",
+    .payload_digest = seam_digest,
+  };
+  WylPolicyFactLogicalOperationStatus seam_state = { 0 };
+  if (wyl_policy_store_reserve_fact_logical_quota (store, &seam_operation,
+      1, 11, &seam_state) != WYRELOG_E_OK
+      || wyl_policy_store_cancel_fact_logical_quota (store, &seam_operation,
+      TRUE, &seam_state) != WYRELOG_E_OK
+      || seam_state.state != WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+    return 370;
+  g_autofree gchar *logical_status_query = g_strdup_printf
+        ("tenant=%s&dimension=logical_bytes&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
+  g_autofree gchar *logical_before = NULL;
+  rc = send_raw (session, "GET", base_url, "/facts/quota",
+          logical_status_query, admin_token, NULL, &status, &logical_before);
+  if (rc != 0 || status != 200)
+    return 371;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *seam_retract_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=seam-1&"
+          "idempotency_key=seam-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/seam/orders:retract", seam_retract_query,
+          admin_token, "order_id\tamount\no-9\t9\n", &status, &body);
+  g_autofree gchar *seam_digest_json = g_strdup_printf
+        ("\"payload_digest\":\"%s\"", seam_digest);
+  if (rc != 0 || status != 202
+      || strstr (body, "\"committed\":true") == NULL
+      || strstr (body, "\"quota_state\":\"reconciling\"") == NULL
+      || strstr (body, "\"operation_id\":\"seam-1\"") == NULL
+      || strstr (body, "\"batch_id\":\"seam-1\"") == NULL
+      || strstr (body, seam_digest_json) == NULL)
+    return 372;
+  /* The disclosed digest is the one the status route accepts. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *seam_status_query = g_strdup_printf (
+    "tenant=%s&graph=seam&batch_id=seam-1&operation_id=seam-1&"
+    "payload_digest=%s&%s", WYL_TENANT_DEFAULT, seam_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", seam_status_query, admin_token,
+          NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"state\":\"cancelled\"") == NULL)
+    return 373;
+  /* The seam charged nothing: tenant usage reads exactly as before. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/facts/quota",
+          logical_status_query, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200 || g_strcmp0 (body, logical_before) != 0)
+    return 374;
 
   /* The same conflict remains typed after the relation contains facts. */
   g_clear_pointer (&body, g_free);

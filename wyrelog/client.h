@@ -705,6 +705,12 @@ gboolean wyl_client_fact_append_result_get_reconcile
   (const WylClientFactAppendResult * result);
 const gchar *wyl_client_fact_append_result_get_operation_id
   (const WylClientFactAppendResult * result);
+/* The payload digest a committed-but-reconciling response discloses, or
+ * NULL when the response carried none. Together with the tenant, graph,
+ * batch id and operation id it identifies the operation for
+ * wyl_client_fact_logical_operation_status. */
+const gchar *wyl_client_fact_append_result_get_payload_digest
+  (const WylClientFactAppendResult * result);
 const gchar *wyl_client_fact_append_result_get_mutation_class
   (const WylClientFactAppendResult * result);
 const gchar *wyl_client_fact_append_result_get_degraded_class

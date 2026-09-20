@@ -49,6 +49,7 @@ struct _WylClientFactAppendResult
   gboolean reconcile;
   gchar *batch_id;
   gchar *operation_id;
+  gchar *payload_digest;
   gchar *mutation_class;
   gchar *degraded_class;
   gint64 committed_row_delta;
@@ -2969,6 +2970,8 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
       return WYRELOG_E_IO;
     g_autofree gchar *operation_id = parse_simple_json_string_member (data,
             size, "operation_id");
+    g_autofree gchar *payload_digest = parse_simple_json_string_member (data,
+            size, "payload_digest");
     g_autofree gchar *mutation_class = parse_simple_json_string_member (data,
             size, "mutation_class");
     g_autofree gchar *degraded_class = parse_simple_json_string_member (data,
@@ -2996,6 +2999,7 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
     result->reconcile = reconcile;
     result->batch_id = g_steal_pointer (&response_batch);
     result->operation_id = g_steal_pointer (&operation_id);
+    result->payload_digest = g_steal_pointer (&payload_digest);
     result->mutation_class = g_steal_pointer (&mutation_class);
     result->degraded_class = g_steal_pointer (&degraded_class);
     result->committed_row_delta = committed_row_delta;
@@ -3092,6 +3096,7 @@ wyl_client_fact_append_result_free (WylClientFactAppendResult *result)
     return;
   g_free (result->batch_id);
   g_free (result->operation_id);
+  g_free (result->payload_digest);
   g_free (result->mutation_class);
   g_free (result->degraded_class);
   g_free (result);
@@ -3142,6 +3147,13 @@ wyl_client_fact_append_result_get_operation_id
   (const WylClientFactAppendResult *result)
 {
   return result != NULL ? result->operation_id : NULL;
+}
+
+const gchar *
+wyl_client_fact_append_result_get_payload_digest
+  (const WylClientFactAppendResult *result)
+{
+  return result != NULL ? result->payload_digest : NULL;
 }
 
 const gchar *

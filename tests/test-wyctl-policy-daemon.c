@@ -906,6 +906,7 @@ main (void)
    * bytes and applied in full; the status read never reports a replay. */
   g_autofree gchar *batch_1_digest = fact_test_batch_payload_digest
         (WYL_FACT_STORE_OP_ASSERT, "batch-1", "key-1", "o-1", 42);
+  g_assert_nonnull (batch_1_digest);
   gchar *fact_quota_operation_status_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,
@@ -999,6 +1000,85 @@ main (void)
   assert_wyctl_stdout (fact_retract_argv, "inserted\n");
   assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
   assert_wyctl_stdout (fact_retract_argv, "duplicate\n");
+
+  /* #553: a committed-but-reconciling mutation prints the payload digest
+   * that completes its operation identity, for put and retract alike. The
+   * 202 is reached deterministically: the seam reservation is cancelled as
+   * a definite non-commit, the identical retract replays it, the store
+   * commits, and settlement refuses the cancelled row. The row and the
+   * uncharged tombstone batch are test-only state; nothing later reads
+   * them. */
+  g_autoptr (GError) seam_error = NULL;
+  gchar *seam_input_path = NULL;
+  gint seam_fd = g_file_open_tmp ("wyctl-facts-seam-XXXXXX",
+          &seam_input_path, &seam_error);
+  g_assert_no_error (seam_error);
+  g_assert_cmpint (seam_fd, >=, 0);
+  g_assert_true (g_close (seam_fd, NULL));
+  g_assert_true (g_file_set_contents (seam_input_path,
+      "order_id,amount\no-9,9\n", -1, &seam_error));
+  g_assert_no_error (seam_error);
+  g_autofree gchar *seam_input_path_autofree = seam_input_path;
+  g_autofree gchar *seam_digest = fact_test_batch_payload_digest
+        (WYL_FACT_STORE_OP_RETRACT, "seam-1", "seam-key-1", "o-9", 9);
+  g_assert_nonnull (seam_digest);
+  const WylPolicyFactLogicalQuotaOperation seam_operation = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .batch_id = "seam-1",
+    .request_id = "seam-key-1",
+    .payload_digest = seam_digest,
+  };
+  WylPolicyFactLogicalOperationStatus seam_state = { 0 };
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota
+        (wyl_handle_get_policy_store (handle), &seam_operation, 1, 11,
+      &seam_state), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota
+        (wyl_handle_get_policy_store (handle), &seam_operation, TRUE,
+      &seam_state), ==, WYRELOG_E_OK);
+  gchar *fact_seam_retract_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "retract",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "seam-1",
+    "--idempotency-key", "seam-key-1",
+    "--format", "csv",
+    "--input", seam_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  g_autofree gchar *seam_expected = g_strdup_printf
+        ("committed-reconciling operation_id=seam-key-1 batch_id=seam-1 "
+          "payload_digest=%s\n", seam_digest);
+  assert_wyctl_stdout (fact_seam_retract_argv, seam_expected);
+  /* The cancelled row still carries the reservation's unknown-bytes
+   * sentinel, which the signed applied_bytes field preserves. */
+  gchar *fact_seam_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "quota", "operation-status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--batch-id", "seam-1",
+    "--operation-id", "seam-key-1",
+    "--payload-digest", seam_digest,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_seam_status_argv,
+      "tenant=__wr_default graph=orders batch_id=seam-1 operation_id=seam-key-1 state=cancelled replay=false requested_rows=1 requested_bytes=11 applied_rows=0 applied_bytes=-1\n");
+  g_unlink (seam_input_path);
   g_unlink (input_path);
 #endif
 

@@ -2137,11 +2137,15 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
           retract ? "fact_retract_failed" : "fact_append_failed");
   if (exit_rc == 0) {
     if (wyl_client_fact_append_result_get_reconcile (result)) {
-      g_print ("committed-reconciling operation_id=%s batch_id=%s\n",
+      g_print ("committed-reconciling operation_id=%s batch_id=%s"
+          " payload_digest=%s\n",
           wyl_client_fact_append_result_get_operation_id (result) != NULL
               ? wyl_client_fact_append_result_get_operation_id (result) : "",
           wyl_client_fact_append_result_get_batch_id (result) != NULL
-              ? wyl_client_fact_append_result_get_batch_id (result) : "");
+              ? wyl_client_fact_append_result_get_batch_id (result) : "",
+          wyl_client_fact_append_result_get_payload_digest (result) != NULL
+              ? wyl_client_fact_append_result_get_payload_digest (result)
+              : "");
     } else {
       g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
           "inserted" : "duplicate");

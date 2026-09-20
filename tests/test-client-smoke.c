@@ -1296,7 +1296,9 @@ main (void)
   http.status = 202;
   http.body = "{\"ok\":true,\"committed\":true,\"reconcile\":true,"
       "\"quota_state\":\"reconciling\",\"operation_id\":\"request-1\","
-      "\"batch_id\":\"batch-1\",\"inserted\":true,"
+      "\"batch_id\":\"batch-1\",\"payload_digest\":\""
+      "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\","
+      "\"inserted\":true,"
       "\"mutation_class\":\"committed\",\"queryable\":false,"
       "\"committed_row_delta\":3,\"logical_byte_delta\":12,"
       "\"engine_generation\":7}";
@@ -1310,6 +1312,10 @@ main (void)
       || wyl_client_fact_append_result_get_queryable (mutation_result)
       || g_strcmp0 (wyl_client_fact_append_result_get_operation_id
         (mutation_result), "request-1") != 0
+      || g_strcmp0 (wyl_client_fact_append_result_get_payload_digest
+        (mutation_result),
+      "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+      != 0
       || wyl_client_fact_append_result_get_committed_row_delta
         (mutation_result) != 3
       || wyl_client_fact_append_result_get_logical_byte_delta
@@ -1317,6 +1323,24 @@ main (void)
       || wyl_client_fact_append_result_get_engine_generation
         (mutation_result) != 7)
     return wyl_test_normalize_exit_status (296);
+  /* A daemon that predates the digest disclosure still decodes; the
+   * getter reports the member's absence rather than inventing one. */
+  g_clear_pointer (&mutation_result, wyl_client_fact_append_result_free);
+  http.status = 202;
+  http.body = "{\"ok\":true,\"committed\":true,\"reconcile\":true,"
+      "\"quota_state\":\"reconciling\",\"operation_id\":\"request-1\","
+      "\"batch_id\":\"batch-1\",\"inserted\":true,"
+      "\"mutation_class\":\"committed\",\"queryable\":false,"
+      "\"committed_row_delta\":3,\"logical_byte_delta\":12,"
+      "\"engine_generation\":7}";
+  if (wyl_client_fact_put_batch (management_client, "__wr_default", "orders",
+      "shop", "orders", 1, "batch-1", "request-1", mutation_payload,
+      sizeof mutation_payload - 1, 123, "public", 49, &mutation_result)
+      != WYRELOG_E_OK
+      || !wyl_client_fact_append_result_get_reconcile (mutation_result)
+      || wyl_client_fact_append_result_get_payload_digest (mutation_result)
+      != NULL)
+    return wyl_test_normalize_exit_status (297);
   http.status = 200;
 
   /*
