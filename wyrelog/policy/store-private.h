@@ -69,6 +69,10 @@ typedef void (*WylPolicyStoreTransactionContentionHook)
 void wyl_policy_store_set_transaction_contention_hook_for_test
   (wyl_policy_store_t *store, WylPolicyStoreTransactionContentionHook hook,
     gpointer data);
+/* Make the next logical quota settlement on this store fail with E_IO, once.
+ * Test use only; declared unconditionally, defined only in the seams build. */
+void wyl_policy_store_fail_next_fact_logical_settle_for_test
+  (wyl_policy_store_t *store);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum

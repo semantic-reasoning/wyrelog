@@ -33,6 +33,7 @@ PROTECTED = {
     "wyl_fact_store_test_duckdb_call_count",
     "wyl_fact_replay_open_graph_engine_with_store_for_test",
     "wyl_policy_store_set_transaction_contention_hook_for_test",
+    "wyl_policy_store_fail_next_fact_logical_settle_for_test",
 }
 SENTINEL = "wyl_init"
 

@@ -6617,6 +6617,166 @@ test_fact_write_rate_admission_persists_and_bounds (void)
 }
 
 static void
+test_fact_logical_quota_cancelled_reopen (void)
+{
+  /* A reservation cancelled after a failed commit is reopened by the identical
+   * request under the fresh-reservation limit check, so the retry converges
+   * exactly once instead of replaying a dead row. */
+  g_autofree gchar *store_root = NULL;
+  g_autofree gchar *store_path = make_store_path (&store_root);
+  wyl_policy_store_open_options_t open_opts = { .path = store_path };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "reopen-a",
+      &created), ==, WYRELOG_E_OK);
+  WylPolicyFactLogicalQuotaConfig config = {
+    .has_limit = TRUE,
+    .logical_row_limit = 2,
+    .logical_byte_limit = 20,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "reopen-a",
+      &config), ==, WYRELOG_E_OK);
+
+  const WylPolicyFactLogicalQuotaOperation op_x = {
+    .tenant_id = "reopen-a",
+    .graph_id = "orders",
+    .batch_id = "x",
+    .request_id = "x",
+    .payload_digest =
+        "1111111111111111111111111111111111111111111111111111111111111111",
+  };
+  const WylPolicyFactLogicalQuotaOperation op_y = {
+    .tenant_id = "reopen-a",
+    .graph_id = "orders",
+    .batch_id = "y",
+    .request_id = "y",
+    .payload_digest =
+        "2222222222222222222222222222222222222222222222222222222222222222",
+  };
+  const WylPolicyFactLogicalQuotaOperation op_z = {
+    .tenant_id = "reopen-a",
+    .graph_id = "orders",
+    .batch_id = "z",
+    .request_id = "z",
+    .payload_digest =
+        "3333333333333333333333333333333333333333333333333333333333333333",
+  };
+  WylPolicyFactLogicalOperationStatus op_status = { 0 };
+  WylPolicyFactLogicalQuotaStatus usage = { 0 };
+
+  /* 1-2: reserve, then cancel as a definite non-commit. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_x,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store, &op_x,
+      TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.pending_rows, ==, 0);
+  g_assert_cmpuint (usage.pending_bytes, ==, 0);
+
+  /* 3: the identical request reopens the reservation as a live one. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_x,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_false (op_status.replay);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.pending_rows, ==, 1);
+  g_assert_cmpuint (usage.pending_bytes, ==, 5);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+        (store, &op_x, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  g_assert_cmpuint (op_status.applied_rows, ==, 0);
+  g_assert_cmpint (op_status.applied_bytes, ==, -1);
+
+  /* 4: settlement charges the reopened reservation exactly once. */
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store, &op_x,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_SETTLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.committed_rows, ==, 1);
+  g_assert_cmpuint (usage.committed_bytes, ==, 5);
+  g_assert_cmpuint (usage.pending_rows, ==, 0);
+  g_assert_cmpuint (usage.pending_bytes, ==, 0);
+
+  /* 5: a reopen obeys the limit like a fresh reservation. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_y,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store, &op_y,
+      TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_z,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_settle_fact_logical_quota (store, &op_z,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_y,
+      1, 5, &op_status), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+        (store, &op_y, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.committed_rows, ==, 2);
+  g_assert_cmpuint (usage.committed_bytes, ==, 10);
+  g_assert_cmpuint (usage.pending_rows, ==, 0);
+  g_assert_cmpuint (usage.pending_bytes, ==, 0);
+
+  /* 6: a size mismatch on a cancelled row is still a conflict. */
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_y,
+      1, 6, &op_status), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+        (store, &op_y, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED);
+
+  /* 7: once the limit admits it, reopen then cancel again is clean. */
+  config.logical_row_limit = 3;
+  config.logical_byte_limit = 30;
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store, "reopen-a",
+      &config), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reserve_fact_logical_quota (store, &op_y,
+      1, 5, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING);
+  g_assert_cmpint (wyl_policy_store_cancel_fact_logical_quota (store, &op_y,
+      TRUE, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.pending_rows, ==, 0);
+  g_assert_cmpuint (usage.pending_bytes, ==, 0);
+
+  /* 8: the state is durable across a close and reopen of the store. */
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_operation_status
+        (store, &op_y, &op_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (op_status.state, ==,
+      WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED);
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      "reopen-a", &usage), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (usage.committed_rows, ==, 2);
+  g_assert_cmpuint (usage.committed_bytes, ==, 10);
+  g_assert_cmpuint (usage.pending_rows, ==, 0);
+  g_assert_cmpuint (usage.pending_bytes, ==, 0);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  cleanup_store_path (store_root, store_path);
+}
+
+static void
 test_fact_physical_quota_ledger (void)
 {
   g_autofree gchar *store_root = NULL;
@@ -7063,6 +7223,9 @@ main (int argc, char **argv)
       test_fact_write_rate_admission_clock_remainder);
   g_test_add_func ("/policy/graph-authority/fact-logical-quota-ledger",
       test_fact_logical_quota_ledger);
+  g_test_add_func
+    ("/policy/graph-authority/fact-logical-quota-cancelled-reopen",
+      test_fact_logical_quota_cancelled_reopen);
   g_test_add_func ("/policy/graph-authority/fact-physical-quota-ledger",
       test_fact_physical_quota_ledger);
   g_test_add_func

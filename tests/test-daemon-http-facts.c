@@ -921,10 +921,12 @@ tsv_post (SoupSession *session, const gchar *base_url, const gchar *token,
 
 /* Read-only proof covers durable rows, events and batch accounting, without
  * provisioning a missing table as a side effect of the assertion. */
+/* Check a projection's rows and the store-wide batch and event-log counts.
+ * The event-log count is explicit here; tsv_check_store derives it. */
 static void
-tsv_check_store (const gchar *root, const gchar *relation,
+tsv_check_store_counts (const gchar *root, const gchar *relation,
     const gchar *expected_a, const gchar *expected_b, gint64 expected_rows,
-    gint64 expected_batches)
+    gint64 expected_batches, gint64 expected_events)
 {
   WylFactGraphLocator locator = { 0 };
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator,
@@ -979,8 +981,7 @@ tsv_check_store (const gchar *root, const gchar *relation,
       "SELECT (SELECT count(*) FROM fact_batches), "
       "(SELECT count(*) FROM fact_event_log);", &result), ==, DuckDBSuccess);
   g_assert_cmpint (duckdb_value_int64 (&result, 0, 0), ==, expected_batches);
-  g_assert_cmpint (duckdb_value_int64 (&result, 1, 0), ==,
-      expected_rows + (g_strcmp0 (relation, "single") == 0 ? 2 : 0));
+  g_assert_cmpint (duckdb_value_int64 (&result, 1, 0), ==, expected_events);
   duckdb_destroy_result (&result);
   /* Nullable writes are all rejected. Check their target projection directly,
    * including the legitimate case where no physical table was ever created. */
@@ -1004,6 +1005,16 @@ tsv_check_store (const gchar *root, const gchar *relation,
   duckdb_disconnect (&conn);
   duckdb_close (&db);
   duckdb_destroy_config (&config);
+}
+
+static void
+tsv_check_store (const gchar *root, const gchar *relation,
+    const gchar *expected_a, const gchar *expected_b, gint64 expected_rows,
+    gint64 expected_batches)
+{
+  tsv_check_store_counts (root, relation, expected_a, expected_b,
+      expected_rows, expected_batches,
+      expected_rows + (g_strcmp0 (relation, "single") == 0 ? 2 : 0));
 }
 
 static void
@@ -1097,7 +1108,10 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
   /* Physical admission is implemented by the secure DuckDB bridge.  The
    * portable HTTP fixture also runs in builds without that bridge, where the
    * quota status API remains available but cannot reserve artifact evidence.
-   * Keep this boundary assertion with the implementation it exercises. */
+   * Keep this boundary assertion with the implementation it exercises. The
+   * bridge block below also commits the refused batch on retry, which the
+   * store-wide batch count at the end of this check must include. */
+  gint64 bridge_reopened_batches = 0;
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   WylPolicyFactPhysicalQuotaStatus physical_before_guard = { 0 };
   g_assert_cmpint (wyl_policy_store_get_fact_physical_quota_status (store,
@@ -1135,6 +1149,29 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
   g_assert_cmpint (wyl_policy_store_set_fact_quota_config (store,
       WYL_TENANT_DEFAULT, WYL_POLICY_FACT_QUOTA_PHYSICAL_BYTES,
       &restore_physical_quota), ==, WYRELOG_E_OK);
+  /* #553: the physical refusal cancelled the batch's logical reservation on
+   * the production path. Once the limit admits it, the identical request
+   * reopens that reservation, commits, and is charged exactly once: one row,
+   * and the 13 logical bytes of the two string values. */
+  WylPolicyFactLogicalQuotaStatus logical_before_reopen = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &logical_before_reopen), ==, WYRELOG_E_OK);
+  tsv_post (session, base_url, token, append, physical_guard_query,
+      "a\tb\nphysical\tguard\n", strlen ("a\tb\nphysical\tguard\n"),
+      200, "\"inserted\":true");
+  tsv_check_store (root, "pair", NULL, NULL, 3, 3);
+  bridge_reopened_batches = 1;
+  WylPolicyFactLogicalQuotaStatus logical_after_reopen = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &logical_after_reopen), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (logical_after_reopen.committed_rows, ==,
+      logical_before_reopen.committed_rows + 1);
+  g_assert_cmpuint (logical_after_reopen.committed_bytes, ==,
+      logical_before_reopen.committed_bytes + 13);
+  g_assert_cmpuint (logical_after_reopen.pending_rows, ==,
+      logical_before_reopen.pending_rows);
+  g_assert_cmpuint (logical_after_reopen.pending_bytes, ==,
+      logical_before_reopen.pending_bytes);
 #endif
 
   const gchar *bad_schemas[] = { "v\tstring\tfalse\ttrue   \n",
@@ -1161,14 +1198,19 @@ check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_u
       "batch_id=single&idempotency_key=single&" FACT_GUARD;
   tsv_post (session, base_url, token, single_path, single_batch, single_rows,
       strlen (single_rows), 200, "\"committed_row_delta\":4");
-  tsv_check_store (root, "single", "   ", NULL, 4, 3);
+  /* On bridge builds the reopened physical batch adds one batch and one
+   * event to the store-wide counts. */
+  tsv_check_store_counts (root, "single", "   ", NULL, 4,
+      3 + bridge_reopened_batches, 6 + bridge_reopened_batches);
 }
 
-/* The digest the daemon binds to the seam batch below: the store's canonical
- * content hash over the same schema-typed values, computed with the daemon's
- * own function. Identifiers are not part of it. Caller owns the result. */
+/* The digest the daemon binds to a one-row batch on graph seam: the store's
+ * canonical content hash over the same schema-typed values, computed with the
+ * daemon's own function. Identifiers are not part of it. Caller owns the
+ * result. */
 static gchar *
-seam_batch_payload_digest (void)
+seam_batch_payload_digest (wyl_fact_store_op_t op, const gchar *batch_id,
+    const gchar *key, const gchar *order_id, gint64 amount)
 {
   const wyl_policy_fact_relation_schema_column_t columns[] = {
     {"order_id", "symbol", FALSE, TRUE},
@@ -1185,23 +1227,23 @@ seam_batch_payload_digest (void)
     .n_columns = G_N_ELEMENTS (columns),
   };
   const wyl_fact_value_t values[] = {
-    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-9"},
-    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 9},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = order_id},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = amount},
   };
   const wyl_fact_row_t rows[] = {
     {values, G_N_ELEMENTS (values)},
   };
   const wyl_fact_store_batch_t batch = {
-    .batch_id = "seam-1",
+    .batch_id = batch_id,
     .tenant_id = WYL_TENANT_DEFAULT,
     .graph_id = "seam",
     .namespace_id = "shop",
     .relation_name = "orders",
     .schema_version = 1,
     .source = "http",
-    .request_id = "seam-1",
-    .idempotency_key = "seam-1",
-    .op = WYL_FACT_STORE_OP_RETRACT,
+    .request_id = key,
+    .idempotency_key = key,
+    .op = op,
     .rows = rows,
     .n_rows = G_N_ELEMENTS (rows),
   };
@@ -2209,13 +2251,13 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 283;
 
   /* #553: the committed-but-reconciling response discloses the payload
-   * digest, completing the identity the operation-status route requires.
-   * The real responder is reached deterministically: a reservation for the
-   * seam batch is cancelled as a definite non-commit, the identical request
-   * then replays that reservation, the store commits, and settlement finds
-   * a cancelled row and refuses, which is the 202 path. The cancelled row
-   * and the uncharged committed batch are test-only state, kept on a
-   * dedicated graph so the absolute row counts on orders are untouched. */
+   * digest, completing the identity the operation-status route requires,
+   * and the identical retry converges the operation exactly once. The real
+   * 202 responder is reached through the store's settle fault seam: the
+   * store commits, the one-shot settlement failure leaves the operation
+   * pending, and the retry replays the reservation, deduplicates the batch,
+   * settles it and charges it once. Kept on a dedicated graph so the
+   * absolute row counts on orders are untouched. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seam_create_query = g_strdup_printf
         ("tenant=%s&graph=seam&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
@@ -2234,31 +2276,15 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
           &status, &body);
   if (rc != 0 || status != 200 || strstr (body, "\"ok\":true") == NULL)
     return 368;
-  g_autofree gchar *seam_digest = seam_batch_payload_digest ();
+  g_autofree gchar *seam_digest = seam_batch_payload_digest
+        (WYL_FACT_STORE_OP_RETRACT, "seam-1", "seam-1", "o-9", 9);
   if (seam_digest == NULL)
     return 369;
-  const WylPolicyFactLogicalQuotaOperation seam_operation = {
-    .tenant_id = WYL_TENANT_DEFAULT,
-    .graph_id = "seam",
-    .batch_id = "seam-1",
-    .request_id = "seam-1",
-    .payload_digest = seam_digest,
-  };
-  WylPolicyFactLogicalOperationStatus seam_state = { 0 };
-  if (wyl_policy_store_reserve_fact_logical_quota (store, &seam_operation,
-      1, 11, &seam_state) != WYRELOG_E_OK
-      || wyl_policy_store_cancel_fact_logical_quota (store, &seam_operation,
-      TRUE, &seam_state) != WYRELOG_E_OK
-      || seam_state.state != WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+  WylPolicyFactLogicalQuotaStatus seam_usage_before = { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &seam_usage_before) != WYRELOG_E_OK)
     return 370;
-  g_autofree gchar *logical_status_query = g_strdup_printf
-        ("tenant=%s&dimension=logical_bytes&%s", WYL_TENANT_DEFAULT,
-          FACT_GUARD);
-  g_autofree gchar *logical_before = NULL;
-  rc = send_raw (session, "GET", base_url, "/facts/quota",
-          logical_status_query, admin_token, NULL, &status, &logical_before);
-  if (rc != 0 || status != 200)
-    return 371;
+  wyl_policy_store_fail_next_fact_logical_settle_for_test (store);
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seam_retract_query = g_strdup_printf
         ("tenant=%s&namespace=shop&schema_version=1&batch_id=seam-1&"
@@ -2275,7 +2301,8 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       || strstr (body, "\"batch_id\":\"seam-1\"") == NULL
       || strstr (body, seam_digest_json) == NULL)
     return 372;
-  /* The disclosed digest is the one the status route accepts. */
+  /* The disclosed digest is the one the status route accepts, and the
+   * operation is still pending: committed, not yet charged. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seam_status_query = g_strdup_printf (
     "tenant=%s&graph=seam&batch_id=seam-1&operation_id=seam-1&"
@@ -2284,13 +2311,33 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
           "/facts/quota/operation-status", seam_status_query, admin_token,
           NULL, &status, &body);
   if (rc != 0 || status != 200
-      || strstr (body, "\"state\":\"cancelled\"") == NULL)
+      || strstr (body, "\"state\":\"pending\"") == NULL)
     return 373;
-  /* The seam charged nothing: tenant usage reads exactly as before. */
+  /* The identical retry deduplicates the batch and settles the operation. */
   g_clear_pointer (&body, g_free);
-  rc = send_raw (session, "GET", base_url, "/facts/quota",
-          logical_status_query, admin_token, NULL, &status, &body);
-  if (rc != 0 || status != 200 || g_strcmp0 (body, logical_before) != 0)
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/seam/orders:retract", seam_retract_query,
+          admin_token, "order_id\tamount\no-9\t9\n", &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"inserted\":false") == NULL
+      || strstr (body, "\"quota_state\"") != NULL)
+    return 371;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", seam_status_query, admin_token,
+          NULL, &status, &body);
+  WylPolicyFactLogicalQuotaStatus seam_usage_after = { 0 };
+  if (rc != 0 || status != 200
+      || strstr (body, "\"state\":\"settled\"") == NULL
+      || strstr (body, "\"applied_rows\":1") == NULL
+      || strstr (body, "\"applied_bytes\":11") == NULL
+      || wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &seam_usage_after) != WYRELOG_E_OK
+      || seam_usage_after.committed_rows != seam_usage_before.committed_rows + 1
+      || seam_usage_after.committed_bytes
+      != seam_usage_before.committed_bytes + 11
+      || seam_usage_after.pending_rows != seam_usage_before.pending_rows
+      || seam_usage_after.pending_bytes != seam_usage_before.pending_bytes)
     return 374;
 
   /* #1098 at the HTTP boundary: a per-tenant concurrent-open limit of zero
@@ -2357,6 +2404,114 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
       == NULL
       || strstr (body, "\"charged\":0") == NULL)
     return 379;
+
+  /* #553: a reservation cancelled after a failed commit (what the daemon does
+   * on a physical_bytes refusal or a store error) is reopened by the
+   * identical request, which then commits, settles and is charged exactly
+   * once; a further identical request is a dedupe replay. The cancel is
+   * driven through the store API exactly as the handler drives it. */
+  g_autofree gchar *reopen_digest = seam_batch_payload_digest
+        (WYL_FACT_STORE_OP_ASSERT, "reopen-1", "reopen-1", "o-7", 7);
+  if (reopen_digest == NULL)
+    return 380;
+  const WylPolicyFactLogicalQuotaOperation reopen_operation = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "seam",
+    .batch_id = "reopen-1",
+    .request_id = "reopen-1",
+    .payload_digest = reopen_digest,
+  };
+  WylPolicyFactLogicalOperationStatus reopen_state = { 0 };
+  if (wyl_policy_store_reserve_fact_logical_quota (store, &reopen_operation,
+      1, 11, &reopen_state) != WYRELOG_E_OK
+      || wyl_policy_store_cancel_fact_logical_quota (store, &reopen_operation,
+      TRUE, &reopen_state) != WYRELOG_E_OK
+      || reopen_state.state != WYL_POLICY_FACT_LOGICAL_OPERATION_CANCELLED)
+    return 381;
+  WylPolicyFactLogicalQuotaStatus usage_before = { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &usage_before) != WYRELOG_E_OK)
+    return 382;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *reopen_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=reopen-1&"
+          "idempotency_key=reopen-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/seam/orders:append", reopen_query, admin_token,
+          "order_id\tamount\no-7\t7\n", &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"inserted\":true") == NULL
+      || strstr (body, "\"quota_state\"") != NULL)
+    return 383;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *reopen_status_query = g_strdup_printf (
+    "tenant=%s&graph=seam&batch_id=reopen-1&operation_id=reopen-1&"
+    "payload_digest=%s&%s", WYL_TENANT_DEFAULT, reopen_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", reopen_status_query, admin_token,
+          NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"state\":\"settled\"") == NULL
+      || strstr (body, "\"applied_rows\":1") == NULL
+      || strstr (body, "\"applied_bytes\":11") == NULL)
+    return 384;
+  WylPolicyFactLogicalQuotaStatus usage_after = { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &usage_after) != WYRELOG_E_OK
+      || usage_after.committed_rows != usage_before.committed_rows + 1
+      || usage_after.committed_bytes != usage_before.committed_bytes + 11
+      || usage_after.pending_rows != usage_before.pending_rows
+      || usage_after.pending_bytes != usage_before.pending_bytes)
+    return 385;
+  /* The identical request again is a dedupe replay: nothing more is
+   * charged and the batch is reported as already present. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/seam/orders:append", reopen_query, admin_token,
+          "order_id\tamount\no-7\t7\n", &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"inserted\":false") == NULL)
+    return 386;
+  WylPolicyFactLogicalQuotaStatus usage_replay = { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &usage_replay) != WYRELOG_E_OK
+      || usage_replay.committed_rows != usage_after.committed_rows
+      || usage_replay.committed_bytes != usage_after.committed_bytes
+      || usage_replay.pending_rows != usage_after.pending_rows
+      || usage_replay.pending_bytes != usage_after.pending_bytes)
+    return 387;
+  /* The handler's own cancel: the same batch id under a new idempotency key
+   * is refused by the store as a batch conflict after its logical reservation
+   * was taken, and the handler cancels that reservation. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *reopen_conflict_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=reopen-1&"
+          "idempotency_key=reopen-conflict&%s", WYL_TENANT_DEFAULT,
+          FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/seam/orders:append", reopen_conflict_query,
+          admin_token, "order_id\tamount\no-7\t7\n", &status, &body);
+  if (rc != 0 || status != 409
+      || strstr (body, "\"error\":\"fact_batch_conflict\"") == NULL)
+    return 388;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *reopen_conflict_status_query = g_strdup_printf (
+    "tenant=%s&graph=seam&batch_id=reopen-1&operation_id=reopen-conflict&"
+    "payload_digest=%s&%s", WYL_TENANT_DEFAULT, reopen_digest, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url,
+          "/facts/quota/operation-status", reopen_conflict_status_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"state\":\"cancelled\"") == NULL)
+    return 389;
+  WylPolicyFactLogicalQuotaStatus usage_conflict = { 0 };
+  if (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &usage_conflict) != WYRELOG_E_OK
+      || usage_conflict.committed_rows != usage_after.committed_rows
+      || usage_conflict.committed_bytes != usage_after.committed_bytes
+      || usage_conflict.pending_rows != usage_after.pending_rows
+      || usage_conflict.pending_bytes != usage_after.pending_bytes)
+    return 390;
 
   /* The same conflict remains typed after the relation contains facts. */
   g_clear_pointer (&body, g_free);
