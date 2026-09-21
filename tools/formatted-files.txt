@@ -68,6 +68,7 @@ tests/test-fact-provisioning.c
 tests/test-fact-publication-lock-matrix.c
 tests/test-fact-reconcile-move.c
 tests/test-fact-reconcile.c
+tests/test-fact-replay-scheduler.c
 tests/test-fact-replay.c
 tests/test-fact-root-writer-lease.c
 tests/test-fact-runtime.c

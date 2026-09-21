@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include <glib.h>
+#include <gio/gio.h>
 
 #include "wyrelog/error.h"
 
@@ -46,5 +46,69 @@ typedef struct _WylFactReplayScheduler WylFactReplayScheduler;
 typedef struct _WylFactReplayFuture WylFactReplayFuture;
 typedef struct _WylFactReplayJobContext WylFactReplayJobContext;
 typedef struct _WylFactResourceRecorder WylFactResourceRecorder;
+
+typedef struct
+{
+  guint64 active;
+  guint64 queued;
+  guint64 active_opens;
+  guint64 completed_total;
+  guint64 rows_total;
+  guint64 runtime_us_total;
+  guint64 queue_delay_us_total;
+  guint64 queue_delay_us_max;
+  guint64 cancelled_total;
+  guint64 timed_out_total;
+  guint64 row_limit_total;
+  guint64 queue_rejected_total;
+  guint64 quota_rejected_total;
+} WylFactReplayResourceSnapshot;
+
+typedef wyrelog_error_t (*WylFactReplayJobFunc)
+  (WylFactReplayJobContext *context, gpointer user_data);
+
+WylFactResourceRecorder *wyl_fact_resource_recorder_new (void);
+WylFactResourceRecorder *wyl_fact_resource_recorder_ref
+  (WylFactResourceRecorder *recorder);
+void wyl_fact_resource_recorder_unref (WylFactResourceRecorder *recorder);
+void wyl_fact_resource_recorder_snapshot (WylFactResourceRecorder *recorder,
+    WylFactReplayResourceSnapshot *out_snapshot);
+
+wyrelog_error_t wyl_fact_replay_scheduler_new
+  (const WylFactReplaySchedulerConfig *config,
+    WylFactResourceRecorder *recorder,
+    WylFactReplayScheduler **out_scheduler);
+WylFactReplayScheduler *wyl_fact_replay_scheduler_ref
+  (WylFactReplayScheduler *scheduler);
+void wyl_fact_replay_scheduler_unref (WylFactReplayScheduler *scheduler);
+wyrelog_error_t wyl_fact_replay_scheduler_shutdown
+  (WylFactReplayScheduler *scheduler);
+
+wyrelog_error_t wyl_fact_replay_scheduler_submit
+  (WylFactReplayScheduler *scheduler, const gchar *tenant_id,
+    const gchar *graph_id, GCancellable *cancellable,
+    WylFactReplayJobFunc function, gpointer user_data,
+    GDestroyNotify user_data_destroy, WylFactReplayFuture **out_future);
+
+WylFactReplayFuture *wyl_fact_replay_future_ref
+  (WylFactReplayFuture *future);
+void wyl_fact_replay_future_unref (WylFactReplayFuture *future);
+wyrelog_error_t wyl_fact_replay_future_wait (WylFactReplayFuture *future);
+
+GCancellable *wyl_fact_replay_job_context_get_cancellable
+  (WylFactReplayJobContext *context);
+gint64 wyl_fact_replay_job_context_get_deadline_us
+  (WylFactReplayJobContext *context);
+guint64 wyl_fact_replay_job_context_get_row_limit
+  (WylFactReplayJobContext *context);
+void wyl_fact_replay_job_context_add_rows
+  (WylFactReplayJobContext *context, guint64 rows);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactResourceRecorder,
+    wyl_fact_resource_recorder_unref)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactReplayScheduler,
+    wyl_fact_replay_scheduler_unref)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactReplayFuture,
+    wyl_fact_replay_future_unref)
 
 G_END_DECLS;
