@@ -1994,6 +1994,14 @@ if get_option('enable_fact_store').allowed()
   # also run under ASan/UBSan, where that multiplies past 60.
   test('fact-replay', test_fact_replay, timeout : 120)
 
+  test_fact_replay_scheduler = executable('test-fact-replay-scheduler',
+    'test-fact-replay-scheduler.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+
+  test('fact-replay-scheduler', test_fact_replay_scheduler, timeout : 30)
+
   # The lock matrix drives the provisioned secure publication path and its
   # test-only synchronization seams.  Keep it behind the secure bridge so a
   # prebuilt/off-bridge configuration cannot advertise evidence it cannot
