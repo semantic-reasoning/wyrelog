@@ -6,9 +6,6 @@
 
 #include "wyl-id-private.h"
 
-#define JOURNAL_MAX_BYTES (8u * 1024u * 1024u)
-#define JOURNAL_MAX_TEXT 1024u
-
 static void
 journal_graph_free (WylFactOfflineRestoreJournalGraph *graph)
 {
@@ -46,9 +43,16 @@ wyl_fact_offline_restore_journal_clear (WylFactOfflineRestoreJournal *journal)
 static gboolean
 canonical_uuid (const gchar *text)
 {
+  if (text == NULL)
+    return FALSE;
+  for (guint i = 0; i < 36; i++)
+    if (text[i] == '\0')
+      return FALSE;
+  if (text[36] != '\0')
+    return FALSE;
   wyl_id_t id;
   gchar canonical[WYL_ID_STRING_BUF];
-  return text != NULL && wyl_id_parse (text, &id) == WYRELOG_E_OK
+  return wyl_id_parse (text, &id) == WYRELOG_E_OK
          && wyl_id_format (&id, canonical, sizeof canonical) == WYRELOG_E_OK
          && g_strcmp0 (text, canonical) == 0;
 }
@@ -56,17 +60,14 @@ canonical_uuid (const gchar *text)
 static gboolean
 bounded_text (const gchar *text)
 {
-  return text != NULL && text[0] != '\0'
-         && strlen (text) <= JOURNAL_MAX_TEXT && g_utf8_validate (text, -1, NULL);
-}
-
-static gboolean
-identity_is_zero (const WylFactArtifactInventoryIdentity *identity)
-{
-  return identity != NULL && identity->domain == 0 && identity->object == 0
-         && identity->object_width == 0
-         && memcmp (identity->object_bytes, (guint8[16]) { 0 },
-             sizeof identity->object_bytes) == 0;
+  if (text == NULL)
+    return FALSE;
+  gsize length = 0;
+  while (length <= WYL_FACT_OFFLINE_RESTORE_MAX_TEXT
+      && text[length] != '\0')
+    length++;
+  return length > 0 && length <= WYL_FACT_OFFLINE_RESTORE_MAX_TEXT
+         && g_utf8_validate (text, length, NULL);
 }
 
 static gboolean
@@ -79,6 +80,15 @@ identity_representation_valid
   return identity->object_width == 16 ?
          identity->object == 0 :
          memcmp (identity->object_bytes, (guint8[16]) { 0 },
+             sizeof identity->object_bytes) == 0;
+}
+
+static gboolean
+identity_is_zero (const WylFactArtifactInventoryIdentity *identity)
+{
+  return identity_representation_valid (identity)
+         && identity->domain == 0 && identity->object == 0
+         && memcmp (identity->object_bytes, (guint8[16]) { 0 },
              sizeof identity->object_bytes) == 0;
 }
 
@@ -136,7 +146,8 @@ decode_text (const gchar *text)
 {
   gsize length = 0;
   g_autofree guchar *raw = g_base64_decode (text, &length);
-  if (raw == NULL || length == 0 || length > JOURNAL_MAX_TEXT
+  if (raw == NULL || length == 0
+      || length > WYL_FACT_OFFLINE_RESTORE_MAX_TEXT
       || memchr (raw, '\0', length) != NULL
       || !g_utf8_validate ((const gchar *) raw, length, NULL))
     return NULL;
@@ -311,7 +322,8 @@ wyl_fact_offline_restore_journal_init (WylFactOfflineRestoreJournal *journal,
   gsize manifest_length = canonical_manifest == NULL ? 0 :
       g_bytes_get_size (canonical_manifest);
   if (canonical_manifest == NULL || manifest_length == 0
-      || manifest_length > JOURNAL_MAX_BYTES || !canonical_uuid (operation_uuid)
+      || manifest_length > WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES
+      || !canonical_uuid (operation_uuid)
       || (scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
       && scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
       || (scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
@@ -672,7 +684,7 @@ wyl_fact_offline_restore_journal_encode
   digest ((const guint8 *) text->str, text->len, checksum_bytes);
   g_autofree gchar *checksum = hex_digest (checksum_bytes);
   g_string_append_printf (text, "checksum=%s\n", checksum);
-  if (text->len > JOURNAL_MAX_BYTES) {
+  if (text->len > WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES) {
     g_string_free (text, TRUE);
     return WYRELOG_E_INVALID;
   }
@@ -798,7 +810,8 @@ wyl_fact_offline_restore_journal_decode
     return WYRELOG_E_INVALID;
   gsize length = 0;
   const guint8 *raw = g_bytes_get_data (bytes, &length);
-  if (length == 0 || length > JOURNAL_MAX_BYTES
+  if (length == 0
+      || length > WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES
       || raw[length - 1] != '\n' || memchr (raw, '\0', length) != NULL)
     return WYRELOG_E_POLICY;
   g_autofree gchar *text = g_strndup ((const gchar *) raw, length);

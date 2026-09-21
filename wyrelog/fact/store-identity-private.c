@@ -4,8 +4,6 @@
 #include <string.h>
 
 #define WYL_FACT_STORE_KIND "wyrelog.fact"
-#define WYL_FACT_STORE_FORMAT_VERSION 1
-#define WYL_FACT_STORE_PATH_ENCODING_VERSION 1
 
 static gint identity_test_fault;
 G_LOCK_DEFINE_STATIC (identity_open);
@@ -60,15 +58,15 @@ gboolean
 wyl_fact_store_identity_input_is_valid (const WylFactStoreIdentity *identity)
 {
   return identity != NULL
-      && identity->tenant_id != NULL && identity->tenant_id[0] != '\0'
-      && g_utf8_validate (identity->tenant_id, -1, NULL)
-      && identity->graph_id != NULL && identity->graph_id[0] != '\0'
-      && g_utf8_validate (identity->graph_id, -1, NULL)
-      && identity_uuid_is_canonical (identity->store_uuid)
-      && identity->format_version > 0
-      && identity->format_version <= G_MAXINT64
-      && identity->path_encoding_version > 0
-      && identity->path_encoding_version <= G_MAXINT64;
+         && identity->tenant_id != NULL && identity->tenant_id[0] != '\0'
+         && g_utf8_validate (identity->tenant_id, -1, NULL)
+         && identity->graph_id != NULL && identity->graph_id[0] != '\0'
+         && g_utf8_validate (identity->graph_id, -1, NULL)
+         && identity_uuid_is_canonical (identity->store_uuid)
+         && identity->format_version > 0
+         && identity->format_version <= G_MAXINT64
+         && identity->path_encoding_version > 0
+         && identity->path_encoding_version <= G_MAXINT64;
 }
 
 gboolean
@@ -107,7 +105,7 @@ wyl_fact_store_identity_process_guard_unlock (void)
 }
 
 void wyl_fact_store_identity_process_guard_set_test_hook
-    (WylFactStoreIdentityGuardTestHook hook, gpointer user_data)
+  (WylFactStoreIdentityGuardTestHook hook, gpointer user_data)
 {
   G_LOCK (identity_guard_test_hook);
   identity_guard_test_hook = hook;
@@ -159,7 +157,7 @@ query_count (const WylFactStoreIdentityExecutor *executor, const gchar *sql,
   CountResult result = { TRUE, FALSE, 0 };
   guint64 rows = 0;
   wyrelog_error_t rc = executor->execute (executor->context, sql, NULL, 0,
-      count_row, &result, &rows);
+          count_row, &result, &rows);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!result.valid || !result.seen || rows != 1)
@@ -174,7 +172,7 @@ execute_no_rows (const WylFactStoreIdentityExecutor *executor,
 {
   guint64 rows = 0;
   return executor->execute (executor->context, sql, params, n_params, NULL,
-      NULL, &rows);
+             NULL, &rows);
 }
 
 static wyrelog_error_t
@@ -183,9 +181,9 @@ identity_metadata_exists (const WylFactStoreIdentityExecutor *executor,
 {
   gint64 count = 0;
   wyrelog_error_t rc = query_count (executor,
-      "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
-      "WHERE schema_name='main' "
-      "AND table_name='fact_store_metadata' AND NOT internal;", &count);
+          "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
+          "WHERE schema_name='main' "
+          "AND table_name='fact_store_metadata' AND NOT internal;", &count);
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_exists = count == 1;
@@ -198,17 +196,17 @@ identity_catalog_is_empty (const WylFactStoreIdentityExecutor *executor,
 {
   static const gchar *queries[] = {
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
-        "WHERE NOT internal;",
+    "WHERE NOT internal;",
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_views() "
-        "WHERE NOT internal;",
+    "WHERE NOT internal;",
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_sequences();",
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_types() "
-        "WHERE NOT internal;",
+    "WHERE NOT internal;",
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_functions() "
-        "WHERE NOT internal;",
+    "WHERE NOT internal;",
     "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_schemas() "
-        "WHERE NOT internal "
-        "AND schema_name NOT IN ('main','information_schema','pg_catalog');",
+    "WHERE NOT internal "
+    "AND schema_name NOT IN ('main','information_schema','pg_catalog');",
   };
   gint64 total = 0;
   for (gsize i = 0; i < G_N_ELEMENTS (queries); i++) {
@@ -229,8 +227,8 @@ bytes_equal_literal (const WylFactStoreIdentityCell *cell, const gchar *literal)
 {
   gsize length = strlen (literal);
   return cell->type == WYL_FACT_STORE_IDENTITY_CELL_BYTES
-      && cell->as.bytes.length == length
-      && memcmp (cell->as.bytes.data, literal, length) == 0;
+         && cell->as.bytes.length == length
+         && memcmp (cell->as.bytes.data, literal, length) == 0;
 }
 
 static gboolean
@@ -263,13 +261,13 @@ ddl_row (const WylFactStoreIdentityCell *cells, gsize n_cells,
       || cells[0].type != WYL_FACT_STORE_IDENTITY_CELL_BYTES
       || cells[0].as.bytes.length == 0
       || !g_utf8_validate ((const gchar *) cells[0].as.bytes.data,
-          cells[0].as.bytes.length, NULL)) {
+      cells[0].as.bytes.length, NULL)) {
     result->valid = FALSE;
     return FALSE;
   }
   result->seen = TRUE;
   g_autofree gchar *ddl = g_strndup ((const gchar *) cells[0].as.bytes.data,
-      cells[0].as.bytes.length);
+          cells[0].as.bytes.length);
   g_autofree gchar *lower = ddl != NULL ? g_ascii_strdown (ddl, -1) : NULL;
   result->valid = lower != NULL && strstr (lower, "collate") == NULL;
   return result->valid;
@@ -287,7 +285,7 @@ validate_identity_schema (const WylFactStoreIdentityExecutor *executor)
   SchemaColumnsResult columns = { TRUE, 0 };
   guint64 rows = 0;
   wyrelog_error_t rc = executor->execute (executor->context, columns_sql,
-      NULL, 0, schema_columns_row, &columns, &rows);
+          NULL, 0, schema_columns_row, &columns, &rows);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (!columns.valid || rows != 2 || columns.row != 2)
@@ -297,24 +295,24 @@ validate_identity_schema (const WylFactStoreIdentityExecutor *executor)
   gint64 table_shape_count = 0;
   gint64 primary_key_shape_count = 0;
   rc = query_count (executor,
-      "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_constraints() "
-      "WHERE schema_name='main' "
-      "AND table_name='fact_store_metadata';", &total_count);
+          "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_constraints() "
+          "WHERE schema_name='main' "
+          "AND table_name='fact_store_metadata';", &total_count);
   if (rc == WYRELOG_E_OK)
     rc = query_count (executor,
-        "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
-        "WHERE schema_name='main' "
-        "AND table_name='fact_store_metadata' AND NOT internal "
-        "AND has_primary_key AND column_count=2 AND index_count=1 "
-        "AND check_constraint_count=0;", &table_shape_count);
+            "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
+            "WHERE schema_name='main' "
+            "AND table_name='fact_store_metadata' AND NOT internal "
+            "AND has_primary_key AND column_count=2 AND index_count=1 "
+            "AND check_constraint_count=0;", &table_shape_count);
   if (rc == WYRELOG_E_OK)
     rc = query_count (executor,
-        "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_constraints() "
-        "WHERE schema_name='main' "
-        "AND table_name='fact_store_metadata' "
-        "AND constraint_type='PRIMARY KEY' "
-        "AND constraint_text='PRIMARY KEY(\"key\")';",
-        &primary_key_shape_count);
+            "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_constraints() "
+            "WHERE schema_name='main' "
+            "AND table_name='fact_store_metadata' "
+            "AND constraint_type='PRIMARY KEY' "
+            "AND constraint_text='PRIMARY KEY(\"key\")';",
+            &primary_key_shape_count);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (total_count != 3 || table_shape_count != 1
@@ -324,10 +322,10 @@ validate_identity_schema (const WylFactStoreIdentityExecutor *executor)
   DdlResult ddl = { TRUE, FALSE };
   rows = 0;
   rc = executor->execute (executor->context,
-      "SELECT sql FROM duckdb_tables() "
-      "WHERE schema_name='main' "
-      "AND table_name='fact_store_metadata' AND NOT internal;",
-      NULL, 0, ddl_row, &ddl, &rows);
+          "SELECT sql FROM duckdb_tables() "
+          "WHERE schema_name='main' "
+          "AND table_name='fact_store_metadata' AND NOT internal;",
+          NULL, 0, ddl_row, &ddl, &rows);
   if (rc != WYRELOG_E_OK)
     return rc;
   return ddl.valid && ddl.seen && rows == 1 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
@@ -349,9 +347,9 @@ identity_values_row (const WylFactStoreIdentityCell *cells, gsize n_cells,
       || memchr (cells[0].as.bytes.data, '\0', cells[0].as.bytes.length)
       || memchr (cells[1].as.bytes.data, '\0', cells[1].as.bytes.length)
       || !g_utf8_validate ((const gchar *) cells[0].as.bytes.data,
-          cells[0].as.bytes.length, NULL)
+      cells[0].as.bytes.length, NULL)
       || !g_utf8_validate ((const gchar *) cells[1].as.bytes.data,
-          cells[1].as.bytes.length, NULL)) {
+      cells[1].as.bytes.length, NULL)) {
     result->valid = FALSE;
     return FALSE;
   }
@@ -368,7 +366,7 @@ identity_values_row (const WylFactStoreIdentityCell *cells, gsize n_cells,
   }
   result->values[slot] =
       g_strndup ((const gchar *) cells[1].as.bytes.data,
-      cells[1].as.bytes.length);
+          cells[1].as.bytes.length);
   if (result->values[slot] == NULL) {
     result->valid = FALSE;
     return FALSE;
@@ -386,8 +384,8 @@ validate_identity_values (const WylFactStoreIdentityExecutor *executor,
   IdentityValuesResult values = {.valid = TRUE };
   guint64 rows = 0;
   wyrelog_error_t rc = executor->execute (executor->context,
-      "SELECT key,value FROM main.fact_store_metadata;", NULL, 0,
-      identity_values_row, &values, &rows);
+          "SELECT key,value FROM main.fact_store_metadata;", NULL, 0,
+          identity_values_row, &values, &rows);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     goto out;
@@ -468,9 +466,9 @@ validate_identity_unlocked (const WylFactStoreIdentityExecutor *executor,
     executor->validation_barrier (executor->context);
   gint64 audit_tables = 0;
   rc = query_count (executor,
-      "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
-      "WHERE schema_name='main' "
-      "AND table_name='audit_events' AND NOT internal;", &audit_tables);
+          "SELECT CAST(COUNT(*) AS BIGINT) FROM duckdb_tables() "
+          "WHERE schema_name='main' "
+          "AND table_name='audit_events' AND NOT internal;", &audit_tables);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     return rc;
@@ -488,7 +486,7 @@ validate_identity_snapshot (const WylFactStoreIdentityExecutor *executor,
     WylFactStoreIdentityResult *out_result)
 {
   wyrelog_error_t rc = execute_no_rows (executor, "BEGIN TRANSACTION;", NULL,
-      0);
+          0);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     return rc;
@@ -509,7 +507,7 @@ static gboolean
 identity_fault (WylFactStoreIdentityTestFault fault)
 {
   return g_atomic_int_compare_and_exchange (&identity_test_fault, fault,
-      WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE);
+             WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE);
 }
 
 void
@@ -526,7 +524,8 @@ bytes_param (const gchar *value)
   WylFactStoreIdentityCell cell = {
     .type = WYL_FACT_STORE_IDENTITY_CELL_BYTES,
     .as.bytes = {
-        (const guint8 *) value, strlen (value)}
+      (const guint8 *) value, strlen (value)
+    }
   };
   return cell;
 }
@@ -539,8 +538,8 @@ insert_identity_value (const WylFactStoreIdentityExecutor *executor,
     bytes_param (key), bytes_param (value)
   };
   return execute_no_rows (executor,
-      "INSERT INTO main.fact_store_metadata(key,value) VALUES (?,?);",
-      params, G_N_ELEMENTS (params));
+             "INSERT INTO main.fact_store_metadata(key,value) VALUES (?,?);",
+             params, G_N_ELEMENTS (params));
 }
 
 static wyrelog_error_t
@@ -552,7 +551,7 @@ initialize_identity_unlocked (const WylFactStoreIdentityExecutor *executor,
   gboolean injected_rollback_failure = FALSE;
   gboolean empty = FALSE;
   wyrelog_error_t rc = execute_no_rows (executor, "BEGIN TRANSACTION;", NULL,
-      0);
+          0);
   if (rc != WYRELOG_E_OK) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     return rc;
@@ -566,8 +565,8 @@ initialize_identity_unlocked (const WylFactStoreIdentityExecutor *executor,
     goto rollback;
   }
   rc = execute_no_rows (executor,
-      "CREATE TABLE main.fact_store_metadata("
-      "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);", NULL, 0);
+          "CREATE TABLE main.fact_store_metadata("
+          "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);", NULL, 0);
   if (rc != WYRELOG_E_OK)
     goto internal_or_open;
   if (identity_fault (WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE))
@@ -637,8 +636,8 @@ internal_or_open:
 rollback:
   if (in_transaction
       && (injected_rollback_failure
-          || execute_no_rows (executor, "ROLLBACK;", NULL,
-              0) != WYRELOG_E_OK)) {
+      || execute_no_rows (executor, "ROLLBACK;", NULL,
+      0) != WYRELOG_E_OK)) {
     *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
     return WYRELOG_E_INTERNAL;
   }
@@ -659,7 +658,7 @@ wyl_fact_store_identity_execute (const WylFactStoreIdentityExecutor *executor,
 
   gboolean missing = FALSE;
   wyrelog_error_t rc = validate_identity_snapshot (executor, identity,
-      &missing, out_result);
+          &missing, out_result);
   if (rc != WYRELOG_E_OK && missing) {
     switch (mode) {
       case WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY:

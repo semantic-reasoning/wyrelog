@@ -51,6 +51,7 @@ wyrelog_sources = files(
   'fact/replay-scheduler-private.c',
   'fact/offline-backup-manifest-private.c',
   'fact/offline-restore-journal-private.c',
+  'fact/offline-restore-validation-private.c',
   'fact/graph-locator-private.c',
   'fact/reconcile-private.c',
   'fact/reconcile-move-private.c',

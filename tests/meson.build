@@ -53,6 +53,19 @@ test_offline_restore_journal = executable('test-fact-offline-restore-journal',
 )
 test('fact-offline-restore-journal', test_offline_restore_journal)
 
+test_offline_restore_validation = executable(
+  'test-fact-offline-restore-validation',
+  'test-fact-offline-restore-validation.c',
+  '../wyrelog/fact/offline-backup-manifest-private.c',
+  '../wyrelog/fact/offline-restore-journal-private.c',
+  '../wyrelog/fact/offline-restore-validation-private.c',
+  '../wyrelog/wyl-id.c',
+  include_directories : [include_directories('..'),
+    include_directories('../wyrelog')],
+  dependencies : [glib_dep, libchronoid_dep],
+)
+test('fact-offline-restore-validation', test_offline_restore_validation)
+
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
 # locale's codec.  This asserts strictness; it does not change the default.
