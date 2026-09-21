@@ -14,6 +14,9 @@
 
 G_BEGIN_DECLS;
 
+#define WYL_FACT_STORE_FORMAT_VERSION 1u
+#define WYL_FACT_STORE_PATH_ENCODING_VERSION 1u
+
 typedef struct
 {
   const gchar *tenant_id;

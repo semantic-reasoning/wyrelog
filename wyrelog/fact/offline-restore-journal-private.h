@@ -11,6 +11,8 @@ G_BEGIN_DECLS
 
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION 1u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
+#define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
+#define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
 
 /*
  * Pure, bounded serialization and recovery-decision contract for #552.

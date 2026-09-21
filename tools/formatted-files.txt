@@ -62,6 +62,7 @@ tests/test-fact-graph-seal.c
 tests/test-fact-offline-backup-manifest.c
 tests/test-fact-offline-backup-source.c
 tests/test-fact-offline-restore-journal.c
+tests/test-fact-offline-restore-validation.c
 tests/test-fact-open-concurrent-process.c
 tests/test-fact-provisioning-construct.c
 tests/test-fact-provisioning-run.c
@@ -266,6 +267,8 @@ wyrelog/fact/offline-backup-source-private.c
 wyrelog/fact/offline-backup-source-private.h
 wyrelog/fact/offline-restore-journal-private.c
 wyrelog/fact/offline-restore-journal-private.h
+wyrelog/fact/offline-restore-validation-private.c
+wyrelog/fact/offline-restore-validation-private.h
 wyrelog/fact/open-reservation-private.c
 wyrelog/fact/open-reservation-private.h
 wyrelog/fact/provisioning-construct-private.c
@@ -294,6 +297,7 @@ wyrelog/fact/secure-duckdb-filesystem-contract-private.h
 wyrelog/fact/secure-duckdb-filesystem-test-faults-private.h
 wyrelog/fact/store-connection-private.h
 wyrelog/fact/store-duckdb-config-test-seams-private.h
+wyrelog/fact/store-identity-private.c
 wyrelog/fact/store-identity-types-private.h
 wyrelog/fact/store-open-private.c
 wyrelog/fact/store-open-private.h
