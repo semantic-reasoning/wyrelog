@@ -42,6 +42,55 @@ run_child_with_env (gchar **argv, gchar **envp, gchar **stdout_buf,
   g_assert_no_error (error);
 }
 
+/* Report what the child actually printed when an expected diagnostic is
+ * missing.  The bare assertion says only that a substring was absent, which
+ * is the least useful half of the evidence (#1186). */
+static void
+assert_child_stderr_has (const gchar *stderr_buf, const gchar *needle)
+{
+  if (stderr_buf != NULL && g_strstr_len (stderr_buf, -1, needle) != NULL)
+    return;
+  g_printerr ("expected \"%s\" on the child's stderr, which was: %s\n",
+      needle, stderr_buf != NULL ? stderr_buf : "(null)");
+  g_assert_not_reached ();
+}
+
+/* A keyfile fixture only means anything if wyctl can find the
+ * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source
+ * without recursing into parent sources (wyctl_open_settings), so this
+ * mirrors that lookup exactly; a recursive one would accept environments
+ * wyctl itself rejects.  The source covers GSETTINGS_SCHEMA_DIR, which meson
+ * points at this build's compiled schema, and the data dirs, where an
+ * installed wyrelog ships one -- whichever of those it resolves to first.
+ *
+ * With no schema reachable there, wyctl reports "missing daemon URL" rather
+ * than reading the fixture, and only status-gsettings-supplies-daemon-url
+ * notices: it fails on its own downstream assertion, which reads as a
+ * resolver bug and is what #1186 recorded as an unexplained failure.  Every
+ * other fixture case passes while proving nothing -- the kill-switch case
+ * because "missing daemon URL" is precisely what it asserts, the
+ * CLI-override case because its URL comes from the command line either way,
+ * and the four subcommand cases because they exit at option parsing before
+ * any resolution.  Abort here instead, naming the cause: a skip would be
+ * counted as a pass, and in a correct environment this cannot fire. */
+static void
+assert_wyctl_gsettings_schema_available (void)
+{
+  GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+  g_autoptr (GSettingsSchema) schema = source != NULL
+      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", FALSE)
+      : NULL;
+  if (schema != NULL)
+    return;
+  const gchar *dir = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_printerr ("wyctl cannot reach the org.wyrelog.wyctl GSettings schema in "
+      "this environment, so the keyfile fixture below would prove nothing "
+      "(GSETTINGS_SCHEMA_DIR=%s).  Run this test through meson, which points "
+      "the schema source at the compiled schema.\n",
+      dir != NULL ? dir : "(unset)");
+  g_assert_not_reached ();
+}
+
 /* Build a temporary XDG_CONFIG_HOME directory that holds a GSettings
  * keyfile with the supplied org.wyrelog.wyctl values, and return the
  * directory path (owned by caller). Caller must remove the directory
@@ -52,6 +101,7 @@ run_child_with_env (gchar **argv, gchar **envp, gchar **stdout_buf,
 static gchar *
 make_keyfile_xdg_dir (const gchar *const *keys, const gchar *const *values)
 {
+  assert_wyctl_gsettings_schema_available ();
   g_autoptr (GError) error = NULL;
   gchar *xdg = g_dir_make_tmp ("wyctl-xdg-XXXXXX", &error);
   g_assert_no_error (error);
@@ -2459,8 +2509,8 @@ test_status_gsettings_supplies_daemon_url (void)
   remove_dir_recursive (xdg);
 
   g_assert_false (wait_status_is_success (wait_status));
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-      "wyctl: daemon unavailable: http://127.0.0.1:1"));
+  assert_child_stderr_has (stderr_buf,
+      "wyctl: daemon unavailable: http://127.0.0.1:1");
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
 }
 
@@ -2492,8 +2542,8 @@ test_status_cli_overrides_gsettings (void)
   remove_dir_recursive (xdg);
 
   g_assert_false (wait_status_is_success (wait_status));
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-      "wyctl: daemon unavailable: http://127.0.0.1:1"));
+  assert_child_stderr_has (stderr_buf,
+      "wyctl: daemon unavailable: http://127.0.0.1:1");
   g_assert_null (g_strstr_len (stderr_buf, -1,
       "from-gsettings.example.invalid"));
 }
@@ -2729,7 +2779,7 @@ test_status_kill_switch_disables_gsettings (void)
   remove_dir_recursive (xdg);
 
   g_assert_false (wait_status_is_success (wait_status));
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+  assert_child_stderr_has (stderr_buf, "wyctl: missing daemon URL");
   g_assert_null (g_strstr_len (stderr_buf, -1, "daemon unavailable:"));
 }
 
