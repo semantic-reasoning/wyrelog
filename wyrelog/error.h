@@ -70,6 +70,10 @@ typedef enum wyrelog_error_t
    * conflict without misclassifying authority or schema failures.
    */
   WYRELOG_E_CONFLICT = -13,
+  /* A bounded operation exceeded its configured row or resource budget. */
+  WYRELOG_E_RESOURCE_LIMIT = -14,
+  /* A bounded operation exceeded its monotonic execution deadline. */
+  WYRELOG_E_TIMED_OUT = -15,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);

@@ -52,6 +52,9 @@ typedef enum
   WYL_FACT_GRAPH_REPLAY_SCHEMA_MISMATCH,
   WYL_FACT_GRAPH_REPLAY_FAILED,
   WYL_FACT_GRAPH_REPLAY_INTERNAL,
+  WYL_FACT_GRAPH_REPLAY_CANCELLED,
+  WYL_FACT_GRAPH_REPLAY_TIMED_OUT,
+  WYL_FACT_GRAPH_REPLAY_RESOURCE_LIMIT,
 } WylFactGraphReplayClass;
 
 /*
@@ -158,6 +161,10 @@ typedef struct _WylFactGraphLockSet WylFactGraphLockSet;
 
 typedef wyrelog_error_t (*WylFactGraphBuildFunc) (const WylFactGraphKey * key,
     WylEngine ** out_engine, gpointer user_data);
+/* Runs under the entry state lock at the engine-publication linearization
+ * point. It must be callback-free, nonblocking, and must not re-enter runtime
+ * APIs. */
+typedef wyrelog_error_t (*WylFactGraphPublishCheckFunc) (gpointer user_data);
 typedef wyrelog_error_t (*WylFactGraphSnapshotFunc) (WylEngine * engine,
     gpointer user_data);
 typedef wyrelog_error_t (*WylFactGraphRuntimeStatusFunc) (const
@@ -241,6 +248,11 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_refresh
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphBuildFunc build, gpointer user_data,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_fact_graph_runtime_manager_refresh_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status);
 wyrelog_error_t wyl_fact_graph_runtime_manager_get_status
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphRuntimeStatus * out_status);
@@ -627,6 +639,11 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_refresh_closed
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphBuildFunc build, gpointer user_data,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_fact_graph_runtime_manager_refresh_closed_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status);
 
 /* Rebuild a graph while CLOSED and publish/open it as one entry-local
  * operation.  The publication marker makes ordinary open_admission callers
@@ -637,6 +654,12 @@ wyl_fact_graph_runtime_manager_publish_closed_and_open
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     WylFactGraphBuildFunc build, gpointer user_data,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_publish_closed_and_open_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status);
 
 typedef struct
 {
@@ -691,6 +714,10 @@ wyrelog_error_t wyl_fact_graph_runtime_publication_begin_closed
 wyrelog_error_t wyl_fact_graph_runtime_publication_refresh
   (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,
     gpointer user_data, WylFactGraphRuntimeStatus *out_status);
+wyrelog_error_t wyl_fact_graph_runtime_publication_refresh_checked
+  (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,
+    gpointer user_data, WylFactGraphPublishCheckFunc publish_check,
+    gpointer publish_check_data, WylFactGraphRuntimeStatus *out_status);
 wyrelog_error_t wyl_fact_graph_runtime_publication_open
   (WylFactGraphRuntimePublication *publication);
 /* Failure leaves the token/barrier/writer intact for checked cleanup. */

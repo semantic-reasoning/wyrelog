@@ -9,6 +9,7 @@
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/replay-scheduler-private.h"
 
 G_BEGIN_DECLS;
 
@@ -131,6 +132,12 @@ wyrelog_error_t wyl_fact_replay_refresh_graph (wyl_policy_store_t * policy,
     const gchar * fact_root, const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeManager * runtime_manager,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_fact_replay_refresh_graph_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactReplayJobContext *job_context,
+    WylFactGraphRuntimeStatus *out_status);
 
 /* Rebuild and publish one graph while its runtime admission remains CLOSED.
  * This is the publication half of a graph unseal sequencer: callers must

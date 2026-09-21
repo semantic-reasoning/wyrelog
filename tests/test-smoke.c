@@ -19,6 +19,8 @@ G_STATIC_ASSERT (WYRELOG_E_BREAK_GLASS_DISABLED == -10);
 G_STATIC_ASSERT (WYRELOG_E_BUSY == -11);
 G_STATIC_ASSERT (WYRELOG_E_CANCELLED == -12);
 G_STATIC_ASSERT (WYRELOG_E_CONFLICT == -13);
+G_STATIC_ASSERT (WYRELOG_E_RESOURCE_LIMIT == -14);
+G_STATIC_ASSERT (WYRELOG_E_TIMED_OUT == -15);
 
 int
 main (void)
@@ -32,6 +34,12 @@ main (void)
     return wyl_test_normalize_exit_status (6);
   if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_CONFLICT), "conflict") != 0)
     return wyl_test_normalize_exit_status (7);
+  if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_RESOURCE_LIMIT),
+      "resource limit exceeded") != 0)
+    return wyl_test_normalize_exit_status (8);
+  if (g_strcmp0 (wyrelog_error_string (WYRELOG_E_TIMED_OUT),
+      "operation timed out") != 0)
+    return wyl_test_normalize_exit_status (9);
 
   const gchar *version = wyrelog_version_string ();
   if (version == NULL || version[0] == '\0')

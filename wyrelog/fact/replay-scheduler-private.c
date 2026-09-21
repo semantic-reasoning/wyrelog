@@ -12,6 +12,15 @@ typedef enum
   REPLAY_JOB_DONE,
 } ReplayJobState;
 
+typedef enum
+{
+  REPLAY_OUTCOME_OPEN,
+  REPLAY_OUTCOME_COMMITTED,
+  REPLAY_OUTCOME_CANCELLED,
+  REPLAY_OUTCOME_TIMED_OUT,
+  REPLAY_OUTCOME_RESOURCE_LIMIT,
+} ReplayOutcome;
+
 typedef struct _ReplayTenantQueue ReplayTenantQueue;
 typedef struct _ReplayJob ReplayJob;
 
@@ -54,9 +63,19 @@ struct _ReplayJob
   gulong cancel_handler;
   WylFactReplayFuture *future;
   ReplayJobState state;
+  gint outcome;
   gboolean cancel_requested;
   gint64 queued_at_us;
 };
+
+typedef struct
+{
+  ReplayJob *job;
+  GMutex mutex;
+  GCond changed;
+  gint64 deadline_us;
+  gboolean done;
+} ReplayWatchdog;
 
 struct _WylFactReplayJobContext
 {
@@ -150,6 +169,12 @@ recorder_complete_active (WylFactResourceRecorder *recorder,
   if (result == WYRELOG_E_CANCELLED)
     recorder->values.cancelled_total = saturating_add
           (recorder->values.cancelled_total, 1);
+  else if (result == WYRELOG_E_TIMED_OUT)
+    recorder->values.timed_out_total = saturating_add
+          (recorder->values.timed_out_total, 1);
+  else if (result == WYRELOG_E_RESOURCE_LIMIT)
+    recorder->values.row_limit_total = saturating_add
+          (recorder->values.row_limit_total, 1);
   g_mutex_unlock (&recorder->mutex);
 }
 
@@ -314,7 +339,9 @@ replay_job_cancelled (GCancellable *cancellable, gpointer user_data)
   (void) cancellable;
   ReplayJob *job = user_data;
   WylFactReplayScheduler *scheduler = job->scheduler;
-  g_cancellable_cancel (job->work_cancellable);
+  if (g_atomic_int_compare_and_exchange (&job->outcome,
+      REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_CANCELLED))
+    g_cancellable_cancel (job->work_cancellable);
 
   g_mutex_lock (&scheduler->mutex);
   if (job->state == REPLAY_JOB_NEW) {
@@ -329,6 +356,25 @@ replay_job_cancelled (GCancellable *cancellable, gpointer user_data)
     g_cond_signal (&scheduler->reaper_changed);
   }
   g_mutex_unlock (&scheduler->mutex);
+}
+
+static gpointer
+replay_watchdog (gpointer data)
+{
+  ReplayWatchdog *watchdog = data;
+  gboolean timed_out = FALSE;
+  g_mutex_lock (&watchdog->mutex);
+  while (!watchdog->done
+      && g_cond_wait_until (&watchdog->changed, &watchdog->mutex,
+      watchdog->deadline_us))
+    ;
+  if (!watchdog->done)
+    timed_out = g_atomic_int_compare_and_exchange (&watchdog->job->outcome,
+            REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_TIMED_OUT);
+  g_mutex_unlock (&watchdog->mutex);
+  if (timed_out)
+    g_cancellable_cancel (watchdog->job->work_cancellable);
+  return NULL;
 }
 
 static ReplayJob *
@@ -385,10 +431,24 @@ replay_worker (gpointer data)
           : started_at_us + scheduler->config.time_limit_us,
       .row_limit = scheduler->config.row_limit,
     };
+    ReplayWatchdog watchdog = {
+      .job = job,
+      .deadline_us = context.deadline_us,
+    };
+    g_mutex_init (&watchdog.mutex);
+    g_cond_init (&watchdog.changed);
+    GThread *watchdog_thread = g_thread_new ("fact-replay-watchdog",
+            replay_watchdog, &watchdog);
     wyrelog_error_t result = job->function (&context, job->user_data);
-    if (result == WYRELOG_E_OK
-        && g_cancellable_is_cancelled (job->work_cancellable))
-      result = WYRELOG_E_CANCELLED;
+    g_mutex_lock (&watchdog.mutex);
+    watchdog.done = TRUE;
+    g_cond_signal (&watchdog.changed);
+    g_mutex_unlock (&watchdog.mutex);
+    g_thread_join (watchdog_thread);
+    g_cond_clear (&watchdog.changed);
+    g_mutex_clear (&watchdog.mutex);
+    if (result == WYRELOG_E_OK)
+      result = wyl_fact_replay_job_context_checkpoint (&context);
     gint64 runtime_us = MAX (0, g_get_monotonic_time () - started_at_us);
 
     g_mutex_lock (&scheduler->mutex);
@@ -532,8 +592,10 @@ wyl_fact_replay_scheduler_shutdown (WylFactReplayScheduler *scheduler)
   g_hash_table_iter_init (&active_iter, scheduler->active_jobs);
   while (g_hash_table_iter_next (&active_iter, &active_job, NULL)) {
     ReplayJob *job = active_job;
-    g_ptr_array_add (active_cancellables,
-        g_object_ref (job->work_cancellable));
+    if (g_atomic_int_compare_and_exchange (&job->outcome,
+        REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_CANCELLED))
+      g_ptr_array_add (active_cancellables,
+          g_object_ref (job->work_cancellable));
   }
   g_cond_broadcast (&scheduler->changed);
   g_cond_broadcast (&scheduler->reaper_changed);
@@ -699,6 +761,75 @@ wyl_fact_replay_job_context_add_rows (WylFactReplayJobContext *context,
 {
   if (context != NULL)
     context->rows = saturating_add (context->rows, rows);
+}
+
+wyrelog_error_t
+wyl_fact_replay_job_context_checkpoint (WylFactReplayJobContext *context)
+{
+  if (context == NULL)
+    return WYRELOG_E_INVALID;
+  gint outcome = g_atomic_int_get (&context->job->outcome);
+  if (outcome == REPLAY_OUTCOME_COMMITTED)
+    return WYRELOG_E_OK;
+  if (outcome == REPLAY_OUTCOME_TIMED_OUT)
+    return WYRELOG_E_TIMED_OUT;
+  if (outcome == REPLAY_OUTCOME_RESOURCE_LIMIT)
+    return WYRELOG_E_RESOURCE_LIMIT;
+  if (outcome == REPLAY_OUTCOME_CANCELLED
+      || g_cancellable_is_cancelled (context->job->work_cancellable))
+    return WYRELOG_E_CANCELLED;
+  if (g_get_monotonic_time () >= context->deadline_us) {
+    if (g_atomic_int_compare_and_exchange (&context->job->outcome,
+        REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_TIMED_OUT))
+      g_cancellable_cancel (context->job->work_cancellable);
+    outcome = g_atomic_int_get (&context->job->outcome);
+    if (outcome == REPLAY_OUTCOME_COMMITTED)
+      return WYRELOG_E_OK;
+    if (outcome == REPLAY_OUTCOME_CANCELLED)
+      return WYRELOG_E_CANCELLED;
+    return WYRELOG_E_TIMED_OUT;
+  }
+  if (context->rows > context->row_limit)
+    return WYRELOG_E_RESOURCE_LIMIT;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_replay_job_context_charge_rows (WylFactReplayJobContext *context,
+    guint64 rows)
+{
+  if (context == NULL)
+    return WYRELOG_E_INVALID;
+  context->rows = saturating_add (context->rows, rows);
+  if (context->rows > context->row_limit)
+    g_atomic_int_compare_and_exchange (&context->job->outcome,
+        REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_RESOURCE_LIMIT);
+  return wyl_fact_replay_job_context_checkpoint (context);
+}
+
+wyrelog_error_t
+wyl_fact_replay_job_context_commit (WylFactReplayJobContext *context)
+{
+  if (context == NULL)
+    return WYRELOG_E_INVALID;
+  if (g_get_monotonic_time () >= context->deadline_us)
+    g_atomic_int_compare_and_exchange (&context->job->outcome,
+        REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_TIMED_OUT);
+  g_atomic_int_compare_and_exchange (&context->job->outcome,
+      REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_COMMITTED);
+  switch (g_atomic_int_get (&context->job->outcome)) {
+    case REPLAY_OUTCOME_COMMITTED:
+      return WYRELOG_E_OK;
+    case REPLAY_OUTCOME_CANCELLED:
+      return WYRELOG_E_CANCELLED;
+    case REPLAY_OUTCOME_TIMED_OUT:
+      return WYRELOG_E_TIMED_OUT;
+    case REPLAY_OUTCOME_RESOURCE_LIMIT:
+      return WYRELOG_E_RESOURCE_LIMIT;
+    case REPLAY_OUTCOME_OPEN:
+    default:
+      return WYRELOG_E_INTERNAL;
+  }
 }
 
 void

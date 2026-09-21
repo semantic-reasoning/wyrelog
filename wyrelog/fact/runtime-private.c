@@ -336,6 +336,12 @@ wyl_fact_graph_replay_class_name (WylFactGraphReplayClass replay_class)
       return "replay_failed";
     case WYL_FACT_GRAPH_REPLAY_INTERNAL:
       return "internal";
+    case WYL_FACT_GRAPH_REPLAY_CANCELLED:
+      return "cancelled";
+    case WYL_FACT_GRAPH_REPLAY_TIMED_OUT:
+      return "timed_out";
+    case WYL_FACT_GRAPH_REPLAY_RESOURCE_LIMIT:
+      return "resource_limit";
     default:
       return "internal";
   }
@@ -376,6 +382,12 @@ classify_replay_error (wyrelog_error_t rc)
     case WYRELOG_E_INTERNAL:
     case WYRELOG_E_INVALID:
       return WYL_FACT_GRAPH_REPLAY_INTERNAL;
+    case WYRELOG_E_CANCELLED:
+      return WYL_FACT_GRAPH_REPLAY_CANCELLED;
+    case WYRELOG_E_TIMED_OUT:
+      return WYL_FACT_GRAPH_REPLAY_TIMED_OUT;
+    case WYRELOG_E_RESOURCE_LIMIT:
+      return WYL_FACT_GRAPH_REPLAY_RESOURCE_LIMIT;
     default:
       return WYL_FACT_GRAPH_REPLAY_FAILED;
   }
@@ -767,7 +779,8 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     const WylFactGraphKey *key, WylFactGraphBuildFunc build,
     gpointer user_data, WylFactGraphRuntimeStatus *out_status,
     WylFactGraphAdmission refuse_when, wyrelog_error_t refuse_rc,
-    WylFactGraphAdmission mint_as, gboolean publish_open)
+    WylFactGraphAdmission mint_as, gboolean publish_open,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data)
 {
   if (out_status != NULL)
     memset (out_status, 0, sizeof *out_status);
@@ -906,29 +919,33 @@ manager_refresh_gated (WylFactGraphRuntimeManager *manager,
     if (publish_open)
       entry->publication_active = FALSE;
     rc = WYRELOG_E_BUSY;
-  } else if (rc == WYRELOG_E_OK) {
-    replacement->generation = ++entry->engine_generation;
-    old = entry->current;
-    entry->current = replacement;
-    replacement = NULL;
-    entry->state = WYL_FACT_GRAPH_RUNTIME_READY;
-    entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
-    if (publish_open) {
-      entry->admission = WYL_FACT_GRAPH_ADMISSION_OPEN;
-      entry->publication_active = FALSE;
-      g_cond_broadcast (&entry->drain_cond);
-    }
-  } else if (rc == WYRELOG_E_NOT_FOUND && entry->current == NULL) {
-    /* A provisioned graph may not have a lazy store until its first append.
-     * Keep that normal lifecycle state distinct from an actual replay error. */
-    entry->state = WYL_FACT_GRAPH_RUNTIME_EMPTY;
-    entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
   } else {
-    entry->state = entry->current == NULL
+    if (rc == WYRELOG_E_OK && publish_check != NULL)
+      rc = publish_check (publish_check_data);
+    if (rc == WYRELOG_E_OK) {
+      replacement->generation = ++entry->engine_generation;
+      old = entry->current;
+      entry->current = replacement;
+      replacement = NULL;
+      entry->state = WYL_FACT_GRAPH_RUNTIME_READY;
+      entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+      if (publish_open) {
+        entry->admission = WYL_FACT_GRAPH_ADMISSION_OPEN;
+        entry->publication_active = FALSE;
+        g_cond_broadcast (&entry->drain_cond);
+      }
+    } else if (rc == WYRELOG_E_NOT_FOUND && entry->current == NULL) {
+      /* A provisioned graph may not have a lazy store until its first append.
+       * Keep that normal lifecycle state distinct from an actual replay error. */
+      entry->state = WYL_FACT_GRAPH_RUNTIME_EMPTY;
+      entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+    } else {
+      entry->state = entry->current == NULL
         ? WYL_FACT_GRAPH_RUNTIME_DEGRADED : WYL_FACT_GRAPH_RUNTIME_READY_STALE;
-    entry->last_replay_class = classify_replay_error (rc);
-    if (publish_open)
-      entry->publication_active = FALSE;
+      entry->last_replay_class = classify_replay_error (rc);
+      if (publish_open)
+        entry->publication_active = FALSE;
+    }
   }
   if (out_status != NULL)
     status_fill_locked (entry, out_status);
@@ -947,7 +964,22 @@ wyl_fact_graph_runtime_manager_refresh (WylFactGraphRuntimeManager *manager,
 {
   return manager_refresh_gated (manager, key, build, user_data, out_status,
              WYL_FACT_GRAPH_ADMISSION_CLOSED, WYRELOG_E_BUSY,
-             WYL_FACT_GRAPH_ADMISSION_OPEN, FALSE);
+             WYL_FACT_GRAPH_ADMISSION_OPEN, FALSE, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_refresh_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (publish_check == NULL)
+    return WYRELOG_E_INVALID;
+  return manager_refresh_gated (manager, key, build, user_data, out_status,
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, WYRELOG_E_BUSY,
+             WYL_FACT_GRAPH_ADMISSION_OPEN, FALSE, publish_check,
+             publish_check_data);
 }
 
 wyrelog_error_t
@@ -958,7 +990,22 @@ wyl_fact_graph_runtime_manager_refresh_closed
 {
   return manager_refresh_gated (manager, key, build, user_data, out_status,
              WYL_FACT_GRAPH_ADMISSION_OPEN, WYRELOG_E_INVALID,
-             WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE);
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_refresh_closed_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (publish_check == NULL)
+    return WYRELOG_E_INVALID;
+  return manager_refresh_gated (manager, key, build, user_data, out_status,
+             WYL_FACT_GRAPH_ADMISSION_OPEN, WYRELOG_E_INVALID,
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, FALSE, publish_check,
+             publish_check_data);
 }
 
 wyrelog_error_t
@@ -969,7 +1016,22 @@ wyl_fact_graph_runtime_manager_publish_closed_and_open
 {
   return manager_refresh_gated (manager, key, build, user_data, out_status,
              WYL_FACT_GRAPH_ADMISSION_OPEN, WYRELOG_E_INVALID,
-             WYL_FACT_GRAPH_ADMISSION_CLOSED, TRUE);
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, TRUE, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_publish_closed_and_open_checked
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    WylFactGraphBuildFunc build, gpointer user_data,
+    WylFactGraphPublishCheckFunc publish_check, gpointer publish_check_data,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (publish_check == NULL)
+    return WYRELOG_E_INVALID;
+  return manager_refresh_gated (manager, key, build, user_data, out_status,
+             WYL_FACT_GRAPH_ADMISSION_OPEN, WYRELOG_E_INVALID,
+             WYL_FACT_GRAPH_ADMISSION_CLOSED, TRUE, publish_check,
+             publish_check_data);
 }
 
 static wyrelog_error_t
@@ -1164,9 +1226,10 @@ wyl_fact_graph_runtime_unseal_preparation_clear
 }
 
 wyrelog_error_t
-wyl_fact_graph_runtime_publication_refresh
+wyl_fact_graph_runtime_publication_refresh_checked
   (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,
-    gpointer user_data, WylFactGraphRuntimeStatus *out_status)
+    gpointer user_data, WylFactGraphPublishCheckFunc publish_check,
+    gpointer publish_check_data, WylFactGraphRuntimeStatus *out_status)
 {
   if (out_status != NULL)
     memset (out_status, 0, sizeof *out_status);
@@ -1211,17 +1274,21 @@ wyl_fact_graph_runtime_publication_refresh
     entry->state = WYL_FACT_GRAPH_RUNTIME_ABANDONED;
     entry->publication_active = FALSE;
     rc = WYRELOG_E_BUSY;
-  } else if (rc == WYRELOG_E_OK) {
-    replacement->generation = ++entry->engine_generation;
-    old = entry->current;
-    entry->current = replacement;
-    replacement = NULL;
-    entry->state = WYL_FACT_GRAPH_RUNTIME_READY;
-    entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
   } else {
-    entry->state = entry->current == NULL
+    if (rc == WYRELOG_E_OK && publish_check != NULL)
+      rc = publish_check (publish_check_data);
+    if (rc == WYRELOG_E_OK) {
+      replacement->generation = ++entry->engine_generation;
+      old = entry->current;
+      entry->current = replacement;
+      replacement = NULL;
+      entry->state = WYL_FACT_GRAPH_RUNTIME_READY;
+      entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+    } else {
+      entry->state = entry->current == NULL
         ? WYL_FACT_GRAPH_RUNTIME_DEGRADED : WYL_FACT_GRAPH_RUNTIME_READY_STALE;
-    entry->last_replay_class = classify_replay_error (rc);
+      entry->last_replay_class = classify_replay_error (rc);
+    }
   }
   /* Once refresh has entered the build/result path, its state is authoritative
    * even when the build fails.  Only an abort before refresh may restore the
@@ -1233,6 +1300,15 @@ wyl_fact_graph_runtime_publication_refresh
   engine_generation_unref (old);
   engine_generation_unref (replacement);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_publication_refresh
+  (WylFactGraphRuntimePublication *publication, WylFactGraphBuildFunc build,
+    gpointer user_data, WylFactGraphRuntimeStatus *out_status)
+{
+  return wyl_fact_graph_runtime_publication_refresh_checked (publication,
+             build, user_data, NULL, NULL, out_status);
 }
 
 static wyrelog_error_t
