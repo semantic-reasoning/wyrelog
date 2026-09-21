@@ -125,6 +125,8 @@ struct _WylHandle
   WylFactGraphRuntimeManager *fact_graph_runtime;
   WylFactTenantAdmissionManager *fact_tenant_admission;
   WylFactReplaySchedulerConfig fact_replay_scheduler_config;
+  WylFactResourceRecorder *fact_resource_recorder;
+  WylFactReplayScheduler *fact_replay_scheduler;
   GMutex fact_replay_coordinator_lock;
 #endif
   gboolean login_skip_mfa_allowed;
@@ -1088,6 +1090,12 @@ wyl_handle_finalize (GObject *object)
 #ifdef WYL_HAS_FACT_STORE
   g_clear_pointer (&self->fact_root, g_free);
   g_assert_null (self->fact_root_writer_lease);
+  if (self->fact_replay_scheduler != NULL)
+    (void) wyl_fact_replay_scheduler_shutdown (self->fact_replay_scheduler);
+  g_clear_pointer (&self->fact_replay_scheduler,
+      wyl_fact_replay_scheduler_unref);
+  g_clear_pointer (&self->fact_resource_recorder,
+      wyl_fact_resource_recorder_unref);
   g_clear_pointer (&self->fact_graph_runtime,
       wyl_fact_graph_runtime_manager_unref);
   g_clear_pointer (&self->fact_tenant_admission,
@@ -1546,6 +1554,14 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   if (!wyl_fact_replay_scheduler_config_is_zero
         (&opts->fact_replay_scheduler))
     self->fact_replay_scheduler_config = opts->fact_replay_scheduler;
+  self->fact_resource_recorder = wyl_fact_resource_recorder_new ();
+  wyrelog_error_t scheduler_rc = wyl_fact_replay_scheduler_new
+        (&self->fact_replay_scheduler_config, self->fact_resource_recorder,
+          &self->fact_replay_scheduler);
+  if (scheduler_rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return scheduler_rc;
+  }
   self->fact_root = g_strdup (opts->fact_root);
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     wyrelog_error_t lease_rc = wyl_fact_root_writer_lease_acquire
@@ -1724,8 +1740,25 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
   handle->policy_store_shutdown_pending = TRUE;
   g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
 
-  wyrelog_error_t rc = wyl_service_auth_authority_close
-        (handle->service_auth_authority);
+#ifdef WYL_HAS_FACT_STORE
+  /* Close replay admission first. Lifecycle callers may own a service write
+   * lease while waiting for a fair scheduler slot; cancelling that wait is
+   * what lets them release the lease consumed by authority_close below. */
+  wyrelog_error_t rc = handle->fact_replay_scheduler == NULL
+      ? WYRELOG_E_OK
+      : wyl_fact_replay_scheduler_shutdown (handle->fact_replay_scheduler);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+    handle->policy_store_shutdown_pending = FALSE;
+    g_cond_broadcast (&handle->policy_store_lifecycle_changed);
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    return rc;
+  }
+#else
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#endif
+
+  rc = wyl_service_auth_authority_close (handle->service_auth_authority);
   if (rc != WYRELOG_E_OK) {
     g_mutex_lock (&handle->policy_store_lifecycle_mutex);
     handle->policy_store_shutdown_pending = FALSE;
@@ -2433,6 +2466,38 @@ wyl_handle_policy_store_pin_snapshot_for_test (WylHandle *self,
 }
 
 #ifdef WYL_HAS_FACT_STORE
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *snapshot_policy;
+} HandleReplayPolicyProvider;
+
+static wyrelog_error_t
+handle_replay_policy_pin (gpointer user_data,
+    wyl_policy_store_t **out_policy)
+{
+  HandleReplayPolicyProvider *provider = user_data;
+  return wyl_handle_policy_store_pin_current (provider->handle, out_policy);
+}
+
+static void
+handle_replay_policy_unpin (gpointer user_data, wyl_policy_store_t *policy)
+{
+  HandleReplayPolicyProvider *provider = user_data;
+  wyl_handle_policy_store_unpin (provider->handle, policy);
+}
+
+static void
+handle_replay_policy_snapshot_complete (gpointer user_data)
+{
+  HandleReplayPolicyProvider *provider = user_data;
+  if (provider->snapshot_policy != NULL) {
+    wyl_handle_policy_store_unpin (provider->handle,
+        provider->snapshot_policy);
+    provider->snapshot_policy = NULL;
+  }
+}
+
 wyrelog_error_t
 wyl_handle_replay_fact_graphs (WylHandle *self,
     wyl_fact_replay_summary_t *out_summary)
@@ -2452,16 +2517,49 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
    * lifecycle idempotent without appending duplicate EDB rows.
    */
   wyl_policy_store_t *policy = NULL;
-  g_mutex_lock (&self->fact_replay_coordinator_lock);
   wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
-  if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  if (rc != WYRELOG_E_OK)
     return rc;
-  }
-  rc = wyl_fact_replay_policy_graphs (policy, self->fact_root,
-          self->fact_graph_runtime, out_summary);
-  wyl_handle_policy_store_unpin (self, policy);
-  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  HandleReplayPolicyProvider provider_context = { self, policy };
+  const WylFactReplayPolicyProvider provider = {
+    .pin = handle_replay_policy_pin,
+    .unpin = handle_replay_policy_unpin,
+    .snapshot_complete = handle_replay_policy_snapshot_complete,
+    .user_data = &provider_context,
+  };
+  rc = wyl_fact_replay_policy_graphs_scheduled_with_provider (policy,
+          self->fact_root, self->fact_graph_runtime,
+          self->fact_replay_scheduler, &self->fact_replay_scheduler_config,
+          &provider, out_summary);
+  if (provider_context.snapshot_policy != NULL)
+    wyl_handle_policy_store_unpin (self, provider_context.snapshot_policy);
+  return rc;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const wyl_policy_fact_graph_info_t *graph_info;
+  WylFactGraphRuntimeStatus *out_status;
+} HandleReplayRefreshJob;
+
+static wyrelog_error_t
+handle_replay_refresh_job (WylFactReplayJobContext *job_context,
+    gpointer user_data)
+{
+  HandleReplayRefreshJob *job = user_data;
+  WylHandle *self = job->handle;
+  wyl_policy_store_t *policy = NULL;
+
+  /* Scheduler admission is intentionally before the lifecycle pin. A queued
+   * job owns no policy resource and cannot obstruct unrelated policy work. */
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_refresh_graph_bounded (policy, self->fact_root,
+            job->graph_info, self->fact_graph_runtime, job_context,
+            job->out_status);
+  if (policy != NULL)
+    wyl_handle_policy_store_unpin (self, policy);
   return rc;
 }
 
@@ -2478,42 +2576,288 @@ wyl_handle_refresh_fact_graph (WylHandle *self,
   if (self->fact_graph_runtime == NULL || graph_info == NULL)
     return WYRELOG_E_INVALID;
 
-  /*
-   * Targeted single-graph counterpart of wyl_handle_replay_fact_graphs: an
-   * append/retract refreshes only the graph it committed to, under the same
-   * policy-store pin and coordinator lock, leaving every other graph's engine
-   * generation untouched.
-   */
-  wyl_policy_store_t *policy = NULL;
-  g_mutex_lock (&self->fact_replay_coordinator_lock);
-  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  HandleReplayRefreshJob job = {
+    .handle = self,
+    .graph_info = graph_info,
+    .out_status = out_status,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  wyrelog_error_t rc = wyl_fact_replay_scheduler_submit
+        (self->fact_replay_scheduler, graph_info->tenant_id,
+          graph_info->graph_id, NULL, handle_replay_refresh_job, &job, NULL,
+          &future);
+  return rc == WYRELOG_E_OK ? wyl_fact_replay_future_wait (future) : rc;
+}
+
+void
+wyl_handle_fact_replay_resource_snapshot (WylHandle *self,
+    WylFactReplayResourceSnapshot *out_snapshot)
+{
+  if (out_snapshot == NULL)
+    return;
+  memset (out_snapshot, 0, sizeof *out_snapshot);
+  if (self == NULL || !WYL_IS_HANDLE (self)
+      || self->fact_resource_recorder == NULL)
+    return;
+  wyl_fact_resource_recorder_snapshot (self->fact_resource_recorder,
+      out_snapshot);
+}
+
+WylFactResourceRecorder *
+wyl_handle_fact_resource_recorder (WylHandle *self)
+{
+  return self != NULL && WYL_IS_HANDLE (self)
+      ? self->fact_resource_recorder : NULL;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylFactReplayJobContext *context;
+  wyrelog_error_t result;
+  gboolean admitted;
+  gboolean finished;
+  gboolean abandoned;
+} HandleReplayCallerGate;
+
+static void
+handle_replay_caller_gate_init (HandleReplayCallerGate *gate)
+{
+  g_mutex_init (&gate->mutex);
+  g_cond_init (&gate->changed);
+}
+
+static void
+handle_replay_caller_gate_clear (HandleReplayCallerGate *gate)
+{
+  g_cond_clear (&gate->changed);
+  g_mutex_clear (&gate->mutex);
+}
+
+static void
+handle_replay_caller_gate_abandon (gpointer user_data)
+{
+  HandleReplayCallerGate *gate = user_data;
+  g_mutex_lock (&gate->mutex);
+  if (!gate->admitted) {
+    gate->abandoned = TRUE;
+    g_cond_broadcast (&gate->changed);
+  }
+  g_mutex_unlock (&gate->mutex);
+}
+
+static wyrelog_error_t
+handle_replay_caller_gate_job (WylFactReplayJobContext *context,
+    gpointer user_data)
+{
+  HandleReplayCallerGate *gate = user_data;
+  g_mutex_lock (&gate->mutex);
+  gate->context = context;
+  gate->admitted = TRUE;
+  g_cond_broadcast (&gate->changed);
+  while (!gate->finished)
+    g_cond_wait (&gate->changed, &gate->mutex);
+  wyrelog_error_t result = gate->result;
+  gate->context = NULL;
+  g_mutex_unlock (&gate->mutex);
+  return result;
+}
+
+static wyrelog_error_t
+handle_replay_caller_gate_enter (WylHandle *self, const gchar *tenant_id,
+    const gchar *graph_id, GCancellable *cancellable,
+    HandleReplayCallerGate *gate,
+    WylFactReplayFuture **out_future, WylFactReplayJobContext **out_context)
+{
+  *out_future = NULL;
+  *out_context = NULL;
+  wyrelog_error_t rc = wyl_fact_replay_scheduler_submit
+        (self->fact_replay_scheduler, tenant_id, graph_id, cancellable,
+          handle_replay_caller_gate_job, gate,
+          handle_replay_caller_gate_abandon, out_future);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&gate->mutex);
+  while (!gate->admitted && !gate->abandoned)
+    g_cond_wait (&gate->changed, &gate->mutex);
+  if (gate->admitted)
+    *out_context = gate->context;
+  g_mutex_unlock (&gate->mutex);
+  return gate->admitted ? WYRELOG_E_OK
+      : wyl_fact_replay_future_wait (*out_future);
+}
+
+static wyrelog_error_t handle_replay_caller_gate_leave
+  (HandleReplayCallerGate *gate, WylFactReplayFuture *future,
+    wyrelog_error_t result);
+
+struct _WylFactReplayAdmission
+{
+  WylHandle *handle;
+  gchar *tenant_id;
+  gchar *graph_id;
+  HandleReplayCallerGate gate;
+  WylFactReplayFuture *future;
+  WylFactReplayJobContext *context;
+  gboolean completed;
+};
+
+wyrelog_error_t
+wyl_handle_fact_replay_admission_acquire (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id, GCancellable *cancellable,
+    WylFactReplayAdmission **out_admission)
+{
+  if (out_admission != NULL)
+    *out_admission = NULL;
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || graph_id == NULL || out_admission == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactReplayAdmission *admission = g_new0 (WylFactReplayAdmission, 1);
+  admission->handle = g_object_ref (self);
+  admission->tenant_id = g_strdup (tenant_id);
+  admission->graph_id = g_strdup (graph_id);
+  handle_replay_caller_gate_init (&admission->gate);
+  wyrelog_error_t rc = handle_replay_caller_gate_enter (self, tenant_id,
+          graph_id, cancellable, &admission->gate, &admission->future,
+          &admission->context);
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+    handle_replay_caller_gate_clear (&admission->gate);
+    g_clear_object (&admission->handle);
+    g_free (admission->tenant_id);
+    g_free (admission->graph_id);
+    g_free (admission);
     return rc;
   }
-  rc = wyl_fact_replay_refresh_graph (policy, self->fact_root, graph_info,
-          self->fact_graph_runtime, out_status);
-  wyl_handle_policy_store_unpin (self, policy);
-  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  *out_admission = admission;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t handle_fact_replay_admission_complete
+  (WylFactReplayAdmission *admission, wyrelog_error_t result);
+
+wyrelog_error_t
+wyl_handle_fact_replay_admission_acquire_service_write
+  (WylFactReplayAdmission *admission,
+    WylServiceAuthWriteLease **out_write_lease)
+{
+  if (out_write_lease != NULL)
+    *out_write_lease = NULL;
+  if (admission == NULL || admission->completed || admission->handle == NULL
+      || admission->context == NULL || out_write_lease == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (admission->handle),
+          admission->handle,
+          wyl_fact_replay_job_context_get_cancellable (admission->context),
+          out_write_lease);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_replay_job_context_suppress_work_totals (admission->context);
+    wyrelog_error_t budget_rc =
+        wyl_fact_replay_job_context_checkpoint (admission->context);
+    if (budget_rc != WYRELOG_E_OK)
+      rc = budget_rc;
+    return handle_fact_replay_admission_complete (admission, rc);
+  }
   return rc;
 }
 
-wyrelog_error_t
-wyl_handle_reconcile_fact_graph (WylHandle *self,
-    WylServiceAuthWriteLease *write_lease,
-    const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
-    WylFactGraphReconcileOutcome *out_outcome)
+GCancellable *
+wyl_handle_fact_replay_admission_get_cancellable
+  (WylFactReplayAdmission *admission)
 {
-  if (out_outcome != NULL)
-    memset (out_outcome, 0, sizeof *out_outcome);
-  if (self == NULL || !WYL_IS_HANDLE (self) || graph_info == NULL
-      || self->fact_graph_runtime == NULL
-      || self->fact_tenant_admission == NULL)
-    return WYRELOG_E_INVALID;
+  return admission != NULL && !admission->completed
+         && admission->context != NULL
+      ? wyl_fact_replay_job_context_get_cancellable (admission->context)
+      : NULL;
+}
 
+static wyrelog_error_t
+handle_fact_replay_admission_complete (WylFactReplayAdmission *admission,
+    wyrelog_error_t result)
+{
+  if (admission == NULL || admission->completed)
+    return WYRELOG_E_INVALID;
+  admission->completed = TRUE;
+  return handle_replay_caller_gate_leave (&admission->gate,
+             admission->future, result);
+}
+
+wyrelog_error_t
+wyl_handle_refresh_fact_graph_admitted (WylHandle *self,
+    WylFactReplayAdmission *admission,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeStatus *out_status)
+{
+  if (out_status != NULL)
+    memset (out_status, 0, sizeof *out_status);
+  if (self == NULL || !WYL_IS_HANDLE (self) || admission == NULL
+      || admission->completed || admission->handle != self
+      || graph_info == NULL
+      || g_strcmp0 (admission->tenant_id, graph_info->tenant_id) != 0
+      || g_strcmp0 (admission->graph_id, graph_info->graph_id) != 0
+      || self->fact_graph_runtime == NULL)
+    return WYRELOG_E_INVALID;
+  HandleReplayRefreshJob job = {
+    .handle = self,
+    .graph_info = graph_info,
+    .out_status = out_status,
+  };
+  wyrelog_error_t rc = handle_replay_refresh_job (admission->context, &job);
+  return handle_fact_replay_admission_complete (admission, rc);
+}
+
+void
+wyl_handle_fact_replay_admission_free (WylFactReplayAdmission *admission)
+{
+  if (admission == NULL)
+    return;
+  if (!admission->completed) {
+    wyl_fact_replay_job_context_suppress_work_totals (admission->context);
+    wyrelog_error_t rc =
+        wyl_fact_replay_job_context_checkpoint (admission->context);
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    (void) handle_fact_replay_admission_complete (admission, rc);
+  }
+  g_clear_pointer (&admission->future, wyl_fact_replay_future_unref);
+  handle_replay_caller_gate_clear (&admission->gate);
+  g_clear_object (&admission->handle);
+  g_free (admission->tenant_id);
+  g_free (admission->graph_id);
+  g_free (admission);
+}
+
+static wyrelog_error_t
+handle_replay_caller_gate_leave (HandleReplayCallerGate *gate,
+    WylFactReplayFuture *future, wyrelog_error_t result)
+{
+  g_mutex_lock (&gate->mutex);
+  gate->result = result;
+  gate->finished = TRUE;
+  g_cond_broadcast (&gate->changed);
+  g_mutex_unlock (&gate->mutex);
+  return wyl_fact_replay_future_wait (future);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  WylServiceAuthWriteLease *write_lease;
+  const wyl_policy_fact_graph_info_t *graph_info;
+  gint64 drain_timeout_us;
+  WylFactGraphReconcileOutcome *out_outcome;
+} HandleReplayReconcileJob;
+
+static wyrelog_error_t
+handle_replay_reconcile_execute (WylFactReplayJobContext *job_context,
+    HandleReplayReconcileJob *job)
+{
+  WylHandle *self = job->handle;
   g_autoptr (WylFactTenantAdmissionLease) tenant_lease = NULL;
   wyrelog_error_t rc = wyl_fact_tenant_admission_acquire_write
-        (self->fact_tenant_admission, graph_info->tenant_id, NULL,
+        (self->fact_tenant_admission, job->graph_info->tenant_id,
+          wyl_fact_replay_job_context_get_cancellable (job_context),
           &tenant_lease);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2521,16 +2865,17 @@ wyl_handle_reconcile_fact_graph (WylHandle *self,
   wyl_policy_store_t *policy = NULL;
   wyl_policy_store_t *lease_policy = NULL;
   g_mutex_lock (&self->fact_replay_coordinator_lock);
-  rc = wyl_service_auth_write_lease_get_policy_store (write_lease, self,
+  rc = wyl_service_auth_write_lease_get_policy_store (job->write_lease, self,
           &lease_policy);
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_policy_store_pin_current (self, &policy);
   if (rc == WYRELOG_E_OK && policy != lease_policy)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_reconcile_degraded (policy, self->fact_root,
-            self->fact_root_writer_lease, graph_info,
-            self->fact_graph_runtime, drain_timeout_us, out_outcome);
+    rc = wyl_fact_graph_reconcile_degraded_bounded (policy, self->fact_root,
+            self->fact_root_writer_lease, job->graph_info,
+            self->fact_graph_runtime, job->drain_timeout_us, job_context,
+            job->out_outcome);
   if (policy != NULL)
     wyl_handle_policy_store_unpin (self, policy);
   g_mutex_unlock (&self->fact_replay_coordinator_lock);
@@ -2538,29 +2883,55 @@ wyl_handle_reconcile_fact_graph (WylHandle *self,
 }
 
 wyrelog_error_t
-wyl_handle_unseal_fact_graph (WylHandle *self,
+wyl_handle_reconcile_fact_graph (WylHandle *self,
+    WylFactReplayAdmission *admission,
     WylServiceAuthWriteLease *write_lease,
     const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
-    WylFactGraphUnsealOutcome *out_outcome)
+    WylFactGraphReconcileOutcome *out_outcome)
 {
   if (out_outcome != NULL)
     memset (out_outcome, 0, sizeof *out_outcome);
-  if (self == NULL || !WYL_IS_HANDLE (self) || graph_info == NULL
-      || self->fact_graph_runtime == NULL)
+  if (self == NULL || !WYL_IS_HANDLE (self) || admission == NULL
+      || admission->completed || admission->handle != self
+      || graph_info == NULL
+      || g_strcmp0 (admission->tenant_id, graph_info->tenant_id) != 0
+      || g_strcmp0 (admission->graph_id, graph_info->graph_id) != 0
+      || self->fact_graph_runtime == NULL
+      || self->fact_tenant_admission == NULL)
     return WYRELOG_E_INVALID;
 
-#ifdef WYL_HAS_FACT_STORE
-  /* The root writer lease is acquired with the handle and must remain valid
-   * for the complete validation/build/publication sequence.  Revalidate at
-   * this boundary so a replaced root is rejected before any policy mutation
-   * or runtime publication is attempted. */
+  HandleReplayReconcileJob job = {
+    .handle = self,
+    .write_lease = write_lease,
+    .graph_info = graph_info,
+    .drain_timeout_us = drain_timeout_us,
+    .out_outcome = out_outcome,
+  };
+  wyrelog_error_t rc = handle_replay_reconcile_execute (admission->context,
+          &job);
+  return handle_fact_replay_admission_complete (admission, rc);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  WylServiceAuthWriteLease *write_lease;
+  const wyl_policy_fact_graph_info_t *graph_info;
+  gint64 drain_timeout_us;
+  WylFactGraphUnsealOutcome *out_outcome;
+} HandleReplayUnsealJob;
+
+static wyrelog_error_t
+handle_replay_unseal_execute (WylFactReplayJobContext *context,
+    HandleReplayUnsealJob *job)
+{
+  WylHandle *self = job->handle;
   if (self->fact_root_writer_lease == NULL)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t root_rc = wyl_fact_root_writer_lease_verify
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify
         (self->fact_root_writer_lease);
-  if (root_rc != WYRELOG_E_OK)
-    return root_rc;
-#endif
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   wyl_policy_store_t *policy = NULL;
   wyl_policy_store_t *lease_policy = NULL;
@@ -2568,20 +2939,19 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
   wyl_fact_publication_lock_event_emit
     (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
       WYL_FACT_PUBLICATION_LOCK_ACQUIRED, self);
-  wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
-        (write_lease, self, &lease_policy);
+  rc = wyl_service_auth_write_lease_get_policy_store (job->write_lease, self,
+          &lease_policy);
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_policy_store_pin_current (self, &policy);
   if (rc == WYRELOG_E_OK && policy != lease_policy)
     rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_graph_unseal_with_root_lease (policy, self->fact_root,
-            self->fact_root_writer_lease, graph_info, self->fact_graph_runtime,
-            drain_timeout_us, out_outcome);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_unseal_with_root_lease_bounded (policy,
+            self->fact_root, self->fact_root_writer_lease, job->graph_info,
+            self->fact_graph_runtime, job->drain_timeout_us, context,
+            job->out_outcome);
+  if (policy != NULL)
     wyl_handle_policy_store_unpin (self, policy);
-  } else if (policy != NULL) {
-    wyl_handle_policy_store_unpin (self, policy);
-  }
   wyl_fact_publication_lock_event_emit
     (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
       WYL_FACT_PUBLICATION_LOCK_RELEASE_BEGIN, self);
@@ -2590,6 +2960,34 @@ wyl_handle_unseal_fact_graph (WylHandle *self,
     (WYL_FACT_PUBLICATION_LOCK_HANDLE_COORDINATOR,
       WYL_FACT_PUBLICATION_LOCK_RELEASED, self);
   return rc;
+}
+
+wyrelog_error_t
+wyl_handle_unseal_fact_graph (WylHandle *self,
+    WylFactReplayAdmission *admission,
+    WylServiceAuthWriteLease *write_lease,
+    const wyl_policy_fact_graph_info_t *graph_info, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (out_outcome != NULL)
+    memset (out_outcome, 0, sizeof *out_outcome);
+  if (self == NULL || !WYL_IS_HANDLE (self) || admission == NULL
+      || admission->completed || admission->handle != self
+      || graph_info == NULL
+      || g_strcmp0 (admission->tenant_id, graph_info->tenant_id) != 0
+      || g_strcmp0 (admission->graph_id, graph_info->graph_id) != 0
+      || self->fact_graph_runtime == NULL)
+    return WYRELOG_E_INVALID;
+  HandleReplayUnsealJob job = {
+    .handle = self,
+    .write_lease = write_lease,
+    .graph_info = graph_info,
+    .drain_timeout_us = drain_timeout_us,
+    .out_outcome = out_outcome,
+  };
+  wyrelog_error_t rc = handle_replay_unseal_execute (admission->context,
+          &job);
+  return handle_fact_replay_admission_complete (admission, rc);
 }
 
 static void
@@ -2646,7 +3044,8 @@ wyrelog_error_t
 wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
     const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch,
-    const wyl_policy_fact_graph_info_t *graph_info, gboolean *out_inserted,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactReplayAdmission *admission, gboolean *out_inserted,
     wyl_fact_mutation_outcome_t *out_outcome)
 {
   if (out_inserted != NULL)
@@ -2679,6 +3078,9 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
   g_clear_pointer (store, wyl_fact_store_close);
 
   if (rc != WYRELOG_E_OK) {
+    if (delta.quota_exceeded)
+      wyl_fact_resource_recorder_record_quota_rejection
+        (self->fact_resource_recorder);
     out_outcome->delta = delta;
     return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
   }
@@ -2691,7 +3093,9 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
   /* Step 3: post-commit targeted refresh of this graph only.  A failure here
    * is committed-but-degraded, never a commit failure. */
   WylFactGraphRuntimeStatus status = { 0 };
-  wyrelog_error_t refresh_rc = wyl_handle_refresh_fact_graph (self, graph_info,
+  wyrelog_error_t refresh_rc = admission == NULL
+      ? wyl_handle_refresh_fact_graph (self, graph_info, &status)
+      : wyl_handle_refresh_fact_graph_admitted (self, admission, graph_info,
           &status);
   out_outcome->delta = delta;
   out_outcome->engine_queryable = status.queryable;

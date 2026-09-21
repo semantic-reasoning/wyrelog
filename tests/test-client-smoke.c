@@ -629,9 +629,20 @@ static gboolean
 check_fact_status_codec (void)
 {
   WylClientFactStatus status = { 0 };
+  WylClientFactReplayResources replay =
+      WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT;
+  gboolean has_replay = FALSE;
   const gchar *valid =
       "{\"status\":\"ready\",\"graphs_total\":2,"
       "\"graphs_ready\":1,\"graphs_degraded\":0,\"graphs_sealed\":1,"
+      "\"replay_resources\":{\"active\":1,\"queued\":2,"
+      "\"active_opens\":3,\"completed_total\":4,"
+      "\"rows_total\":5,\"runtime_us_total\":6,"
+      "\"queue_delay_us_total\":7,\"queue_delay_us_max\":8,"
+      "\"cancelled_total\":9,\"timed_out_total\":10,"
+      "\"row_limit_total\":11,\"queue_rejected_total\":12,"
+      "\"quota_rejected_total\":13,"
+      "\"future_metric\":{\"nested\":[true,null,14]}},"
       "\"\\u20ac\":null,\"graphs\":[{"
       "\"tenant_id\":\"tenant-a\",\"graph_id\":\"orders\","
       "\"state\":\"ready\",\"queryable\":true,"
@@ -641,15 +652,36 @@ check_fact_status_codec (void)
       "{\"tenant_id\":\"tenant-a\",\"graph_id\":\"sealed\","
       "\"state\":\"sealed\",\"queryable\":false,"
       "\"last_error_class\":null}],\"future_root\":[1,{\"x\":false}]}";
-  if (wyl_client_fact_status_decode (valid, strlen (valid), &status)
+  if (wyl_client_fact_status_decode_with_replay_resources (valid,
+      strlen (valid), &status, &replay, &has_replay)
       != WYRELOG_E_OK || status.status != WYL_CLIENT_FACT_STATUS_READY
       || g_strcmp0 (status.status_name, "ready") != 0
       || status.graphs_total != 2 || status.graphs_ready != 1
       || status.graphs_degraded != 0 || status.graphs_sealed != 1
+      || !has_replay || replay.active != 1 || replay.queued != 2
+      || replay.active_opens != 3 || replay.completed_total != 4
+      || replay.quota_rejected_total != 13
       || !status.has_graphs || status.n_graphs != 2
       || status.graphs[0].state != WYL_CLIENT_FACT_GRAPH_STATE_READY
       || status.graphs[0].last_error_class != NULL
       || status.graphs[1].state != WYL_CLIENT_FACT_GRAPH_STATE_SEALED)
+    return FALSE;
+  WylClientFactReplayResources old_caller =
+      WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT;
+  old_caller.queued = G_MAXUINT64;
+  const gsize old_size = G_STRUCT_OFFSET (WylClientFactReplayResources,
+          active) + sizeof old_caller.active;
+  if (wyl_client_fact_replay_resources_copy (&replay, &old_caller, old_size)
+      != WYRELOG_E_OK || old_caller.active != 1
+      || old_caller.queued != G_MAXUINT64)
+    return FALSE;
+  guint8 undersized[1] = { 0 };
+  if (wyl_client_fact_replay_resources_copy (&replay,
+      (WylClientFactReplayResources *) undersized, sizeof undersized)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_replay_resources (NULL, NULL, NULL,
+      (WylClientFactReplayResources *) undersized, sizeof undersized)
+      != WYRELOG_E_INVALID)
     return FALSE;
   wyl_client_fact_status_clear (&status);
   if (status.status_name != NULL || status.graphs != NULL

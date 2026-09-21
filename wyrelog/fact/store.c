@@ -6,6 +6,7 @@
 #include "compound-private.h"
 #include "legacy-store-identity-private.h"
 #include "open-reservation-private.h"
+#include "replay-scheduler-private.h"
 #include "store-duckdb-config-test-seams-private.h"
 #include "store-identity-private.h"
 #include "wyrelog/wyl-log-private.h"
@@ -62,6 +63,8 @@ struct wyl_fact_store_t
   WylSecureDuckdbBridge *provisioned_bridge;
   WylFactOpenReservation *open_reservation;
   FactOpenReservationAdapter *open_reservation_adapter;
+  WylFactResourceRecorder *resource_recorder;
+  gboolean resource_open_recorded;
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
   wyl_policy_store_t *physical_quota_policy;
   WylFactArtifactNamespace *physical_quota_namespace;
@@ -189,8 +192,18 @@ fact_store_open_reservation_release (gpointer user_data,
     gboolean *out_released)
 {
   FactOpenReservationAdapter *adapter = user_data;
-  return adapter == NULL ? WYRELOG_E_INVALID
-      : fact_store_release_native (adapter->store, out_released);
+  if (adapter == NULL)
+    return WYRELOG_E_INVALID;
+  return fact_store_release_native (adapter->store, out_released);
+}
+
+static void
+fact_store_open_reservation_adapter_free (FactOpenReservationAdapter *adapter)
+{
+  if (adapter == NULL)
+    return;
+  g_free (adapter->owner_incarnation);
+  g_free (adapter);
 }
 
 static void
@@ -237,10 +250,25 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
     const gchar *token_identity, WylFactOpenReservation **out_reservation,
     wyrelog_error_t *out_error)
 {
+  return wyl_fact_store_open_reservation_begin_observed (policy_store,
+             tenant_id, graph_id, root_identity, token_identity, NULL,
+             NULL, out_reservation, out_error);
+}
+
+FactOpenReservationAdapter *
+wyl_fact_store_open_reservation_begin_observed
+  (wyl_policy_store_t *policy_store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, WylFactResourceRecorder *resource_recorder,
+    gboolean *out_quota_rejected,
+    WylFactOpenReservation **out_reservation, wyrelog_error_t *out_error)
+{
   if (out_reservation != NULL)
     *out_reservation = NULL;
   if (out_error != NULL)
     *out_error = WYRELOG_E_OK;
+  if (out_quota_rejected != NULL)
+    *out_quota_rejected = FALSE;
   if (policy_store == NULL || tenant_id == NULL || graph_id == NULL
       || root_identity == NULL || token_identity == NULL
       || out_reservation == NULL){
@@ -261,9 +289,15 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
     return NULL;
   }
   g_autofree gchar *persisted_id = NULL;
-  rc = wyl_policy_store_reserve_fact_open (policy_store, reservation_id, owner,
-          tenant_id, graph_id, root_identity, token_identity, &persisted_id);
+  gboolean quota_rejected = FALSE;
+  rc = wyl_policy_store_reserve_fact_open_classified (policy_store,
+          reservation_id, owner, tenant_id, graph_id, root_identity,
+          token_identity, &quota_rejected, &persisted_id);
   if (rc != WYRELOG_E_OK) {
+    if (quota_rejected && resource_recorder != NULL)
+      wyl_fact_resource_recorder_record_quota_rejection (resource_recorder);
+    if (out_quota_rejected != NULL)
+      *out_quota_rejected = quota_rejected;
     (void) wyl_policy_store_retire_fact_open_owner (policy_store, owner);
     if (out_error != NULL)
       *out_error = rc;
@@ -297,8 +331,7 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
         adapter->owner_incarnation, NULL, TRUE);
     wyl_policy_store_retire_fact_open_owner (policy_store,
         adapter->owner_incarnation);
-    g_free (adapter->owner_incarnation);
-    g_free (adapter);
+    fact_store_open_reservation_adapter_free (adapter);
     if (out_error != NULL)
       *out_error = WYRELOG_E_NOMEM;
     return NULL;
@@ -311,8 +344,7 @@ wyl_fact_store_open_reservation_begin (wyl_policy_store_t *policy_store,
     fact_store_open_reservation_discard (reservation);
     wyl_policy_store_retire_fact_open_owner (policy_store,
         adapter->owner_incarnation);
-    g_free (adapter->owner_incarnation);
-    g_free (adapter);
+    fact_store_open_reservation_adapter_free (adapter);
     if (out_error != NULL)
       *out_error = fail_rc != WYRELOG_E_OK ? fail_rc : rc;
     return NULL;
@@ -330,6 +362,19 @@ wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
   adapter->store = store;
   store->open_reservation_adapter = adapter;
   store->open_reservation = reservation;
+}
+
+void
+wyl_fact_store_observe_open (wyl_fact_store_t *store,
+    WylFactResourceRecorder *resource_recorder)
+{
+  if (store == NULL || resource_recorder == NULL
+      || store->resource_open_recorded)
+    return;
+  store->resource_recorder =
+      wyl_fact_resource_recorder_ref (resource_recorder);
+  store->resource_open_recorded = TRUE;
+  wyl_fact_resource_recorder_open_begin (resource_recorder);
 }
 
 #if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
@@ -370,8 +415,7 @@ wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
   if (adapter->policy_store != NULL && adapter->owner_incarnation != NULL)
     (void) wyl_policy_store_retire_fact_open_owner (adapter->policy_store,
         adapter->owner_incarnation);
-  g_free (adapter->owner_incarnation);
-  g_free (adapter);
+  fact_store_open_reservation_adapter_free (adapter);
 }
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
@@ -1476,8 +1520,8 @@ fact_store_close_checked (wyl_fact_store_t *store, gboolean forced)
               store->open_reservation_adapter->owner_incarnation);
       if (rc == WYRELOG_E_OK)
         rc = retire_rc;
-      g_free (store->open_reservation_adapter->owner_incarnation);
-      g_free (store->open_reservation_adapter);
+      fact_store_open_reservation_adapter_free
+        (store->open_reservation_adapter);
       store->open_reservation_adapter = NULL;
     }
   } else {
@@ -1486,6 +1530,12 @@ fact_store_close_checked (wyl_fact_store_t *store, gboolean forced)
     if (!released)
       return rc;
   }
+  if (store->resource_open_recorded) {
+    wyl_fact_resource_recorder_open_end (store->resource_recorder);
+    store->resource_open_recorded = FALSE;
+  }
+  g_clear_pointer (&store->resource_recorder,
+      wyl_fact_resource_recorder_unref);
   g_mutex_clear (&store->lock);
   g_free (store->identity_tenant_id);
   g_free (store->identity_graph_id);

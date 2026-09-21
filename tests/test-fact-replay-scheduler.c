@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "test-exit-status.h"
 #include <glib.h>
 
 #include "fact/replay-scheduler-private.h"
@@ -47,6 +48,8 @@ typedef struct
   WylFactReplayScheduler *scheduler;
   wyrelog_error_t shutdown_result;
 } ReentrantDestroy;
+
+static WylFactReplaySchedulerConfig test_config (void);
 
 static void
 replay_gate_init (ReplayGate *gate)
@@ -123,6 +126,38 @@ gated_replay (WylFactReplayJobContext *context, gpointer user_data)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+refused_before_replay (WylFactReplayJobContext *context, gpointer user_data)
+{
+  (void) user_data;
+  wyl_fact_replay_job_context_suppress_work_totals (context);
+  return WYRELOG_E_POLICY;
+}
+
+static void
+test_pre_replay_refusal_is_not_completed_or_cancelled (void)
+{
+  WylFactReplaySchedulerConfig config = test_config ();
+  g_autoptr (WylFactResourceRecorder) recorder =
+      wyl_fact_resource_recorder_new ();
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, recorder,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant",
+      "graph", NULL, refused_before_replay, NULL, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_POLICY);
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  g_assert_cmpuint (snapshot.active, ==, 0);
+  g_assert_cmpuint (snapshot.completed_total, ==, 0);
+  g_assert_cmpuint (snapshot.rows_total, ==, 0);
+  g_assert_cmpuint (snapshot.runtime_us_total, ==, 0);
+  g_assert_cmpuint (snapshot.cancelled_total, ==, 0);
+}
+
 static WylFactReplaySchedulerConfig
 test_config (void)
 {
@@ -160,6 +195,19 @@ counted_replay (WylFactReplayJobContext *context, gpointer user_data)
         wyl_fact_replay_job_context_get_cancellable (context)))
     return WYRELOG_E_CANCELLED;
   wyl_fact_replay_job_context_add_rows (context, 1);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+resource_signal_replay (WylFactReplayJobContext *context, gpointer user_data)
+{
+  WylFactResourceRecorder *recorder = user_data;
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_replay_job_context_open_begin (context);
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  g_assert_cmpuint (snapshot.active_opens, ==, 1);
+  wyl_fact_replay_job_context_open_end (context);
+  wyl_fact_replay_job_context_record_quota_rejection (context);
   return WYRELOG_E_OK;
 }
 
@@ -641,6 +689,26 @@ test_commit_closes_deadline (void)
   g_assert_cmpuint (snapshot.timed_out_total, ==, 0);
 }
 
+static void
+test_resource_signals (void)
+{
+  WylFactReplaySchedulerConfig config = test_config ();
+  g_autoptr (WylFactResourceRecorder) recorder =
+      wyl_fact_resource_recorder_new ();
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, recorder,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant",
+      "graph", NULL, resource_signal_replay, recorder, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==, WYRELOG_E_OK);
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  g_assert_cmpuint (snapshot.active_opens, ==, 0);
+  g_assert_cmpuint (snapshot.quota_rejected_total, ==, 1);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -667,5 +735,9 @@ main (int argc, char **argv)
       test_deadline_is_enforced);
   g_test_add_func ("/fact-replay-scheduler/commit-closes-deadline",
       test_commit_closes_deadline);
-  return g_test_run ();
+  g_test_add_func ("/fact-replay-scheduler/resource-signals",
+      test_resource_signals);
+  g_test_add_func ("/fact-replay-scheduler/pre-replay-refusal-metrics",
+      test_pre_replay_refusal_is_not_completed_or_cancelled);
+  return wyl_test_normalize_exit_status (g_test_run ());
 }

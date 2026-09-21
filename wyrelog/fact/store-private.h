@@ -19,6 +19,7 @@ G_BEGIN_DECLS;
 typedef struct wyl_fact_store_t wyl_fact_store_t;
 typedef struct FactOpenReservationAdapter FactOpenReservationAdapter;
 typedef struct WylFactOpenReservation WylFactOpenReservation;
+typedef struct _WylFactResourceRecorder WylFactResourceRecorder;
 
 typedef void (*WylFactStoreIdentityValidationTestHook) (duckdb_database db,
     gpointer user_data);
@@ -128,10 +129,18 @@ FactOpenReservationAdapter *wyl_fact_store_open_reservation_begin
     const gchar *graph_id, const gchar *root_identity,
     const gchar *token_identity, WylFactOpenReservation **out_reservation,
     wyrelog_error_t *out_error);
+FactOpenReservationAdapter *wyl_fact_store_open_reservation_begin_observed
+  (wyl_policy_store_t *policy_store, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, WylFactResourceRecorder *resource_recorder,
+    gboolean *out_quota_rejected,
+    WylFactOpenReservation **out_reservation, wyrelog_error_t *out_error);
 void wyl_fact_store_open_reservation_attach (wyl_fact_store_t *store,
     FactOpenReservationAdapter *adapter, WylFactOpenReservation *reservation);
 void wyl_fact_store_open_reservation_abort (FactOpenReservationAdapter *adapter,
     WylFactOpenReservation *reservation);
+void wyl_fact_store_observe_open (wyl_fact_store_t *store,
+    WylFactResourceRecorder *resource_recorder);
 
 wyrelog_error_t wyl_fact_store_create_schema (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_table_exists (wyl_fact_store_t * store,

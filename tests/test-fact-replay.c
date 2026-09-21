@@ -72,6 +72,39 @@ bounded_refresh_job (WylFactReplayJobContext *context, gpointer user_data)
 }
 
 static wyrelog_error_t
+bounded_validation_job (WylFactReplayJobContext *context, gpointer user_data)
+{
+  BoundedRefreshCall *call = user_data;
+  return wyl_fact_replay_validate_graph_bounded (call->policy, call->root,
+             call->info, context);
+}
+
+static wyrelog_error_t
+delete_then_bounded_validation_job (WylFactReplayJobContext *context,
+    gpointer user_data)
+{
+  BoundedRefreshCall *call = user_data;
+  sqlite3 *db = wyl_policy_store_get_db (call->policy);
+  if (sqlite3_exec (db,
+      "PRAGMA foreign_keys=OFF;"
+      "DELETE FROM fact_graphs WHERE tenant_id='tenant-a' "
+      "AND graph_id='orders';"
+      "PRAGMA foreign_keys=ON;", NULL, NULL, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  return wyl_fact_replay_validate_graph_bounded (call->policy, call->root,
+             call->info, context);
+}
+
+static void
+cancel_connected_validation (WylFactReplayJobContext *context,
+    gpointer user_data)
+{
+  (void) user_data;
+  g_cancellable_cancel
+    (wyl_fact_replay_job_context_get_cancellable (context));
+}
+
+static wyrelog_error_t
 capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
     gpointer user_data)
 {
@@ -2078,6 +2111,386 @@ test_bounded_replay_preserves_published_generation (void)
 }
 
 static void
+test_nonartifact_validation_cancels_before_query_teardown (void)
+{
+  TEST ("bounded non-artifact validation disconnects cancellation safely");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-validation-cancel-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_compound_graph_with_schemas (policy, root, "tenant-a", "shipments");
+  append_compound_route_batches (policy, "tenant-a", "shipments");
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "shipments");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipments",
+    .storage_path = storage_path,
+    .schema_version = 1,
+  };
+  WylFactReplaySchedulerConfig config = {
+    .global_concurrency = 2,
+    .tenant_concurrency = 1,
+    .global_queue_limit = 8,
+    .tenant_queue_limit = 4,
+    .row_limit = 100,
+    .time_limit_us = 5 * G_TIME_SPAN_SECOND,
+  };
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  BoundedRefreshCall call = {
+    .policy = policy,
+    .root = root,
+    .info = &info,
+  };
+  wyl_fact_replay_set_validation_connected_test_hook
+    (cancel_connected_validation, NULL);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "shipments", NULL, bounded_validation_job, &call, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_CANCELLED);
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  remove_tree (root);
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean release_first;
+  gboolean later_tenant_started;
+} StartupFairnessProbe;
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const gchar *root;
+  WylFactGraphRuntimeManager *runtime;
+  WylFactReplayScheduler *scheduler;
+  WylFactReplaySchedulerConfig config;
+  wyrelog_error_t rc;
+} StartupFairnessRun;
+
+static void
+startup_fairness_hook (const gchar *tenant_id, const gchar *graph_id,
+    gpointer user_data)
+{
+  (void) graph_id;
+  StartupFairnessProbe *probe = user_data;
+  g_mutex_lock (&probe->mutex);
+  if (g_strcmp0 (tenant_id, "tenant-a") == 0) {
+    while (!probe->release_first)
+      g_cond_wait (&probe->changed, &probe->mutex);
+  } else if (g_strcmp0 (tenant_id, "tenant-c") == 0
+      && g_strcmp0 (graph_id, "graph-c-3") == 0) {
+    probe->later_tenant_started = TRUE;
+    g_cond_broadcast (&probe->changed);
+  }
+  g_mutex_unlock (&probe->mutex);
+}
+
+static gpointer
+startup_fairness_run (gpointer user_data)
+{
+  StartupFairnessRun *run = user_data;
+  wyl_fact_replay_summary_t summary = { 0 };
+  run->rc = wyl_fact_replay_policy_graphs_scheduled (run->policy, run->root,
+          run->runtime, run->scheduler, &run->config, &summary);
+  return NULL;
+}
+
+static void
+test_startup_rolls_past_one_producer_batch (void)
+{
+  TEST ("startup admits later tenants while an earlier tenant is stalled");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-fair-startup-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  for (guint i = 1; i <= 3; i++) {
+    g_autofree gchar *graph_a = g_strdup_printf ("graph-a-%u", i);
+    g_autofree gchar *graph_c = g_strdup_printf ("graph-c-%u", i);
+    create_compound_graph_with_schemas (policy, root, "tenant-a", graph_a);
+    create_compound_graph_with_schemas (policy, root, "tenant-c", graph_c);
+  }
+
+  g_autoptr (WylFactGraphRuntimeManager) runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&runtime), ==,
+      WYRELOG_E_OK);
+  WylFactReplaySchedulerConfig config = {
+    .global_concurrency = 2,
+    .tenant_concurrency = 1,
+    .global_queue_limit = 2,
+    .tenant_queue_limit = 1,
+    .row_limit = 100,
+    .time_limit_us = 30 * G_TIME_SPAN_SECOND,
+  };
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  StartupFairnessProbe probe = { 0 };
+  g_mutex_init (&probe.mutex);
+  g_cond_init (&probe.changed);
+  wyl_fact_replay_set_scheduled_start_test_hook (startup_fairness_hook,
+      &probe);
+  StartupFairnessRun run = {
+    .policy = policy,
+    .root = root,
+    .runtime = runtime,
+    .scheduler = scheduler,
+    .config = config,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  GThread *thread = g_thread_new ("startup-fairness", startup_fairness_run,
+          &run);
+  g_mutex_lock (&probe.mutex);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!probe.later_tenant_started
+      && g_cond_wait_until (&probe.changed, &probe.mutex, deadline))
+    ;
+  gboolean later_started = probe.later_tenant_started;
+  probe.release_first = TRUE;
+  g_cond_broadcast (&probe.changed);
+  g_mutex_unlock (&probe.mutex);
+  g_thread_join (thread);
+  wyl_fact_replay_set_scheduled_start_test_hook (NULL, NULL);
+  g_cond_clear (&probe.changed);
+  g_mutex_clear (&probe.mutex);
+  g_assert_true (later_started);
+  g_assert_cmpint (run.rc, ==, WYRELOG_E_OK);
+  remove_tree (root);
+}
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  gboolean mutated;
+} StartupPolicySnapshotProbe;
+
+static wyrelog_error_t
+startup_policy_snapshot_pin (gpointer user_data,
+    wyl_policy_store_t **out_policy)
+{
+  StartupPolicySnapshotProbe *probe = user_data;
+  *out_policy = probe->policy;
+  return WYRELOG_E_OK;
+}
+
+static void
+startup_policy_snapshot_captured (WylFactReplayJobContext *job_context,
+    gpointer user_data)
+{
+  (void) job_context;
+  StartupPolicySnapshotProbe *probe = user_data;
+  if (probe->mutated)
+    return;
+  sqlite3 *db = wyl_policy_store_get_db (probe->policy);
+  probe->mutated = sqlite3_exec (db,
+          "DELETE FROM fact_relation_schema_columns "
+          "WHERE tenant_id='tenant-a' AND graph_id='orders';",
+          NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static void
+test_startup_uses_per_job_immutable_policy_snapshot (void)
+{
+  TEST ("startup workers consume immutable post-admission policy snapshots");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-policy-snapshot-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+
+  g_autoptr (WylFactGraphRuntimeManager) runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&runtime), ==,
+      WYRELOG_E_OK);
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  StartupPolicySnapshotProbe probe = { policy, FALSE };
+  const WylFactReplayPolicyProvider provider = {
+    .pin = startup_policy_snapshot_pin,
+    .user_data = &probe,
+  };
+  wyl_fact_replay_set_validation_connected_test_hook
+    (startup_policy_snapshot_captured, &probe);
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_assert_cmpint (wyl_fact_replay_policy_graphs_scheduled_with_provider
+        (policy, root, runtime, scheduler, &config, &provider, &summary), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  g_assert_true (probe.mutated);
+  g_assert_cmpuint (summary.graphs_seen, ==, 1);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
+  g_assert_cmpuint (summary.graphs_degraded, ==, 0);
+  remove_tree (root);
+}
+
+static void
+startup_policy_authority_changed (const gchar *tenant_id,
+    const gchar *graph_id, gpointer user_data)
+{
+  StartupPolicySnapshotProbe *probe = user_data;
+  if (probe->mutated || g_strcmp0 (tenant_id, "tenant-a") != 0
+      || g_strcmp0 (graph_id, "orders") != 0)
+    return;
+  sqlite3 *db = wyl_policy_store_get_db (probe->policy);
+  probe->mutated = sqlite3_exec (db,
+          "UPDATE fact_graphs SET sealed=1 "
+          "WHERE tenant_id='tenant-a' AND graph_id='orders';",
+          NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static void
+test_startup_snapshot_includes_post_admission_graph_authority (void)
+{
+  TEST ("startup snapshot includes post-admission graph authority");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-authority-snapshot-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+  g_autoptr (WylFactGraphRuntimeManager) runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&runtime), ==,
+      WYRELOG_E_OK);
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  StartupPolicySnapshotProbe probe = { policy, FALSE };
+  const WylFactReplayPolicyProvider provider = {
+    .pin = startup_policy_snapshot_pin,
+    .user_data = &probe,
+  };
+  wyl_fact_replay_set_scheduled_start_test_hook
+    (startup_policy_authority_changed, &probe);
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_assert_cmpint (wyl_fact_replay_policy_graphs_scheduled_with_provider
+        (policy, root, runtime, scheduler, &config, &provider, &summary), ==,
+      WYRELOG_E_OK);
+  wyl_fact_replay_set_scheduled_start_test_hook (NULL, NULL);
+  g_assert_true (probe.mutated);
+  g_assert_cmpuint (summary.graphs_seen, ==, 1);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 0);
+  g_assert_cmpuint (summary.graphs_sealed, ==, 1);
+  remove_tree (root);
+}
+
+static void
+test_targeted_refresh_uses_immutable_policy_snapshot (void)
+{
+  TEST ("targeted refresh retains one coherent post-admission policy view");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-targeted-snapshot-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "orders");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .storage_path = storage_path,
+    .schema_version = 1,
+  };
+  g_autoptr (WylFactGraphRuntimeManager) runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&runtime), ==,
+      WYRELOG_E_OK);
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  StartupPolicySnapshotProbe probe = { policy, FALSE };
+  wyl_fact_replay_set_validation_connected_test_hook
+    (startup_policy_snapshot_captured, &probe);
+  BoundedRefreshCall call = {
+    .policy = policy,
+    .root = root,
+    .info = &info,
+    .runtime = runtime,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "orders", NULL, bounded_refresh_job, &call, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==, WYRELOG_E_OK);
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  g_assert_true (probe.mutated);
+  g_assert_true (call.status.queryable);
+  wyl_fact_graph_runtime_status_clear (&call.status);
+  remove_tree (root);
+}
+
+static void
+test_bounded_validation_owns_authority_and_preserves_graph_not_found (void)
+{
+  TEST ("bounded validation owns authority and preserves graph deletion");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-validation-authority-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  append_order_batches (policy, root, "tenant-a", "orders");
+  wyl_policy_fact_graph_info_t stale = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .storage_path = "/caller/stale/authority",
+    .schema_version = 999,
+    .sealed = TRUE,
+  };
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  BoundedRefreshCall call = {
+    .policy = policy,
+    .root = root,
+    .info = &stale,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "orders", NULL, bounded_validation_job, &call, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==, WYRELOG_E_OK);
+  g_clear_pointer (&future, wyl_fact_replay_future_unref);
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "orders", NULL, delete_then_bounded_validation_job, &call, NULL,
+      &future), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_NOT_FOUND);
+  remove_tree (root);
+}
+
+static void
 test_direct_replay_retracts_and_mangles (void)
 {
   TEST ("direct replay loads net facts with mangled relation names");
@@ -2859,7 +3272,7 @@ commit_one_mutation_op (WylHandle *handle, wyl_policy_store_t *policy,
   g_assert_true (target.found);
 
   wyrelog_error_t rc = wyl_handle_commit_fact_mutation (handle, &store,
-          &schema, &batch, &target.info, out_inserted, out_outcome);
+          &schema, &batch, &target.info, NULL, out_inserted, out_outcome);
   /* The entry point consumes the store: it must be NULL now, and the
    * g_autoptr below must therefore be a no-op rather than a double close. */
   g_assert_null (store);
@@ -3652,6 +4065,10 @@ test_provisioned_graph_reports_empty_not_degraded (void)
   g_assert_nonnull (strstr (json, "\"graphs_ready\":0"));
   g_assert_nonnull (strstr (json, "\"graphs_degraded\":1"));
   g_assert_nonnull (strstr (json, "\"graphs_provisioned\":1"));
+  g_assert_nonnull (strstr (json, "\"replay_resources\":{"));
+  g_assert_nonnull (strstr (json, "\"completed_total\":2"));
+  g_assert_nonnull (strstr (json, "\"active_opens\":0"));
+  g_assert_null (strstr (json, root));
 
   /* The first append materializes the store and follows the existing ready
    * path; the unavailable sibling remains degraded. */
@@ -3882,8 +4299,8 @@ test_evicted_and_closed_reports_evicted_not_sealed (void)
   WylFactGraphSealOutcome outcome = { 0 };
   g_autoptr (WylServiceAuthWriteLease) lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
-        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
-      ==, WYRELOG_E_OK);
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info, -1,
       &outcome), ==, WYRELOG_E_OK);
   /* The fixture really is both.  Without the eviction the assertion below
@@ -4743,6 +5160,13 @@ test_handle_unseal_traces_coordinator_before_publication (void)
   g_assert_cmpint (wyl_handle_seal_fact_graph (handle, lease, &info, -1,
       &sealed), ==, WYRELOG_E_OK);
   wyl_fact_graph_seal_outcome_clear (&sealed);
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactReplayAdmission) admission = NULL;
+  g_assert_cmpint (wyl_handle_fact_replay_admission_acquire (handle,
+      info.tenant_id, info.graph_id, NULL, &admission), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_fact_replay_admission_acquire_service_write
+        (admission, &lease), ==, WYRELOG_E_OK);
 
   PublicationLockTrace trace = { 0 };
   g_mutex_init (&trace.mutex);
@@ -4751,8 +5175,8 @@ test_handle_unseal_traces_coordinator_before_publication (void)
   wyl_fact_publication_lock_event_set_hook (publication_lock_trace_event,
       &trace);
   WylFactGraphUnsealOutcome unsealed = { 0 };
-  g_assert_cmpint (wyl_handle_unseal_fact_graph (handle, lease, &info, -1,
-      &unsealed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_unseal_fact_graph (handle, admission, lease,
+      &info, -1, &unsealed), ==, WYRELOG_E_OK);
   wyl_fact_publication_lock_event_set_hook (NULL, NULL);
   g_assert_true (unsealed.engine_published);
   g_assert_true (unsealed.runtime_admission_open);
@@ -4845,6 +5269,18 @@ main (int argc, char **argv)
       test_direct_replay_retracts_and_mangles);
   g_test_add_func ("/fact-replay/bounded-preserves-generation",
       test_bounded_replay_preserves_published_generation);
+  g_test_add_func ("/fact-replay/nonartifact-validation-cancel",
+      test_nonartifact_validation_cancels_before_query_teardown);
+  g_test_add_func ("/fact-replay/startup-rolls-past-producer-batch",
+      test_startup_rolls_past_one_producer_batch);
+  g_test_add_func ("/fact-replay/startup-policy-snapshot",
+      test_startup_uses_per_job_immutable_policy_snapshot);
+  g_test_add_func ("/fact-replay/startup-authority-snapshot",
+      test_startup_snapshot_includes_post_admission_graph_authority);
+  g_test_add_func ("/fact-replay/targeted-policy-snapshot",
+      test_targeted_refresh_uses_immutable_policy_snapshot);
+  g_test_add_func ("/fact-replay/validation-authority-snapshot",
+      test_bounded_validation_owns_authority_and_preserves_graph_not_found);
   g_test_add_func ("/fact-replay/legacy-null-fails-closed",
       test_replay_keeps_legacy_nullable_null_fail_closed);
   g_test_add_func ("/fact-replay/compound-shared",

@@ -24,7 +24,7 @@
     "tests/test-fact-offline-backup-source.c": 1,
     "tests/test-fact-provisioning-run.c": 15,
     "tests/test-fact-reconcile-move.c": 2,
-    "tests/test-fact-replay.c": 3,
+    "tests/test-fact-replay.c": 6,
     "tests/test-fact-store-forget-transaction-provision-helper.c": 1,
     "tests/test-fact-store-provisioned.c": 1,
     "tests/test-handle-engine-pair.c": 3,

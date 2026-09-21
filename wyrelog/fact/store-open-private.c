@@ -112,8 +112,22 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
     const gchar *fact_root, const gchar *tenant_id, const gchar *graph_id,
     gboolean writable, wyl_fact_store_t **out_store)
 {
+  return wyl_fact_store_open_provisioned_graph_observed (policy_store,
+             fact_root, tenant_id, graph_id, writable, NULL, NULL, out_store);
+}
+
+wyrelog_error_t
+wyl_fact_store_open_provisioned_graph_observed
+  (wyl_policy_store_t *policy_store, const gchar *fact_root,
+    const gchar *tenant_id, const gchar *graph_id, gboolean writable,
+    WylFactResourceRecorder *resource_recorder,
+    gboolean *out_quota_rejected,
+    wyl_fact_store_t **out_store)
+{
   if (out_store != NULL)
     *out_store = NULL;
+  if (out_quota_rejected != NULL)
+    *out_quota_rejected = FALSE;
   if (policy_store == NULL || fact_root == NULL || fact_root[0] == '\0'
       || tenant_id == NULL || graph_id == NULL || out_store == NULL)
     return WYRELOG_E_INVALID;
@@ -159,8 +173,9 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
   WylFactOpenReservation *reservation = NULL;
   wyrelog_error_t reservation_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {
-    adapter = wyl_fact_store_open_reservation_begin (policy_store, tenant_id,
-            graph_id, fact_root, authority->store_uuid, &reservation,
+    adapter = wyl_fact_store_open_reservation_begin_observed (policy_store,
+            tenant_id, graph_id, fact_root, authority->store_uuid,
+            resource_recorder, out_quota_rejected, &reservation,
             &reservation_rc);
     if (adapter == NULL)
       rc = reservation_rc;
@@ -182,6 +197,8 @@ wyl_fact_store_open_provisioned_graph (wyl_policy_store_t *policy_store,
     rc = wyl_fact_open_reservation_adopt_native (reservation);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_open_reservation_mark_active (reservation);
+  if (rc == WYRELOG_E_OK)
+    wyl_fact_store_observe_open (*out_store, resource_recorder);
   if (rc != WYRELOG_E_OK) {
     if (*out_store != NULL) {
       wyl_fact_store_close (*out_store);

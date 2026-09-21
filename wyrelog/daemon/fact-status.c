@@ -115,14 +115,17 @@ wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs,
     const gchar *tenant_filter)
 {
   FactStatusJsonCtx ctx = { 0 };
+  WylFactReplayResourceSnapshot replay = { 0 };
   g_autoptr (GString) graphs = include_graphs ? g_string_new (NULL) : NULL;
   ctx.graphs = graphs;
   ctx.tenant_filter = tenant_filter;
 
 #ifdef WYL_HAS_FACT_STORE
-  if (handle != NULL)
+  if (handle != NULL) {
     (void) wyl_handle_foreach_fact_graph_status (handle,
         append_graph_status_json, &ctx);
+    wyl_handle_fact_replay_resource_snapshot (handle, &replay);
+  }
   const gchar *status = ctx.degraded > 0 ? "degraded" : "ready";
 #else
   (void) handle;
@@ -133,8 +136,26 @@ wyl_daemon_fact_status_json (WylHandle *handle, gboolean include_graphs,
   append_json_string (body, status);
   g_string_append_printf (body,
       ",\"graphs_total\":%u,\"graphs_ready\":%u,\"graphs_degraded\":%u"
-      ",\"graphs_provisioned\":%u,\"graphs_sealed\":%u",
-      ctx.total, ctx.ready, ctx.degraded, ctx.provisioned, ctx.sealed);
+      ",\"graphs_provisioned\":%u,\"graphs_sealed\":%u"
+      ",\"replay_resources\":{\"active\":%" G_GUINT64_FORMAT
+      ",\"queued\":%" G_GUINT64_FORMAT
+      ",\"active_opens\":%" G_GUINT64_FORMAT
+      ",\"completed_total\":%" G_GUINT64_FORMAT
+      ",\"rows_total\":%" G_GUINT64_FORMAT
+      ",\"runtime_us_total\":%" G_GUINT64_FORMAT
+      ",\"queue_delay_us_total\":%" G_GUINT64_FORMAT
+      ",\"queue_delay_us_max\":%" G_GUINT64_FORMAT
+      ",\"cancelled_total\":%" G_GUINT64_FORMAT
+      ",\"timed_out_total\":%" G_GUINT64_FORMAT
+      ",\"row_limit_total\":%" G_GUINT64_FORMAT
+      ",\"queue_rejected_total\":%" G_GUINT64_FORMAT
+      ",\"quota_rejected_total\":%" G_GUINT64_FORMAT "}",
+      ctx.total, ctx.ready, ctx.degraded, ctx.provisioned, ctx.sealed,
+      replay.active, replay.queued, replay.active_opens,
+      replay.completed_total, replay.rows_total, replay.runtime_us_total,
+      replay.queue_delay_us_total, replay.queue_delay_us_max,
+      replay.cancelled_total, replay.timed_out_total, replay.row_limit_total,
+      replay.queue_rejected_total, replay.quota_rejected_total);
   if (include_graphs) {
     g_string_append (body, ",\"graphs\":[");
     if (graphs != NULL)

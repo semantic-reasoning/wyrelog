@@ -786,9 +786,16 @@ test_independent_policy_seal_with_live_handle (gconstpointer data)
       (void) wyl_service_auth_write_lease_release_terminal (&lease);
       g_assert_cmpint (initial_seal, ==, WYRELOG_E_OK);
     }
+    g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&lease),
+        ==, WYRELOG_E_OK);
+    g_autoptr (WylFactReplayAdmission) admission = NULL;
+    g_assert_cmpint (wyl_handle_fact_replay_admission_acquire (handle,
+        info.tenant_id, info.graph_id, NULL, &admission), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_handle_fact_replay_admission_acquire_service_write
+          (admission, &lease), ==, WYRELOG_E_OK);
     WylFactGraphUnsealOutcome outcome = { 0 };
     wyl_fact_graph_seal_set_test_hook (seal_before_admission_hook, &probe);
-    unseal_rc = wyl_handle_unseal_fact_graph (handle, lease, &info,
+    unseal_rc = wyl_handle_unseal_fact_graph (handle, admission, lease, &info,
             G_TIME_SPAN_SECOND, &outcome);
     wyl_fact_graph_seal_set_test_hook (NULL, NULL);
     wyl_fact_graph_unseal_outcome_clear (&outcome);

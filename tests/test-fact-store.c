@@ -7,6 +7,7 @@
 
 #include "wyrelog/fact/legacy-store-identity-private.h"
 #include "wyrelog/fact/open-reservation-private.h"
+#include "wyrelog/fact/replay-scheduler-private.h"
 #include "wyrelog/fact/store-open-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-test-seams-private.h"
@@ -5355,6 +5356,63 @@ out:
 }
 
 static gint
+check_observed_open_tracks_active_and_quota_once (void)
+{
+  OpenReservationFixture fixture;
+  g_autoptr (WylFactResourceRecorder) recorder = NULL;
+  gint rc = open_reservation_fixture_init (&fixture,
+          "wyl-fact-open-observed-XXXXXX", 2910);
+  if (rc != 0)
+    goto out;
+  if (wyl_policy_store_set_fact_concurrent_open_quota (fixture.policy,
+      "tenant-a", 1) != WYRELOG_E_OK) {
+    rc = 2913;
+    goto out;
+  }
+  recorder = wyl_fact_resource_recorder_new ();
+  wyl_fact_store_t *store = NULL;
+  gboolean quota_rejected = TRUE;
+  if (wyl_fact_store_open_legacy_graph_observed (fixture.policy,
+      fixture.fact_path, fixture.dir, "tenant-a", "orders", TRUE, recorder,
+      &quota_rejected, &store) != WYRELOG_E_OK || store == NULL
+      || quota_rejected) {
+    rc = 2914;
+    goto out;
+  }
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  if (snapshot.active_opens != 1 || snapshot.quota_rejected_total != 0) {
+    rc = 2915;
+    goto close_store;
+  }
+  wyl_fact_store_t *refused = NULL;
+  quota_rejected = FALSE;
+  if (wyl_fact_store_open_legacy_graph_observed (fixture.policy,
+      fixture.fact_path, fixture.dir, "tenant-a", "orders", TRUE, recorder,
+      &quota_rejected, &refused) != WYRELOG_E_POLICY || refused != NULL
+      || !quota_rejected) {
+    rc = 2916;
+    goto close_store;
+  }
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  if (snapshot.active_opens != 1 || snapshot.quota_rejected_total != 1) {
+    rc = 2917;
+    goto close_store;
+  }
+  wyl_fact_store_close (store);
+  store = NULL;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  if (snapshot.active_opens != 0 || snapshot.quota_rejected_total != 1)
+    rc = 2918;
+  goto out;
+close_store:
+  wyl_fact_store_close (store);
+out:
+  open_reservation_fixture_clear (&fixture);
+  return rc;
+}
+
+static gint
 check_forced_close_finishes_refused_cleanup (void)
 {
   OpenReservationFixture fixture;
@@ -5934,6 +5992,9 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_refused_reservation_unwind_is_freed ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_observed_open_tracks_active_and_quota_once ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_forced_close_finishes_refused_cleanup ();

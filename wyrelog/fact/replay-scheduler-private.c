@@ -83,6 +83,7 @@ struct _WylFactReplayJobContext
   gint64 deadline_us;
   guint64 row_limit;
   guint64 rows;
+  gboolean suppress_work_totals;
 };
 
 struct _WylFactReplayScheduler
@@ -102,6 +103,7 @@ struct _WylFactReplayScheduler
   GThread *reaper;
   guint active;
   guint pending;
+  guint64 change_serial;
   gboolean shutting_down;
   gboolean shutdown_complete;
   GThread *shutdown_owner;
@@ -155,17 +157,20 @@ recorder_queued_to_active (WylFactResourceRecorder *recorder,
 
 static void
 recorder_complete_active (WylFactResourceRecorder *recorder,
-    wyrelog_error_t result, guint64 rows, guint64 runtime_us)
+    wyrelog_error_t result, guint64 rows, guint64 runtime_us,
+    gboolean suppress_work_totals)
 {
   g_mutex_lock (&recorder->mutex);
   if (recorder->values.active > 0)
     recorder->values.active--;
-  recorder->values.completed_total = saturating_add
-        (recorder->values.completed_total, 1);
-  recorder->values.rows_total = saturating_add
-        (recorder->values.rows_total, rows);
-  recorder->values.runtime_us_total = saturating_add
-        (recorder->values.runtime_us_total, runtime_us);
+  if (!suppress_work_totals) {
+    recorder->values.completed_total = saturating_add
+          (recorder->values.completed_total, 1);
+    recorder->values.rows_total = saturating_add
+          (recorder->values.rows_total, rows);
+    recorder->values.runtime_us_total = saturating_add
+          (recorder->values.runtime_us_total, runtime_us);
+  }
   if (result == WYRELOG_E_CANCELLED)
     recorder->values.cancelled_total = saturating_add
           (recorder->values.cancelled_total, 1);
@@ -227,6 +232,29 @@ wyl_fact_resource_recorder_snapshot (WylFactResourceRecorder *recorder,
   g_mutex_lock (&recorder->mutex);
   *out_snapshot = recorder->values;
   g_mutex_unlock (&recorder->mutex);
+}
+
+void
+wyl_fact_resource_recorder_record_quota_rejection
+  (WylFactResourceRecorder *recorder)
+{
+  if (recorder == NULL)
+    return;
+  recorder_add (recorder, &recorder->values.quota_rejected_total, 1);
+}
+
+void
+wyl_fact_resource_recorder_open_begin (WylFactResourceRecorder *recorder)
+{
+  if (recorder != NULL)
+    recorder_adjust_gauge (recorder, &recorder->values.active_opens, TRUE);
+}
+
+void
+wyl_fact_resource_recorder_open_end (WylFactResourceRecorder *recorder)
+{
+  if (recorder != NULL)
+    recorder_adjust_gauge (recorder, &recorder->values.active_opens, FALSE);
 }
 
 static WylFactReplayFuture *
@@ -354,6 +382,8 @@ replay_job_cancelled (GCancellable *cancellable, gpointer user_data)
     job->state = REPLAY_JOB_GARBAGE;
     g_queue_push_tail (&scheduler->garbage, job);
     g_cond_signal (&scheduler->reaper_changed);
+    scheduler->change_serial++;
+    g_cond_broadcast (&scheduler->changed);
   }
   g_mutex_unlock (&scheduler->mutex);
 }
@@ -395,6 +425,10 @@ scheduler_take_job_locked (WylFactReplayScheduler *scheduler)
     job->state = REPLAY_JOB_ACTIVE;
     g_hash_table_add (scheduler->active_jobs, job);
     tenant_mark_ready_locked (scheduler, tenant);
+    /* Wake producers when a pending slot is consumed; an active job may run
+     * indefinitely relative to queue admission. */
+    scheduler->change_serial++;
+    g_cond_broadcast (&scheduler->changed);
     return job;
   }
   return NULL;
@@ -458,11 +492,12 @@ replay_worker (gpointer data)
     scheduler->active--;
     job->state = REPLAY_JOB_DONE;
     tenant_mark_ready_locked (scheduler, job->tenant);
+    scheduler->change_serial++;
     g_cond_broadcast (&scheduler->changed);
     g_mutex_unlock (&scheduler->mutex);
 
     recorder_complete_active (scheduler->recorder, result, context.rows,
-        (guint64) runtime_us);
+        (guint64) runtime_us, context.suppress_work_totals);
     replay_job_destroy_user_data (job);
     replay_future_complete (job->future, result);
     replay_job_free (job);
@@ -509,6 +544,7 @@ wyl_fact_replay_scheduler_new (const WylFactReplaySchedulerConfig *config,
   g_cond_init (&scheduler->changed);
   g_cond_init (&scheduler->reaper_changed);
   scheduler->config = *config;
+  scheduler->change_serial = 1;
   scheduler->recorder = recorder != NULL
     ? wyl_fact_resource_recorder_ref (recorder)
     : wyl_fact_resource_recorder_new ();
@@ -622,6 +658,32 @@ wyl_fact_replay_scheduler_shutdown (WylFactReplayScheduler *scheduler)
   return WYRELOG_E_OK;
 }
 
+guint64
+wyl_fact_replay_scheduler_change_serial (WylFactReplayScheduler *scheduler)
+{
+  if (scheduler == NULL)
+    return 0;
+  g_mutex_lock (&scheduler->mutex);
+  guint64 serial = scheduler->change_serial;
+  g_mutex_unlock (&scheduler->mutex);
+  return serial;
+}
+
+wyrelog_error_t
+wyl_fact_replay_scheduler_wait_for_change
+  (WylFactReplayScheduler *scheduler, guint64 observed_serial)
+{
+  if (scheduler == NULL || observed_serial == 0)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&scheduler->mutex);
+  while (!scheduler->shutting_down
+      && scheduler->change_serial == observed_serial)
+    g_cond_wait (&scheduler->changed, &scheduler->mutex);
+  gboolean shutting_down = scheduler->shutting_down;
+  g_mutex_unlock (&scheduler->mutex);
+  return shutting_down ? WYRELOG_E_BUSY : WYRELOG_E_OK;
+}
+
 static gpointer
 replay_scheduler_destroy (gpointer data)
 {
@@ -732,6 +794,7 @@ wyl_fact_replay_scheduler_submit (WylFactReplayScheduler *scheduler,
   g_queue_push_tail (&tenant->jobs, job);
   tenant_mark_ready_locked (scheduler, tenant);
   *out_future = wyl_fact_replay_future_ref (job->future);
+  scheduler->change_serial++;
   g_cond_signal (&scheduler->changed);
   g_mutex_unlock (&scheduler->mutex);
   return WYRELOG_E_OK;
@@ -741,6 +804,14 @@ GCancellable *
 wyl_fact_replay_job_context_get_cancellable (WylFactReplayJobContext *context)
 {
   return context != NULL ? context->job->work_cancellable : NULL;
+}
+
+WylFactResourceRecorder *
+wyl_fact_replay_job_context_get_resource_recorder
+  (WylFactReplayJobContext *context)
+{
+  return context != NULL && context->job != NULL
+      ? context->job->scheduler->recorder : NULL;
 }
 
 gint64
@@ -759,8 +830,7 @@ void
 wyl_fact_replay_job_context_add_rows (WylFactReplayJobContext *context,
     guint64 rows)
 {
-  if (context != NULL)
-    context->rows = saturating_add (context->rows, rows);
+  (void) wyl_fact_replay_job_context_charge_rows (context, rows);
 }
 
 wyrelog_error_t
@@ -805,6 +875,38 @@ wyl_fact_replay_job_context_charge_rows (WylFactReplayJobContext *context,
     g_atomic_int_compare_and_exchange (&context->job->outcome,
         REPLAY_OUTCOME_OPEN, REPLAY_OUTCOME_RESOURCE_LIMIT);
   return wyl_fact_replay_job_context_checkpoint (context);
+}
+
+void
+wyl_fact_replay_job_context_open_begin (WylFactReplayJobContext *context)
+{
+  wyl_fact_resource_recorder_open_begin
+    (wyl_fact_replay_job_context_get_resource_recorder (context));
+}
+
+void
+wyl_fact_replay_job_context_open_end (WylFactReplayJobContext *context)
+{
+  wyl_fact_resource_recorder_open_end
+    (wyl_fact_replay_job_context_get_resource_recorder (context));
+}
+
+void
+wyl_fact_replay_job_context_record_quota_rejection
+  (WylFactReplayJobContext *context)
+{
+  if (context == NULL || context->job == NULL)
+    return;
+  wyl_fact_resource_recorder_record_quota_rejection
+    (context->job->scheduler->recorder);
+}
+
+void
+wyl_fact_replay_job_context_suppress_work_totals
+  (WylFactReplayJobContext *context)
+{
+  if (context != NULL)
+    context->suppress_work_totals = TRUE;
 }
 
 wyrelog_error_t

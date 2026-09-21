@@ -66,6 +66,30 @@ typedef enum
 
 typedef struct
 {
+  /* Versioned, caller-sized ABI. Pass the allocation size separately. */
+  guint32 version;
+  guint32 reserved;
+  guint64 active;
+  guint64 queued;
+  guint64 active_opens;
+  guint64 completed_total;
+  guint64 rows_total;
+  guint64 runtime_us_total;
+  guint64 queue_delay_us_total;
+  guint64 queue_delay_us_max;
+  guint64 cancelled_total;
+  guint64 timed_out_total;
+  guint64 row_limit_total;
+  guint64 queue_rejected_total;
+  guint64 quota_rejected_total;
+} WylClientFactReplayResources;
+
+#define WYL_CLIENT_FACT_REPLAY_RESOURCES_VERSION 1u
+#define WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT \
+  { .version = WYL_CLIENT_FACT_REPLAY_RESOURCES_VERSION }
+
+typedef struct
+{
   /* Owned strings. Unknown future states retain their bounded wire name and
    * map to WYL_CLIENT_FACT_GRAPH_STATE_UNKNOWN. */
   gchar *tenant_id;
@@ -560,6 +584,11 @@ void wyl_client_fact_graph_verification_clear
 wyrelog_error_t wyl_client_fact_status (WylClient * client,
     const gchar * access_token, const gchar * tenant,
     WylClientFactStatus * out_status);
+/* Fetches the identifier-free replay pressure snapshot from /facts/status.
+ * Initialize out_resources with WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT. */
+wyrelog_error_t wyl_client_fact_replay_resources (WylClient * client,
+    const gchar * access_token, const gchar * tenant,
+    WylClientFactReplayResources * out_resources, gsize result_size);
 /* Performs the daemon's non-mutating exact graph path/identity/schema
  * verification. The client must carry credentials bound to tenant. The
  * result is owned by the caller and must be cleared after use. */

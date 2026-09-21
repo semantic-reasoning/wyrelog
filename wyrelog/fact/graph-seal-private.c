@@ -655,12 +655,20 @@ reconcile_discard_closed_publication
   wyl_fact_graph_runtime_publication_abort (publication);
 }
 
-wyrelog_error_t
-wyl_fact_graph_reconcile_degraded
+static wyrelog_error_t
+replay_job_checkpoint (WylFactReplayJobContext *job_context)
+{
+  return job_context == NULL ? WYRELOG_E_OK
+      : wyl_fact_replay_job_context_checkpoint (job_context);
+}
+
+static wyrelog_error_t
+fact_graph_reconcile_degraded_internal
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactRootWriterLease *root_lease,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
     WylFactGraphReconcileOutcome *out_outcome)
 {
   if (out_outcome != NULL) {
@@ -676,9 +684,12 @@ wyl_fact_graph_reconcile_degraded
     if (root_rc != WYRELOG_E_OK)
       return root_rc;
   }
+  wyrelog_error_t rc = replay_job_checkpoint (job_context);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   WylPolicyGraphAuthorityRecord *authority = NULL;
-  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (policy,
+  rc = wyl_policy_store_read_graph_authority (policy,
           graph_info->tenant_id, graph_info->graph_id, &authority);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -710,8 +721,10 @@ wyl_fact_graph_reconcile_degraded
   if (rc != WYRELOG_E_OK)
     goto finish;
   WylFactGraphRuntimeStatus drained = { 0 };
-  rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
-          drain_timeout_us, &drained);
+  rc = replay_job_checkpoint (job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
+            drain_timeout_us, &drained);
   wyl_fact_graph_runtime_status_clear (&drained);
   if (rc != WYRELOG_E_OK)
     goto preparation_finish;
@@ -722,18 +735,33 @@ wyl_fact_graph_reconcile_degraded
     goto preparation_finish;
 
   wyl_policy_fact_graph_info_t current = { 0 };
-  rc = read_unsealed_graph_info (policy, graph_info->tenant_id,
-          graph_info->graph_id, &current);
+  rc = replay_job_checkpoint (job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = read_unsealed_graph_info (policy, graph_info->tenant_id,
+            graph_info->graph_id, &current);
   if (rc == WYRELOG_E_OK && artifact_lease != NULL)
-    rc = wyl_fact_replay_validate_graph_with_artifact_lease (policy, fact_root,
-            &current, artifact_namespace, artifact_lease);
+    rc = job_context == NULL
+        ? wyl_fact_replay_validate_graph_with_artifact_lease (policy,
+            fact_root, &current, artifact_namespace, artifact_lease)
+        : wyl_fact_replay_validate_graph_with_artifact_lease_bounded (policy,
+            fact_root, &current, artifact_namespace, artifact_lease,
+            job_context);
   else if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+    rc = job_context == NULL
+        ? wyl_fact_replay_validate_graph (policy, fact_root, &current)
+        : wyl_fact_replay_validate_graph_bounded (policy, fact_root,
+            &current, job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = replay_job_checkpoint (job_context);
   if (rc == WYRELOG_E_OK) {
     WylFactGraphRuntimeStatus status = { 0 };
-    rc = wyl_fact_replay_refresh_graph_publication (policy, fact_root,
+    rc = job_context == NULL
+        ? wyl_fact_replay_refresh_graph_publication (policy, fact_root,
             &current, &publication, artifact_namespace, artifact_lease,
-            &status);
+            &status)
+        : wyl_fact_replay_refresh_graph_publication_bounded (policy,
+            fact_root, &current, &publication, artifact_namespace,
+            artifact_lease, job_context, &status);
     if (out_outcome != NULL) {
       out_outcome->status = status;
       memset (&status, 0, sizeof status);
@@ -747,10 +775,12 @@ wyl_fact_graph_reconcile_degraded
 
   WylPolicyAuthorityMutationResult result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
-  rc = wyl_policy_store_reconcile_graph_authority (policy,
-          graph_info->tenant_id, graph_info->graph_id,
-          expected_lifecycle_generation, expected_reconciliation_generation,
-          &result);
+  rc = replay_job_checkpoint (job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_reconcile_graph_authority (policy,
+            graph_info->tenant_id, graph_info->graph_id,
+            expected_lifecycle_generation, expected_reconciliation_generation,
+            &result);
   if (out_outcome != NULL)
     out_outcome->policy_result = result;
   if (rc != WYRELOG_E_OK)
@@ -823,10 +853,40 @@ finish:
 }
 
 wyrelog_error_t
+wyl_fact_graph_reconcile_degraded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphReconcileOutcome *out_outcome)
+{
+  return fact_graph_reconcile_degraded_internal (policy, fact_root,
+             root_lease, graph_info, manager, drain_timeout_us, NULL,
+             out_outcome);
+}
+
+wyrelog_error_t
+wyl_fact_graph_reconcile_degraded_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
+    WylFactGraphReconcileOutcome *out_outcome)
+{
+  if (job_context == NULL)
+    return WYRELOG_E_INVALID;
+  return fact_graph_reconcile_degraded_internal (policy, fact_root,
+             root_lease, graph_info, manager, drain_timeout_us, job_context,
+             out_outcome);
+}
+
+wyrelog_error_t
 wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactRootWriterLease *root_lease,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
     WylFactGraphUnsealOutcome *out_outcome)
 {
   if (out_outcome != NULL) {
@@ -843,6 +903,9 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     if (rc != WYRELOG_E_OK)
       return rc;
   }
+  rc = replay_job_checkpoint (job_context);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   WylFactGraphKey key = { 0 };
   rc = wyl_fact_graph_key_init (&key, graph_info->tenant_id,
@@ -870,8 +933,10 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
     goto finish;
   {
     WylFactGraphRuntimeStatus drained = { 0 };
-    rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
-            drain_timeout_us, &drained);
+    rc = replay_job_checkpoint (job_context);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_drain (manager, &key,
+              drain_timeout_us, &drained);
     wyl_fact_graph_runtime_status_clear (&drained);
     if (rc != WYRELOG_E_OK)
       goto finish;
@@ -896,6 +961,9 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   gboolean recovery = preparation.recovery_eligible
       && fence.initial_lifecycle_state == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE;
+  rc = replay_job_checkpoint (job_context);
+  if (rc != WYRELOG_E_OK)
+    goto fence_abort;
   if (recovery) {
     fence.mode = WYL_POLICY_GRAPH_PUBLICATION_RECOVERY;
     result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
@@ -937,10 +1005,19 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * prevents a future publication path from treating a mere authority
    * readback as sufficient validation. */
   if (artifact_lease != NULL)
-    rc = wyl_fact_replay_validate_graph_with_artifact_lease (policy, fact_root,
-            &current, artifact_namespace, artifact_lease);
+    rc = job_context == NULL
+        ? wyl_fact_replay_validate_graph_with_artifact_lease (policy,
+            fact_root, &current, artifact_namespace, artifact_lease)
+        : wyl_fact_replay_validate_graph_with_artifact_lease_bounded (policy,
+            fact_root, &current, artifact_namespace, artifact_lease,
+            job_context);
   else
-    rc = wyl_fact_replay_validate_graph (policy, fact_root, &current);
+    rc = job_context == NULL
+        ? wyl_fact_replay_validate_graph (policy, fact_root, &current)
+        : wyl_fact_replay_validate_graph_bounded (policy, fact_root,
+            &current, job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = replay_job_checkpoint (job_context);
   if (rc != WYRELOG_E_OK) {
     clear_unseal_graph_info (&current);
     goto compensate;
@@ -970,9 +1047,15 @@ wyl_fact_graph_unseal_core (wyl_policy_store_t *policy, const gchar *fact_root,
    * Every admission/acquire path rejects CLOSED, so this is the only safe
    * transient while the engine is being built. */
   WylFactGraphRuntimeStatus status = { 0 };
-  rc = wyl_fact_replay_refresh_graph_publication (policy, fact_root,
-          &current, &publication, artifact_namespace, artifact_lease,
-          &status);
+  rc = replay_job_checkpoint (job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = job_context == NULL
+      ? wyl_fact_replay_refresh_graph_publication (policy, fact_root,
+            &current, &publication, artifact_namespace, artifact_lease,
+            &status)
+      : wyl_fact_replay_refresh_graph_publication_bounded (policy,
+            fact_root, &current, &publication, artifact_namespace,
+            artifact_lease, job_context, &status);
   clear_unseal_graph_info (&current);
   if (out_outcome != NULL) {
     out_outcome->status = status;
@@ -1117,8 +1200,8 @@ wyl_fact_graph_unseal (wyl_policy_store_t *policy, WylHandle *handle,
   rc = wyl_service_auth_write_lease_validate_operation (write_lease, handle);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info, manager,
-             drain_timeout_us, out_outcome);
+  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info,
+             manager, drain_timeout_us, NULL, out_outcome);
 }
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
@@ -1128,8 +1211,8 @@ wyl_fact_graph_unseal_for_test (wyl_policy_store_t *policy,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome *out_outcome)
 {
-  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info, manager,
-             drain_timeout_us, out_outcome);
+  return wyl_fact_graph_unseal_core (policy, fact_root, NULL, graph_info,
+             manager, drain_timeout_us, NULL, out_outcome);
 }
 #endif
 
@@ -1144,5 +1227,20 @@ wyl_fact_graph_unseal_with_root_lease
   if (root_lease == NULL)
     return WYRELOG_E_INVALID;
   return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
-             graph_info, manager, drain_timeout_us, out_outcome);
+             graph_info, manager, drain_timeout_us, NULL, out_outcome);
+}
+
+wyrelog_error_t
+wyl_fact_graph_unseal_with_root_lease_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
+    WylFactGraphUnsealOutcome *out_outcome)
+{
+  if (root_lease == NULL || job_context == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_graph_unseal_core (policy, fact_root, root_lease,
+             graph_info, manager, drain_timeout_us, job_context, out_outcome);
 }

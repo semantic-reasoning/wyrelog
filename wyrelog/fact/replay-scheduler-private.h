@@ -73,6 +73,10 @@ WylFactResourceRecorder *wyl_fact_resource_recorder_ref
 void wyl_fact_resource_recorder_unref (WylFactResourceRecorder *recorder);
 void wyl_fact_resource_recorder_snapshot (WylFactResourceRecorder *recorder,
     WylFactReplayResourceSnapshot *out_snapshot);
+void wyl_fact_resource_recorder_record_quota_rejection
+  (WylFactResourceRecorder *recorder);
+void wyl_fact_resource_recorder_open_begin (WylFactResourceRecorder *recorder);
+void wyl_fact_resource_recorder_open_end (WylFactResourceRecorder *recorder);
 
 wyrelog_error_t wyl_fact_replay_scheduler_new
   (const WylFactReplaySchedulerConfig *config,
@@ -89,6 +93,10 @@ wyrelog_error_t wyl_fact_replay_scheduler_submit
     const gchar *graph_id, GCancellable *cancellable,
     WylFactReplayJobFunc function, gpointer user_data,
     GDestroyNotify user_data_destroy, WylFactReplayFuture **out_future);
+guint64 wyl_fact_replay_scheduler_change_serial
+  (WylFactReplayScheduler *scheduler);
+wyrelog_error_t wyl_fact_replay_scheduler_wait_for_change
+  (WylFactReplayScheduler *scheduler, guint64 observed_serial);
 
 WylFactReplayFuture *wyl_fact_replay_future_ref
   (WylFactReplayFuture *future);
@@ -96,6 +104,8 @@ void wyl_fact_replay_future_unref (WylFactReplayFuture *future);
 wyrelog_error_t wyl_fact_replay_future_wait (WylFactReplayFuture *future);
 
 GCancellable *wyl_fact_replay_job_context_get_cancellable
+  (WylFactReplayJobContext *context);
+WylFactResourceRecorder *wyl_fact_replay_job_context_get_resource_recorder
   (WylFactReplayJobContext *context);
 gint64 wyl_fact_replay_job_context_get_deadline_us
   (WylFactReplayJobContext *context);
@@ -107,6 +117,16 @@ wyrelog_error_t wyl_fact_replay_job_context_checkpoint
   (WylFactReplayJobContext *context);
 wyrelog_error_t wyl_fact_replay_job_context_charge_rows
   (WylFactReplayJobContext *context, guint64 rows);
+void wyl_fact_replay_job_context_open_begin
+  (WylFactReplayJobContext *context);
+void wyl_fact_replay_job_context_open_end
+  (WylFactReplayJobContext *context);
+void wyl_fact_replay_job_context_record_quota_rejection
+  (WylFactReplayJobContext *context);
+/* The admitted producer stopped before replay began. Keep budget outcome
+ * classification, but exclude it from completed replay work/row/runtime totals. */
+void wyl_fact_replay_job_context_suppress_work_totals
+  (WylFactReplayJobContext *context);
 /* Callback-free atomic publication latch for a runtime state-lock boundary. */
 wyrelog_error_t wyl_fact_replay_job_context_commit
   (WylFactReplayJobContext *context);

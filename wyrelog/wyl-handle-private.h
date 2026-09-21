@@ -260,6 +260,7 @@ wyrelog_error_t wyl_handle_flush_pending_deltas_for_test (WylHandle * self);
 #endif
 
 #ifdef WYL_HAS_FACT_STORE
+typedef struct _WylFactReplayAdmission WylFactReplayAdmission;
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
     wyl_fact_replay_summary_t * out_summary);
 /* Targeted single-graph refresh (issue #546): refresh only |graph_info|'s
@@ -268,7 +269,29 @@ wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
 wyrelog_error_t wyl_handle_refresh_fact_graph (WylHandle * self,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_handle_refresh_fact_graph_admitted (WylHandle * self,
+    WylFactReplayAdmission * admission,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactGraphRuntimeStatus * out_status);
+/* Process-wide bounded-cardinality replay pressure. No tenant, graph, path,
+ * or fact labels are retained by the recorder. */
+void wyl_handle_fact_replay_resource_snapshot (WylHandle * self,
+    WylFactReplayResourceSnapshot * out_snapshot);
+WylFactResourceRecorder *wyl_handle_fact_resource_recorder
+  (WylHandle * self);
+/* Acquire this fair replay slot before acquiring a service-auth write lease. */
+wyrelog_error_t wyl_handle_fact_replay_admission_acquire (WylHandle * self,
+    const gchar * tenant_id, const gchar * graph_id,
+    GCancellable * cancellable, WylFactReplayAdmission ** out_admission);
+wyrelog_error_t wyl_handle_fact_replay_admission_acquire_service_write
+  (WylFactReplayAdmission * admission,
+    WylServiceAuthWriteLease ** out_write_lease);
+GCancellable *wyl_handle_fact_replay_admission_get_cancellable
+  (WylFactReplayAdmission * admission);
+void wyl_handle_fact_replay_admission_free
+  (WylFactReplayAdmission * admission);
 wyrelog_error_t wyl_handle_reconcile_fact_graph (WylHandle * self,
+    WylFactReplayAdmission * admission,
     WylServiceAuthWriteLease *write_lease,
     const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
     WylFactGraphReconcileOutcome *out_outcome);
@@ -276,9 +299,12 @@ wyrelog_error_t wyl_handle_reconcile_fact_graph (WylHandle * self,
  * supplies a daemon policy write lease; the wrapper verifies that its pinned
  * store is this handle's current store before changing lifecycle state. */
 wyrelog_error_t wyl_handle_unseal_fact_graph (WylHandle * self,
+    WylFactReplayAdmission * admission,
     WylServiceAuthWriteLease * write_lease,
     const wyl_policy_fact_graph_info_t * graph_info, gint64 drain_timeout_us,
     WylFactGraphUnsealOutcome * out_outcome);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactReplayAdmission,
+    wyl_handle_fact_replay_admission_free)
 /* Capture one graph's runtime status without refreshing it (issue #546).
  * This is how a caller observes a graph's engine/operation generations, which
  * wyl_fact_graph_status_t deliberately does not carry.  It takes no
@@ -353,7 +379,8 @@ wyrelog_error_t wyl_handle_commit_fact_mutation (WylHandle * self,
     wyl_fact_store_t * *store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch,
-    const wyl_policy_fact_graph_info_t * graph_info, gboolean * out_inserted,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactReplayAdmission * admission, gboolean * out_inserted,
     wyl_fact_mutation_outcome_t * out_outcome);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,

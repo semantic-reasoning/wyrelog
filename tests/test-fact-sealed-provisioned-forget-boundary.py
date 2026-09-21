@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import shutil
 import tempfile
 
@@ -19,9 +20,9 @@ def require(condition: bool, message: str) -> None:
 
 
 def function_body(source: str, name: str) -> str:
-    marker = f"\n{name} ("
-    start = source.find(marker)
-    require(start >= 0, f"missing function {name}")
+    match = re.search(rf"\n{re.escape(name)}\s*\(", source)
+    require(match is not None, f"missing function {name}")
+    start = match.start()
     brace = source.find("{", start)
     require(brace >= 0, f"missing body for {name}")
     depth = 0
@@ -54,7 +55,14 @@ def validate(root: pathlib.Path) -> None:
     opener = opener_path.read_text(encoding="utf-8")
     production_replay = production_replay_path.read_text(encoding="utf-8")
 
-    open_body = function_body(opener, "wyl_fact_store_open_provisioned_graph")
+    open_wrapper = function_body(
+        opener, "wyl_fact_store_open_provisioned_graph"
+    )
+    open_body = function_body(
+        opener, "wyl_fact_store_open_provisioned_graph_observed"
+    )
+    require("wyl_fact_store_open_provisioned_graph_observed" in open_wrapper,
+            "compatibility opener bypasses the observed authority path")
     require("WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE" in open_body,
             "provisioned opener no longer admits ACTIVE")
     require("WYL_POLICY_GRAPH_LIFECYCLE_SEALED" in open_body,
@@ -65,14 +73,14 @@ def validate(root: pathlib.Path) -> None:
     graph_open_body = function_body(production_replay, "open_graph_store")
     provisioned_route = (
         "if (provisioned)\n"
-        "    return wyl_fact_store_open_provisioned_graph ("
+        "    return wyl_fact_store_open_provisioned_graph_observed ("
     )
     require(graph_open_body.count(provisioned_route) == 1,
             "boot replay no longer routes provisioned graphs through policy")
     route_index = graph_open_body.index(provisioned_route)
     resolver_index = graph_open_body.find("resolve_fact_db_path")
     legacy_open_index = graph_open_body.find(
-        "wyl_fact_store_open_legacy_graph (")
+        "wyl_fact_store_open_legacy_graph_observed (")
     require(resolver_index > route_index
             and legacy_open_index > resolver_index,
             "boot replay resolves or path-opens before provisioned admission")
@@ -224,9 +232,9 @@ def self_test(root: pathlib.Path) -> None:
          "WYL_POLICY_GRAPH_LIFECYCLE_SEALED", ""),
         ("wyrelog/fact/replay.c",
          "if (provisioned)\n"
-         "    return wyl_fact_store_open_provisioned_graph (",
+         "    return wyl_fact_store_open_provisioned_graph_observed (",
          "if (FALSE)\n"
-         "    return wyl_fact_store_open_provisioned_graph ("),
+         "    return wyl_fact_store_open_provisioned_graph_observed ("),
         ("tests/test-fact-replay.c",
          "wyl_policy_store_create_fact_graph_provisioning",
          "wyl_policy_store_create_fact_graph"),

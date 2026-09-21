@@ -16,8 +16,8 @@ ROLE_OWNERS = {
 }
 EXPECTED_RAW_INVENTORY = {
     "wyrelog/fact/store.c": (54, 389, 4, 3),
-    "wyrelog/fact/compound.c": (0, 123, 14, 0),
-    "wyrelog/fact/replay.c": (0, 32, 2, 0),
+    "wyrelog/fact/compound.c": (0, 125, 16, 0),
+    "wyrelog/fact/replay.c": (0, 34, 3, 0),
 }
 EXPECTED_RAW_MEMBER_FUNCTIONS = {
     "wyrelog/fact/store.c": {
@@ -69,12 +69,14 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "insert_arg_unlocked": 18,
         "insert_term_unlocked": 13,
         "load_logical_arg_unlocked": 29,
-        "load_term_unlocked": 19,
+        "load_term_unlocked": 20,
         "replay_unlocked": 12,
+        "compound_interrupt_cancelled": 1,
     },
     "wyrelog/fact/replay.c": {
         "list_replay_relations": 16,
-        "replay_relation_into_engine": 16,
+        "replay_relation_into_engine": 17,
+        "replay_interrupt_cancelled": 1,
     },
     "wyrelog/fact/store.c": {
         "append_value": 4,
@@ -139,6 +141,15 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "probe_graph_forgets",
     "quarantine_forget_intent_unlocked",
     "reconcile_graph_forgets",
+    "refresh_graph_bounded_internal",
+    "refresh_graph_publication_internal",
+    "scheduled_policy_graph_replay",
+    "wyl_fact_replay_policy_graphs_scheduled",
+    "wyl_fact_replay_policy_graphs_scheduled_with_provider",
+    "wyl_fact_replay_refresh_graph_bounded",
+    "wyl_fact_replay_refresh_graph_publication_bounded",
+    "wyl_fact_replay_validate_graph_bounded",
+    "wyl_fact_replay_validate_graph_with_artifact_lease_bounded",
     "wyl_fact_replay_open_graph_engine",
     "wyl_fact_replay_open_graph_engine_with_store_for_test",
     "wyl_fact_replay_policy_graphs",
@@ -152,6 +163,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "validate_graph_internal",
     "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
     "wyl_fact_replay_validate_graph_with_artifact_lease",
+    "wyl_fact_store_open_reservation_begin_observed",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -161,6 +173,15 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "open_graph_store",
         "probe_graph_forgets",
         "reconcile_graph_forgets",
+        "refresh_graph_bounded_internal",
+        "refresh_graph_publication_internal",
+        "scheduled_policy_graph_replay",
+        "wyl_fact_replay_policy_graphs_scheduled",
+        "wyl_fact_replay_policy_graphs_scheduled_with_provider",
+        "wyl_fact_replay_refresh_graph_bounded",
+        "wyl_fact_replay_refresh_graph_publication_bounded",
+        "wyl_fact_replay_validate_graph_bounded",
+        "wyl_fact_replay_validate_graph_with_artifact_lease_bounded",
         "wyl_fact_replay_open_graph_engine",
         "wyl_fact_replay_open_graph_engine_with_store_for_test",
         "wyl_fact_replay_policy_graphs",
@@ -185,6 +206,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "forget_survey_unlocked",
         "quarantine_forget_intent_unlocked",
         "wyl_fact_store_open_reservation_begin",
+        "wyl_fact_store_open_reservation_begin_observed",
     },
 }
 OLD_AUTHORITY = (
@@ -609,7 +631,7 @@ def validate(files: dict[str, str]) -> None:
                     )
     expected_calls = {
         "wyrelog/fact/store.c": (16, 4, 20),
-        "wyrelog/fact/compound.c": (5, 5, 7),
+        "wyrelog/fact/compound.c": (6, 6, 8),
         "wyrelog/fact/replay.c": (3, 2, 3),
     }
     for path, (begins, gets, ends) in expected_calls.items():
@@ -643,6 +665,7 @@ def validate(files: dict[str, str]) -> None:
             "wyl_fact_compound_put",
             "wyl_fact_compound_replay",
             "wyl_fact_compound_replay_cached",
+            "wyl_fact_compound_replay_cached_bounded",
         ),
         "wyrelog/fact/replay.c": (
             "list_replay_relations",
@@ -1416,14 +1439,16 @@ def validate(files: dict[str, str]) -> None:
     for token in (
         "wyl_fact_store_connection_session_begin (store,\n          &admission)",
         "wyl_fact_store_connection_session_end (&admission);",
-        "list_replay_relations (policy, store, graph_info, &relations)",
+        "list_replay_relations (policy, store, graph_info, policy_snapshot,\n"
+        "          job_context,\n          &relations)",
     ):
         if token not in replay_admission:
             raise AssertionError(f"supplied-store replay admission drifted: {token}")
     if replay_admission.index(
         "wyl_fact_store_connection_session_end (&admission);"
     ) > replay_admission.index(
-        "list_replay_relations (policy, store, graph_info, &relations)"
+        "list_replay_relations (policy, store, graph_info, policy_snapshot,\n"
+        "          job_context,\n          &relations)"
     ):
         raise AssertionError("supplied-store health check occurs after policy work")
     replay_seam_start = replay.rfind(
