@@ -42,6 +42,17 @@ test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
 )
 test('fact-offline-backup-manifest', test_offline_backup_manifest)
 
+test_offline_restore_journal = executable('test-fact-offline-restore-journal',
+  'test-fact-offline-restore-journal.c',
+  '../wyrelog/fact/offline-backup-manifest-private.c',
+  '../wyrelog/fact/offline-restore-journal-private.c',
+  '../wyrelog/wyl-id.c',
+  include_directories : [include_directories('..'),
+    include_directories('../wyrelog')],
+  dependencies : [glib_dep, libchronoid_dep],
+)
+test('fact-offline-restore-journal', test_offline_restore_journal)
+
 # Boundary checkers read repository sources.  Make an encoding-less read a
 # hard error so a checker can never silently fall back to the machine
 # locale's codec.  This asserts strictness; it does not change the default.
