@@ -92,7 +92,15 @@ open_readiness = body(runtime, "open_readiness_handle")
 open_handle = body(handle, "wyl_handle_open_with_options")
 shutdown = body(handle, "wyl_handle_complete_shutdown")
 replay_graphs = body(handle, "wyl_handle_replay_fact_graphs")
-replay_policy_graphs = body(fact_replay, "wyl_fact_replay_policy_graphs")
+replay_policy_graphs = body(
+    fact_replay, "wyl_fact_replay_policy_graphs_scheduled_with_provider"
+)
+complete_startup_replay = body(
+    fact_replay, "complete_pending_startup_replay"
+)
+capture_replay_policy = body(
+    fact_replay, "capture_replay_policy_snapshot"
+)
 authorized_bind = body(policy_store, "wyl_policy_store_bind_fact_root_authorized")
 bind_locked = body(policy_store, "bind_fact_root_locked")
 
@@ -141,22 +149,24 @@ assert "fact_graph_statuses" not in handle
 assert "fact_graphs_lock" not in handle
 assert "wyl_handle_get_fact_graph_engine" not in handle
 assert "wyl_handle_get_fact_graph_engine" not in handle_private
-assert replay_graphs.index("g_mutex_lock (&self->fact_replay_coordinator_lock)") < replay_graphs.index(
-    "wyl_handle_policy_store_pin_current"
-)
+assert "fact_replay_coordinator_lock" not in replay_graphs
 assert replay_graphs.index("wyl_handle_policy_store_pin_current") < replay_graphs.index(
-    "wyl_fact_replay_policy_graphs"
+    "wyl_fact_replay_policy_graphs_scheduled"
 )
-assert replay_graphs.index("wyl_fact_replay_policy_graphs") < replay_graphs.index(
+assert replay_graphs.index("wyl_fact_replay_policy_graphs_scheduled") < replay_graphs.index(
     "wyl_handle_policy_store_unpin"
 )
-assert replay_graphs.index("wyl_handle_policy_store_unpin") < replay_graphs.rindex(
-    "g_mutex_unlock (&self->fact_replay_coordinator_lock)"
+assert "wyl_policy_store_fact_replay_snapshot_begin" in capture_replay_policy
+assert "wyl_policy_store_foreach_fact_graph" in capture_replay_policy
+assert "wyl_policy_store_fact_replay_snapshot_end" in capture_replay_policy
+assert replay_policy_graphs.index("capture_replay_policy_snapshot") < replay_policy_graphs.index(
+    "wyl_fact_replay_scheduler_submit"
 )
-assert replay_policy_graphs.index("wyl_policy_store_foreach_fact_graph") < replay_policy_graphs.index(
-    "wyl_fact_graph_runtime_manager_refresh"
+assert replay_policy_graphs.index("wyl_fact_replay_scheduler_submit") < replay_policy_graphs.index(
+    "complete_pending_startup_replay"
 )
-assert replay_policy_graphs.index("wyl_fact_graph_runtime_manager_refresh") < replay_policy_graphs.index(
+assert "wyl_fact_replay_future_wait" in complete_startup_replay
+assert replay_policy_graphs.index("complete_pending_startup_replay") < replay_policy_graphs.index(
     "wyl_fact_graph_runtime_manager_retire_unseen"
 )
 

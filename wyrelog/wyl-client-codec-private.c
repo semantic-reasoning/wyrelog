@@ -943,6 +943,66 @@ wyl_client_fact_status_free (WylClientFactStatus *status)
   g_free (status);
 }
 
+static gboolean fact_status_parse_key (JsonCursor *cursor, gchar **out_key);
+static gboolean fact_status_skip_value (JsonCursor *cursor, guint depth);
+
+static guint64 *
+fact_status_replay_metric (WylClientFactReplayResources *resources,
+    const gchar *key,
+    guint *out_index)
+{
+  static const gchar *names[] = {
+    "active", "queued", "active_opens", "completed_total", "rows_total",
+    "runtime_us_total", "queue_delay_us_total", "queue_delay_us_max",
+    "cancelled_total", "timed_out_total", "row_limit_total",
+    "queue_rejected_total", "quota_rejected_total",
+  };
+  guint64 *fields[] = {
+    &resources->active, &resources->queued, &resources->active_opens,
+    &resources->completed_total, &resources->rows_total,
+    &resources->runtime_us_total, &resources->queue_delay_us_total,
+    &resources->queue_delay_us_max, &resources->cancelled_total,
+    &resources->timed_out_total, &resources->row_limit_total,
+    &resources->queue_rejected_total, &resources->quota_rejected_total,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+    if (g_str_equal (key, names[i])) {
+      *out_index = i;
+      return fields[i];
+    }
+  }
+  return NULL;
+}
+
+static gboolean
+fact_status_parse_replay_resources (JsonCursor *cursor,
+    WylClientFactReplayResources *resources)
+{
+  guint seen = 0;
+  if (!take (cursor, '{'))
+    return FALSE;
+  while (!take (cursor, '}')) {
+    g_autofree gchar *key = NULL;
+    guint index = 0;
+    if (!fact_status_parse_key (cursor, &key) || !take (cursor, ':'))
+      return FALSE;
+    guint64 *metric = fact_status_replay_metric (resources, key, &index);
+    if (metric == NULL) {
+      if (!fact_status_skip_value (cursor, 0))
+        return FALSE;
+    } else {
+      if ((seen & (1u << index)) != 0 || !parse_uint64 (cursor, metric))
+        return FALSE;
+      seen |= 1u << index;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      return FALSE;
+  }
+  return seen == 0x1fffu;
+}
+
 static gboolean
 fact_status_skip_number (JsonCursor *cursor)
 {
@@ -1299,12 +1359,16 @@ fact_status_parse_graph (JsonCursor *cursor,
 }
 
 wyrelog_error_t
-wyl_client_fact_status_decode (const gchar *document, gsize document_len,
-    WylClientFactStatus *out_status)
+wyl_client_fact_status_decode_with_replay_resources (const gchar *document,
+    gsize document_len, WylClientFactStatus *out_status,
+    WylClientFactReplayResources *out_resources,
+    gboolean *out_has_resources)
 {
   if (out_status == NULL)
     return WYRELOG_E_INVALID;
   wyl_client_fact_status_clear (out_status);
+  if (out_has_resources != NULL)
+    *out_has_resources = FALSE;
   if (document == NULL || document_len == 0
       || document_len > WYL_CLIENT_FACT_STATUS_MAX_DOCUMENT
       || memchr (document, '\0', document_len) != NULL
@@ -1319,6 +1383,9 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
   gboolean seen_status = FALSE, seen_total = FALSE, seen_ready = FALSE;
   gboolean seen_degraded = FALSE, seen_provisioned = FALSE;
   gboolean seen_sealed = FALSE, seen_graphs = FALSE;
+  gboolean seen_replay_resources = FALSE;
+  WylClientFactReplayResources replay_resources =
+      WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT;
   GArray *graphs = g_array_new (FALSE, TRUE,
           sizeof (WylClientFactGraphStatus));
   g_array_set_clear_func (graphs,
@@ -1387,8 +1454,16 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
             goto invalid;
         }
       }
-    } else if (!fact_status_skip_value (&cursor, 0)) {
-      goto invalid;
+    } else if (g_strcmp0 (key, "replay_resources") == 0) {
+      if (seen_replay_resources
+          || !fact_status_parse_replay_resources (&cursor,
+          &replay_resources))
+        goto invalid;
+      seen_replay_resources = TRUE;
+    } else {
+      if (!fact_status_skip_value (&cursor, 0)) {
+        goto invalid;
+      }
     }
     if (take (&cursor, '}'))
       break;
@@ -1442,6 +1517,10 @@ wyl_client_fact_status_decode (const gchar *document, gsize document_len,
   parsed.graphs = (WylClientFactGraphStatus *) g_array_free (graphs, FALSE);
   graphs = NULL;
   *out_status = parsed;
+  if (out_resources != NULL)
+    *out_resources = replay_resources;
+  if (out_has_resources != NULL)
+    *out_has_resources = seen_replay_resources;
   g_hash_table_unref (identities);
   return WYRELOG_E_OK;
 
@@ -1450,4 +1529,31 @@ invalid:
   g_hash_table_unref (identities);
   g_free (parsed.status_name);
   return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_client_fact_status_decode (const gchar *document, gsize document_len,
+    WylClientFactStatus *out_status)
+{
+  return wyl_client_fact_status_decode_with_replay_resources (document,
+             document_len, out_status, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_client_fact_replay_resources_copy
+  (const WylClientFactReplayResources *parsed,
+    WylClientFactReplayResources *out_resources, gsize result_size)
+{
+  const gsize minimum_size = G_STRUCT_OFFSET (WylClientFactReplayResources,
+          active) + sizeof out_resources->active;
+  if (parsed == NULL || out_resources == NULL
+      || result_size < minimum_size
+      || out_resources->version != WYL_CLIENT_FACT_REPLAY_RESOURCES_VERSION)
+    return WYRELOG_E_INVALID;
+  const gsize writable_size = MIN (result_size, sizeof *out_resources);
+  guint32 version = out_resources->version;
+  memset (out_resources, 0, writable_size);
+  memcpy (out_resources, parsed, writable_size);
+  out_resources->version = version;
+  return WYRELOG_E_OK;
 }

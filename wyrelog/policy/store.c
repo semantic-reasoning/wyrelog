@@ -8155,6 +8155,43 @@ wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 }
 
 wyrelog_error_t
+wyl_policy_store_fact_replay_snapshot_begin (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  policy_store_transaction_enter (store);
+  if (store->transaction_depth > 1 || !sqlite3_get_autocommit (store->db))
+    rc = WYRELOG_E_BUSY;
+  else
+    rc = exec_sql (store->db, "BEGIN;");
+  if (rc != WYRELOG_E_OK)
+    policy_store_transaction_leave (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_fact_replay_snapshot_end (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL
+      || !policy_store_transaction_frame_owned (store))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = exec_sql (store->db, "COMMIT;");
+  if (rc != WYRELOG_E_OK && !sqlite3_get_autocommit (store->db))
+    (void) exec_sql (store->db, "ROLLBACK;");
+  policy_store_transaction_leave (store);
+  return rc;
+}
+
+gboolean
+wyl_policy_store_fact_replay_snapshot_is_current (wyl_policy_store_t *store)
+{
+  return store != NULL && store->db != NULL
+         && policy_store_transaction_frame_owned (store)
+         && !sqlite3_get_autocommit (store->db);
+}
+
+wyrelog_error_t
 wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL
@@ -14383,8 +14420,23 @@ wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
     const gchar *graph_id, const gchar *root_identity,
     const gchar *token_identity, gchar **out_reservation_id)
 {
+  return wyl_policy_store_reserve_fact_open_classified (store,
+             reservation_id, owner_incarnation, tenant_id, graph_id,
+             root_identity, token_identity, NULL, out_reservation_id);
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_fact_open_classified (wyl_policy_store_t *store,
+    const gchar *reservation_id, const gchar *owner_incarnation,
+    const gchar *tenant_id,
+    const gchar *graph_id, const gchar *root_identity,
+    const gchar *token_identity, gboolean *out_quota_rejected,
+    gchar **out_reservation_id)
+{
   if (out_reservation_id != NULL)
     *out_reservation_id = NULL;
+  if (out_quota_rejected != NULL)
+    *out_quota_rejected = FALSE;
   if (store == NULL || store->db == NULL || out_reservation_id == NULL
       || reservation_id == NULL || reservation_id[0] == '\0'
       || owner_incarnation == NULL || owner_incarnation[0] == '\0'
@@ -14426,8 +14478,12 @@ wyl_policy_store_reserve_fact_open (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_get_fact_concurrent_open_quota (store, tenant_id,
             &status);
-  if (rc == WYRELOG_E_OK && status.has_limit && status.charged >= status.hard_limit)
+  if (rc == WYRELOG_E_OK && status.has_limit
+      && status.charged >= status.hard_limit) {
+    if (out_quota_rejected != NULL)
+      *out_quota_rejected = TRUE;
     rc = WYRELOG_E_POLICY;
+  }
   if (rc == WYRELOG_E_OK) {
     rc = prepare_stmt (store->db,
             "INSERT INTO fact_open_reservations(reservation_id,owner_incarnation,"
@@ -21499,6 +21555,41 @@ wyl_policy_store_load_fact_relation_schema_columns (wyl_policy_store_t *store,
   *out_columns = columns;
   *out_n_columns = len;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_fact_relation_schema_key (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyFactRelationSchemaKeyCb cb, gpointer user_data)
+{
+  if (store == NULL || store->db == NULL || tenant_id == NULL
+      || graph_id == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT namespace_id,relation_name,schema_version "
+          "FROM fact_relation_schemas WHERE tenant_id=? AND graph_id=? "
+          "ORDER BY namespace_id,relation_name,schema_version;", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *namespace_id =
+        (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *relation_name =
+        (const gchar *) sqlite3_column_text (stmt, 1);
+    gint64 version = sqlite3_column_int64 (stmt, 2);
+    if (namespace_id == NULL || relation_name == NULL || version <= 0
+        || version > G_MAXUINT32)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = cb (namespace_id, relation_name, (guint32) version, user_data);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
 }
 
 void wyl_policy_fact_relation_query_info_clear

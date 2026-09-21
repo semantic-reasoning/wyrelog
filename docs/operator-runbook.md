@@ -1896,6 +1896,49 @@ and map to the client's `UNKNOWN` enum value until that client is updated.
 The decoder rejects snapshots larger than 4 MiB, more than 16,384 graphs, or
 status/reason names longer than 64 bytes; it never returns a truncated list.
 
+### Bounded replay scheduling
+
+Startup, mutation refresh, unseal, and explicit reconciliation share one
+tenant-fair replay scheduler. Work is FIFO within a tenant and round-robin
+between ready tenants; the per-tenant concurrency and queue limits reserve
+capacity so one tenant cannot occupy every worker or pending slot. Defaults
+are 4 global workers, 1 worker per tenant, 1,024 global pending jobs, 64 pending
+jobs per tenant, 1,000,000 materialized rows per replay, and 120 seconds per
+replay. Tune them with `--fact-replay-global-concurrency`,
+`--fact-replay-tenant-concurrency`, `--fact-replay-global-queue-limit`,
+`--fact-replay-tenant-queue-limit`, `--fact-replay-row-limit`, and
+`--fact-replay-time-limit-ms`. Tenant limits must remain below global limits;
+invalid or zero explicit values stop startup.
+
+Queue saturation rejects new replay work as busy. A row limit or timeout marks
+only that graph degraded/retryable and retains its previous published engine;
+no partial candidate becomes queryable. Shutdown closes scheduler admission,
+cancels queued and active jobs, then waits for workers before closing the
+policy store.
+
+Unseal and explicit reconciliation acquire their scheduler admission token
+before acquiring the thread-affine service-auth write lease. Queue waits
+therefore hold neither that lease nor policy/runtime publication locks.
+Startup enumerates graph identities, releases its startup policy pin, and only
+then submits jobs. After admission, each worker captures that graph's authority,
+materialization, activation, and schema in one policy read snapshot and releases
+the SQLite transaction before opening DuckDB or entering runtime publication.
+Targeted refresh uses the same immutable per-graph view. Unseal and explicit
+reconciliation capture the view inside their already-open lifecycle publication
+fence; that outer transaction remains held through atomic lifecycle/runtime
+publication and is released by the fence owner. No policy generation is retained
+while queued.
+
+`/facts/status` exposes global, identifier-free counters in the stable
+`replay_resources` object: active and queued jobs, replay-owned active store
+reservations, completed work, rows,
+runtime and queue delay, cancellations, timeouts, row-limit failures, and
+queue/quota rejections. These fields contain no tenant IDs, graph IDs, paths,
+or facts and therefore remain bounded-cardinality even in an authenticated
+tenant-scoped response. The typed client returns a caller-sized snapshot from
+`wyl_client_fact_replay_resources()` without changing `WylClientFactStatus`'s
+ABI.
+
 The typed C client also exposes the non-mutating graph verification endpoint
 through `wyl_client_fact_graph_verify()`. It requires credentials bound to the
 target tenant and returns only the verified tenant and graph identifiers; it

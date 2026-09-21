@@ -2643,13 +2643,13 @@ client_fact_guard_query (const gchar *tenant, gint64 guard_timestamp,
              guard_timestamp, escaped_loc, guard_risk);
 }
 
-wyrelog_error_t
-wyl_client_fact_status (WylClient *client, const gchar *access_token,
-    const gchar *tenant, WylClientFactStatus *out_status)
+static wyrelog_error_t
+client_fact_status_fetch (WylClient *client, const gchar *access_token,
+    const gchar *tenant, GBytes **out_body)
 {
-  if (out_status == NULL)
+  if (out_body == NULL)
     return WYRELOG_E_INVALID;
-  wyl_client_fact_status_clear (out_status);
+  *out_body = NULL;
   if (client == NULL || !WYL_IS_CLIENT (client))
     return WYRELOG_E_INVALID;
   /* A token without a tenant cannot be scoped, and a tenant without a token
@@ -2681,7 +2681,7 @@ wyl_client_fact_status (WylClient *client, const gchar *access_token,
     client_fact_attach_auth (message, access_token);
 
   client_clear_last_http_error (client);
-  g_autoptr (GBytes) body = NULL;
+  GBytes *body = NULL;
   guint status = 0;
   wyrelog_error_t rc = client_send_message_collect_bounded (client, message,
           WYL_CLIENT_FACT_STATUS_MAX_DOCUMENT, &body, &status);
@@ -2690,20 +2690,74 @@ wyl_client_fact_status (WylClient *client, const gchar *access_token,
   client->last_http_status = status;
   if (status != 200) {
     if (status == 401)
-      return WYRELOG_E_AUTH;
-    if (status == 403)
-      return WYRELOG_E_POLICY;
-    if (status == 404)
-      return WYRELOG_E_NOT_FOUND;
-    if (status == 503)
-      return WYRELOG_E_BUSY;
-    return WYRELOG_E_IO;
+      rc = WYRELOG_E_AUTH;
+    else if (status == 403)
+      rc = WYRELOG_E_POLICY;
+    else if (status == 404)
+      rc = WYRELOG_E_NOT_FOUND;
+    else if (status == 503)
+      rc = WYRELOG_E_BUSY;
+    else
+      rc = WYRELOG_E_IO;
+    g_bytes_unref (body);
+    return rc;
   }
+
+  *out_body = body;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_fact_status (WylClient *client, const gchar *access_token,
+    const gchar *tenant, WylClientFactStatus *out_status)
+{
+  if (out_status == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_status_clear (out_status);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_fact_status_fetch (client, access_token, tenant,
+          &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   gsize size = 0;
   const gchar *data = g_bytes_get_data (body, &size);
   rc = wyl_client_fact_status_decode (data, size, out_status);
   return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_client_fact_replay_resources (WylClient *client,
+    const gchar *access_token, const gchar *tenant,
+    WylClientFactReplayResources *out_resources, gsize result_size)
+{
+  const gsize minimum_size = G_STRUCT_OFFSET (WylClientFactReplayResources,
+          active) + sizeof out_resources->active;
+  if (out_resources == NULL
+      || result_size < minimum_size
+      || out_resources->version != WYL_CLIENT_FACT_REPLAY_RESOURCES_VERSION)
+    return WYRELOG_E_INVALID;
+  const guint32 requested_version = out_resources->version;
+
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_fact_status_fetch (client, access_token, tenant,
+          &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  WylClientFactStatus status = { 0 };
+  WylClientFactReplayResources parsed =
+      WYL_CLIENT_FACT_REPLAY_RESOURCES_INIT;
+  gboolean has_resources = FALSE;
+  rc = wyl_client_fact_status_decode_with_replay_resources (data, size,
+          &status, &parsed, &has_resources);
+  wyl_client_fact_status_clear (&status);
+  if (rc != WYRELOG_E_OK || !has_resources)
+    return WYRELOG_E_IO;
+  out_resources->version = requested_version;
+  return wyl_client_fact_replay_resources_copy (&parsed, out_resources,
+             result_size);
 }
 
 void

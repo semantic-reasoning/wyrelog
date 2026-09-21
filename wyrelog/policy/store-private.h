@@ -2735,6 +2735,12 @@ wyrelog_error_t wyl_policy_store_reserve_fact_open
     const gchar * tenant_id, const gchar * graph_id,
     const gchar * root_identity, const gchar * token_identity,
     gchar ** out_reservation_id);
+wyrelog_error_t wyl_policy_store_reserve_fact_open_classified
+  (wyl_policy_store_t * store, const gchar * reservation_id,
+    const gchar * owner_incarnation,
+    const gchar * tenant_id, const gchar * graph_id,
+    const gchar * root_identity, const gchar * token_identity,
+    gboolean * out_quota_rejected, gchar ** out_reservation_id);
 wyrelog_error_t wyl_policy_store_transition_fact_open
   (wyl_policy_store_t * store, const gchar * reservation_id,
     const gchar * owner_incarnation,
@@ -2835,6 +2841,18 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
     gboolean * out_relation_visible,
     wyl_policy_fact_relation_schema_column_info_t ** out_columns,
     gsize * out_n_columns);
+typedef wyrelog_error_t (*WylPolicyFactRelationSchemaKeyCb)
+  (const gchar *namespace_id, const gchar *relation_name,
+    guint32 schema_version, gpointer user_data);
+wyrelog_error_t wyl_policy_store_foreach_fact_relation_schema_key
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyFactRelationSchemaKeyCb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_fact_replay_snapshot_begin
+  (wyl_policy_store_t *store);
+wyrelog_error_t wyl_policy_store_fact_replay_snapshot_end
+  (wyl_policy_store_t *store);
+gboolean wyl_policy_store_fact_replay_snapshot_is_current
+  (wyl_policy_store_t *store);
 wyrelog_error_t wyl_policy_store_load_fact_relation_query
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * query_name,

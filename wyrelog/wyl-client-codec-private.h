@@ -37,5 +37,13 @@ wyrelog_error_t wyl_client_service_credential_list_decode
     WylClientServiceCredentialList * out_credentials);
 wyrelog_error_t wyl_client_fact_status_decode (const gchar * document,
     gsize document_len, WylClientFactStatus * out_status);
+wyrelog_error_t wyl_client_fact_status_decode_with_replay_resources
+  (const gchar * document, gsize document_len,
+    WylClientFactStatus * out_status,
+    WylClientFactReplayResources * out_resources,
+    gboolean * out_has_resources);
+wyrelog_error_t wyl_client_fact_replay_resources_copy
+  (const WylClientFactReplayResources * parsed,
+    WylClientFactReplayResources * out_resources, gsize result_size);
 
 G_END_DECLS;

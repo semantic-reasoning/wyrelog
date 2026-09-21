@@ -196,21 +196,32 @@ run_worker (gpointer user_data)
   g_mutex_lock (&run->mutex);
   worker->thread = g_thread_self ();
   g_mutex_unlock (&run->mutex);
+  const wyl_policy_fact_graph_info_t info = {
+    .tenant_id = tenant_id, .graph_id = graph_id,
+  };
+  g_autoptr (WylFactReplayAdmission) admission = NULL;
+  if (worker->unseal)
+    worker->acquire_rc = wyl_handle_fact_replay_admission_acquire
+          (run->handle, info.tenant_id, info.graph_id, run->cancel,
+            &admission);
+  else
+    worker->acquire_rc = WYRELOG_E_OK;
   WylServiceAuthWriteLease *lease = NULL;
-  worker->acquire_rc = wyl_service_auth_authority_acquire_write
-        (wyl_handle_get_service_auth_authority (run->handle), run->handle,
-          run->cancel, &lease);
+  if (worker->acquire_rc == WYRELOG_E_OK)
+    worker->acquire_rc = worker->unseal
+        ? wyl_handle_fact_replay_admission_acquire_service_write
+          (admission, &lease)
+        : wyl_service_auth_authority_acquire_write
+          (wyl_handle_get_service_auth_authority (run->handle), run->handle,
+            run->cancel, &lease);
   if (worker->acquire_rc == WYRELOG_E_OK) {
     g_mutex_lock (&run->mutex);
     worker->acquired = TRUE;
     g_mutex_unlock (&run->mutex);
-    const wyl_policy_fact_graph_info_t info = {
-      .tenant_id = tenant_id, .graph_id = graph_id,
-    };
     if (worker->unseal) {
       WylFactGraphUnsealOutcome outcome = { 0 };
-      worker->operation_rc = wyl_handle_unseal_fact_graph (run->handle, lease,
-              &info, G_TIME_SPAN_SECOND, &outcome);
+      worker->operation_rc = wyl_handle_unseal_fact_graph (run->handle,
+              admission, lease, &info, G_TIME_SPAN_SECOND, &outcome);
       worker->policy_result = outcome.policy_result;
       wyl_fact_graph_unseal_outcome_clear (&outcome);
     } else {
@@ -366,6 +377,84 @@ test_opposing_wrappers (gconstpointer data)
   wyl_policy_graph_authority_record_free (after);
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  gint done;
+  wyrelog_error_t rc;
+} ReplayLeaseBudgetWorker;
+
+static gpointer
+replay_lease_budget_worker (gpointer user_data)
+{
+  ReplayLeaseBudgetWorker *worker = user_data;
+  g_autoptr (WylFactReplayAdmission) admission = NULL;
+  worker->rc = wyl_handle_fact_replay_admission_acquire (worker->handle,
+          tenant_id, graph_id, NULL, &admission);
+  WylServiceAuthWriteLease *lease = NULL;
+  if (worker->rc == WYRELOG_E_OK)
+    worker->rc = wyl_handle_fact_replay_admission_acquire_service_write
+          (admission, &lease);
+  if (lease != NULL)
+    (void) wyl_service_auth_write_lease_release_terminal (&lease);
+  g_atomic_int_set (&worker->done, TRUE);
+  return NULL;
+}
+
+static void
+test_replay_budget_cancels_service_write_wait (void)
+{
+  if (!g_test_subprocess ()) {
+    g_test_trap_subprocess (NULL, 15 * G_TIME_SPAN_SECOND, 0);
+    g_test_trap_assert_passed ();
+    return;
+  }
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-replay-write-budget-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *path = g_build_filename (root, "policy.sqlite", NULL);
+  seed_provisioned_graph (path, root);
+  WylFactReplaySchedulerConfig replay_config;
+  wyl_fact_replay_scheduler_config_defaults (&replay_config);
+  replay_config.time_limit_us = 100 * G_TIME_SPAN_MILLISECOND;
+  WylHandleOpenOptions options = {
+    .policy_store_path = path,
+    .fact_root = root,
+    .fact_replay_scheduler = replay_config,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  WylFactReplayResourceSnapshot before = { 0 };
+  wyl_handle_fact_replay_resource_snapshot (handle, &before);
+  WylServiceAuthWriteLease *held = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &held),
+      ==, WYRELOG_E_OK);
+  ReplayLeaseBudgetWorker worker = { handle, FALSE, WYRELOG_E_INTERNAL };
+  GThread *thread = g_thread_new ("replay-write-budget",
+          replay_lease_budget_worker, &worker);
+  gint64 deadline = g_get_monotonic_time () + 3 * G_TIME_SPAN_SECOND;
+  while (!g_atomic_int_get (&worker.done)
+      && g_get_monotonic_time () < deadline)
+    g_usleep (1000);
+  gboolean completed_while_held = g_atomic_int_get (&worker.done);
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&held), ==,
+      WYRELOG_E_OK);
+  g_thread_join (thread);
+  g_assert_true (completed_while_held);
+  g_assert_cmpint (worker.rc, ==, WYRELOG_E_TIMED_OUT);
+  WylFactReplayResourceSnapshot after = { 0 };
+  wyl_handle_fact_replay_resource_snapshot (handle, &after);
+  g_assert_cmpuint (after.completed_total, ==, before.completed_total);
+  g_assert_cmpuint (after.runtime_us_total, ==, before.runtime_us_total);
+  g_assert_cmpuint (after.cancelled_total, ==, before.cancelled_total);
+  g_assert_cmpuint (after.timed_out_total, ==, before.timed_out_total + 1);
+  g_clear_object (&handle);
+  remove_root (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -378,5 +467,7 @@ main (int argc, char **argv)
       GUINT_TO_POINTER (2), test_opposing_wrappers);
   g_test_add_data_func ("/fact-coordination/failed-seal-then-unseal",
       GUINT_TO_POINTER (3), test_opposing_wrappers);
+  g_test_add_func ("/fact-coordination/replay-budget-cancels-write-wait",
+      test_replay_budget_cancels_service_write_wait);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

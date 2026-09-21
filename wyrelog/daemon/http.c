@@ -805,6 +805,7 @@ typedef struct
    * so neither thread can dereference the other's freed memory. */
   WylDaemonHttpContext *ctx;    /* borrowed with the daemon context */
   GCancellable *cancellable;    /* +1 ref; the watch holds its own ref */
+  GCancellable *parent_cancellable; /* borrowed replay deadline/cancel */
   PolicyWriteWatch *watch;      /* +1 ref; NULL for message-less writers */
   gboolean watch_disarmed;      /* handler-thread only: source already removed */
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -812,6 +813,13 @@ typedef struct
   guint observed_cleanup_resources;
 #endif
 } WylDaemonPolicyWrite;
+
+static void
+policy_write_parent_cancelled (GCancellable *parent, gpointer user_data)
+{
+  (void) parent;
+  g_cancellable_cancel (G_CANCELLABLE (user_data));
+}
 
 static const gchar *
 wyl_daemon_policy_write_owner_name (WylDaemonPolicyWriteOwner owner)
@@ -1491,9 +1499,17 @@ wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
   if (message != NULL)
     wyl_daemon_policy_write_arm_socket_watch (write, message);
 
+  gulong parent_cancel_handler = write->parent_cancellable == NULL ? 0
+      : g_cancellable_connect (write->parent_cancellable,
+          G_CALLBACK (policy_write_parent_cancelled), write->cancellable,
+          NULL);
+
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
         (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle,
           write->cancellable, &write->lease);
+  if (parent_cancel_handler != 0)
+    g_cancellable_disconnect (write->parent_cancellable,
+        parent_cancel_handler);
   /* Bound the socket watch strictly to the parked-wait window: the main loop
    * has now unfrozen, so disarm before the handler proceeds into the ACTIVE
    * mutation/response with libsoup owning the socket again.  Idempotent, so the
@@ -12906,6 +12922,8 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
   gboolean needs_hardening = FALSE;
   if (out_quota_exceeded != NULL)
     *out_quota_exceeded = FALSE;
+  WylFactResourceRecorder *recorder =
+      wyl_handle_fact_resource_recorder (ctx->handle);
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   /* A provisioning or active graph is served by the live secure handle on its
    * retained pair; only legacy graphs keep the path open below. */
@@ -12915,9 +12933,9 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       && authority->lifecycle_state
       != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED) {
     wyl_policy_graph_authority_record_free (authority);
-    rc = wyl_fact_store_open_provisioned_graph (policy_store, ctx->fact_root,
-            tenant, graph, TRUE, out_store);
-    goto quota_check;
+    return wyl_fact_store_open_provisioned_graph_observed (policy_store,
+               ctx->fact_root, tenant, graph, TRUE, recorder,
+               out_quota_exceeded, out_store);
   }
   wyl_policy_graph_authority_record_free (authority);
 #endif
@@ -12925,8 +12943,9 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
           graph, TRUE, &path, &needs_hardening);
   trace_http_fact_store ("resolve", rc);
   if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_store_open_legacy_graph (policy_store, path, ctx->fact_root,
-            tenant, graph, TRUE, out_store);
+    rc = wyl_fact_store_open_legacy_graph_observed (policy_store, path,
+            ctx->fact_root, tenant, graph, TRUE, recorder,
+            out_quota_exceeded, out_store);
     trace_http_fact_store ("duckdb-open", rc);
   }
   if (needs_hardening) {
@@ -12956,20 +12975,11 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       rc = WYRELOG_E_POLICY;
     trace_http_fact_store ("strict-resolve", rc);
     if (rc == WYRELOG_E_OK) {
-      rc = wyl_fact_store_open_legacy_graph (policy_store, path,
-              ctx->fact_root, tenant, graph, TRUE, out_store);
+      rc = wyl_fact_store_open_legacy_graph_observed (policy_store, path,
+              ctx->fact_root, tenant, graph, TRUE, recorder,
+              out_quota_exceeded, out_store);
       trace_http_fact_store ("duckdb-reopen", rc);
     }
-  }
-#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
-quota_check:
-#endif
-  if (rc == WYRELOG_E_POLICY && out_quota_exceeded != NULL) {
-    WylPolicyFactConcurrentOpenQuotaStatus status = { 0 };
-    if (wyl_policy_store_get_fact_concurrent_open_quota (policy_store, tenant,
-        &status) == WYRELOG_E_OK && status.has_limit
-        && status.charged >= status.hard_limit)
-      *out_quota_exceeded = TRUE;
   }
   return rc;
 }
@@ -13624,8 +13634,18 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       return;
     }
 
+    g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
+    wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
+          (ctx->handle, tenant, graph, NULL, &replay_admission);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+          "fact_replay_admission_failed");
+      return;
+    }
     g_auto (WylDaemonPolicyWrite) write = { 0 };
-    wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+    write.parent_cancellable =
+        wyl_handle_fact_replay_admission_get_cancellable (replay_admission);
+    rc = wyl_daemon_policy_write_acquire (ctx, msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET, &write);
     if (rc != WYRELOG_E_OK) {
       set_json_error (msg, 500, "fact_forget_failed");
@@ -13751,7 +13771,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
        * generation is touched (issue #547 outcome contract). */
       WylFactGraphRuntimeStatus status = { 0 };
       wyrelog_error_t refresh_rc =
-          wyl_handle_refresh_fact_graph (ctx->handle, &lookup.info, &status);
+          wyl_handle_refresh_fact_graph_admitted (ctx->handle,
+              replay_admission, &lookup.info, &status);
       outcome.engine_queryable = status.queryable;
       outcome.engine_generation = status.engine_generation;
       if (refresh_rc == WYRELOG_E_OK) {
@@ -13835,8 +13856,18 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *fail_code =
       (op == FACT_HTTP_OP_RETRACT) ? "fact_retract_failed" :
       "fact_append_failed";
+  g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
+  wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
+        (ctx->handle, tenant, graph, NULL, &replay_admission);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        "fact_replay_admission_failed");
+    return;
+  }
   g_auto (WylDaemonPolicyWrite) write = { 0 };
-  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+  write.parent_cancellable =
+      wyl_handle_fact_replay_admission_get_cancellable (replay_admission);
+  rc = wyl_daemon_policy_write_acquire (ctx, msg,
           WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION, &write);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, fail_code);
@@ -14029,7 +14060,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
    * fact_store (issue #546); see wyl_handle_commit_fact_mutation. */
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_commit_fact_mutation (ctx->handle, &fact_store, &schema,
-            &batch, &lookup.info, &inserted, &outcome);
+            &batch, &lookup.info, replay_admission, &inserted, &outcome);
   g_clear_pointer (&fact_store, wyl_fact_store_close);
   wyrelog_error_t logical_quota_settle_rc = WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK) {

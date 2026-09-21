@@ -9,6 +9,7 @@ import sys
 root = Path(sys.argv[1])
 seal = (root / "wyrelog/fact/graph-seal-private.c").read_text(encoding="utf-8")
 handle = (root / "wyrelog/wyl-handle.c").read_text(encoding="utf-8")
+http = (root / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
 runtime_header = (root / "wyrelog/fact/runtime-private.h").read_text(
     encoding="utf-8"
 )
@@ -32,14 +33,41 @@ def body(source: str, name: str) -> str:
 
 unseal = body(seal, "wyl_fact_graph_unseal_core")
 handle_unseal = body(handle, "wyl_handle_unseal_fact_graph")
+handle_unseal_execute = body(handle, "handle_replay_unseal_execute")
+admission_acquire = body(handle, "wyl_handle_fact_replay_admission_acquire")
+facts_route = body(http, "facts_route_handler")
+policy_write_acquire = body(http, "wyl_daemon_policy_write_acquire")
 
-# The handle's lifetime lease and coordinator precede the graph sequencer.
-assert handle_unseal.index("wyl_fact_root_writer_lease_verify") < handle_unseal.index(
+# Fair scheduler admission is a separate API that callers must complete before
+# acquiring their thread-affine service write lease. The lifecycle API accepts
+# only an already-admitted token and cannot queue while that lease is held.
+assert "handle_replay_caller_gate_enter" in admission_acquire
+assert "handle_replay_caller_gate_enter" not in handle_unseal
+assert "admission->context" in handle_unseal
+for owner in (
+    "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET",
+    "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION",
+):
+    owner_at = facts_route.index(owner)
+    admission_at = facts_route.rfind(
+        "wyl_handle_fact_replay_admission_acquire", 0, owner_at
+    )
+    prior_write_at = facts_route.rfind(
+        "wyl_daemon_policy_write_acquire", 0, owner_at
+    )
+    assert admission_at >= 0 and prior_write_at > admission_at
+assert "wyl_handle_refresh_fact_graph_admitted" in facts_route
+assert "&lookup.info, replay_admission" in facts_route
+assert policy_write_acquire.index("g_cancellable_connect") < \
+    policy_write_acquire.index("wyl_service_auth_authority_acquire_write")
+assert handle_unseal_execute.index(
+    "wyl_fact_root_writer_lease_verify"
+) < handle_unseal_execute.index(
     "g_mutex_lock (&self->fact_replay_coordinator_lock)"
 )
-assert handle_unseal.index(
+assert handle_unseal_execute.index(
     "g_mutex_lock (&self->fact_replay_coordinator_lock)"
-) < handle_unseal.index("wyl_fact_graph_unseal_with_root_lease")
+) < handle_unseal_execute.index("wyl_fact_graph_unseal_with_root_lease_bounded")
 
 # The sequencer must retain the artifact lease through runtime publication,
 # and must take the policy fence after the runtime writer has closed admission.

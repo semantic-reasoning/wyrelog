@@ -1,15 +1,15 @@
 {
-  "aggregate": "513841cf6251f6ee6952e947985ed1f9063869738bc4a8b1b72b577a79dc5e68",
+  "aggregate": "724f3166e087c4cd4ac114ae104d352f78378b4c56efa1180aa44a14881900c3",
   "directives": {
-    "count": 550,
-    "sha256": "93ecd8667e99f159599da165394b838c0416cc121d178ffd1b7e9e62ff38ea8e"
+    "count": 548,
+    "sha256": "070e6f8089a1a4a1be0c8abd89bc6e327e03d0cb3821fff810b970d9ece9ec49"
   },
   "functions": {
     "direct_permission_mutation_handler": "029b8875cfc10f5b184ada7ac0fb03fba2d7a573e09519c1f308174484e335d0",
     "ensure_policy_permission_exists": "9a12fb60ed4158b55ac94f121d3eed9817d0c851069cf1d9aa36287952906d5f",
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
     "facts_quota_handler": "9ff4f019e3007fcf028c21f19e292a2d877c2110fd66291b514c05c3807a181f",
-    "facts_route_handler": "f92d74349dc8d83ba30c4e05ceb625a8c9f847db0a69b942ec88b0a3170b15ce",
+    "facts_route_handler": "f4e8a0cddef0ed59180da93d01b78c29edefc45a1b9c13d888358b2ab2bb7191",
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
     "graph_seal_handler": "d05b56e29f9dd57178b0615664422bbfa5e095428beb1f608ed97769b88d99b5",
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
@@ -55,7 +55,7 @@
     "wyl_daemon_http_fail_next_policy_write_finalize_for_test": "f05c46ab764d425bac67044cd3ea697a2bf5578f2bb40989f0ebb6051306bc7d",
     "wyl_daemon_http_policy_write_for_test": "f007bfb7fcf32cd2d24d5417208860a993e6d3d1da458e459c861c8b59de4e61",
     "wyl_daemon_http_resolve_tenant_create_outcome_for_test": "fd1eb40947acaf85185621162361fa2265c49f4b825ace41081dda870e6be950",
-    "wyl_daemon_policy_write_acquire": "b8873c3d2971856bb4e9a65cdf742d19e1b61c78e0af48175a302c61973a5573",
+    "wyl_daemon_policy_write_acquire": "0f7494bdaea2f978af4ade42e5ab7779928a08abea7cb43a7f34d3580068acae",
     "wyl_daemon_policy_write_clear": "efdfcd18f7e13b8ecb87616f8fcf90b6d0f6047c2665ea438dfe7c06002aa93f",
     "wyl_daemon_policy_write_detach_message": "d78b824fd228e7a751025a43dadb93aff955ba01acd3c2ba8a158346513e8c4a",
     "wyl_daemon_policy_write_finalize": "e2b4e754c9cdcd29b85b22c20ca54fb729f986b643cc233bbfe4ce361f755ed9",

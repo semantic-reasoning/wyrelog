@@ -99,11 +99,21 @@ wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
 wyrelog_error_t wyl_fact_replay_validate_graph
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info);
+wyrelog_error_t wyl_fact_replay_validate_graph_bounded
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactReplayJobContext * job_context);
 wyrelog_error_t wyl_fact_replay_validate_graph_with_artifact_lease
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactArtifactNamespace * artifact_namespace,
     WylFactArtifactMutationLease * artifact_lease);
+wyrelog_error_t wyl_fact_replay_validate_graph_with_artifact_lease_bounded
+  (wyl_policy_store_t * policy, const gchar * fact_root,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactArtifactNamespace * artifact_namespace,
+    WylFactArtifactMutationLease * artifact_lease,
+    WylFactReplayJobContext * job_context);
 #if defined(WYL_TEST_HANDLE_SEAMS)
 typedef enum
 {
@@ -112,6 +122,14 @@ typedef enum
 } WylFactReplayTestFault;
 
 void wyl_fact_replay_set_test_fault (WylFactReplayTestFault fault);
+typedef void (*WylFactReplayScheduledStartTestHook)
+  (const gchar *tenant_id, const gchar *graph_id, gpointer user_data);
+void wyl_fact_replay_set_scheduled_start_test_hook
+  (WylFactReplayScheduledStartTestHook hook, gpointer user_data);
+typedef void (*WylFactReplayValidationConnectedTestHook)
+  (WylFactReplayJobContext *job_context, gpointer user_data);
+void wyl_fact_replay_set_validation_connected_test_hook
+  (WylFactReplayValidationConnectedTestHook hook, gpointer user_data);
 
 wyrelog_error_t wyl_fact_replay_open_graph_engine_with_store_for_test
   (wyl_policy_store_t * policy, wyl_fact_store_t * store,
@@ -121,6 +139,27 @@ wyrelog_error_t wyl_fact_replay_open_graph_engine_with_store_for_test
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
     const gchar * fact_root, WylFactGraphRuntimeManager * runtime_manager,
     wyl_fact_replay_summary_t * out_summary);
+wyrelog_error_t wyl_fact_replay_policy_graphs_scheduled
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactReplayScheduler *scheduler,
+    const WylFactReplaySchedulerConfig *config,
+    wyl_fact_replay_summary_t *out_summary);
+typedef struct
+{
+  wyrelog_error_t (*pin) (gpointer user_data,
+      wyl_policy_store_t **out_policy);
+  void (*unpin) (gpointer user_data, wyl_policy_store_t *policy);
+  void (*snapshot_complete) (gpointer user_data);
+  gpointer user_data;
+} WylFactReplayPolicyProvider;
+wyrelog_error_t wyl_fact_replay_policy_graphs_scheduled_with_provider
+  (wyl_policy_store_t *snapshot_policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager,
+    WylFactReplayScheduler *scheduler,
+    const WylFactReplaySchedulerConfig *config,
+    const WylFactReplayPolicyProvider *provider,
+    wyl_fact_replay_summary_t *out_summary);
 
 /* Refresh exactly one graph's runtime engine (issue #546).  Unlike
  * wyl_fact_replay_policy_graphs this touches only the given key and never
@@ -169,5 +208,13 @@ wyrelog_error_t wyl_fact_replay_refresh_graph_publication
     WylFactArtifactNamespace * artifact_namespace,
     WylFactArtifactMutationLease * artifact_lease,
     WylFactGraphRuntimeStatus * out_status);
+wyrelog_error_t wyl_fact_replay_refresh_graph_publication_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimePublication *publication,
+    WylFactArtifactNamespace *artifact_namespace,
+    WylFactArtifactMutationLease *artifact_lease,
+    WylFactReplayJobContext *job_context,
+    WylFactGraphRuntimeStatus *out_status);
 
 G_END_DECLS;

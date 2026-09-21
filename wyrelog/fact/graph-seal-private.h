@@ -8,6 +8,7 @@
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
+#include "wyrelog/fact/replay-scheduler-private.h"
 
 G_BEGIN_DECLS;
 
@@ -135,6 +136,13 @@ wyrelog_error_t wyl_fact_graph_reconcile_degraded
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
     WylFactGraphReconcileOutcome *out_outcome);
+wyrelog_error_t wyl_fact_graph_reconcile_degraded_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
+    WylFactGraphReconcileOutcome *out_outcome);
 
 /* Activate one authority-managed sealed graph, rebuild its engine while the
  * runtime barrier remains closed, and reopen only after publication.  The
@@ -169,6 +177,13 @@ wyrelog_error_t wyl_fact_graph_unseal_with_root_lease
     WylFactRootWriterLease *root_lease,
     const wyl_policy_fact_graph_info_t *graph_info,
     WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactGraphUnsealOutcome *out_outcome);
+wyrelog_error_t wyl_fact_graph_unseal_with_root_lease_bounded
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactRootWriterLease *root_lease,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactGraphRuntimeManager *manager, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
     WylFactGraphUnsealOutcome *out_outcome);
 
 #if defined(WYL_TEST_HANDLE_SEAMS)
