@@ -124,6 +124,7 @@ struct _WylHandle
   WylFactRootWriterLease *fact_root_writer_lease;
   WylFactGraphRuntimeManager *fact_graph_runtime;
   WylFactTenantAdmissionManager *fact_tenant_admission;
+  WylFactReplaySchedulerConfig fact_replay_scheduler_config;
   GMutex fact_replay_coordinator_lock;
 #endif
   gboolean login_skip_mfa_allowed;
@@ -1144,6 +1145,8 @@ wyl_handle_init (WylHandle *self)
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE
+  wyl_fact_replay_scheduler_config_defaults
+    (&self->fact_replay_scheduler_config);
   if (wyl_fact_graph_runtime_manager_new (&self->fact_graph_runtime)
       != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to create fact graph runtime");
@@ -1532,8 +1535,17 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   if (opts == NULL)
     return WYRELOG_E_INVALID;
 
+  if (!wyl_fact_replay_scheduler_config_is_zero
+        (&opts->fact_replay_scheduler)
+      && wyl_fact_replay_scheduler_config_validate
+        (&opts->fact_replay_scheduler) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
 #ifdef WYL_HAS_FACT_STORE
+  if (!wyl_fact_replay_scheduler_config_is_zero
+        (&opts->fact_replay_scheduler))
+    self->fact_replay_scheduler_config = opts->fact_replay_scheduler;
   self->fact_root = g_strdup (opts->fact_root);
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     wyrelog_error_t lease_rc = wyl_fact_root_writer_lease_acquire

@@ -39,6 +39,7 @@
 #endif
 
 #include "daemon/options.h"
+#include "wyl-handle-private.h"
 
 /* test-only: file-private gate in wyrelog/daemon/options.c.
  * Declared here (not in options.h) so the production header stays
@@ -260,6 +261,119 @@ test_parser_listen_port_string_in_conf (void)
   g_free (opts.profile_arg);
   g_free (opts.listen_port_arg);
   remove_tmp_conf (path);
+}
+
+static void
+test_replay_limits_defaults_and_boundaries (void)
+{
+  g_auto (WylDaemonOptions) opts = { .listen_port = -1 };
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (opts.fact_replay_scheduler.global_concurrency, ==, 4);
+  g_assert_cmpuint (opts.fact_replay_scheduler.tenant_concurrency, ==, 1);
+  g_assert_cmpuint (opts.fact_replay_scheduler.global_queue_limit, ==, 1024);
+  g_assert_cmpuint (opts.fact_replay_scheduler.tenant_queue_limit, ==, 64);
+  g_assert_cmpuint (opts.fact_replay_scheduler.row_limit, ==, 1000000);
+  g_assert_cmpint (opts.fact_replay_scheduler.time_limit_us, ==, 120000000);
+
+  WylFactReplaySchedulerConfig valid = {
+    .global_concurrency = 2,
+    .tenant_concurrency = 1,
+    .global_queue_limit = 2,
+    .tenant_queue_limit = 1,
+    .row_limit = 1,
+    .time_limit_us = 1,
+  };
+  g_assert_cmpint (wyl_fact_replay_scheduler_config_validate (&valid), ==,
+      WYRELOG_E_OK);
+  valid.tenant_concurrency = valid.global_concurrency;
+  g_assert_cmpint (wyl_fact_replay_scheduler_config_validate (&valid), ==,
+      WYRELOG_E_INVALID);
+  valid.tenant_concurrency = 1;
+  valid.tenant_queue_limit = valid.global_queue_limit;
+  g_assert_cmpint (wyl_fact_replay_scheduler_config_validate (&valid), ==,
+      WYRELOG_E_INVALID);
+}
+
+static void
+test_replay_limits_cli_and_config (void)
+{
+  gchar *path = make_tmp_conf ("[daemon]\n"
+          "fact_replay_global_concurrency=8\n"
+          "fact_replay_tenant_concurrency=2\n"
+          "fact_replay_global_queue_limit=300\n"
+          "fact_replay_tenant_queue_limit=30\n"
+          "fact_replay_row_limit=5000\n"
+          "fact_replay_time_limit_ms=9000\n", 0640);
+  g_auto (WylDaemonOptions) opts = {
+    .config_path = path,
+    .fact_replay_tenant_queue_limit_arg = (gchar *) "40",
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (opts.fact_replay_scheduler.global_concurrency, ==, 8);
+  g_assert_cmpuint (opts.fact_replay_scheduler.tenant_concurrency, ==, 2);
+  g_assert_cmpuint (opts.fact_replay_scheduler.global_queue_limit, ==, 300);
+  g_assert_cmpuint (opts.fact_replay_scheduler.tenant_queue_limit, ==, 40);
+  g_assert_cmpuint (opts.fact_replay_scheduler.row_limit, ==, 5000);
+  g_assert_cmpint (opts.fact_replay_scheduler.time_limit_us, ==, 9000000);
+  remove_tmp_conf (path);
+}
+
+static void
+test_replay_limits_reject_unreserved_and_overflow (void)
+{
+  const struct
+  {
+    const gchar *global_workers;
+    const gchar *tenant_workers;
+    const gchar *global_queue;
+    const gchar *tenant_queue;
+    const gchar *time_ms;
+  } cases[] = {
+    { "1", "1", "2", "1", "1" },
+    { "2", "2", "2", "1", "1" },
+    { "2", "1", "2", "2", "1" },
+    { "2", "1", "2", "1", "9223372036854776" },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (WylDaemonOptions) opts = {
+      .fact_replay_global_concurrency_arg = (gchar *) cases[i].global_workers,
+      .fact_replay_tenant_concurrency_arg = (gchar *) cases[i].tenant_workers,
+      .fact_replay_global_queue_limit_arg = (gchar *) cases[i].global_queue,
+      .fact_replay_tenant_queue_limit_arg = (gchar *) cases[i].tenant_queue,
+      .fact_replay_time_limit_ms_arg = (gchar *) cases[i].time_ms,
+      .listen_port = -1,
+    };
+    g_autoptr (GError) error = NULL;
+    g_assert_false (wyl_daemon_options_resolve (&opts, &error));
+    g_assert_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE);
+  }
+
+  g_auto (WylDaemonOptions) negative_row_limit = {
+    .fact_replay_row_limit_arg = (gchar *) "-1",
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+  g_assert_false (wyl_daemon_options_resolve (&negative_row_limit, &error));
+  g_assert_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE);
+}
+
+static void
+test_replay_limits_handle_rejects_partial_config (void)
+{
+  WylHandleOpenOptions options = {
+    .fact_replay_scheduler = {
+      .global_concurrency = 4,
+    },
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (handle);
 }
 
 static void
@@ -927,6 +1041,14 @@ main (int argc, char **argv)
       test_parser_cli_overrides_conf);
   g_test_add_func ("/daemon-options/parser/listen-port-string",
       test_parser_listen_port_string_in_conf);
+  g_test_add_func ("/daemon-options/replay-limits/defaults-boundaries",
+      test_replay_limits_defaults_and_boundaries);
+  g_test_add_func ("/daemon-options/replay-limits/cli-config",
+      test_replay_limits_cli_and_config);
+  g_test_add_func ("/daemon-options/replay-limits/reject-invalid",
+      test_replay_limits_reject_unreserved_and_overflow);
+  g_test_add_func ("/daemon-options/replay-limits/handle-rejects-partial",
+      test_replay_limits_handle_rejects_partial_config);
   g_test_add_func ("/daemon-options/credential-roots/from-conf",
       test_credential_roots_from_conf);
   g_test_add_func ("/daemon-options/credential-roots/optional-when-unset",

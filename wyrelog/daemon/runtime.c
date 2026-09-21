@@ -380,6 +380,7 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
     .policy_store_path = opts->policy_store_path,
     .policy_keyprovider_path = opts->policy_keyprovider_path,
     .fact_root = opts->fact_root,
+    .fact_replay_scheduler = opts->fact_replay_scheduler,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
 #ifdef WYL_HAS_AUDIT
@@ -462,6 +463,7 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
 #else
     .policy_store_path = scratch_policy_store,
 #endif
+    .fact_replay_scheduler = opts->fact_replay_scheduler,
     .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,

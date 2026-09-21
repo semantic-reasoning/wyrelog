@@ -48,6 +48,7 @@ wyrelog_sources = files(
   'daemon/auth-registry-private.c',
   'fact/graph-locator-darwin-private.c',
   'fact/open-reservation-private.c',
+  'fact/replay-scheduler-private.c',
   'fact/offline-backup-manifest-private.c',
   'fact/graph-locator-private.c',
   'fact/reconcile-private.c',
