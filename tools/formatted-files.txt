@@ -207,6 +207,7 @@ wyrelog/daemon/http-body-limit-private.h
 wyrelog/daemon/http-guards-private.c
 wyrelog/daemon/http.c
 wyrelog/daemon/http.h
+wyrelog/daemon/options.c
 wyrelog/daemon/options.h
 wyrelog/daemon/runtime.c
 wyrelog/daemon/runtime.h
@@ -276,6 +277,8 @@ wyrelog/fact/reconcile-private.h
 wyrelog/fact/recovery-mac-private.c
 wyrelog/fact/recovery-mac-private.h
 wyrelog/fact/replay-private.h
+wyrelog/fact/replay-scheduler-private.c
+wyrelog/fact/replay-scheduler-private.h
 wyrelog/fact/replay.c
 wyrelog/fact/runtime-private.c
 wyrelog/fact/runtime-private.h

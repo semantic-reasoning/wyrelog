@@ -9,6 +9,7 @@
 #include "wyrelog/session.h"
 #include "policy/store-private.h"
 #include "auth/service-auth-coordination-private.h"
+#include "fact/replay-scheduler-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/graph-seal-private.h"
@@ -31,6 +32,9 @@ typedef struct
   const gchar *audit_store_path;
   /* Canonical authority root for graph-local fact stores. */
   const gchar *fact_root;
+  /* All-zero preserves designated-initializer compatibility and selects the
+   * scheduler defaults.  Any nonzero configuration must be complete. */
+  WylFactReplaySchedulerConfig fact_replay_scheduler;
   /* Test-only deterministic seam immediately after writer-lease acquire. */
   void (*fact_root_lease_acquired_checkpoint) (gpointer data);
   gpointer fact_root_lease_acquired_checkpoint_data;

@@ -3,6 +3,8 @@
 
 #include <glib.h>
 
+#include "fact/replay-scheduler-private.h"
+
 typedef enum
 {
   WYL_DAEMON_PROFILE_SYSTEM = 0,
@@ -41,7 +43,14 @@ typedef struct
   const gchar *system_url;
   gchar *listen_port_arg;
   gchar *event_queue_limit_arg;
+  gchar *fact_replay_global_concurrency_arg;
+  gchar *fact_replay_tenant_concurrency_arg;
+  gchar *fact_replay_global_queue_limit_arg;
+  gchar *fact_replay_tenant_queue_limit_arg;
+  gchar *fact_replay_row_limit_arg;
+  gchar *fact_replay_time_limit_ms_arg;
   guint event_queue_limit;
+  WylFactReplaySchedulerConfig fact_replay_scheduler;
   gint listen_port;
   gboolean check_only;
   gboolean production_mode;
