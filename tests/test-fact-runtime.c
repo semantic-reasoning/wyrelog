@@ -152,6 +152,12 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
 }
 
 static wyrelog_error_t
+reject_publication (gpointer user_data)
+{
+  return GPOINTER_TO_INT (user_data);
+}
+
+static wyrelog_error_t
 build_refuses_recursive_refresh (const WylFactGraphKey *key,
     WylEngine **out_engine, gpointer user_data)
 {
@@ -377,6 +383,40 @@ status_reentrant_cb (const WylFactGraphRuntimeStatus *status,
       status->operation_generation);
   wyl_fact_graph_runtime_status_clear (&copy);
   return WYRELOG_E_OK;
+}
+
+static void
+test_publish_check_preserves_generation (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&manager), ==,
+      WYRELOG_E_OK);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant", "graph"), ==,
+      WYRELOG_E_OK);
+  BuildSpec first = { .marker = 201 };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &first, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.engine_generation, ==, 1);
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  BuildSpec rejected = { .marker = 202 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_checked (manager,
+      &key, build_marker_engine, &rejected, reject_publication,
+      GINT_TO_POINTER (WYRELOG_E_TIMED_OUT), &status), ==,
+      WYRELOG_E_TIMED_OUT);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+  g_assert_cmpint (status.last_replay_class, ==,
+      WYL_FACT_GRAPH_REPLAY_TIMED_OUT);
+  g_assert_cmpuint (status.engine_generation, ==, 1);
+  g_assert_true (status.queryable);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &key, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (snapshot_marker (snapshot), ==, 201);
+  wyl_fact_graph_key_clear (&key);
 }
 
 static void
@@ -3074,6 +3114,8 @@ main (int argc, char **argv)
       test_unseal_prepare_preserves_healthy_and_shutdown);
   g_test_add_func ("/fact-runtime/refresh-snapshot-status-evict",
       test_refresh_snapshot_status_and_evict);
+  g_test_add_func ("/fact-runtime/publish-check-preserves-generation",
+      test_publish_check_preserves_generation);
   g_test_add_func ("/fact-runtime/slow-build-graph-local",
       test_slow_build_is_graph_local);
   g_test_add_func ("/fact-runtime/engine-call-serialization",

@@ -54,6 +54,23 @@ typedef struct
   gchar *storage_path;
 } GraphPathProbe;
 
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const gchar *root;
+  const wyl_policy_fact_graph_info_t *info;
+  WylFactGraphRuntimeManager *runtime;
+  WylFactGraphRuntimeStatus status;
+} BoundedRefreshCall;
+
+static wyrelog_error_t
+bounded_refresh_job (WylFactReplayJobContext *context, gpointer user_data)
+{
+  BoundedRefreshCall *call = user_data;
+  return wyl_fact_replay_refresh_graph_bounded (call->policy, call->root,
+             call->info, call->runtime, context, &call->status);
+}
+
 static wyrelog_error_t
 capture_graph_path_cb (const wyl_policy_fact_graph_info_t *info,
     gpointer user_data)
@@ -1994,6 +2011,69 @@ test_status_is_not_ready_while_an_erasure_is_outstanding (void)
   g_assert_null (strstr (json, "batch-1"));
   g_assert_null (strstr (json, "missing__"));
 
+  remove_tree (root);
+}
+
+static void
+test_bounded_replay_preserves_published_generation (void)
+{
+  TEST ("bounded replay rejects cumulative rows before publication");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-budget-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_compound_graph_with_schemas (policy, root, "tenant-a", "shipments");
+  append_compound_route_batches (policy, "tenant-a", "shipments");
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "shipments");
+  wyl_policy_fact_graph_info_t info = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipments",
+    .storage_path = storage_path,
+    .schema_version = 1,
+  };
+  g_autoptr (WylFactGraphRuntimeManager) runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&runtime), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus seeded = { 0 };
+  g_assert_cmpint (wyl_fact_replay_refresh_graph (policy, root, &info,
+      runtime, &seeded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (seeded.engine_generation, ==, 1);
+  wyl_fact_graph_runtime_status_clear (&seeded);
+
+  WylFactReplaySchedulerConfig config = {
+    .global_concurrency = 2,
+    .tenant_concurrency = 1,
+    .global_queue_limit = 8,
+    .tenant_queue_limit = 4,
+    .row_limit = 1,
+    .time_limit_us = 5 * G_TIME_SPAN_SECOND,
+  };
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  BoundedRefreshCall call = {
+    .policy = policy,
+    .root = root,
+    .info = &info,
+    .runtime = runtime,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "shipments", NULL, bounded_refresh_job, &call, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_RESOURCE_LIMIT);
+  g_assert_cmpint (call.status.state, ==,
+      WYL_FACT_GRAPH_RUNTIME_READY_STALE);
+  g_assert_cmpint (call.status.last_replay_class, ==,
+      WYL_FACT_GRAPH_REPLAY_RESOURCE_LIMIT);
+  g_assert_cmpuint (call.status.engine_generation, ==, 1);
+  g_assert_true (call.status.queryable);
+  wyl_fact_graph_runtime_status_clear (&call.status);
   remove_tree (root);
 }
 
@@ -4763,6 +4843,8 @@ main (int argc, char **argv)
       test_handle_unseal_traces_coordinator_before_publication);
   g_test_add_func ("/fact-replay/direct",
       test_direct_replay_retracts_and_mangles);
+  g_test_add_func ("/fact-replay/bounded-preserves-generation",
+      test_bounded_replay_preserves_published_generation);
   g_test_add_func ("/fact-replay/legacy-null-fails-closed",
       test_replay_keeps_legacy_nullable_null_fail_closed);
   g_test_add_func ("/fact-replay/compound-shared",

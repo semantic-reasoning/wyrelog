@@ -205,6 +205,26 @@ saturating_rows_replay (WylFactReplayJobContext *context, gpointer user_data)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+slow_replay (WylFactReplayJobContext *context, gpointer user_data)
+{
+  (void) context;
+  (void) user_data;
+  g_usleep (5 * 1000);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+commit_then_slow_replay (WylFactReplayJobContext *context, gpointer user_data)
+{
+  (void) user_data;
+  wyrelog_error_t rc = wyl_fact_replay_job_context_commit (context);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_usleep (5 * 1000);
+  return WYRELOG_E_OK;
+}
+
 static void
 reentrant_destroy (gpointer user_data)
 {
@@ -573,10 +593,52 @@ test_row_counter_saturates (void)
   g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant",
       "graph", NULL, saturating_rows_replay, NULL, NULL, &future), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_RESOURCE_LIMIT);
   WylFactReplayResourceSnapshot snapshot;
   wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
   g_assert_cmpuint (snapshot.rows_total, ==, G_MAXUINT64);
+  g_assert_cmpuint (snapshot.row_limit_total, ==, 1);
+}
+
+static void
+test_deadline_is_enforced (void)
+{
+  WylFactReplaySchedulerConfig config = test_config ();
+  config.time_limit_us = G_TIME_SPAN_MILLISECOND;
+  g_autoptr (WylFactResourceRecorder) recorder =
+      wyl_fact_resource_recorder_new ();
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, recorder,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant",
+      "graph", NULL, slow_replay, NULL, NULL, &future), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==,
+      WYRELOG_E_TIMED_OUT);
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  g_assert_cmpuint (snapshot.timed_out_total, ==, 1);
+}
+
+static void
+test_commit_closes_deadline (void)
+{
+  WylFactReplaySchedulerConfig config = test_config ();
+  config.time_limit_us = G_TIME_SPAN_MILLISECOND;
+  g_autoptr (WylFactResourceRecorder) recorder =
+      wyl_fact_resource_recorder_new ();
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, recorder,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant",
+      "graph", NULL, commit_then_slow_replay, NULL, NULL, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_future_wait (future), ==, WYRELOG_E_OK);
+  WylFactReplayResourceSnapshot snapshot;
+  wyl_fact_resource_recorder_snapshot (recorder, &snapshot);
+  g_assert_cmpuint (snapshot.timed_out_total, ==, 0);
 }
 
 int
@@ -601,5 +663,9 @@ main (int argc, char **argv)
       test_worker_shutdown_is_busy);
   g_test_add_func ("/fact-replay-scheduler/row-counter-saturates",
       test_row_counter_saturates);
+  g_test_add_func ("/fact-replay-scheduler/deadline-enforced",
+      test_deadline_is_enforced);
+  g_test_add_func ("/fact-replay-scheduler/commit-closes-deadline",
+      test_commit_closes_deadline);
   return g_test_run ();
 }

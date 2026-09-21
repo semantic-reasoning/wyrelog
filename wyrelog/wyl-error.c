@@ -27,13 +27,17 @@ wyrelog_error_string (wyrelog_error_t err)
       return "no entity registered for the supplied identifier";
     case WYRELOG_E_BREAK_GLASS_DISABLED:
       return "break-glass override is disabled in this build or not "
-          "armed at runtime";
+             "armed at runtime";
     case WYRELOG_E_BUSY:
       return "resource is busy";
     case WYRELOG_E_CANCELLED:
       return "operation cancelled by caller";
     case WYRELOG_E_CONFLICT:
       return "conflict";
+    case WYRELOG_E_RESOURCE_LIMIT:
+      return "resource limit exceeded";
+    case WYRELOG_E_TIMED_OUT:
+      return "operation timed out";
   }
   return "unknown error";
 }

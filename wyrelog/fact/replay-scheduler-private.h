@@ -103,6 +103,13 @@ guint64 wyl_fact_replay_job_context_get_row_limit
   (WylFactReplayJobContext *context);
 void wyl_fact_replay_job_context_add_rows
   (WylFactReplayJobContext *context, guint64 rows);
+wyrelog_error_t wyl_fact_replay_job_context_checkpoint
+  (WylFactReplayJobContext *context);
+wyrelog_error_t wyl_fact_replay_job_context_charge_rows
+  (WylFactReplayJobContext *context, guint64 rows);
+/* Callback-free atomic publication latch for a runtime state-lock boundary. */
+wyrelog_error_t wyl_fact_replay_job_context_commit
+  (WylFactReplayJobContext *context);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactResourceRecorder,
     wyl_fact_resource_recorder_unref)

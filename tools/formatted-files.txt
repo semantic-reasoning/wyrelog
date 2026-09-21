@@ -324,6 +324,7 @@ wyrelog/wyl-decide-private.h
 wyrelog/wyl-decide.c
 wyrelog/wyl-dl-static-private.h
 wyrelog/wyl-engine.c
+wyrelog/wyl-error.c
 wyrelog/wyl-events-private.h
 wyrelog/wyl-fsm-permission-scope-private.h
 wyrelog/wyl-fsm-permission-scope.c
