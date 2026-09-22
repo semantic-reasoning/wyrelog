@@ -2514,38 +2514,80 @@ test_status_gsettings_supplies_daemon_url (void)
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
 }
 
-static void
-test_status_cli_overrides_gsettings (void)
+/* The URL the two cases below put in the keyfile.  Loopback, so no name
+ * resolution is involved; port 2 refuses at once, exactly as port 1 does for
+ * the case above, which this suite has always depended on.  The path is
+ * carried through verbatim by the daemon-unavailable diagnostic, which is
+ * what makes the needle legible rather than a one-character difference from
+ * the CLI URL. */
+#define WYCTL_TEST_GSETTINGS_URL "http://127.0.0.1:2/from-gsettings"
+
+/* Run `wyctl status' once against a keyfile holding
+ * WYCTL_TEST_GSETTINGS_URL, with `extra_argv' spliced in after the
+ * subcommand name, and hand back the child's stderr.  The fixture is torn
+ * down before the caller asserts anything. */
+static gchar *
+run_status_against_gsettings_url (const gchar *const *extra_argv,
+    gsize extra_argv_len, gboolean disable_gsettings, gint *wait_status)
 {
-  /* GSettings carries a URL we want to be ignored; the CLI value
-   * must win and the diagnostic must mention the CLI URL. */
   g_autofree gchar *literal =
-      gvariant_literal_for_string ("http://from-gsettings.example.invalid");
+      gvariant_literal_for_string (WYCTL_TEST_GSETTINGS_URL);
   const gchar *keys[] = { "daemon-url", NULL };
   const gchar *values[] = { literal, NULL };
   g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
-  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, disable_gsettings);
 
-  gchar *argv[] = {
-    WYL_TEST_WYCTL_PATH,
-    "status",
-    "--daemon-url",
-    "http://127.0.0.1:1",
-    "--timeout-ms",
-    "100",
-    NULL,
-  };
+  GPtrArray *argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  g_ptr_array_add (argv, "status");
+  for (gsize i = 0; i < extra_argv_len; i++)
+    g_ptr_array_add (argv, (gpointer) extra_argv[i]);
+  g_ptr_array_add (argv, "--timeout-ms");
+  g_ptr_array_add (argv, "100");
+  g_ptr_array_add (argv, NULL);
+
   g_autofree gchar *stdout_buf = NULL;
-  g_autofree gchar *stderr_buf = NULL;
-  gint wait_status = 0;
-  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  gchar *stderr_buf = NULL;
+  run_child_with_env ((gchar **) argv->pdata, envp, &stdout_buf, &stderr_buf,
+      wait_status);
+  g_ptr_array_free (argv, TRUE);
   remove_dir_recursive (xdg);
+  return stderr_buf;
+}
 
-  g_assert_false (wait_status_is_success (wait_status));
-  assert_child_stderr_has (stderr_buf,
+static void
+test_status_cli_overrides_gsettings (void)
+{
+  /* GSettings carries a URL we want to be ignored; the CLI value must win
+   * and the diagnostic must mention the CLI URL.
+   *
+   * The control spawn is what makes that mean anything.  Asserting only
+   * that the CLI URL appears and the GSettings one does not is satisfied
+   * just as well by a keyfile nothing ever read, so the case used to pass
+   * with the GSettings fallback deleted (#1189).  The control proves a
+   * child of this test can read a keyfile built this way; the override
+   * spawn then shows the CLI value displacing a value that was
+   * demonstrably available.  Each spawn mints its own fixture directory
+   * from the same keys, so what they share is the construction, not the
+   * directory. */
+  const gchar *override_argv[] = { "--daemon-url", "http://127.0.0.1:1" };
+  gint control_status = 0;
+  gint override_status = 0;
+
+  g_autofree gchar *control_stderr =
+      run_status_against_gsettings_url (NULL, 0, FALSE, &control_status);
+  g_autofree gchar *override_stderr =
+      run_status_against_gsettings_url (override_argv,
+          G_N_ELEMENTS (override_argv), FALSE, &override_status);
+
+  g_assert_false (wait_status_is_success (control_status));
+  assert_child_stderr_has (control_stderr,
+      "wyctl: daemon unavailable: " WYCTL_TEST_GSETTINGS_URL);
+
+  g_assert_false (wait_status_is_success (override_status));
+  assert_child_stderr_has (override_stderr,
       "wyctl: daemon unavailable: http://127.0.0.1:1");
-  g_assert_null (g_strstr_len (stderr_buf, -1,
-      "from-gsettings.example.invalid"));
+  g_assert_null (g_strstr_len (override_stderr, -1, "from-gsettings"));
 }
 
 /* Build a temporary access-token file with the supplied contents and
@@ -2870,32 +2912,30 @@ test_policy_check_gsettings_daemon_url_is_the_transport_target (void)
 static void
 test_status_kill_switch_disables_gsettings (void)
 {
-  /* GSettings carries a URL but WYCTL_DISABLE_GSETTINGS=1 must keep
-   * wyctl from consulting it; with no CLI URL the existing
-   * missing-daemon-URL diagnostic must fire. */
-  g_autofree gchar *literal =
-      gvariant_literal_for_string ("http://from-gsettings.example.invalid");
-  const gchar *keys[] = { "daemon-url", NULL };
-  const gchar *values[] = { literal, NULL };
-  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
-  g_auto (GStrv) envp = build_gsettings_envp (xdg, TRUE);
+  /* GSettings carries a URL but WYCTL_DISABLE_GSETTINGS=1 must keep wyctl
+   * from consulting it; with no CLI URL the existing missing-daemon-URL
+   * diagnostic must fire.
+   *
+   * Breaking the kill switch has always reddened this case.  What it could
+   * not tell apart was a suppressed fixture from one the child could never
+   * have read, since both end in "missing daemon URL" (#1189).  The control
+   * spawn settles that: a fixture built from the same keys, read by the
+   * same binary, with the switch off. */
+  gint control_status = 0;
+  gint suppressed_status = 0;
 
-  gchar *argv[] = {
-    WYL_TEST_WYCTL_PATH,
-    "status",
-    "--timeout-ms",
-    "100",
-    NULL,
-  };
-  g_autofree gchar *stdout_buf = NULL;
-  g_autofree gchar *stderr_buf = NULL;
-  gint wait_status = 0;
-  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
-  remove_dir_recursive (xdg);
+  g_autofree gchar *control_stderr =
+      run_status_against_gsettings_url (NULL, 0, FALSE, &control_status);
+  g_autofree gchar *suppressed_stderr =
+      run_status_against_gsettings_url (NULL, 0, TRUE, &suppressed_status);
 
-  g_assert_false (wait_status_is_success (wait_status));
-  assert_child_stderr_has (stderr_buf, "wyctl: missing daemon URL");
-  g_assert_null (g_strstr_len (stderr_buf, -1, "daemon unavailable:"));
+  g_assert_false (wait_status_is_success (control_status));
+  assert_child_stderr_has (control_stderr,
+      "wyctl: daemon unavailable: " WYCTL_TEST_GSETTINGS_URL);
+
+  g_assert_false (wait_status_is_success (suppressed_status));
+  assert_child_stderr_has (suppressed_stderr, "wyctl: missing daemon URL");
+  g_assert_null (g_strstr_len (suppressed_stderr, -1, "daemon unavailable:"));
 }
 
 static void
