@@ -749,6 +749,51 @@ daemon_url_is_valid (const gchar *daemon_url)
   return g_strcmp0 (scheme, "http") == 0 || g_strcmp0 (scheme, "https") == 0;
 }
 
+/* Do not construct GIO's GNOME resolver until its schemas are reachable:
+ * its instance initializer aborts before is_supported() can reject it. */
+static gboolean
+wyctl_check_proxy_environment (void)
+{
+  if (g_strcmp0 (g_getenv ("GIO_USE_PROXY_RESOLVER"), "dummy") == 0)
+    return TRUE;
+
+  static const gchar *schemas[] = {
+    "org.gnome.system.proxy", "org.gnome.system.proxy.http",
+    "org.gnome.system.proxy.https", "org.gnome.system.proxy.ftp",
+    "org.gnome.system.proxy.socks",
+  };
+  GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+  const gchar *missing = NULL;
+  for (gsize i = 0; i < G_N_ELEMENTS (schemas); i++) {
+    g_autoptr (GSettingsSchema) schema = source != NULL ?
+        g_settings_schema_source_lookup (source, schemas[i], TRUE) : NULL;
+    if (schema == NULL) {
+      missing = schemas[i];
+      break;
+    }
+  }
+  if (missing == NULL)
+    return TRUE;
+
+  /* TLS backend discovery initializes GIO's module registry without
+   * instantiating any proxy resolver. Hosts without the GNOME extension
+   * do not need GNOME schemas. Extension lookup loads types, not instances. */
+  g_tls_backend_get_default ();
+  GIOExtensionPoint *point = g_io_extension_point_lookup
+        (G_PROXY_RESOLVER_EXTENSION_POINT_NAME);
+  if (point == NULL ||
+      g_io_extension_point_get_extension_by_name (point, "gnome") == NULL)
+    return TRUE;
+
+  /* An unavailable or unsupported requested resolver can fall back to
+   * GNOME. Only the built-in dummy resolver safely bypasses this check. */
+  g_printerr ("wyctl: proxy settings unavailable: missing schema '%s'; "
+      "restore GNOME proxy schemas through XDG_DATA_DIRS or "
+      "GSETTINGS_SCHEMA_DIR, or set GIO_USE_PROXY_RESOLVER=dummy "
+      "if direct access without a proxy is intended\n", missing);
+  return FALSE;
+}
+
 static int
 send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
     gchar **out_body)
@@ -759,6 +804,8 @@ send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
   *out_status = 0;
   g_clear_pointer (out_body, g_free);
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (GCancellable) cancellable = g_cancellable_new ();
   WyctlTimeout timeout = {
@@ -1167,6 +1214,8 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
     .credential_id = credential_id,
     .credential_secret = &exchange_secret,
   };
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK) {
     wyctl_sensitive_text_clear (&credential_secret);
@@ -1233,6 +1282,8 @@ run_policy_decide_request (const WyctlOptions *global_opts,
     return 2;
   }
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
@@ -1455,6 +1506,8 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   if (token_rc != 0)
     return token_rc;
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
@@ -1593,6 +1646,8 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
   if (token_rc != 0)
     return token_rc;
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
@@ -1710,6 +1765,8 @@ create_fact_client (const gchar *daemon_url, const gchar *timeout_ms_arg,
   if (token_rc != 0)
     return token_rc;
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token, tenant)
@@ -2815,6 +2872,8 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   if (token_rc != 0)
     return token_rc;
 
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
@@ -3164,6 +3223,8 @@ wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
       "Authorization", authorization);
   g_autoptr (GBytes) request = g_bytes_new (json, strlen (json));
   soup_message_set_request_body_from_bytes (msg, "application/json", request);
+  if (!wyctl_check_proxy_environment ())
+    return 1;
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) response = soup_session_send_and_read (session, msg, NULL,
