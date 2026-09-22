@@ -2590,6 +2590,28 @@ defaults decide which tenant the operator at this workstation routes
 their CLI calls to. Keeping the two explicit makes audit-trail review
 honest about which surface acted.
 
+### HTTP Proxy Schemas
+
+When the GNOME GIO proxy resolver is installed, HTTP commands check that
+`org.gnome.system.proxy` and its HTTP, HTTPS, FTP, and SOCKS child schemas
+are reachable before creating a client. Missing schemas produce a `wyctl:`
+diagnostic and a normal nonzero exit instead of a GLib abort. Restore the
+system schema directory in `XDG_DATA_DIRS` (usually `/usr/share`) or point
+`GSETTINGS_SCHEMA_DIR` at a directory containing the compiled GNOME schemas.
+A nonempty `XDG_DATA_DIRS` replaces the system search path.
+
+If direct access is intended, explicitly set `GIO_USE_PROXY_RESOLVER=dummy`;
+this disables proxy use. wyctl never selects this setting automatically.
+With missing schemas and the GNOME backend installed, other explicit
+resolver selections are conservatively rejected too: unavailable or
+unsupported selections can fall back to GNOME. Systems without that backend
+have no GNOME schema requirement. Normal proxy selection is unchanged when
+all required schemas are visible.
+
+`WYCTL_DISABLE_GSETTINGS=1` disables wyctl's configuration defaults only;
+it does not disable GIO proxy settings. Help, version, offline operations,
+and validation failures reached before HTTP client construction remain usable.
+
 ### Schema Overview
 
 - Schema id: `org.wyrelog.wyctl`

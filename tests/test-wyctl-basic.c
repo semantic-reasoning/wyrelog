@@ -232,6 +232,128 @@ test_status_connection_failure (void)
   g_assert_null (g_strstr_len (stderr_buf, -1, "tracker"));
 }
 
+/* Run each case in a fresh process: GIO caches schemas and resolvers. */
+static void
+test_proxy_schema_environment (gconstpointer data)
+{
+  const gchar *mode = data;
+  gboolean dummy = g_str_equal (mode, "dummy");
+  gboolean normal = g_str_equal (mode, "normal");
+  gboolean local = g_str_equal (mode, "version") ||
+      g_str_equal (mode, "invalid-token");
+  g_tls_backend_get_default ();
+  GIOExtensionPoint *point = g_io_extension_point_lookup
+        (G_PROXY_RESOLVER_EXTENSION_POINT_NAME);
+  if (!dummy && !local && (point == NULL ||
+      g_io_extension_point_get_extension_by_name (point, "gnome") == NULL)) {
+    g_test_skip ("GNOME proxy resolver is not installed");
+    return;
+  }
+
+  if (normal) {
+    static const gchar *schemas[] = {
+      "org.gnome.system.proxy", "org.gnome.system.proxy.http",
+      "org.gnome.system.proxy.https", "org.gnome.system.proxy.ftp",
+      "org.gnome.system.proxy.socks",
+    };
+    GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+    for (gsize i = 0; i < G_N_ELEMENTS (schemas); i++) {
+      g_autoptr (GSettingsSchema) schema = source != NULL ?
+          g_settings_schema_source_lookup (source, schemas[i], TRUE) : NULL;
+      if (schema == NULL) {
+        g_test_skip ("Complete GNOME proxy schemas are not installed");
+        return;
+      }
+    }
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-proxy-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *token = g_build_filename (dir, "token", NULL);
+  g_assert_true (g_file_set_contents (token, "test-token\n", -1, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token, 0600), ==, 0);
+  g_auto (GStrv) envp = g_get_environ ();
+  if (!normal) {
+    envp = g_environ_setenv (envp, "XDG_DATA_DIRS", dir, TRUE);
+    envp = g_environ_setenv (envp, "XDG_DATA_HOME", dir, TRUE);
+    envp = g_environ_setenv (envp, "GSETTINGS_SCHEMA_DIR", dir, TRUE);
+  }
+  envp = g_environ_setenv (envp, "XDG_CURRENT_DESKTOP", "GNOME", TRUE);
+  envp = g_environ_setenv (envp, "GSETTINGS_BACKEND", "memory", TRUE);
+  envp = g_environ_setenv (envp, "WYCTL_DISABLE_GSETTINGS", "1", TRUE);
+  envp = g_environ_setenv (envp, "GIO_USE_PROXY_RESOLVER",
+          dummy ? "dummy" : "gnome", TRUE);
+  if (g_str_equal (mode, "automatic"))
+    envp = g_environ_unsetenv (envp, "GIO_USE_PROXY_RESOLVER");
+
+  if (g_str_equal (mode, "partial")) {
+    g_autofree gchar *xml = g_build_filename (dir, "proxy.gschema.xml", NULL);
+    g_assert_true (g_file_set_contents (xml,
+        "<schemalist><schema id='org.gnome.system.proxy' "
+        "path='/system/proxy/'/></schemalist>", -1, &error));
+    g_assert_no_error (error);
+    gchar *compile[] = { "glib-compile-schemas", dir, NULL };
+    gint status = 0;
+    g_assert_true (g_spawn_sync (NULL, compile, NULL, G_SPAWN_SEARCH_PATH,
+        NULL, NULL, NULL, NULL, &status, &error));
+    g_assert_no_error (error);
+    g_assert_true (g_spawn_check_wait_status (status, &error));
+    g_assert_no_error (error);
+  }
+
+  gchar *status_argv[] = { WYL_TEST_WYCTL_PATH, "status", "--daemon-url",
+                           "http://127.0.0.1:1", "--timeout-ms", "100", NULL };
+  gchar *policy_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                           "http://127.0.0.1:1", "policy", "check", "--user", "alice",
+                           "--permission", "read", "--resource", "doc/1", "--access-token-file",
+                           token, NULL };
+  gchar *mfa_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                        "http://127.0.0.1:1", "mfa", "enroll", "--subject", "alice",
+                        "--access-token-file", token, NULL };
+  gchar *version_argv[] = { WYL_TEST_WYCTL_PATH, "--version", NULL };
+  gchar **argv = status_argv;
+  if (g_str_equal (mode, "policy") || g_str_equal (mode, "invalid-token"))
+    argv = policy_argv;
+  else if (g_str_equal (mode, "mfa"))
+    argv = mfa_argv;
+  else if (g_str_equal (mode, "version"))
+    argv = version_argv;
+  if (g_str_equal (mode, "invalid-token"))
+    g_assert_cmpint (g_unlink (token), ==, 0);
+
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  remove_dir_recursive (dir);
+  g_test_message ("child stderr: %s", stderr_buf);
+  g_assert_true (WIFEXITED (wait_status));
+  if (g_str_equal (mode, "version")) {
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+    g_assert_cmpstr (stderr_buf, ==, "");
+  } else if (g_str_equal (mode, "invalid-token")) {
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+    g_assert_nonnull (strstr (stderr_buf, "access token file"));
+    g_assert_null (strstr (stderr_buf, "proxy settings unavailable"));
+  } else {
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+    g_assert_cmpstr (stdout_buf, ==, "");
+    if (dummy || normal) {
+      g_assert_nonnull (strstr (stderr_buf, "wyctl: daemon unavailable:"));
+      g_assert_null (strstr (stderr_buf, "proxy settings unavailable"));
+    } else {
+      g_assert_nonnull (strstr (stderr_buf, "wyctl: proxy settings unavailable"));
+      g_assert_nonnull (strstr (stderr_buf, g_str_equal (mode, "partial") ?
+          "org.gnome.system.proxy.http" : "org.gnome.system.proxy"));
+      g_assert_nonnull (strstr (stderr_buf, "XDG_DATA_DIRS"));
+      g_assert_nonnull (strstr (stderr_buf, "GIO_USE_PROXY_RESOLVER=dummy"));
+    }
+  }
+  g_assert_null (strstr (stderr_buf, "GLib-GIO-ERROR"));
+}
+
 static void
 assert_status_invalid_timeout (const gchar *timeout_ms)
 {
@@ -2995,6 +3117,16 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+
+  static const gchar *proxy_cases[] = {
+    "status", "policy", "mfa", "automatic", "dummy", "version",
+    "invalid-token", "partial", "normal",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (proxy_cases); i++) {
+    g_autofree gchar *path = g_strdup_printf ("/wyctl/proxy-schema/%s",
+            proxy_cases[i]);
+    g_test_add_data_func (path, proxy_cases[i], test_proxy_schema_environment);
+  }
 
   g_test_add_func ("/wyctl/version", test_version);
   g_test_add_func ("/wyctl/status-connection-failure",
