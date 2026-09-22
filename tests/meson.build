@@ -916,6 +916,10 @@ if build_client and host_machine.system() != 'windows'
     'test-wyctl-config.c',
     '../wyrelog/wyctl/wyctl-config.c',
     include_directories : include_directories('../wyrelog/wyctl'),
+    c_args : [
+      '-DWYL_TEST_GLIB_COMPILE_SCHEMAS="' +
+        glib_compile_schemas_prog.full_path() + '"',
+    ],
     dependencies : [glib_dep, gio_dep],
   )
 

@@ -319,6 +319,7 @@ wyrelog/policy/store-private.h
 wyrelog/policy/store.c
 wyrelog/session.h
 wyrelog/version.h
+wyrelog/wyctl/wyctl-config.c
 wyrelog/wyctl/wyctl-config.h
 wyrelog/wyctl/wyctl-publication-posix-private.c
 wyrelog/wyctl/wyctl-token-file.h
