@@ -418,6 +418,82 @@ test_open_settings_degrades_on_a_partial_schema (void)
   g_test_trap_assert_passed ();
 }
 
+static void
+test_diagnostic_once_after_opt_in (void)
+{
+  if (g_test_subprocess ()) {
+    g_autoptr (GSettings) settings = fresh_settings ();
+    wyctl_enable_settings_diagnostics ();
+    g_autofree gchar *cli = wyctl_resolve_string_option ("", settings,
+            "absent-key");
+    g_assert_cmpstr (cli, ==, "");
+    g_autofree gchar *empty = wyctl_resolve_string_option (NULL, settings,
+            "daemon-url");
+    g_assert_null (empty);
+    g_autofree gchar *no_key = wyctl_resolve_string_option (NULL, NULL, NULL);
+    g_assert_null (no_key);
+    g_autofree gchar *missing = wyctl_resolve_string_option (NULL, settings,
+            "absent-key");
+    g_assert_null (missing);
+    /* Enabling twice must not reset the once-per-process budget. */
+    wyctl_enable_settings_diagnostics ();
+    g_autofree gchar *wrong = wyctl_resolve_uint_option_as_string (NULL,
+            settings, "default-tenant");
+    g_assert_null (wrong);
+    g_autofree gchar *absent = wyctl_resolve_string_option (NULL, NULL,
+            "daemon-url");
+    g_assert_null (absent);
+    return;
+  }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_passed ();
+  g_test_trap_assert_stderr ("*GSettings fallback unavailable: missing key "
+      "'absent-key'*glib-compile-schemas*");
+  g_test_trap_assert_stderr_unmatched ("*GSettings fallback unavailable:*"
+      "GSettings fallback unavailable:*");
+}
+
+static void
+test_diagnostic_wrong_type (gconstpointer data)
+{
+  gboolean uint = GPOINTER_TO_INT (data);
+  if (g_test_subprocess ()) {
+    g_autoptr (GSettings) settings = fresh_settings ();
+    wyctl_enable_settings_diagnostics ();
+    g_autofree gchar *value = uint ?
+        wyctl_resolve_uint_option_as_string (NULL, settings, "daemon-url") :
+        wyctl_resolve_string_option (NULL, settings, "default-timeout-ms");
+    g_assert_null (value);
+    return;
+  }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_passed ();
+  if (uint)
+    g_test_trap_assert_stderr ("*key 'daemon-url' has type 's', expected "
+        "type 'u'*org.wyrelog.wyctl*");
+  else
+    g_test_trap_assert_stderr ("*key 'default-timeout-ms' has type 'u', "
+        "expected type 's'*org.wyrelog.wyctl*");
+}
+
+static void
+test_diagnostic_silent_without_opt_in (void)
+{
+  if (g_test_subprocess ()) {
+    g_autoptr (GSettings) settings = fresh_settings ();
+    g_autofree gchar *missing = wyctl_resolve_string_option (NULL, settings,
+            "absent-key");
+    g_assert_null (missing);
+    g_autofree gchar *wrong = wyctl_resolve_string_option (NULL, settings,
+            "default-timeout-ms");
+    g_assert_null (wrong);
+    return;
+  }
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_passed ();
+  g_test_trap_assert_stderr ("");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -426,6 +502,14 @@ main (int argc, char **argv)
   g_unsetenv (WYCTL_GSETTINGS_DISABLE_ENV);
 
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/wyctl/config/diagnostic/once",
+      test_diagnostic_once_after_opt_in);
+  g_test_add_func ("/wyctl/config/diagnostic/opt-in",
+      test_diagnostic_silent_without_opt_in);
+  g_test_add_data_func ("/wyctl/config/diagnostic/wrong-string",
+      GINT_TO_POINTER (FALSE), test_diagnostic_wrong_type);
+  g_test_add_data_func ("/wyctl/config/diagnostic/wrong-uint",
+      GINT_TO_POINTER (TRUE), test_diagnostic_wrong_type);
   g_test_add_func ("/wyctl/config/resolve-string/nulls",
       test_resolve_string_nulls_propagate);
   g_test_add_func ("/wyctl/config/resolve-string/cli-wins",

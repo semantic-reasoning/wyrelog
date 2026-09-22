@@ -1081,8 +1081,11 @@ if build_client and host_machine.system() != 'windows'
     dependencies : test_wyctl_policy_daemon_deps,
   )
 
+  # Commands may resolve optional defaults; supply the schema so successful
+  # requests exercise a complete installation with no settings diagnostic.
   test('wyctl-policy-daemon', test_wyctl_policy_daemon,
-    depends : wyctl_exe,
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
   )
 
   # End-to-end: drives `wyctl service-credential issue` against an in-process

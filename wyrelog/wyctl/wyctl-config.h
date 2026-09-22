@@ -9,6 +9,13 @@ G_BEGIN_DECLS;
 #define WYCTL_GSETTINGS_SCHEMA_ID "org.wyrelog.wyctl"
 #define WYCTL_GSETTINGS_DISABLE_ENV "WYCTL_DISABLE_GSETTINGS"
 
+/* Opt in to one plain stderr diagnostic per process when a resolver
+ * needs an unusable schema/key fallback. Opening settings, explicit CLI
+ * values, valid empty defaults, and WYCTL_DISABLE_GSETTINGS=1 stay quiet.
+ * For the CLI's single-threaded option resolution; does not change values
+ * or exit status. NULL settings denotes an unavailable/disabled fallback. */
+void wyctl_enable_settings_diagnostics (void);
+
 /* Open the wyctl GSettings tree, or return NULL if the schema is
  * not installed or the operator has set WYCTL_DISABLE_GSETTINGS=1.
  * Never aborts: a missing schema is reported as NULL, not g_error.
@@ -23,7 +30,8 @@ GSettings *wyctl_open_settings (void);
  * absence. cli_value == NULL && settings != NULL reads the key from
  * GSettings; an empty string from the schema is the "unset" sentinel
  * and surfaces as NULL so the caller's missing-option diagnostic
- * remains the single source of truth. The returned string is always
+ * still determines command failure. An enabled schema diagnostic may
+ * precede it when the fallback is unusable. The returned string is always
  * owned by the caller (or NULL). Free with g_free (). */
 gchar *wyctl_resolve_string_option (const gchar * cli_value,
     GSettings * settings, const gchar * key);
