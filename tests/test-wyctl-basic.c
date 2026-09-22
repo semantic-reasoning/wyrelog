@@ -2904,7 +2904,13 @@ test_policy_check_gsettings_daemon_url_is_the_transport_target (void)
   g_unlink (token_path);
   g_autofree gchar *request = server.request;
 
+  /* Name the child's own diagnostic before asserting on the recording.
+   * No sibling ever sees a reply; this one completes a round trip and
+   * parses the answer, so a red here can have a cause that has nothing to
+   * do with the resolver.  A bare "request != NULL" would print none of
+   * it. */
   g_assert_false (wait_status_is_success (wait_status));
+  assert_child_stderr_has (stderr_buf, "wyctl: policy check failed");
   g_assert_nonnull (request);
   g_assert_nonnull (g_strstr_len (request, -1, "POST /decide?"));
 }
