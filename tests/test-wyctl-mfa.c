@@ -694,9 +694,41 @@ test_mfa_enroll_url_encodes_subject (void)
  * resolver call site).
  * ------------------------------------------------------------------ */
 
+/* The keyfile fixtures below only mean anything if wyctl can find the
+ * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source
+ * without recursing into parent sources (wyctl_open_settings), so this
+ * mirrors that lookup exactly; a recursive one would accept environments
+ * wyctl itself rejects.
+ *
+ * With no schema reachable, wyctl never reads the fixture: the
+ * enroll-gsettings-supplies-store case fails on its own downstream
+ * assertion and its siblings pass while proving nothing, which is the
+ * confusion #1186 recorded for the same fixture in test-wyctl-basic.c.
+ * Abort here instead, naming the cause.  A skip would be counted as a pass,
+ * and under meson, which points the schema source at this build's compiled
+ * schema, this cannot fire. */
+static void
+assert_wyctl_gsettings_schema_available_mfa (void)
+{
+  GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+  g_autoptr (GSettingsSchema) schema = source != NULL
+      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", FALSE)
+      : NULL;
+  if (schema != NULL)
+    return;
+  const gchar *dir = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_printerr ("wyctl cannot reach the org.wyrelog.wyctl GSettings schema in "
+      "this environment, so the keyfile fixture below would prove nothing "
+      "(GSETTINGS_SCHEMA_DIR=%s).  Run this test through meson, which points "
+      "the schema source at the compiled schema.\n",
+      dir != NULL ? dir : "(unset)");
+  g_assert_not_reached ();
+}
+
 static gchar *
 make_keyfile_xdg_dir_mfa (const gchar *const *keys, const gchar *const *values)
 {
+  assert_wyctl_gsettings_schema_available_mfa ();
   g_autoptr (GError) error = NULL;
   gchar *xdg = g_dir_make_tmp ("wyctl-mfa-xdg-XXXXXX", &error);
   g_assert_no_error (error);
@@ -788,6 +820,37 @@ test_mfa_enroll_cli_store_wins_over_gsettings (void)
   g_autofree gchar *xdg = make_keyfile_xdg_dir_mfa (keys, values);
   g_auto (GStrv) envp = build_mfa_gsettings_envp (xdg, FALSE);
 
+  /* Control: the same fixture with no --store, proving this child can
+   * actually read this keyfile.  Without it the case asserts only that the
+   * CLI store got the row and the GSettings store did not, which is equally
+   * true of a keyfile nothing ever read -- so it passed with the GSettings
+   * fallback deleted (#1189).
+   *
+   * Each spawn gets its own accumulators.  read_until_line_prefix scans
+   * what is already buffered before reading the new child and returns on
+   * the first secret_base32= it finds there, so a reused GString would make
+   * the second child verify the first child's secret and fail. */
+  {
+    const gchar *control_argv[] = {
+      WYL_TEST_WYCTL_PATH,
+      "mfa", "enroll",
+      "--subject", "alice.gs.control",
+      NULL,
+    };
+    g_autoptr (GString) control_out = g_string_new (NULL);
+    g_autoptr (GString) control_err = g_string_new (NULL);
+    gint control_rc = run_wyctl_mfa_argv_env (control_argv, envp,
+            WYCTL_TEST_FEED_VALID, NULL, control_out, control_err);
+    if (control_rc != 0)
+      g_printerr ("cli-wins control stderr: %s\n", control_err->str);
+    g_assert_cmpint (control_rc, ==, 0);
+
+    WylTotpEnrollment control_enr = { 0 };
+    g_assert_true (lookup_enrollment (gs_store, "alice.gs.control",
+        &control_enr));
+    wyl_totp_enrollment_clear (&control_enr);
+  }
+
   const gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "mfa", "enroll",
@@ -804,6 +867,8 @@ test_mfa_enroll_cli_store_wins_over_gsettings (void)
     g_printerr ("cli-wins stderr: %s\n", err->str);
   g_assert_cmpint (rc, ==, 0);
 
+  /* The two spawns used distinct subjects, and lookup_enrollment is
+   * subject-scoped, so the control's row does not disturb either check. */
   WylTotpEnrollment cli_enr = { 0 };
   g_assert_true (lookup_enrollment (cli_store, "alice.cli", &cli_enr));
   wyl_totp_enrollment_clear (&cli_enr);
@@ -811,6 +876,11 @@ test_mfa_enroll_cli_store_wins_over_gsettings (void)
   WylTotpEnrollment gs_enr = { 0 };
   g_assert_false (lookup_enrollment (gs_store, "alice.cli", &gs_enr));
   wyl_totp_enrollment_clear (&gs_enr);
+
+  WylTotpEnrollment stray_enr = { 0 };
+  g_assert_false (lookup_enrollment (cli_store, "alice.gs.control",
+      &stray_enr));
+  wyl_totp_enrollment_clear (&stray_enr);
 
   g_unlink (cli_store);
   g_unlink (gs_store);
@@ -901,6 +971,33 @@ test_mfa_enroll_kill_switch_disables_fallback (void)
   const gchar *values[] = { literal, NULL };
   g_autofree gchar *xdg = make_keyfile_xdg_dir_mfa (keys, values);
   g_auto (GStrv) envp = build_mfa_gsettings_envp (xdg, TRUE);
+
+  /* Control: the same fixture with the kill switch off.  Breaking the kill
+   * switch has always reddened this case, but a pass could not tell a
+   * suppressed fixture from one the child could never have read, since both
+   * end in "missing --store" (#1189).  This settles it.  Fresh accumulators
+   * per spawn, for the reason recorded in the cli-store-wins case above. */
+  {
+    g_auto (GStrv) control_envp = build_mfa_gsettings_envp (xdg, FALSE);
+    const gchar *control_argv[] = {
+      WYL_TEST_WYCTL_PATH,
+      "mfa", "enroll",
+      "--subject", "alice.kill.control",
+      NULL,
+    };
+    g_autoptr (GString) control_out = g_string_new (NULL);
+    g_autoptr (GString) control_err = g_string_new (NULL);
+    gint control_rc = run_wyctl_mfa_argv_env (control_argv, control_envp,
+            WYCTL_TEST_FEED_VALID, NULL, control_out, control_err);
+    if (control_rc != 0)
+      g_printerr ("kill-switch control stderr: %s\n", control_err->str);
+    g_assert_cmpint (control_rc, ==, 0);
+
+    WylTotpEnrollment control_enr = { 0 };
+    g_assert_true (lookup_enrollment (gs_store, "alice.kill.control",
+        &control_enr));
+    wyl_totp_enrollment_clear (&control_enr);
+  }
 
   const gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
