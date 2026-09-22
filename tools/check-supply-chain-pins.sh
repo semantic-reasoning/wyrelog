@@ -64,7 +64,7 @@ for wrap in "$ROOT"/subprojects/*.wrap; do
   check_wrap_file "$wrap"
 done
 
-for name in wirelog libchronoid nanoarrow "xxHash-0.8.3"; do
+for name in wirelog libchronoid nanoarrow "xxHash-0.8.4"; do
   if [ -d "$ROOT/subprojects/$name" ]; then
     if ! find "$ROOT/subprojects/$name" -maxdepth 2 \
         \( -iname 'LICENSE*' -o -iname 'NOTICE*' \) | grep -q .; then
