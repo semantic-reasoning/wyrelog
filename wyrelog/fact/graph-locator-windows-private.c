@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-locator-private.h"
+#include "fact/graph-artifact-transition-names-private.h"
 #include "fact/graph-provisioned-pair-internal.h"
 #include "fact/graph-windows-security-private.h"
 #include "fact/root-writer-lease-private.h"
@@ -1816,6 +1817,61 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
 }
 
 wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_create_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    WylFactGraphStage *out_stage)
+{
+  if (out_stage != NULL)
+    *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  if (out_stage == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_id_t operation_id;
+  wyrelog_error_t rc = operation_uuid_parse_canonical (operation_uuid,
+          &operation_id);
+  WylFactArtifactTransitionNames names = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_names_validate (directory, names.stage);
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular (directory->graph_handle, names.stage,
+            GENERIC_READ | GENERIC_WRITE, TRUE, TRUE, &handle,
+            &identity);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_populate (directory, handle, names.stage, &identity,
+            &operation_id, out_stage);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-created",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = flush_directory (directory->graph_handle);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-parent-synced",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK) {
+    gint fd = _open_osfhandle ((intptr_t) handle, _O_BINARY | _O_RDWR);
+    if (fd < 0)
+      rc = WYRELOG_E_IO;
+    else {
+      handle = INVALID_HANDLE_VALUE;
+      out_stage->fd = fd;
+      out_stage->exact_provisioning_stage = FALSE;
+      out_stage->offline_restore_stage = TRUE;
+    }
+  }
+  if (handle_is_valid (handle))
+    CloseHandle (handle);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_stage_clear (out_stage);
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
     const gchar *operation_uuid, WylFactGraphStage *out_stage)
 {
@@ -2061,6 +2117,66 @@ named_file_state (WylFactGraphDirectory *directory, const gchar *basename,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_revalidate
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
+{
+  if (!stage_is_bound (directory, stage))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (directory);
+  gboolean present = FALSE;
+  gboolean exact = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = named_file_state (directory, stage->stage_basename,
+            &stage->identity, &present, &exact);
+  if (rc == WYRELOG_E_OK && (!present || !exact))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_get_size
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage,
+    guint64 *out_size)
+{
+  if (out_size != NULL)
+    *out_size = 0;
+  if (out_size == NULL || !stage_is_bound (directory, stage))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  HANDLE handle = borrow_stage_handle (stage);
+  FILE_STANDARD_INFO standard = { 0 };
+  if (rc == WYRELOG_E_OK && !GetFileInformationByHandleEx (handle,
+      FileStandardInfo, &standard, sizeof standard))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (standard.Directory || standard.DeletePending
+      || standard.EndOfFile.QuadPart < 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  if (rc == WYRELOG_E_OK)
+    *out_size = (guint64) standard.EndOfFile.QuadPart;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_sync
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
+{
+  wyrelog_error_t rc = wyl_fact_graph_directory_restore_stage_revalidate
+        (directory, stage);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_stage_sync (stage);
+  if (rc == WYRELOG_E_OK)
+    rc = flush_directory (directory->graph_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  return rc;
+}
+
 static wyrelog_error_t
 rename_stage_relative (WylFactGraphDirectory *directory,
     WylFactGraphStage *stage)
@@ -2098,6 +2214,7 @@ stage_forget (WylFactGraphStage *stage)
   memset (&stage->graph_identity, 0, sizeof stage->graph_identity);
   memset (&stage->operation_evidence, 0, sizeof stage->operation_evidence);
   stage->exact_provisioning_stage = FALSE;
+  stage->offline_restore_stage = FALSE;
 }
 
 static void
@@ -2195,7 +2312,8 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
 {
   /* UUID-derived stages must not be published through the random-stage API:
    * it carries no durable provenance evidence. */
-  if (stage != NULL && stage->exact_provisioning_stage)
+  if (stage != NULL && (stage->exact_provisioning_stage
+      || stage->offline_restore_stage))
     return WYRELOG_E_POLICY;
   return stage_publish_bound (directory, stage);
 }
@@ -2213,6 +2331,8 @@ wyl_fact_graph_stage_abort (WylFactGraphDirectory *directory,
 {
   if (!stage_is_bound (directory, stage))
     return WYRELOG_E_INVALID;
+  if (stage->offline_restore_stage)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = directory_revalidate (directory);
   gboolean stage_present = FALSE;
   gboolean stage_exact = FALSE;

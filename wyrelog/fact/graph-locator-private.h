@@ -119,6 +119,9 @@ typedef struct
    * record.  Their publication path never trusts a source pathname after the
    * handle has been acquired. */
   gboolean exact_provisioning_stage;
+  /* Restore stages are preflight-only and cannot use generic publication or
+   * abort transitions. */
+  gboolean offline_restore_stage;
 #ifdef G_OS_WIN32
   WylFactGraphWinIdentity identity;
   WylFactGraphWinIdentity graph_identity;
@@ -210,6 +213,20 @@ wyrelog_error_t wyl_fact_graph_directory_stage_create
 wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
+/* Create a private, operation-named offline-restore stage. The basename is
+ * derived internally as restore-<canonical UUIDv7>.duckdb. This is separate
+ * from the provisioning-stage namespace and does not authorize publication.
+ * An existing entry is a collision and is never replaced. */
+wyrelog_error_t wyl_fact_graph_directory_restore_stage_create_exact
+  (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphStage * out_stage);
+wyrelog_error_t wyl_fact_graph_directory_restore_stage_revalidate
+  (WylFactGraphDirectory * directory, WylFactGraphStage * stage);
+wyrelog_error_t wyl_fact_graph_directory_restore_stage_get_size
+  (WylFactGraphDirectory * directory, WylFactGraphStage * stage,
+    guint64 * out_size);
+wyrelog_error_t wyl_fact_graph_directory_restore_stage_sync
+  (WylFactGraphDirectory * directory, WylFactGraphStage * stage);
 /* Reopen only the exact persisted provisioning-stage name.  This never
  * creates a file; absence is NOT_FOUND.  A returned handle proves current
  * resolver-relative binding, not pre-crash provenance. */

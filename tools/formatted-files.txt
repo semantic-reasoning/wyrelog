@@ -63,6 +63,7 @@ tests/test-fact-offline-backup-manifest.c
 tests/test-fact-offline-backup-source.c
 tests/test-fact-offline-restore-journal-store.c
 tests/test-fact-offline-restore-journal.c
+tests/test-fact-offline-restore-stage.c
 tests/test-fact-offline-restore-validation.c
 tests/test-fact-open-concurrent-process.c
 tests/test-fact-provisioning-construct.c
@@ -270,6 +271,8 @@ wyrelog/fact/offline-restore-journal-private.c
 wyrelog/fact/offline-restore-journal-private.h
 wyrelog/fact/offline-restore-journal-store-private.c
 wyrelog/fact/offline-restore-journal-store-private.h
+wyrelog/fact/offline-restore-stage-private.c
+wyrelog/fact/offline-restore-stage-private.h
 wyrelog/fact/offline-restore-validation-private.c
 wyrelog/fact/offline-restore-validation-private.h
 wyrelog/fact/open-reservation-private.c
