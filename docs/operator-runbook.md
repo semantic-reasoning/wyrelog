@@ -2601,6 +2601,34 @@ honest about which surface acted.
   ${datadir}/glib-2.0/schemas` afterwards or wyctl will silently fall
   back to CLI-only mode.
 
+### When wyctl ignores a value `gsettings get` returns
+
+Two common reasons are below, and they have different answers.
+Establish which one you have before changing anything. A third, rarer
+one is a schema that declares a key with a type wyctl does not expect;
+wyctl treats that key as unset and says nothing, which issue #1197
+tracks.
+
+**The schema wyctl could reach.** wyctl once consulted only the first
+schema source in GLib's chain rather than walking it, so a correctly
+installed schema was invisible to wyctl while `gsettings` found it. Any
+other directory carrying compiled schemas ahead of wyrelog's was enough,
+and with `GSETTINGS_SCHEMA_DIR` unset that includes
+`$XDG_DATA_HOME/glib-2.0/schemas`, which outranks every `XDG_DATA_DIRS`
+entry. Fixed in the release carrying issue #1190; wyctl now walks the
+chain. If you are on an older build, upgrading resolves it.
+
+**Whose settings wyctl reads under `sudo`.** This is not fixed and
+upgrading does not help. `sudo` resets the environment, `HOME` becomes
+`/root`, and GSettings keeps per-user values under the user's own
+directories, so a value you set as yourself is not the value `sudo wyctl`
+reads. Both commands in the mfa workflow above are affected. Issue #1196
+tracks what the supported path should be.
+
+The two agree about which schema. They still disagree about whose
+settings, so `gsettings get` returning your value as yourself says
+nothing about what a privileged wyctl will see.
+
 ### Key Reference
 
 | Key | Type | Default | Purpose |
