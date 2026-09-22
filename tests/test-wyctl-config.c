@@ -2,6 +2,7 @@
 #include "test-exit-status.h"
 #include <gio/gio.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "wyctl-config.h"
 
@@ -237,6 +238,119 @@ test_open_settings_returns_null_for_missing_schema_id (void)
   g_assert_null (schema);
 }
 
+
+/* A stale org.wyrelog.wyctl: the id wyctl looks for, carrying only
+ * daemon-url.  This is what a partial or half-upgraded install leaves
+ * behind, and it is the shape that used to abort the resolver. */
+static const gchar STALE_WYCTL_GSCHEMA[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<schemalist>\n"
+    "  <schema id=\"org.wyrelog.wyctl\" path=\"/org/wyrelog/wyctl/\">\n"
+    "    <key name=\"daemon-url\" type=\"s\">\n"
+    "      <default>'http://old.example/'</default>\n"
+    "    </key>\n"
+    "  </schema>\n"
+    "</schemalist>\n";
+
+/* Compile `gschema_xml' into a fresh temporary directory and return that
+ * directory, which the caller passes to remove_schema_dir ().
+ *
+ * The compile is not a formality.  GLib skips a data directory that
+ * carries no gschemas.compiled, so an uncompiled directory would not
+ * become the head of the source chain at all and every test built on one
+ * would pass while proving nothing.  Both the spawn's exit status and the
+ * compiled file's existence are therefore asserted here. */
+static gchar *
+make_schema_dir (const gchar *tmpl, const gchar *gschema_xml)
+{
+  g_autoptr (GError) error = NULL;
+  gchar *dir = g_dir_make_tmp (tmpl, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (dir);
+
+  g_autofree gchar *xml_path = g_build_filename (dir, "test.gschema.xml",
+          NULL);
+  g_assert_true (g_file_set_contents (xml_path, gschema_xml, -1, &error));
+  g_assert_no_error (error);
+
+  gchar *argv[] = {
+    (gchar *) WYL_TEST_GLIB_COMPILE_SCHEMAS,
+    "--strict",
+    dir,
+    NULL,
+  };
+  gint wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
+      NULL, NULL, &wait_status, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_spawn_check_wait_status (wait_status, &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *compiled = g_build_filename (dir, "gschemas.compiled",
+          NULL);
+  g_assert_true (g_file_test (compiled, G_FILE_TEST_EXISTS));
+  return dir;
+}
+
+/* Remove what make_schema_dir () created.  A test that leaks one directory
+ * per run is a slow way to fill TMPDIR, which reddens this whole suite. */
+static void
+remove_schema_dir (const gchar *dir)
+{
+  static const gchar *names[] = { "test.gschema.xml", "gschemas.compiled" };
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+    g_autofree gchar *path = g_build_filename (dir, names[i], NULL);
+    g_unlink (path);
+  }
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_open_settings_degrades_on_a_partial_schema (void)
+{
+  /* wyctl-config.h promises this resolver never aborts.  That held for a
+   * schema that is missing entirely and not for one that is merely
+   * incomplete: GLib makes reading an absent key a fatal g_error, so a
+   * stale org.wyrelog.wyctl reachable ahead of the real one turned a
+   * missing-option diagnostic into a core dump (#1190).
+   *
+   * The child runs against a chain whose head is exactly that stale
+   * schema.  A subprocess is needed because the default schema source is
+   * cached on first use and this binary's other cases have already used
+   * it. */
+  if (g_test_subprocess ()) {
+    g_autoptr (GSettings) settings = wyctl_open_settings ();
+    g_assert_nonnull (settings);
+
+    g_autofree gchar *url =
+        wyctl_resolve_string_option (NULL, settings, "daemon-url");
+    g_assert_cmpstr (url, ==, "http://old.example/");
+
+    g_autofree gchar *store =
+        wyctl_resolve_string_option (NULL, settings, "default-policy-store");
+    g_assert_null (store);
+
+    g_autofree gchar *timeout =
+        wyctl_resolve_uint_option_as_string (NULL, settings,
+            "default-timeout-ms");
+    g_assert_null (timeout);
+    return;
+  }
+
+  const gchar *real = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_assert_nonnull (real);
+  g_autofree gchar *saved = g_strdup (real);
+  g_autofree gchar *stale = make_schema_dir ("wyctl-stale-schema-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_autofree gchar *chain = g_strjoin (":", stale, saved, NULL);
+
+  g_setenv ("GSETTINGS_SCHEMA_DIR", chain, TRUE);
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_setenv ("GSETTINGS_SCHEMA_DIR", saved, TRUE);
+  remove_schema_dir (stale);
+  g_test_trap_assert_passed ();
+}
+
 int
 main (int argc, char **argv)
 {
@@ -285,5 +399,7 @@ main (int argc, char **argv)
       test_open_settings_returns_handle_when_schema_present);
   g_test_add_func ("/wyctl/config/open/null-for-missing-schema-id",
       test_open_settings_returns_null_for_missing_schema_id);
+  g_test_add_func ("/wyctl/config/open/partial-schema-degrades",
+      test_open_settings_degrades_on_a_partial_schema);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
