@@ -2548,103 +2548,6 @@ test_status_cli_overrides_gsettings (void)
       "from-gsettings.example.invalid"));
 }
 
-/* Drive a wyctl subcommand against a GSettings keyfile that supplies
- * the daemon URL, with the CLI deliberately omitting --daemon-url.
- *
- * The contract is *not* that a specific diagnostic mentions the URL
- * — only `run_status` echoes the URL in its failure diagnostic. The
- * other subcommands print "wyctl: <op> failed" on transport failure
- * without the URL. The portable proof that the resolver supplied a
- * URL is that the subcommand made it *past* the URL-validation
- * gate: neither "missing daemon URL" nor "invalid daemon URL"
- * appears in stderr. The kill-switch companion proves the
- * GSettings fallback is the only thing that could have supplied
- * the URL. */
-static void
-assert_subcommand_consumes_gsettings_daemon_url (gchar **subcommand_argv,
-    gsize subcommand_argv_len)
-{
-  g_autofree gchar *literal =
-      gvariant_literal_for_string ("http://127.0.0.1:1");
-  const gchar *keys[] = { "daemon-url", NULL };
-  const gchar *values[] = { literal, NULL };
-  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
-  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
-
-  GPtrArray *argv = g_ptr_array_new ();
-  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
-  for (gsize i = 0; i < subcommand_argv_len; i++)
-    g_ptr_array_add (argv, subcommand_argv[i]);
-  g_ptr_array_add (argv, NULL);
-
-  g_autofree gchar *stdout_buf = NULL;
-  g_autofree gchar *stderr_buf = NULL;
-  gint wait_status = 0;
-  run_child_with_env ((gchar **) argv->pdata, envp, &stdout_buf, &stderr_buf,
-      &wait_status);
-  g_ptr_array_free (argv, TRUE);
-  remove_dir_recursive (xdg);
-
-  g_assert_false (wait_status_is_success (wait_status));
-  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
-  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: invalid daemon URL"));
-}
-
-static void
-test_policy_check_gsettings_supplies_daemon_url (void)
-{
-  gchar *subcommand[] = {
-    "policy", "check",
-    "--user", "alice",
-    "--permission", "read",
-    "--resource", "doc/1",
-    "--access-token-file", "/dev/null",
-    "--timeout-ms", "100",
-  };
-  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
-      G_N_ELEMENTS (subcommand));
-}
-
-static void
-test_audit_query_gsettings_supplies_daemon_url (void)
-{
-  gchar *subcommand[] = {
-    "audit", "query",
-    "--limit", "1",
-    "--access-token-file", "/dev/null",
-    "--guard-timestamp", "0",
-    "--guard-loc-class", "trusted",
-    "--guard-risk", "0",
-    "--timeout-ms", "100",
-  };
-  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
-      G_N_ELEMENTS (subcommand));
-}
-
-static void
-test_fact_put_gsettings_supplies_daemon_url (void)
-{
-  gchar *subcommand[] = {
-    "fact", "put",
-    "--tenant", "t",
-    "--graph", "g",
-    "--namespace", "ns",
-    "--relation", "r",
-    "--schema-version", "1",
-    "--batch-id", "b",
-    "--idempotency-key", "k",
-    "--format", "csv",
-    "--input", "/dev/null",
-    "--access-token-file", "/dev/null",
-    "--guard-timestamp", "0",
-    "--guard-loc-class", "trusted",
-    "--guard-risk", "0",
-    "--timeout-ms", "100",
-  };
-  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
-      G_N_ELEMENTS (subcommand));
-}
-
 /* Build a temporary access-token file with the supplied contents and
 * mode bits, returning the path. The caller g_unlinks and g_frees. */
 static gchar *
@@ -2667,6 +2570,156 @@ write_token_with_mode (const gchar *contents, mode_t mode)
   g_assert_true (g_close (fd, NULL));
   g_assert_cmpint (g_chmod (path, mode), ==, 0);
   return path;
+}
+
+/* One spawn for the helper below: write a keyfile fixture holding
+ * `daemon_url', run the subcommand against it with no --daemon-url on the
+ * command line, tear the fixture down, and hand back the child's stderr.
+ *
+ * The global flags lead the argv.  wyctl rejects --timeout-ms after a
+ * subcommand name, which is what used to kill these children at option
+ * parsing before any resolution (#1189).  --access-token-file is a
+ * per-subcommand option, so it is appended instead; note that it is itself
+ * a GSettings-resolved key, so a fixture that ever sets it would quietly
+ * change what these cases cover. */
+static gchar *
+run_subcommand_against_gsettings_daemon_url (gchar **subcommand_argv,
+    gsize subcommand_argv_len, const gchar *token_path,
+    const gchar *daemon_url, gint *wait_status)
+{
+  g_autofree gchar *literal = gvariant_literal_for_string (daemon_url);
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+
+  GPtrArray *argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  g_ptr_array_add (argv, "--timeout-ms");
+  g_ptr_array_add (argv, "100");
+  for (gsize i = 0; i < subcommand_argv_len; i++)
+    g_ptr_array_add (argv, subcommand_argv[i]);
+  g_ptr_array_add (argv, "--access-token-file");
+  g_ptr_array_add (argv, (gpointer) token_path);
+  g_ptr_array_add (argv, NULL);
+
+  g_autofree gchar *stdout_buf = NULL;
+  gchar *stderr_buf = NULL;
+  run_child_with_env ((gchar **) argv->pdata, envp, &stdout_buf, &stderr_buf,
+      wait_status);
+  g_ptr_array_free (argv, TRUE);
+  remove_dir_recursive (xdg);
+  return stderr_buf;
+}
+
+/* Drive a wyctl subcommand against a GSettings keyfile that supplies the
+ * daemon URL, and prove the keyfile is what supplied it.
+ *
+ * Two spawns against two fixtures, because neither alone survives deleting
+ * the GSettings fallback (#1189):
+ *
+ *   - an invalid URL in the keyfile must produce "invalid daemon URL".
+ *     Nothing else in the child's environment can put an invalid URL in
+ *     front of validation: there is no --daemon-url on the command line,
+ *     the resolver reads the CLI value and GSettings and nothing else, and
+ *     the schema default is the empty string, which yields "missing daemon
+ *     URL" instead.  So this is the positive, fixture-only proof that the
+ *     keyfile value was read.
+ *   - a syntactically valid URL must carry the child past validation and
+ *     on to its own operation-failed diagnostic, proving the resolved value
+ *     cleared the URL-validation gate.
+ *
+ * That second spawn proves nothing beyond the gate, which is why its
+ * argument is named for the diagnostic rather than for a transport.  The
+ * URL it supplies is unreachable, but arriving there is not what is being
+ * tested, and a shared helper could not test it: `fact put' with an empty
+ * input fails locally and never opens a connection at all, and `datalog
+ * query' pointed at a listener that answers succeeds, which the shared
+ * exit-status assertion below forbids.  The claim that the resolved URL
+ * was the request's target is made once, by
+ * /wyctl/policy-check-gsettings-daemon-url-is-the-transport-target, where a
+ * listener can witness it.
+ *
+ * Both fixtures are torn down before anything is asserted, and the token
+ * file with them, so a failing run leaves nothing behind under TMPDIR. */
+static void
+assert_subcommand_consumes_gsettings_daemon_url (gchar **subcommand_argv,
+    gsize subcommand_argv_len, const gchar *post_validation_diagnostic)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  gint invalid_status = 0;
+  gint resolved_status = 0;
+
+  g_autofree gchar *invalid_stderr =
+      run_subcommand_against_gsettings_daemon_url (subcommand_argv,
+          subcommand_argv_len, token_path, "not a url", &invalid_status);
+  g_autofree gchar *resolved_stderr =
+      run_subcommand_against_gsettings_daemon_url (subcommand_argv,
+          subcommand_argv_len, token_path, "http://127.0.0.1:1",
+          &resolved_status);
+  g_unlink (token_path);
+
+  g_assert_false (wait_status_is_success (invalid_status));
+  assert_child_stderr_has (invalid_stderr, "wyctl: invalid daemon URL");
+
+  g_assert_false (wait_status_is_success (resolved_status));
+  assert_child_stderr_has (resolved_stderr, post_validation_diagnostic);
+  g_assert_null (g_strstr_len (resolved_stderr, -1,
+      "wyctl: missing daemon URL"));
+  g_assert_null (g_strstr_len (resolved_stderr, -1,
+      "wyctl: invalid daemon URL"));
+}
+
+static void
+test_policy_check_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "policy", "check",
+    "--user", "alice",
+    "--permission", "read",
+    "--resource", "doc/1",
+  };
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
+      G_N_ELEMENTS (subcommand),
+      "wyctl: policy check failed");
+}
+
+static void
+test_audit_query_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "audit", "query",
+    "--limit", "1",
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "0",
+  };
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
+      G_N_ELEMENTS (subcommand),
+      "wyctl: audit query failed");
+}
+
+static void
+test_fact_put_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "fact", "put",
+    "--tenant", "t",
+    "--graph", "g",
+    "--namespace", "ns",
+    "--relation", "r",
+    "--schema-version", "1",
+    "--batch-id", "b",
+    "--idempotency-key", "k",
+    "--format", "csv",
+    "--input", "/dev/null",
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "0",
+  };
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
+      G_N_ELEMENTS (subcommand),
+      "wyctl: fact put failed");
 }
 
 /* When the access-token file is unsafe, the safety check MUST fire
@@ -2742,14 +2795,76 @@ test_datalog_query_gsettings_supplies_daemon_url (void)
     "--graph", "g",
     "--query", "rel()",
     "--limit", "1",
-    "--access-token-file", "/dev/null",
     "--guard-timestamp", "0",
     "--guard-loc-class", "trusted",
     "--guard-risk", "0",
-    "--timeout-ms", "100",
   };
   assert_subcommand_consumes_gsettings_daemon_url (subcommand,
-      G_N_ELEMENTS (subcommand));
+      G_N_ELEMENTS (subcommand),
+      "wyctl: datalog query failed");
+}
+
+/* The four cases above prove the keyfile supplied the URL and that the
+ * resolved value cleared validation.  Neither proves the URL was where the
+ * request actually went.  Prove that once, here, by putting a real
+ * listener's address in the keyfile and asserting the listener saw the
+ * request.  It is done for policy check alone on purpose: `fact put' with
+ * an empty input never opens a connection, and `datalog query' succeeds
+ * against a canned 200, so a listener in the shared helper above would need
+ * a response body and an exit-status rule per subcommand.
+ *
+ * The response body is a placeholder chosen so the decision parse fails,
+ * which is what keeps the child's exit status non-zero;
+ * policy_check_server_thread dereferences response_body unconditionally, so
+ * it cannot be left out.  The 1000 ms budget is inherited from the
+ * recorded-request case above, whose comment records a 50 ms budget
+ * expiring mid-connect under load with nothing left to record.  It is a
+ * ceiling rather than a cost: delay_us is zero, so the server answers at
+ * once. */
+static void
+test_policy_check_gsettings_daemon_url_is_the_transport_target (void)
+{
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener,
+    .cancel = accept_cancel,
+    .response_body = "{}",
+    .delay_us = 0,
+  };
+  GThread *server_thread = g_thread_new ("policy-check-gsettings",
+          policy_check_server_thread, &server);
+
+  g_autofree gchar *literal = gvariant_literal_for_string (daemon_url);
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--timeout-ms", "1000",
+    "policy", "check",
+    "--user", "alice",
+    "--permission", "read",
+    "--resource", "doc/1",
+    "--access-token-file", token_path,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  stop_test_server (server_thread, accept_cancel);
+  remove_dir_recursive (xdg);
+  g_unlink (token_path);
+  g_autofree gchar *request = server.request;
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (request);
+  g_assert_nonnull (g_strstr_len (request, -1, "POST /decide?"));
 }
 
 static void
@@ -2891,6 +3006,9 @@ main (int argc, char **argv)
       test_fact_put_gsettings_supplies_daemon_url);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
       test_datalog_query_gsettings_supplies_daemon_url);
+  g_test_add_func (
+    "/wyctl/policy-check-gsettings-daemon-url-is-the-transport-target",
+    test_policy_check_gsettings_daemon_url_is_the_transport_target);
   g_test_add_func ("/wyctl/policy-check-safety-reject-prevents-http",
       test_policy_check_safety_reject_prevents_http);
   g_test_add_func ("/wyctl/audit-query-safety-reject-prevents-http",
