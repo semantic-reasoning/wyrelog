@@ -199,6 +199,15 @@ typedef enum
   WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_COUNT,
 } WylPolicyGraphAuthorityMutationFailStage;
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef enum
+{
+  WYL_POLICY_OFFLINE_RESTORE_FAIL_NONE,
+  WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE,
+  WYL_POLICY_OFFLINE_RESTORE_FAIL_ROLLBACK,
+} WylPolicyOfflineRestoreFailStage;
+#endif
+
 typedef enum
 {
   WYL_POLICY_DARWIN_EVIDENCE_GATE_AFTER_AUTOCOMMIT_CHECK,
@@ -1708,6 +1717,10 @@ void wyl_policy_store_rotation_intent_entry_gate
 void wyl_policy_store_graph_authority_mutation_fail_once
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMutationFailStage stage);
+#ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_policy_store_offline_restore_fail_once
+  (wyl_policy_store_t * store, WylPolicyOfflineRestoreFailStage stage);
+#endif
 void wyl_policy_store_darwin_evidence_gate
   (wyl_policy_store_t * store, WylPolicyDarwinEvidenceGateFunc gate,
     gpointer data);
@@ -3337,5 +3350,63 @@ wyrelog_error_t wyl_policy_store_totp_enrollment_advance_step
  */
 wyrelog_error_t wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *
     store, const gchar * subject_id);
+
+/* Opaque durable storage for #552 restore journals.  The policy layer owns
+ * row/claim atomicity and encrypted-image publication; it deliberately does
+ * not decode the journal blob. */
+#define WYL_POLICY_OFFLINE_RESTORE_LIST_MAX 1024u
+
+typedef enum
+{
+  WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT = 1,
+  WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
+} WylPolicyOfflineRestoreScope;
+
+typedef enum
+{
+  WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED = 1,
+  WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY,
+  WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT,
+  WYL_POLICY_OFFLINE_RESTORE_STORE_STALE,
+  WYL_POLICY_OFFLINE_RESTORE_STORE_NOT_FOUND,
+} WylPolicyOfflineRestoreStoreResult;
+
+typedef struct
+{
+  gchar *operation_uuid;
+  gchar *tenant_id;
+  WylPolicyOfflineRestoreScope scope;
+  gchar *selected_graph_id;
+  guint64 revision;
+  guint8 manifest_sha256[32];
+  guint graph_count;
+  GBytes *journal_blob;
+} WylPolicyOfflineRestoreRecord;
+
+void wyl_policy_offline_restore_record_free
+  (WylPolicyOfflineRestoreRecord *record);
+wyrelog_error_t wyl_policy_store_offline_restore_create
+  (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+wyrelog_error_t wyl_policy_store_offline_restore_load
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    WylPolicyOfflineRestoreRecord **out_record);
+wyrelog_error_t wyl_policy_store_offline_restore_cas
+  (wyl_policy_store_t *store, guint64 expected_revision,
+    const WylPolicyOfflineRestoreRecord *desired,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+wyrelog_error_t wyl_policy_store_offline_restore_release
+  (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *expected,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+wyrelog_error_t wyl_policy_store_offline_restore_list
+  (wyl_policy_store_t *store, const gchar *tenant_id, guint limit,
+    GPtrArray **out_records);
+typedef wyrelog_error_t (*WylPolicyOfflineRestoreRecordFunc)
+  (const WylPolicyOfflineRestoreRecord *record, gpointer user_data);
+wyrelog_error_t wyl_policy_store_offline_restore_foreach
+  (wyl_policy_store_t *store, WylPolicyOfflineRestoreRecordFunc func,
+    gpointer user_data);
 
 G_END_DECLS;

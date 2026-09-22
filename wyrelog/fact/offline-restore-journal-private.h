@@ -225,4 +225,13 @@ wyrelog_error_t wyl_fact_offline_restore_journal_mark_lifecycle_handoff
 WylFactOfflineRestoreRecovery wyl_fact_offline_restore_journal_recovery
   (const WylFactOfflineRestoreJournal *journal);
 
+/* TRUE only when |desired| is the result of exactly one public journal
+ * mutator applied to |current|.  This is the semantic half of durable CAS:
+ * storage compares revisions, while this helper prevents a caller from
+ * changing immutable operation data or combining two state transitions in
+ * one revision. */
+gboolean wyl_fact_offline_restore_journal_is_legal_successor
+  (const WylFactOfflineRestoreJournal *current,
+    const WylFactOfflineRestoreJournal *desired);
+
 G_END_DECLS

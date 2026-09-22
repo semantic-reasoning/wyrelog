@@ -217,6 +217,7 @@ struct wyl_policy_store_t
   WylPolicyDarwinEvidenceGateFunc darwin_evidence_gate;
   gpointer darwin_evidence_gate_data;
 #ifdef WYL_TEST_HANDLE_SEAMS
+  WylPolicyOfflineRestoreFailStage offline_restore_fail_once;
   WylPolicySnapshotFinishFailStage snapshot_finish_fail_once;
   void (*image_release_observer) (const guint8 *image, gsize capacity,
       gpointer data);
@@ -883,6 +884,9 @@ static const gchar *const required_tables[] = {
   "fact_tenant_physical_quota_usage",
   "fact_physical_quota_reservations",
   "fact_graph_create_reservations",
+  "fact_offline_restore_journals",
+  "fact_offline_restore_tenant_claims",
+  "fact_offline_restore_graph_claims",
   "fact_namespaces",
   "fact_relation_schemas",
   "fact_relation_schema_columns",
@@ -906,6 +910,103 @@ static const gchar *const required_tables[] = {
   "service_permission_remediation_receipts",
   "service_retirement_receipts",
 };
+
+static const gchar offline_restore_journals_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_journals ("
+    "operation_uuid TEXT PRIMARY KEY CHECK(typeof(operation_uuid)='text' AND "
+    "length(operation_uuid)=36 AND operation_uuid=lower(operation_uuid) AND "
+    "length(replace(operation_uuid,'-',''))=32 AND "
+    "replace(operation_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(operation_uuid,9,1)='-' AND "
+    "substr(operation_uuid,14,1)='-' AND substr(operation_uuid,15,1)='7' AND "
+    "substr(operation_uuid,19,1)='-' AND substr(operation_uuid,20,1) GLOB '[89ab]' "
+    "AND substr(operation_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')) ,"
+    "selected_graph_id TEXT,revision INTEGER NOT NULL CHECK(typeof(revision)='integer' "
+    "AND revision BETWEEN 1 AND 9223372036854775807),"
+    "manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND "
+    "length(manifest_sha256)=32),graph_count INTEGER NOT NULL CHECK("
+    "typeof(graph_count)='integer' AND graph_count BETWEEN 1 AND 1024),"
+    "journal_blob BLOB NOT NULL CHECK(typeof(journal_blob)='blob' AND "
+    "length(journal_blob) BETWEEN 1 AND 8388608),"
+    "created_at INTEGER NOT NULL CHECK(typeof(created_at)='integer' AND created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(typeof(updated_at)='integer' AND "
+    "updated_at>=created_at),CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
+    "(scope='graph' AND selected_graph_id IS NOT NULL)),"
+    "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),"
+    "FOREIGN KEY(tenant_id,selected_graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+static const gchar offline_restore_tenant_claims_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims ("
+    "tenant_id TEXT PRIMARY KEY,operation_uuid TEXT NOT NULL UNIQUE,"
+    "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),"
+    "FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) "
+    "ON DELETE RESTRICT);";
+static const gchar offline_restore_graph_claims_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims ("
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,operation_uuid TEXT NOT NULL UNIQUE,"
+    "PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) "
+    "REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) "
+    "REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);";
+static const gchar offline_restore_index_sql[] =
+    "CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished "
+    "ON fact_offline_restore_journals(tenant_id,operation_uuid);";
+static const gchar offline_restore_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_update_guard "
+    "BEFORE UPDATE ON fact_offline_restore_journals BEGIN SELECT CASE WHEN "
+    "NEW.operation_uuid!=OLD.operation_uuid OR NEW.tenant_id!=OLD.tenant_id OR "
+    "NEW.scope!=OLD.scope OR NEW.selected_graph_id IS NOT OLD.selected_graph_id OR "
+    "NEW.manifest_sha256!=OLD.manifest_sha256 OR NEW.graph_count!=OLD.graph_count OR "
+    "NEW.created_at!=OLD.created_at OR NEW.revision!=OLD.revision+1 OR "
+    "NEW.updated_at<OLD.updated_at THEN RAISE(ABORT,'invalid restore journal update') END; END;";
+static const gchar offline_restore_delete_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard "
+    "BEFORE DELETE ON fact_offline_restore_journals WHEN EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR "
+    "EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE "
+    "operation_uuid=OLD.operation_uuid) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;";
+static const gchar offline_restore_tenant_claim_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard "
+    "BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN SELECT CASE WHEN NOT EXISTS("
+    "SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid "
+    "AND tenant_id=NEW.tenant_id AND scope='tenant' AND selected_graph_id IS NULL) OR "
+    "EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE tenant_id=NEW.tenant_id) "
+    "THEN RAISE(ABORT,'invalid tenant restore claim') END; END;";
+static const gchar offline_restore_graph_claim_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_insert_guard "
+    "BEFORE INSERT ON fact_offline_restore_graph_claims BEGIN SELECT CASE WHEN NOT EXISTS("
+    "SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid "
+    "AND tenant_id=NEW.tenant_id AND scope='graph' AND selected_graph_id=NEW.graph_id) OR "
+    "EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE tenant_id=NEW.tenant_id) "
+    "THEN RAISE(ABORT,'invalid graph restore claim') END; END;";
+static const gchar offline_restore_tenant_claim_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_update_guard "
+    "BEFORE UPDATE ON fact_offline_restore_tenant_claims BEGIN SELECT "
+    "RAISE(ABORT,'restore tenant claims are immutable'); END;";
+static const gchar offline_restore_graph_claim_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_update_guard "
+    "BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT "
+    "RAISE(ABORT,'restore graph claims are immutable'); END;";
+static const gchar offline_restore_schema_ddl[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_journals ("
+    "operation_uuid TEXT PRIMARY KEY CHECK(typeof(operation_uuid)='text' AND length(operation_uuid)=36 AND operation_uuid=lower(operation_uuid) AND length(replace(operation_uuid,'-',''))=32 AND replace(operation_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(operation_uuid,9,1)='-' AND substr(operation_uuid,14,1)='-' AND substr(operation_uuid,15,1)='7' AND substr(operation_uuid,19,1)='-' AND substr(operation_uuid,20,1) GLOB '[89ab]' AND substr(operation_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')) ,selected_graph_id TEXT,"
+    "revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9223372036854775807),"
+    "manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),"
+    "graph_count INTEGER NOT NULL CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 1 AND 1024),"
+    "journal_blob BLOB NOT NULL CHECK(typeof(journal_blob)='blob' AND length(journal_blob) BETWEEN 1 AND 8388608),"
+    "created_at INTEGER NOT NULL CHECK(typeof(created_at)='integer' AND created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(typeof(updated_at)='integer' AND updated_at>=created_at),"
+    "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)),"
+    "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(tenant_id,selected_graph_id) REFERENCES fact_graphs(tenant_id,graph_id));"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims (tenant_id TEXT PRIMARY KEY,operation_uuid TEXT NOT NULL UNIQUE,FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,operation_uuid TEXT NOT NULL UNIQUE,PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
+    "CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished ON fact_offline_restore_journals(tenant_id,operation_uuid);"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_update_guard BEFORE UPDATE ON fact_offline_restore_journals BEGIN SELECT CASE WHEN NEW.operation_uuid!=OLD.operation_uuid OR NEW.tenant_id!=OLD.tenant_id OR NEW.scope!=OLD.scope OR NEW.selected_graph_id IS NOT OLD.selected_graph_id OR NEW.manifest_sha256!=OLD.manifest_sha256 OR NEW.graph_count!=OLD.graph_count OR NEW.created_at!=OLD.created_at OR NEW.revision!=OLD.revision+1 OR NEW.updated_at<OLD.updated_at THEN RAISE(ABORT,'invalid restore journal update') END; END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard BEFORE DELETE ON fact_offline_restore_journals WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='tenant' AND selected_graph_id IS NULL) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid tenant restore claim') END; END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_insert_guard BEFORE INSERT ON fact_offline_restore_graph_claims BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='graph' AND selected_graph_id=NEW.graph_id) OR EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid graph restore claim') END; END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_update_guard BEFORE UPDATE ON fact_offline_restore_tenant_claims BEGIN SELECT RAISE(ABORT,'restore tenant claims are immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_update_guard BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT RAISE(ABORT,'restore graph claims are immutable'); END;";
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
  * create the complete inert service authority in one savepoint. */
@@ -10874,6 +10975,10 @@ graph_authority_object_matches (sqlite3 *db, const gchar *type,
   if (if_not_exists != NULL)
     memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
         strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  g_strchomp (canonical);
+  gsize canonical_len = strlen (canonical);
+  if (canonical_len > 0 && canonical[canonical_len - 1] == ';')
+    canonical[canonical_len - 1] = '\0';
   g_autofree gchar *actual_normalized = graph_authority_normalize_sql (actual);
   g_autofree gchar *expected_normalized =
       graph_authority_normalize_sql (canonical);
@@ -10896,6 +11001,191 @@ graph_authority_canonical_sql (const gchar *sql)
     memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
         strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
   return graph_authority_normalize_sql (canonical);
+}
+
+static wyrelog_error_t
+validate_offline_restore_schema (sqlite3 *db)
+{
+  static const struct
+  {
+    const gchar *type;
+    const gchar *name;
+    const gchar *sql;
+  } objects[] = {
+    { "table", "fact_offline_restore_journals",
+      offline_restore_journals_sql },
+    { "table", "fact_offline_restore_tenant_claims",
+      offline_restore_tenant_claims_sql },
+    { "table", "fact_offline_restore_graph_claims",
+      offline_restore_graph_claims_sql },
+    { "index", "idx_fact_offline_restore_journals_unfinished",
+      offline_restore_index_sql },
+    { "trigger", "fact_offline_restore_journal_update_guard",
+      offline_restore_update_guard_sql },
+    { "trigger", "fact_offline_restore_journal_delete_guard",
+      offline_restore_delete_guard_sql },
+    { "trigger", "fact_offline_restore_tenant_claim_insert_guard",
+      offline_restore_tenant_claim_guard_sql },
+    { "trigger", "fact_offline_restore_graph_claim_insert_guard",
+      offline_restore_graph_claim_guard_sql },
+    { "trigger", "fact_offline_restore_tenant_claim_update_guard",
+      offline_restore_tenant_claim_update_guard_sql },
+    { "trigger", "fact_offline_restore_graph_claim_update_guard",
+      offline_restore_graph_claim_update_guard_sql },
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (objects); i++) {
+    wyrelog_error_t rc = graph_authority_object_matches (db, objects[i].type,
+            objects[i].name, objects[i].sql);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  static const gchar *const invalid_queries[] = {
+    "SELECT 1 FROM fact_offline_restore_journals WHERE "
+    "typeof(operation_uuid)!='text' OR typeof(tenant_id)!='text' OR "
+    "typeof(scope)!='text' OR typeof(revision)!='integer' OR revision<1 OR "
+    "typeof(manifest_sha256)!='blob' OR length(manifest_sha256)!=32 OR "
+    "typeof(graph_count)!='integer' OR graph_count NOT BETWEEN 1 AND 1024 OR "
+    "typeof(journal_blob)!='blob' OR length(journal_blob) NOT BETWEEN 1 AND 8388608 "
+    "OR typeof(created_at)!='integer' OR typeof(updated_at)!='integer' LIMIT 1;",
+    "SELECT 1 FROM fact_offline_restore_journals AS j WHERE "
+    "(j.scope='tenant' AND ((SELECT count(*) FROM fact_offline_restore_tenant_claims "
+    "WHERE operation_uuid=j.operation_uuid)!=1 OR EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_graph_claims WHERE tenant_id=j.tenant_id))) OR "
+    "(j.scope='graph' AND ((SELECT count(*) FROM fact_offline_restore_graph_claims "
+    "WHERE operation_uuid=j.operation_uuid AND tenant_id=j.tenant_id AND "
+    "graph_id=j.selected_graph_id)!=1 OR EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_tenant_claims WHERE tenant_id=j.tenant_id))) LIMIT 1;",
+    "SELECT 1 FROM fact_offline_restore_tenant_claims AS c WHERE NOT EXISTS("
+    "SELECT 1 FROM fact_offline_restore_journals AS j WHERE "
+    "j.operation_uuid=c.operation_uuid AND j.scope='tenant' AND "
+    "j.tenant_id=c.tenant_id) LIMIT 1;",
+    "SELECT 1 FROM fact_offline_restore_graph_claims AS c WHERE NOT EXISTS("
+    "SELECT 1 FROM fact_offline_restore_journals AS j WHERE "
+    "j.operation_uuid=c.operation_uuid AND j.scope='graph' AND "
+    "j.tenant_id=c.tenant_id AND j.selected_graph_id=c.graph_id) LIMIT 1;",
+    "SELECT 1 FROM fact_offline_restore_tenant_claims AS t JOIN "
+    "fact_offline_restore_graph_claims AS g ON g.tenant_id=t.tenant_id LIMIT 1;",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid_queries); i++) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (db, invalid_queries[i], -1, &stmt, NULL)
+        != SQLITE_OK)
+      return WYRELOG_E_IO;
+    int step = sqlite3_step (stmt);
+    sqlite3_finalize (stmt);
+    if (step == SQLITE_ROW)
+      return WYRELOG_E_POLICY;
+    if (step != SQLITE_DONE)
+      return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+migrate_offline_restore_schema (sqlite3 *db)
+{
+  static const gchar *const names[] = {
+    "fact_offline_restore_journals",
+    "fact_offline_restore_tenant_claims",
+    "fact_offline_restore_graph_claims",
+    "idx_fact_offline_restore_journals_unfinished",
+    "fact_offline_restore_journal_update_guard",
+    "fact_offline_restore_journal_delete_guard",
+    "fact_offline_restore_tenant_claim_insert_guard",
+    "fact_offline_restore_graph_claim_insert_guard",
+    "fact_offline_restore_tenant_claim_update_guard",
+    "fact_offline_restore_graph_claim_update_guard",
+  };
+  sqlite3_stmt *shadow = NULL;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM sqlite_temp_master WHERE name=? COLLATE NOCASE;",
+      -1, &shadow,
+      NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+    sqlite3_reset (shadow);
+    sqlite3_clear_bindings (shadow);
+    if (bind_text (shadow, 1, names[i]) != WYRELOG_E_OK
+        || sqlite3_step (shadow) != SQLITE_ROW) {
+      sqlite3_finalize (shadow);
+      return WYRELOG_E_IO;
+    }
+    if (sqlite3_column_int (shadow, 0) != 0) {
+      sqlite3_finalize (shadow);
+      return WYRELOG_E_POLICY;
+    }
+  }
+  sqlite3_finalize (shadow);
+  sqlite3_stmt *databases = NULL;
+  if (sqlite3_prepare_v2 (db, "PRAGMA database_list;", -1, &databases, NULL)
+      != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int database_step;
+  while ((database_step = sqlite3_step (databases)) == SQLITE_ROW) {
+    const gchar *schema =
+        (const gchar *) sqlite3_column_text (databases, 1);
+    if (g_strcmp0 (schema, "main") == 0 || g_strcmp0 (schema, "temp") == 0)
+      continue;
+    gchar *query = sqlite3_mprintf
+          ("SELECT count(*) FROM \"%w\".sqlite_master "
+            "WHERE name=? COLLATE NOCASE;", schema);
+    if (query == NULL) {
+      sqlite3_finalize (databases);
+      return WYRELOG_E_NOMEM;
+    }
+    sqlite3_stmt *attached = NULL;
+    int prepare = sqlite3_prepare_v2 (db, query, -1, &attached, NULL);
+    sqlite3_free (query);
+    if (prepare != SQLITE_OK) {
+      sqlite3_finalize (databases);
+      return WYRELOG_E_IO;
+    }
+    for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+      sqlite3_reset (attached);
+      sqlite3_clear_bindings (attached);
+      if (bind_text (attached, 1, names[i]) != WYRELOG_E_OK
+          || sqlite3_step (attached) != SQLITE_ROW) {
+        sqlite3_finalize (attached);
+        sqlite3_finalize (databases);
+        return WYRELOG_E_IO;
+      }
+      if (sqlite3_column_int (attached, 0) != 0) {
+        sqlite3_finalize (attached);
+        sqlite3_finalize (databases);
+        return WYRELOG_E_POLICY;
+      }
+    }
+    sqlite3_finalize (attached);
+  }
+  sqlite3_finalize (databases);
+  if (database_step != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM sqlite_master WHERE name=?;", -1, &stmt, NULL)
+      != SQLITE_OK)
+    return WYRELOG_E_IO;
+  guint present = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
+    sqlite3_reset (stmt);
+    sqlite3_clear_bindings (stmt);
+    if (bind_text (stmt, 1, names[i]) != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_ROW) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    present += sqlite3_column_int (stmt, 0) != 0;
+  }
+  sqlite3_finalize (stmt);
+  if (present != 0 && present != G_N_ELEMENTS (names))
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = present == 0 ?
+      exec_sql (db, offline_restore_schema_ddl) : WYRELOG_E_OK;
+  return rc == WYRELOG_E_OK ? validate_offline_restore_schema (db) : rc;
 }
 
 static wyrelog_error_t graph_authority_migration_checkpoint
@@ -12224,6 +12514,18 @@ wyl_policy_store_graph_authority_mutation_fail_once (wyl_policy_store_t *store,
   store->mutation_fail_once = stage;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+void
+wyl_policy_store_offline_restore_fail_once (wyl_policy_store_t *store,
+    WylPolicyOfflineRestoreFailStage stage)
+{
+  if (store == NULL || stage <= WYL_POLICY_OFFLINE_RESTORE_FAIL_NONE
+      || stage > WYL_POLICY_OFFLINE_RESTORE_FAIL_ROLLBACK)
+    return;
+  store->offline_restore_fail_once = stage;
+}
+#endif
+
 void
 wyl_policy_store_fact_open_publication_fail_once
   (wyl_policy_store_t *store, WylPolicyFactOpenPublicationFailStage stage)
@@ -13422,6 +13724,23 @@ graph_authority_schema_ready:
           "    WHERE config_key = 'bootstrap_admin_sealed_at_us');");
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  /* Install the restore journal schema as one all-or-none additive set.
+   * Partial or same-name malformed objects are never repaired. */
+  rc = exec_sql (store->db, "SAVEPOINT wyrelog_offline_restore_schema;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = migrate_offline_restore_schema (store->db);
+  if (rc == WYRELOG_E_OK) {
+    rc = exec_sql (store->db,
+            "RELEASE SAVEPOINT wyrelog_offline_restore_schema;");
+  } else {
+    (void) exec_sql (store->db,
+        "ROLLBACK TO SAVEPOINT wyrelog_offline_restore_schema;");
+    (void) exec_sql (store->db,
+        "RELEASE SAVEPOINT wyrelog_offline_restore_schema;");
+    return rc;
+  }
 
   /* Apply all seven inert service-authority tables, their indexes and their
    * ten immutability/append-only triggers atomically. CREATE TABLE IF NOT
@@ -36393,4 +36712,688 @@ wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+void
+wyl_policy_offline_restore_record_free (WylPolicyOfflineRestoreRecord *record)
+{
+  if (record == NULL)
+    return;
+  g_free (record->operation_uuid);
+  g_free (record->tenant_id);
+  g_free (record->selected_graph_id);
+  g_clear_pointer (&record->journal_blob, g_bytes_unref);
+  g_free (record);
+}
+
+static gboolean
+offline_restore_record_valid (const WylPolicyOfflineRestoreRecord *record)
+{
+  wyl_id_t parsed;
+  gchar canonical[WYL_ID_STRING_BUF];
+  gboolean canonical_operation = record != NULL
+      && record->operation_uuid != NULL
+      && wyl_id_parse (record->operation_uuid, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && g_str_equal (record->operation_uuid, canonical);
+  return canonical_operation && record->tenant_id != NULL
+         && record->revision > 0 && record->revision <= G_MAXINT64
+         && record->graph_count > 0 && record->graph_count <= 1024
+         && record->journal_blob != NULL
+         && g_bytes_get_size (record->journal_blob) > 0
+         && g_bytes_get_size (record->journal_blob) <= 8u * 1024u * 1024u
+         && ((record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT
+         && record->selected_graph_id == NULL)
+         || (record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+         && record->selected_graph_id != NULL));
+}
+
+static gboolean
+offline_restore_record_equal (const WylPolicyOfflineRestoreRecord *left,
+    const WylPolicyOfflineRestoreRecord *right)
+{
+  return left != NULL && right != NULL
+         && g_strcmp0 (left->operation_uuid, right->operation_uuid) == 0
+         && g_strcmp0 (left->tenant_id, right->tenant_id) == 0
+         && left->scope == right->scope
+         && g_strcmp0 (left->selected_graph_id, right->selected_graph_id) == 0
+         && left->revision == right->revision
+         && memcmp (left->manifest_sha256, right->manifest_sha256, 32) == 0
+         && left->graph_count == right->graph_count
+         && g_bytes_equal (left->journal_blob, right->journal_blob);
+}
+
+static WylPolicyOfflineRestoreRecord *
+offline_restore_record_copy (const WylPolicyOfflineRestoreRecord *source)
+{
+  if (!offline_restore_record_valid (source))
+    return NULL;
+  WylPolicyOfflineRestoreRecord *copy =
+      g_new0 (WylPolicyOfflineRestoreRecord, 1);
+  copy->operation_uuid = g_strdup (source->operation_uuid);
+  copy->tenant_id = g_strdup (source->tenant_id);
+  copy->scope = source->scope;
+  copy->selected_graph_id = g_strdup (source->selected_graph_id);
+  copy->revision = source->revision;
+  memcpy (copy->manifest_sha256, source->manifest_sha256, 32);
+  copy->graph_count = source->graph_count;
+  copy->journal_blob = g_bytes_ref (source->journal_blob);
+  return copy;
+}
+
+static wyrelog_error_t
+offline_restore_record_from_row (sqlite3_stmt *stmt,
+    WylPolicyOfflineRestoreRecord **out_record)
+{
+  *out_record = NULL;
+  if (sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
+      || (sqlite3_column_type (stmt, 3) != SQLITE_NULL
+      && sqlite3_column_type (stmt, 3) != SQLITE_TEXT)
+      || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 5) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, 5) != 32
+      || sqlite3_column_type (stmt, 6) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 7) != SQLITE_BLOB)
+    return WYRELOG_E_POLICY;
+  WylPolicyOfflineRestoreRecord *record =
+      g_new0 (WylPolicyOfflineRestoreRecord, 1);
+  record->operation_uuid =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  record->tenant_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+  const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
+  record->scope = g_str_equal (scope, "tenant") ?
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT :
+      (g_str_equal (scope, "graph") ?
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH : 0);
+  if (sqlite3_column_type (stmt, 3) == SQLITE_TEXT)
+    record->selected_graph_id =
+        g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+  gint64 revision = sqlite3_column_int64 (stmt, 4);
+  gint64 graph_count = sqlite3_column_int64 (stmt, 6);
+  if (revision > 0)
+    record->revision = (guint64) revision;
+  memcpy (record->manifest_sha256, sqlite3_column_blob (stmt, 5), 32);
+  if (graph_count > 0 && graph_count <= G_MAXUINT)
+    record->graph_count = (guint) graph_count;
+  record->journal_blob = g_bytes_new (sqlite3_column_blob (stmt, 7),
+          (gsize) sqlite3_column_bytes (stmt, 7));
+  if (!offline_restore_record_valid (record)) {
+    wyl_policy_offline_restore_record_free (record);
+    return WYRELOG_E_POLICY;
+  }
+  *out_record = record;
+  return WYRELOG_E_OK;
+}
+
+#define OFFLINE_RESTORE_COLUMNS                                             \
+  "operation_uuid,tenant_id,scope,selected_graph_id,revision,"             \
+  "manifest_sha256,graph_count,journal_blob"
+
+static wyrelog_error_t
+offline_restore_load_locked (wyl_policy_store_t *store,
+    const gchar *operation_uuid, WylPolicyOfflineRestoreRecord **out_record)
+{
+  *out_record = NULL;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT " OFFLINE_RESTORE_COLUMNS " FROM main.fact_offline_restore_journals "
+          "WHERE operation_uuid=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, operation_uuid);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = offline_restore_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+offline_restore_claim_matches_locked (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *record)
+{
+  sqlite3_stmt *stmt = NULL;
+  const gchar *sql = record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "SELECT (SELECT count(*) FROM main.fact_offline_restore_tenant_claims WHERE "
+      "tenant_id=? AND operation_uuid=?),(SELECT count(*) FROM "
+      "main.fact_offline_restore_graph_claims WHERE tenant_id=?);" :
+      "SELECT (SELECT count(*) FROM main.fact_offline_restore_graph_claims WHERE "
+      "tenant_id=? AND graph_id=? AND operation_uuid=?),(SELECT count(*) FROM "
+      "main.fact_offline_restore_tenant_claims WHERE tenant_id=?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, record->tenant_id);
+  gint operation_index;
+  if (record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH) {
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 2, record->selected_graph_id);
+    operation_index = 3;
+  } else {
+    operation_index = 2;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, operation_index, record->operation_uuid);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, operation_index + 1, record->tenant_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  gboolean matches = step == SQLITE_ROW && sqlite3_column_int (stmt, 0) == 1
+      && sqlite3_column_int (stmt, 1) == 0;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return step != SQLITE_ROW ? WYRELOG_E_IO :
+         (matches ? WYRELOG_E_OK : WYRELOG_E_POLICY);
+}
+
+static wyrelog_error_t
+offline_restore_finish_mutation (wyl_policy_store_t *store,
+    WylPolicyStoreCoordinatorFence *fence, wyrelog_error_t body_rc,
+    gboolean changed)
+{
+  wyrelog_error_t rc = body_rc;
+  if (rc == WYRELOG_E_OK && changed) {
+    rc = wyl_policy_store_publication_transaction_commit (store);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (rc == WYRELOG_E_OK && store->offline_restore_fail_once
+        == WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE) {
+      store->offline_restore_fail_once = WYL_POLICY_OFFLINE_RESTORE_FAIL_NONE;
+      rc = WYRELOG_E_IO;
+    }
+#endif
+    if (rc != WYRELOG_E_OK && !wyl_policy_store_is_autocommit (store)) {
+      wyrelog_error_t rollback_rc =
+          wyl_policy_store_publication_transaction_rollback_checked (store);
+      if (rollback_rc != WYRELOG_E_OK)
+        policy_store_make_terminal (store, rollback_rc);
+    } else if (rc != WYRELOG_E_OK) {
+      policy_store_make_terminal (store, rc);
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_coordinator_fence_publish (fence);
+  } else {
+    wyrelog_error_t rollback_rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (store->offline_restore_fail_once
+        == WYL_POLICY_OFFLINE_RESTORE_FAIL_ROLLBACK) {
+      store->offline_restore_fail_once = WYL_POLICY_OFFLINE_RESTORE_FAIL_NONE;
+      /* Keep the transaction open while relinquishing its serialization
+       * ownership, matching a rollback failure without leaking the mutex. */
+      policy_store_transaction_leave (store);
+      rollback_rc = WYRELOG_E_IO;
+    } else
+#endif
+    rollback_rc =
+        wyl_policy_store_publication_transaction_rollback_checked (store);
+    if (rollback_rc != WYRELOG_E_OK) {
+      policy_store_make_terminal (store, rollback_rc);
+      if (rc == WYRELOG_E_OK)
+        rc = rollback_rc;
+    }
+  }
+  wyl_policy_store_coordinator_fence_clear (fence);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_load (wyl_policy_store_t *store,
+    const gchar *operation_uuid, WylPolicyOfflineRestoreRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || operation_uuid == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return terminal;
+  }
+  wyrelog_error_t rc = offline_restore_load_locked (store, operation_uuid,
+          out_record);
+  if (rc == WYRELOG_E_OK)
+    rc = offline_restore_claim_matches_locked (store, *out_record);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_record, wyl_policy_offline_restore_record_free);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (out_committed != NULL)
+    *out_committed = NULL;
+  if (store == NULL || !offline_restore_record_valid (record)
+      || out_result == NULL || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyOfflineRestoreRecord *existing = NULL;
+  rc = offline_restore_load_locked (store, record->operation_uuid, &existing);
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t claim_rc = offline_restore_claim_matches_locked (store,
+            existing);
+    if (claim_rc != WYRELOG_E_OK)
+      rc = claim_rc;
+    else if (offline_restore_record_equal (existing, record)) {
+      *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY;
+      *out_committed = existing;
+      existing = NULL;
+      rc = WYRELOG_E_OK;
+    } else {
+      *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+      *out_committed = existing;
+      existing = NULL;
+      rc = WYRELOG_E_OK;
+    }
+    wyl_policy_offline_restore_record_free (existing);
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  }
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+
+  sqlite3_stmt *conflict = NULL;
+  const gchar *conflict_sql =
+      record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "SELECT EXISTS(SELECT 1 FROM main.fact_offline_restore_tenant_claims WHERE tenant_id=?) "
+      "OR EXISTS(SELECT 1 FROM main.fact_offline_restore_graph_claims WHERE tenant_id=?);" :
+      "SELECT EXISTS(SELECT 1 FROM main.fact_offline_restore_tenant_claims WHERE tenant_id=?) "
+      "OR EXISTS(SELECT 1 FROM main.fact_offline_restore_graph_claims WHERE tenant_id=? AND graph_id=?);";
+  rc = prepare_stmt (store->db, conflict_sql, &conflict);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (conflict, 1, record->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (conflict, 2, record->tenant_id);
+  if (rc == WYRELOG_E_OK
+      && record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH)
+    rc = bind_text (conflict, 3, record->selected_graph_id);
+  int conflict_step = rc == WYRELOG_E_OK ? sqlite3_step (conflict) :
+      SQLITE_ERROR;
+  gboolean occupied = conflict_step == SQLITE_ROW
+      && sqlite3_column_int (conflict, 0) != 0;
+  sqlite3_finalize (conflict);
+  if (rc == WYRELOG_E_OK && conflict_step != SQLITE_ROW)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && occupied) {
+    sqlite3_stmt *winner = NULL;
+    const gchar *winner_sql =
+        record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+        "SELECT operation_uuid FROM (SELECT operation_uuid FROM "
+        "main.fact_offline_restore_tenant_claims WHERE tenant_id=? UNION ALL "
+        "SELECT operation_uuid FROM main.fact_offline_restore_graph_claims "
+        "WHERE tenant_id=?) ORDER BY operation_uuid LIMIT 1;" :
+        "SELECT operation_uuid FROM (SELECT operation_uuid FROM "
+        "main.fact_offline_restore_tenant_claims WHERE tenant_id=? UNION ALL "
+        "SELECT operation_uuid FROM main.fact_offline_restore_graph_claims "
+        "WHERE tenant_id=? AND graph_id=?) ORDER BY operation_uuid LIMIT 1;";
+    rc = prepare_stmt (store->db, winner_sql, &winner);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (winner, 1, record->tenant_id);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (winner, 2, record->tenant_id);
+    if (rc == WYRELOG_E_OK
+        && record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH)
+      rc = bind_text (winner, 3, record->selected_graph_id);
+    int winner_step = rc == WYRELOG_E_OK ? sqlite3_step (winner) :
+        SQLITE_ERROR;
+    g_autofree gchar *winner_operation = winner_step == SQLITE_ROW ?
+        g_strdup ((const gchar *) sqlite3_column_text (winner, 0)) : NULL;
+    sqlite3_finalize (winner);
+    if (rc == WYRELOG_E_OK && winner_step != SQLITE_ROW)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK)
+      rc = offline_restore_load_locked (store, winner_operation,
+              out_committed);
+    if (rc == WYRELOG_E_OK)
+      rc = offline_restore_claim_matches_locked (store, *out_committed);
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = offline_restore_finish_mutation (store, &fence, rc, FALSE);
+    if (rc != WYRELOG_E_OK)
+      g_clear_pointer (out_committed,
+          wyl_policy_offline_restore_record_free);
+    return rc;
+  }
+  sqlite3_stmt *insert = NULL;
+  rc = rc == WYRELOG_E_OK ? prepare_stmt (store->db,
+          "INSERT INTO main.fact_offline_restore_journals(operation_uuid,tenant_id,scope,"
+          "selected_graph_id,revision,manifest_sha256,graph_count,journal_blob,"
+          "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,unixepoch(),unixepoch());",
+          &insert) : rc;
+  gsize blob_len = 0;
+  const guint8 *blob = g_bytes_get_data (record->journal_blob, &blob_len);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (insert, 1, record->operation_uuid) != WYRELOG_E_OK
+      || bind_text (insert, 2, record->tenant_id) != WYRELOG_E_OK
+      || bind_text (insert, 3,
+      record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "tenant" : "graph") != WYRELOG_E_OK
+      || (record->selected_graph_id == NULL ?
+      sqlite3_bind_null (insert, 4) :
+      sqlite3_bind_text (insert, 4, record->selected_graph_id, -1,
+      SQLITE_TRANSIENT)) != SQLITE_OK
+      || sqlite3_bind_int64 (insert, 5, (sqlite3_int64) record->revision)
+      != SQLITE_OK
+      || sqlite3_bind_blob (insert, 6, record->manifest_sha256, 32,
+      SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int64 (insert, 7, record->graph_count) != SQLITE_OK
+      || sqlite3_bind_blob64 (insert, 8, blob, blob_len,
+      SQLITE_TRANSIENT) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (insert) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (insert);
+  sqlite3_stmt *claim = NULL;
+  const gchar *claim_sql =
+      record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "INSERT INTO main.fact_offline_restore_tenant_claims(tenant_id,operation_uuid) VALUES(?,?);" :
+      "INSERT INTO main.fact_offline_restore_graph_claims(tenant_id,graph_id,operation_uuid) VALUES(?,?,?);";
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, claim_sql, &claim);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (claim, 1, record->tenant_id);
+  gint op_index = 2;
+  if (rc == WYRELOG_E_OK
+      && record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH) {
+    rc = bind_text (claim, 2, record->selected_graph_id);
+    op_index = 3;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (claim, op_index, record->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (claim) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (claim);
+  WylPolicyOfflineRestoreRecord *committed = rc == WYRELOG_E_OK ?
+      offline_restore_record_copy (record) : NULL;
+  if (rc == WYRELOG_E_OK && committed == NULL)
+    rc = WYRELOG_E_NOMEM;
+  rc = offline_restore_finish_mutation (store, &fence, rc,
+          rc == WYRELOG_E_OK);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_offline_restore_record_free (committed);
+    return rc;
+  }
+  *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  *out_committed = committed;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_cas (wyl_policy_store_t *store,
+    guint64 expected_revision, const WylPolicyOfflineRestoreRecord *desired,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (out_committed != NULL)
+    *out_committed = NULL;
+  if (store == NULL || !offline_restore_record_valid (desired)
+      || expected_revision == 0 || expected_revision > G_MAXINT64
+      || desired->revision != expected_revision + 1 || out_result == NULL
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyOfflineRestoreRecord *current = NULL;
+  rc = offline_restore_load_locked (store, desired->operation_uuid, &current);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_NOT_FOUND;
+    return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
+               FALSE);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = offline_restore_claim_matches_locked (store, current);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_offline_restore_record_free (current);
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  }
+  if (current->revision != expected_revision) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_STALE;
+    *out_committed = current;
+    return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
+               FALSE);
+  }
+  gboolean immutable_match = g_strcmp0 (current->tenant_id,
+          desired->tenant_id) == 0 && current->scope == desired->scope
+      && g_strcmp0 (current->selected_graph_id,
+          desired->selected_graph_id) == 0
+      && memcmp (current->manifest_sha256, desired->manifest_sha256, 32) == 0
+      && current->graph_count == desired->graph_count;
+  wyl_policy_offline_restore_record_free (current);
+  if (!immutable_match) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
+               FALSE);
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "UPDATE main.fact_offline_restore_journals SET revision=?,journal_blob=?,"
+          "updated_at=unixepoch() WHERE operation_uuid=? AND revision=?;", &stmt);
+  gsize blob_len = 0;
+  const guint8 *blob = g_bytes_get_data (desired->journal_blob, &blob_len);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 1, desired->revision) != SQLITE_OK
+      || sqlite3_bind_blob64 (stmt, 2, blob, blob_len,
+      SQLITE_TRANSIENT) != SQLITE_OK
+      || bind_text (stmt, 3, desired->operation_uuid) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 4, expected_revision) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_CONFLICT;
+  sqlite3_finalize (stmt);
+  WylPolicyOfflineRestoreRecord *committed = rc == WYRELOG_E_OK ?
+      offline_restore_record_copy (desired) : NULL;
+  if (rc == WYRELOG_E_OK && committed == NULL)
+    rc = WYRELOG_E_NOMEM;
+  rc = offline_restore_finish_mutation (store, &fence, rc,
+          rc == WYRELOG_E_OK);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_offline_restore_record_free (committed);
+    return rc;
+  }
+  *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  *out_committed = committed;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_release (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (store == NULL || !offline_restore_record_valid (expected)
+      || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyOfflineRestoreRecord *current = NULL;
+  rc = offline_restore_load_locked (store, expected->operation_uuid, &current);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_NOT_FOUND;
+    return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
+               FALSE);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = offline_restore_claim_matches_locked (store, current);
+  gboolean exact = rc == WYRELOG_E_OK
+      && offline_restore_record_equal (current, expected);
+  wyl_policy_offline_restore_record_free (current);
+  if (rc != WYRELOG_E_OK)
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  if (!exact) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_STALE;
+    return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
+               FALSE);
+  }
+  sqlite3_stmt *claim = NULL;
+  const gchar *claim_sql = expected->scope ==
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "DELETE FROM main.fact_offline_restore_tenant_claims WHERE tenant_id=? AND operation_uuid=?;" :
+      "DELETE FROM main.fact_offline_restore_graph_claims WHERE tenant_id=? AND graph_id=? AND operation_uuid=?;";
+  rc = prepare_stmt (store->db, claim_sql, &claim);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (claim, 1, expected->tenant_id);
+  gint op_index = 2;
+  if (rc == WYRELOG_E_OK
+      && expected->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH) {
+    rc = bind_text (claim, 2, expected->selected_graph_id);
+    op_index = 3;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (claim, op_index, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (claim) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (claim);
+  sqlite3_stmt *journal = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "DELETE FROM main.fact_offline_restore_journals WHERE operation_uuid=? AND "
+            "revision=? AND journal_blob=?;", &journal);
+  gsize blob_len = 0;
+  const guint8 *blob = g_bytes_get_data (expected->journal_blob, &blob_len);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (journal, 1, expected->operation_uuid) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (journal, 2, expected->revision) != SQLITE_OK
+      || sqlite3_bind_blob64 (journal, 3, blob, blob_len,
+      SQLITE_TRANSIENT) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (journal) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (journal);
+  rc = offline_restore_finish_mutation (store, &fence, rc,
+          rc == WYRELOG_E_OK);
+  if (rc == WYRELOG_E_OK)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_list (wyl_policy_store_t *store,
+    const gchar *tenant_id, guint limit, GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (store == NULL || out_records == NULL || limit == 0
+      || limit > WYL_POLICY_OFFLINE_RESTORE_LIST_MAX)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t terminal = policy_store_terminal_gate (store);
+  if (terminal != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return terminal;
+  }
+  GPtrArray *records = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_policy_offline_restore_record_free);
+  sqlite3_stmt *stmt = NULL;
+  const gchar *sql = tenant_id == NULL ?
+      "SELECT " OFFLINE_RESTORE_COLUMNS " FROM main.fact_offline_restore_journals "
+      "ORDER BY tenant_id,operation_uuid LIMIT ?;" :
+      "SELECT " OFFLINE_RESTORE_COLUMNS " FROM main.fact_offline_restore_journals "
+      "WHERE tenant_id=? ORDER BY tenant_id,operation_uuid LIMIT ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  gint limit_index = 1;
+  if (rc == WYRELOG_E_OK && tenant_id != NULL) {
+    rc = bind_text (stmt, 1, tenant_id);
+    limit_index = 2;
+  }
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, limit_index, (sqlite3_int64) limit + 1)
+      != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    rc = offline_restore_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      rc = offline_restore_claim_matches_locked (store, record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+    else
+      wyl_policy_offline_restore_record_free (record);
+  }
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && records->len > limit)
+    rc = WYRELOG_E_RESOURCE_LIMIT;
+  if (rc == WYRELOG_E_OK)
+    *out_records = records;
+  else
+    g_ptr_array_unref (records);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_foreach (wyl_policy_store_t *store,
+    WylPolicyOfflineRestoreRecordFunc func, gpointer user_data)
+{
+  if (store == NULL || func == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  if (rc != WYRELOG_E_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return rc;
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT " OFFLINE_RESTORE_COLUMNS " FROM "
+          "main.fact_offline_restore_journals "
+          "ORDER BY tenant_id,operation_uuid;", &stmt);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    rc = offline_restore_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      rc = offline_restore_claim_matches_locked (store, record);
+    if (rc == WYRELOG_E_OK)
+      rc = func (record, user_data);
+    wyl_policy_offline_restore_record_free (record);
+  }
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
 }
