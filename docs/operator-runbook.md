@@ -356,20 +356,38 @@ not grant roles or permissions; it only attaches a TOTP factor.
 
 Direct `--store` / `--keyprovider` enrollment, including their GSettings
 fallbacks, is only for maintenance or recovery while `wyrelogd` is stopped.
-Never use it against the encrypted store owned by a running daemon. During a
-daemon-stopped maintenance window, operators can stop repeating the paths by
-setting the two GSettings keys once:
+Never use it against the encrypted store owned by a running daemon.
+
+For privileged maintenance, the supported recipe is to pass the store and
+KeyProvider explicitly. Use the paths for the stopped daemon's profile; for
+example, with the system profile's file-backed KeyProvider:
 
 ```sh
-gsettings set org.wyrelog.wyctl default-policy-store /var/lib/wyrelog/policy.sqlite
-gsettings set org.wyrelog.wyctl default-keyprovider systemd-creds:wyrelog-policy
+sudo wyctl mfa enroll \
+  --subject alice \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --keyprovider file:/etc/wyrelog/system/policy.key
 ```
 
-After this, and only while the daemon is stopped,
-`sudo wyctl mfa enroll --subject alice` (no `--store`, no `--keyprovider`)
-resolves both paths from GSettings. `--subject` is
-**not** a GSettings-backed key — it is always passed explicitly per
-enrollment, because every enrollment targets exactly one principal.
+Use the same explicit options for privileged `wyctl mfa reset`.
+This recipe does not depend on root's GSettings defaults or on preserving
+the invoking user's environment.
+
+GSettings can still save repeated paths when `gsettings` and `wyctl` run
+as the **same account with the same settings-backend environment**, and
+that account already has access to the store and KeyProvider. For that
+same-account, daemon-stopped case:
+
+```sh
+gsettings set org.wyrelog.wyctl default-policy-store /var/lib/wyrelog/system/policy.sqlite
+gsettings set org.wyrelog.wyctl default-keyprovider file:/etc/wyrelog/system/policy.key
+wyctl mfa enroll --subject alice
+```
+
+Do not add `sudo` only to the final command and expect it to inherit the
+operator's saved defaults. See [whose settings wyctl reads under sudo](#when-wyctl-ignores-a-value-gsettings-get-returns)
+below. `--subject` is **not** a GSettings-backed key; always pass it
+explicitly because each enrollment targets one principal.
 
 Precedence is **CLI > GSettings > error**: an explicit `--store` or
 `--keyprovider` on the command line still wins over the GSettings value,
@@ -2640,16 +2658,23 @@ and with `GSETTINGS_SCHEMA_DIR` unset that includes
 entry. Fixed in the release carrying issue #1190; wyctl now walks the
 chain. If you are on an older build, upgrading resolves it.
 
-**Whose settings wyctl reads under `sudo`.** This is not fixed and
-upgrading does not help. `sudo` resets the environment, `HOME` becomes
-`/root`, and GSettings keeps per-user values under the user's own
-directories, so a value you set as yourself is not the value `sudo wyctl`
-reads. Both commands in the mfa workflow above are affected. Issue #1196
-tracks what the supported path should be.
+**Whose settings wyctl reads under `sudo`.** GSettings values belong to
+the account and backend environment in which they were written. Under a
+usual `sudo` environment-reset policy, `HOME` becomes `/root` and
+`sudo wyctl` reads the target account's settings rather than the invoking
+operator's. Making the same schema available to both commands does not
+copy the operator's saved values. `gsettings get` run as yourself therefore
+does not establish what a privileged wyctl will read.
 
-The two agree about which schema. They still disagree about whose
-settings, so `gsettings get` returning your value as yourself says
-nothing about what a privileged wyctl will see.
+The supported privileged workflow is to pass the needed CLI options
+explicitly, as in [offline maintenance](#offline-maintenance-defaults-via-gsettings)
+above. This also works when root has no configured GSettings defaults.
+Do not use `sudo -E` or add a `sudoers` `env_keep` rule just to make this
+recipe work; forwarding the operator's settings environment is not part
+of the supported recipe. GSettings remains available for same-account
+invocations, including a separately configured target-account backend,
+but this runbook does not require provisioning root's settings or a
+system-wide defaults layer.
 
 ### Key Reference
 
@@ -2666,8 +2691,9 @@ nothing about what a privileged wyctl will see.
 | `default-policy-store` | `s` | `""` | Backs offline `--store` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
 | `default-keyprovider` | `s` | `""` | Backs offline `--keyprovider` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
 
-Example: configure the operator workstation once and let every wyctl
-invocation pick up the defaults.
+Example: configure the operator workstation once and let wyctl invocations
+in that same account and settings-backend environment pick up the defaults.
+These per-user values are not automatically inherited by `sudo wyctl`.
 
 ```sh
 gsettings set org.wyrelog.wyctl daemon-url 'http://127.0.0.1:8765'
