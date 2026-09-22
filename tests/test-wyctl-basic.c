@@ -56,12 +56,12 @@ assert_child_stderr_has (const gchar *stderr_buf, const gchar *needle)
 }
 
 /* A keyfile fixture only means anything if wyctl can find the
- * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source
- * without recursing into parent sources (wyctl_open_settings), so this
- * mirrors that lookup exactly; a recursive one would accept environments
- * wyctl itself rejects.  The source covers GSETTINGS_SCHEMA_DIR, which meson
- * points at this build's compiled schema, and the data dirs, where an
- * installed wyrelog ships one -- whichever of those it resolves to first.
+ * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source,
+ * recursing into parent sources (wyctl_open_settings), so this mirrors that
+ * lookup exactly: it accepts any environment wyctl accepts and rejects any
+ * wyctl rejects.  The chain covers GSETTINGS_SCHEMA_DIR, which meson points
+ * at this build's compiled schema, and the data dirs, where an installed
+ * wyrelog ships one.
  *
  * With no schema reachable there, wyctl reports "missing daemon URL" rather
  * than reading the fixture, and only status-gsettings-supplies-daemon-url
@@ -78,7 +78,7 @@ assert_wyctl_gsettings_schema_available (void)
 {
   GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
   g_autoptr (GSettingsSchema) schema = source != NULL
-      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", FALSE)
+      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", TRUE)
       : NULL;
   if (schema != NULL)
     return;

@@ -12,8 +12,13 @@ wyctl_open_settings (void)
   if (source == NULL)
     return NULL;
 
+  /* Recurse, because that is what g_settings_new does and what every
+   * other GSettings client sees.  The lookup is hand-rolled only so a
+   * missing schema yields NULL instead of aborting; the recursion flag was
+   * never the point, and consulting the head source alone hid a correctly
+   * installed schema from wyctl while gsettings found it (#1190). */
   GSettingsSchema *schema = g_settings_schema_source_lookup (source,
-          WYCTL_GSETTINGS_SCHEMA_ID, FALSE);
+          WYCTL_GSETTINGS_SCHEMA_ID, TRUE);
   if (schema == NULL)
     return NULL;
 

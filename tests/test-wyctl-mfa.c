@@ -695,10 +695,10 @@ test_mfa_enroll_url_encodes_subject (void)
  * ------------------------------------------------------------------ */
 
 /* The keyfile fixtures below only mean anything if wyctl can find the
- * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source
- * without recursing into parent sources (wyctl_open_settings), so this
- * mirrors that lookup exactly; a recursive one would accept environments
- * wyctl itself rejects.
+ * org.wyrelog.wyctl schema.  wyctl looks it up in the default schema source,
+ * recursing into parent sources (wyctl_open_settings), so this mirrors that
+ * lookup exactly: it accepts any environment wyctl accepts and rejects any
+ * wyctl rejects.
  *
  * With no schema reachable, wyctl never reads the fixture: the
  * enroll-gsettings-supplies-store case fails on its own downstream
@@ -712,7 +712,7 @@ assert_wyctl_gsettings_schema_available_mfa (void)
 {
   GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
   g_autoptr (GSettingsSchema) schema = source != NULL
-      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", FALSE)
+      ? g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", TRUE)
       : NULL;
   if (schema != NULL)
     return;

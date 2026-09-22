@@ -236,6 +236,13 @@ test_open_settings_returns_null_for_missing_schema_id (void)
       g_settings_schema_source_lookup (source,
           "org.wyrelog.this-does-not-exist", FALSE);
   g_assert_null (schema);
+
+  /* wyctl_open_settings recurses, so pin the recursive mode too: that is
+   * the one it actually relies on. */
+  g_autoptr (GSettingsSchema) recursive =
+      g_settings_schema_source_lookup (source,
+          "org.wyrelog.this-does-not-exist", TRUE);
+  g_assert_null (recursive);
 }
 
 
@@ -248,6 +255,20 @@ static const gchar STALE_WYCTL_GSCHEMA[] =
     "  <schema id=\"org.wyrelog.wyctl\" path=\"/org/wyrelog/wyctl/\">\n"
     "    <key name=\"daemon-url\" type=\"s\">\n"
     "      <default>'http://old.example/'</default>\n"
+    "    </key>\n"
+    "  </schema>\n"
+    "</schemalist>\n";
+
+/* A schema with an id wyctl never looks for.  Its only job is to make the
+ * directory that holds it a schema source, so it can sit ahead of the real
+ * one in the chain; GLib skips a directory that carries no compiled
+ * schemas. */
+static const gchar DECOY_GSCHEMA[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<schemalist>\n"
+    "  <schema id=\"org.wyrelog.testdecoy\" path=\"/org/wyrelog/testdecoy/\">\n"
+    "    <key name=\"unused\" type=\"b\">\n"
+    "      <default>false</default>\n"
     "    </key>\n"
     "  </schema>\n"
     "</schemalist>\n";
@@ -303,6 +324,52 @@ remove_schema_dir (const gchar *dir)
     g_unlink (path);
   }
   g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_open_settings_finds_schema_behind_a_decoy_source (void)
+{
+  /* The schema source chain has a head and parents, and wyctl used to
+   * consult only the head.  So a correctly installed schema was invisible
+   * whenever any other directory carrying compiled schemas came first,
+   * while gsettings, which walks the chain, found it -- the divergence
+   * #1190 reports.
+   *
+   * The child runs against a chain whose head is a decoy carrying an
+   * unrelated schema, with this build's real one behind it.
+   * GSETTINGS_SCHEMA_DIR prepends to that chain rather than replacing it,
+   * so the machine's own data directories are still in it, further back.
+   * That is why the child first asserts the head does not carry the id:
+   * without it a pass would not distinguish "walked the chain" from "the
+   * decoy was never the head". */
+  if (g_test_subprocess ()) {
+    GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+    g_assert_nonnull (source);
+    g_autoptr (GSettingsSchema) head =
+        g_settings_schema_source_lookup (source, "org.wyrelog.wyctl", FALSE);
+    g_assert_null (head);
+
+    g_autoptr (GSettings) settings = wyctl_open_settings ();
+    g_assert_nonnull (settings);
+    /* Read a key as well: a non-NULL handle proves a schema was resolved,
+     * not that it was the one carrying wyctl's keys. */
+    g_autofree gchar *url = g_settings_get_string (settings, "daemon-url");
+    g_assert_nonnull (url);
+    return;
+  }
+
+  const gchar *real = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_assert_nonnull (real);
+  g_autofree gchar *saved = g_strdup (real);
+  g_autofree gchar *decoy = make_schema_dir ("wyctl-decoy-schema-XXXXXX",
+          DECOY_GSCHEMA);
+  g_autofree gchar *chain = g_strjoin (":", decoy, saved, NULL);
+
+  g_setenv ("GSETTINGS_SCHEMA_DIR", chain, TRUE);
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_setenv ("GSETTINGS_SCHEMA_DIR", saved, TRUE);
+  remove_schema_dir (decoy);
+  g_test_trap_assert_passed ();
 }
 
 static void
@@ -401,5 +468,7 @@ main (int argc, char **argv)
       test_open_settings_returns_null_for_missing_schema_id);
   g_test_add_func ("/wyctl/config/open/partial-schema-degrades",
       test_open_settings_degrades_on_a_partial_schema);
+  g_test_add_func ("/wyctl/config/open/behind-decoy-source",
+      test_open_settings_finds_schema_behind_a_decoy_source);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
