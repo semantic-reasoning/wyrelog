@@ -6,6 +6,7 @@
 #include "fact/offline-restore-stage-private.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #ifdef G_OS_WIN32
@@ -15,6 +16,7 @@
 #endif
 
 #define RESTORE_STAGE_MAX_WRITE (1024u * 1024u)
+#define RESTORE_STAGE_READ_CHUNK (64u * 1024u)
 
 struct WylFactOfflineRestoreStage
 {
@@ -24,9 +26,50 @@ struct WylFactOfflineRestoreStage
   WylFactGraphStage native_stage;
   guint64 bytes_written;
   guint64 expected_bytes;
+  guint8 expected_digest[32];
+  GChecksum *stream_checksum;
   gboolean failed;
   gboolean finalized;
 };
+
+static gboolean
+parse_checksum (const gchar *text, guint8 digest[32])
+{
+  if (text == NULL)
+    return FALSE;
+  gsize length = 0;
+  while (length < 72 && text[length] != '\0')
+    length++;
+  if (length != 71 || !g_str_has_prefix (text, "sha256:"))
+    return FALSE;
+  for (guint i = 0; i < 64; i++) {
+    gchar c = text[7 + i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+      return FALSE;
+    guint8 nibble = (guint8) g_ascii_xdigit_value (c);
+    if (i % 2 == 0)
+      digest[i / 2] = (guint8) (nibble << 4);
+    else
+      digest[i / 2] |= nibble;
+  }
+  return TRUE;
+}
+
+static gboolean
+checksum_matches (GChecksum *checksum, const guint8 expected[32])
+{
+  guint8 digest[32];
+  gsize size = sizeof digest;
+  g_checksum_get_digest (checksum, digest, &size);
+  return size == sizeof digest && memcmp (digest, expected, size) == 0;
+}
+
+static wyrelog_error_t
+checkpoint (WylFactOfflineRestoreStage *stage, const gchar *point)
+{
+  return stage->directory->checkpoint == NULL ? WYRELOG_E_OK :
+         stage->directory->checkpoint (point, stage->directory->checkpoint_data);
+}
 
 static gboolean
 same_root (const WylFactGraphResolver *resolver,
@@ -84,15 +127,24 @@ wyrelog_error_t
 wyl_fact_offline_restore_stage_new (WylFactGraphResolver *resolver,
     WylFactGraphDirectory *directory, WylFactRootWriterLease *writer_lease,
     const gchar *operation_uuid, guint64 expected_bytes,
+    const gchar *expected_checksum,
     WylFactOfflineRestoreStage **out_stage)
 {
   if (out_stage != NULL)
     *out_stage = NULL;
+  guint8 expected_digest[32] = { 0 };
   if (resolver == NULL || directory == NULL || writer_lease == NULL
       || operation_uuid == NULL || out_stage == NULL
       || expected_bytes == 0 || expected_bytes > G_MAXINT64
+      || !parse_checksum (expected_checksum, expected_digest)
       || !same_root (resolver, directory))
     return WYRELOG_E_INVALID;
+
+#ifndef G_OS_WIN32
+  off_t bound = (off_t) expected_bytes;
+  if (bound < 0 || (guint64) bound != expected_bytes)
+    return WYRELOG_E_INVALID;
+#endif
 
   WylFactOfflineRestoreStage *stage = g_try_new0
         (WylFactOfflineRestoreStage, 1);
@@ -102,7 +154,13 @@ wyl_fact_offline_restore_stage_new (WylFactGraphResolver *resolver,
   stage->directory = directory;
   stage->writer_lease = writer_lease;
   stage->expected_bytes = expected_bytes;
+  memcpy (stage->expected_digest, expected_digest, sizeof expected_digest);
   stage->native_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  stage->stream_checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (stage->stream_checksum == NULL) {
+    g_free (stage);
+    return WYRELOG_E_NOMEM;
+  }
 
   wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (writer_lease);
   if (rc == WYRELOG_E_OK)
@@ -119,6 +177,7 @@ wyl_fact_offline_restore_stage_new (WylFactGraphResolver *resolver,
     /* A post-create authority failure leaves a possible orphan. Never unlink
      * by name; close the held object and leave classification to recovery. */
     wyl_fact_graph_stage_clear (&stage->native_stage);
+    g_checksum_free (stage->stream_checksum);
     g_free (stage);
     return rc;
   }
@@ -172,7 +231,58 @@ wyl_fact_offline_restore_stage_write (WylFactOfflineRestoreStage *stage,
   }
   if (rc != WYRELOG_E_OK)
     stage->failed = TRUE;
+  else
+    g_checksum_update (stage->stream_checksum, bytes, length);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_sink (guint64 offset, const guint8 *bytes,
+    gsize length, gpointer user_data)
+{
+  return wyl_fact_offline_restore_stage_write (user_data, offset, bytes, length);
+}
+
+static wyrelog_error_t
+verify_readback (WylFactOfflineRestoreStage *stage)
+{
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return WYRELOG_E_NOMEM;
+  wyrelog_error_t rc = checkpoint (stage, "restore-stage-before-readback");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifdef G_OS_WIN32
+  if (_lseeki64 (stage->native_stage.fd, 0, SEEK_SET) != 0)
+    return WYRELOG_E_IO;
+#endif
+  guint8 buffer[RESTORE_STAGE_READ_CHUNK];
+  guint64 offset = 0;
+  for (;;) {
+    guint64 remaining = stage->expected_bytes - offset;
+    gsize requested = remaining == 0 ? 1 :
+        (gsize) MIN (remaining, (guint64) sizeof buffer);
+#ifdef G_OS_WIN32
+    int n = _read (stage->native_stage.fd, buffer, (unsigned int) requested);
+#else
+    ssize_t n = pread (stage->native_stage.fd, buffer, requested,
+            (off_t) offset);
+#endif
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n < 0)
+      return WYRELOG_E_IO;
+    if (remaining == 0)
+      return n == 0 && checksum_matches (checksum, stage->expected_digest)
+          ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+    if (n == 0)
+      return WYRELOG_E_POLICY;
+    g_checksum_update (checksum, buffer, (gsize) n);
+    offset += (guint64) n;
+    rc = checkpoint (stage, "restore-stage-readback-chunk");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 }
 
 wyrelog_error_t
@@ -184,13 +294,14 @@ wyl_fact_offline_restore_stage_finalize (WylFactOfflineRestoreStage *stage,
     *out_bytes_written = 0;
   if (out_identity != NULL)
     memset (out_identity, 0, sizeof *out_identity);
-  if (stage == NULL || out_bytes_written == NULL || out_identity == NULL
-      || stage->failed || stage->finalized)
+  if (stage == NULL || stage->failed || stage->finalized)
     return WYRELOG_E_INVALID;
-  if (stage->bytes_written != stage->expected_bytes) {
-    stage->failed = TRUE;
+  stage->failed = TRUE;
+  if (out_bytes_written == NULL || out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  if (stage->bytes_written != stage->expected_bytes
+      || !checksum_matches (stage->stream_checksum, stage->expected_digest))
     return WYRELOG_E_POLICY;
-  }
   wyrelog_error_t rc = authority_revalidate (stage);
   guint64 staged_size = 0;
   if (rc == WYRELOG_E_OK)
@@ -202,6 +313,10 @@ wyl_fact_offline_restore_stage_finalize (WylFactOfflineRestoreStage *stage,
     rc = wyl_fact_graph_directory_restore_stage_sync (stage->directory,
             &stage->native_stage);
   if (rc == WYRELOG_E_OK)
+    rc = verify_readback (stage);
+  if (rc == WYRELOG_E_OK)
+    rc = checkpoint (stage, "restore-stage-readback-complete");
+  if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_restore_stage_get_size (stage->directory,
             &stage->native_stage, &staged_size);
   if (rc == WYRELOG_E_OK && staged_size != stage->expected_bytes)
@@ -212,8 +327,7 @@ wyl_fact_offline_restore_stage_finalize (WylFactOfflineRestoreStage *stage,
     stage_identity (&stage->native_stage, out_identity);
     *out_bytes_written = stage->bytes_written;
     stage->finalized = TRUE;
-  } else {
-    stage->failed = TRUE;
+    stage->failed = FALSE;
   }
   return rc;
 }
@@ -225,5 +339,6 @@ wyl_fact_offline_restore_stage_free (WylFactOfflineRestoreStage *stage)
     return;
   /* Closing is not cleanup: operation-named orphans are recovery-owned. */
   wyl_fact_graph_stage_clear (&stage->native_stage);
+  g_checksum_free (stage->stream_checksum);
   g_free (stage);
 }
