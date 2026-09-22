@@ -12,6 +12,12 @@ typedef struct
   const GVariantType *type;
 } KeySpec;
 
+/* This lookup stays non-recursive on purpose and does not mirror
+ * wyctl_open_settings, which recurses (#1190).  The cases below assert the
+ * contents of the schema this build compiled, so they must consult only the
+ * head source that tests/meson.build points GSETTINGS_SCHEMA_DIR at.  A
+ * recursive lookup could satisfy them from a schema installed elsewhere on
+ * the machine and hide a stale or missing build artifact. */
 static GSettingsSchema *
 lookup_schema (void)
 {
