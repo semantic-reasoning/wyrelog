@@ -7,6 +7,7 @@
 #endif
 #include "fact/graph-locator-private.h"
 #include "fact/graph-locator-darwin-private.h"
+#include "fact/graph-artifact-transition-names-private.h"
 #ifndef G_OS_WIN32
 #include "fact/graph-provisioned-pair-internal.h"
 #endif
@@ -1174,6 +1175,61 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
 }
 
 wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_create_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    WylFactGraphStage *out_stage)
+{
+  if (out_stage == NULL)
+    return WYRELOG_E_INVALID;
+  *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, names.stage);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, "facts.duckdb");
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_names_clear (&names);
+    return rc;
+  }
+
+  gint fd = openat (directory->graph_fd, names.stage,
+          O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    rc = errno == EEXIST ? WYRELOG_E_BUSY : errno_to_resolver_error (errno);
+    wyl_fact_artifact_transition_names_clear (&names);
+    return rc;
+  }
+  rc = stage_populate_exact (directory, fd, names.stage, "facts.duckdb",
+          FALSE, out_stage);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-created",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-parent-synced",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc != WYRELOG_E_OK) {
+    /* The exact name may have been substituted after the create; close only. */
+    if (out_stage->fd >= 0)
+      wyl_fact_graph_stage_clear (out_stage);
+    else
+      close (fd);
+  } else {
+    out_stage->exact_provisioning_stage = FALSE;
+    out_stage->offline_restore_stage = TRUE;
+  }
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
     const gchar *operation_uuid, WylFactGraphStage *out_stage)
 {
@@ -1692,7 +1748,8 @@ wyl_fact_graph_stage_sync (WylFactGraphStage *stage)
 static gboolean
 stage_is_bound (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
 {
-  return stage != NULL && stage->fd >= 0 && name_is_safe (stage->stage_basename)
+  return directory != NULL && stage != NULL && stage->fd >= 0
+         && name_is_safe (stage->stage_basename)
          && name_is_safe (stage->final_basename)
          && stage->graph_device == directory->graph_device
          && stage->graph_inode == directory->graph_inode;
@@ -1715,6 +1772,64 @@ named_stage_state (WylFactGraphDirectory *directory, const gchar *name,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_revalidate
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
+{
+  if (!stage_is_bound (directory, stage))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (directory);
+  gboolean present = FALSE;
+  gboolean exact = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->stage_basename, stage,
+            &present, &exact);
+  if (rc == WYRELOG_E_OK && (!present || !exact))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_get_size
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage,
+    guint64 *out_size)
+{
+  if (out_size != NULL)
+    *out_size = 0;
+  if (out_size == NULL || !stage_is_bound (directory, stage))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  struct stat held = { 0 };
+  if (rc == WYRELOG_E_OK && fstat (stage->fd, &held) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (!S_ISREG (held.st_mode) || held.st_size < 0
+      || !stat_matches (&held, stage->device, stage->inode, FALSE, 0600)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  if (rc == WYRELOG_E_OK)
+    *out_size = (guint64) held.st_size;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_sync
+  (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
+{
+  wyrelog_error_t rc = wyl_fact_graph_directory_restore_stage_revalidate
+        (directory, stage);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_stage_sync (stage);
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
+  return rc;
+}
+
 static void
 stage_mark_complete (WylFactGraphStage *stage)
 {
@@ -1727,6 +1842,7 @@ stage_mark_complete (WylFactGraphStage *stage)
   stage->graph_device = 0;
   stage->graph_inode = 0;
   stage->exact_provisioning_stage = FALSE;
+  stage->offline_restore_stage = FALSE;
 }
 
 /* Link the held stage descriptor, never the mutable stage pathname.  This is
@@ -1827,6 +1943,8 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
 {
   if (directory == NULL || !stage_is_bound (directory, stage))
     return WYRELOG_E_INVALID;
+  if (stage->offline_restore_stage)
+    return WYRELOG_E_POLICY;
   if (stage->exact_provisioning_stage)
     return exact_stage_publish (directory, stage);
   wyrelog_error_t rc = directory_revalidate (directory);
@@ -1892,6 +2010,8 @@ wyl_fact_graph_stage_abort (WylFactGraphDirectory *directory,
    * replaced after validation.  The coordinator can degrade and retain this
    * known artifact; it must never clean up unknown bytes. */
   if (stage->exact_provisioning_stage)
+    return WYRELOG_E_POLICY;
+  if (stage->offline_restore_stage)
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = directory_revalidate (directory);
   gboolean stage_present = FALSE;

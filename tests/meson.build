@@ -1501,6 +1501,14 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+test_offline_restore_stage = executable('test-fact-offline-restore-stage',
+  'test-fact-offline-restore-stage.c',
+  'fact-test-support.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-offline-restore-stage', test_offline_restore_stage)
+
 test_fact_artifact_transition_names = executable(
   'test-fact-artifact-transition-names',
   'test-fact-artifact-transition-names.c',

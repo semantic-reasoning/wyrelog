@@ -258,7 +258,7 @@ slow_replay (WylFactReplayJobContext *context, gpointer user_data)
 {
   (void) context;
   (void) user_data;
-  g_usleep (5 * 1000);
+  g_usleep (100 * G_TIME_SPAN_MILLISECOND);
   return WYRELOG_E_OK;
 }
 
@@ -269,7 +269,7 @@ commit_then_slow_replay (WylFactReplayJobContext *context, gpointer user_data)
   wyrelog_error_t rc = wyl_fact_replay_job_context_commit (context);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_usleep (5 * 1000);
+  g_usleep (100 * G_TIME_SPAN_MILLISECOND);
   return WYRELOG_E_OK;
 }
 
@@ -653,7 +653,7 @@ static void
 test_deadline_is_enforced (void)
 {
   WylFactReplaySchedulerConfig config = test_config ();
-  config.time_limit_us = G_TIME_SPAN_MILLISECOND;
+  config.time_limit_us = 50 * G_TIME_SPAN_MILLISECOND;
   g_autoptr (WylFactResourceRecorder) recorder =
       wyl_fact_resource_recorder_new ();
   g_autoptr (WylFactReplayScheduler) scheduler = NULL;
@@ -673,7 +673,7 @@ static void
 test_commit_closes_deadline (void)
 {
   WylFactReplaySchedulerConfig config = test_config ();
-  config.time_limit_us = G_TIME_SPAN_MILLISECOND;
+  config.time_limit_us = 50 * G_TIME_SPAN_MILLISECOND;
   g_autoptr (WylFactResourceRecorder) recorder =
       wyl_fact_resource_recorder_new ();
   g_autoptr (WylFactReplayScheduler) scheduler = NULL;
