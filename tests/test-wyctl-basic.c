@@ -355,6 +355,130 @@ test_proxy_schema_environment (gconstpointer data)
 }
 
 static void
+test_settings_diagnostic (gconstpointer data)
+{
+  const gchar *mode = data;
+  gboolean missing = g_str_equal (mode, "missing");
+  gboolean missing_key = g_str_equal (mode, "missing-key");
+  gboolean wrong_type = g_str_equal (mode, "wrong-type");
+  gboolean uint_missing = g_str_equal (mode, "uint-missing");
+  gboolean uint_wrong = g_str_equal (mode, "uint-wrong");
+  gboolean auth = g_str_equal (mode, "auth-timeout");
+  gboolean diagnostic = missing || missing_key || wrong_type ||
+      uint_missing || uint_wrong;
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-settings-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_auto (GStrv) envp = g_get_environ ();
+  envp = g_environ_setenv (envp, "XDG_DATA_DIRS", dir, TRUE);
+  envp = g_environ_setenv (envp, "XDG_DATA_HOME", dir, TRUE);
+  envp = g_environ_setenv (envp, "GSETTINGS_SCHEMA_DIR", dir, TRUE);
+  envp = g_environ_setenv (envp, "GSETTINGS_BACKEND", "memory", TRUE);
+  envp = g_environ_setenv (envp, "GIO_USE_PROXY_RESOLVER", "dummy", TRUE);
+  envp = g_environ_setenv (envp, "G_DEBUG", "fatal-warnings", TRUE);
+  envp = g_environ_unsetenv (envp, "WYCTL_DISABLE_GSETTINGS");
+  if (g_str_equal (mode, "disabled"))
+    envp = g_environ_setenv (envp, "WYCTL_DISABLE_GSETTINGS", "1", TRUE);
+
+  if (missing_key || wrong_type || uint_missing || uint_wrong || auth ||
+      g_str_equal (mode, "empty")) {
+    const gchar *url_key = missing_key ? "" : wrong_type ?
+        "<key name='daemon-url' type='i'><default>7</default></key>" :
+        "<key name='daemon-url' type='s'><default>''</default></key>";
+    const gchar *timeout_key = uint_missing || missing_key ? "" :
+        uint_wrong ? "<key name='default-timeout-ms' type='s'>"
+        "<default>'not-a-timeout-canary'</default></key>" : auth ?
+        "<key name='default-timeout-ms' type='u'><default>0</default></key>" :
+        "<key name='default-timeout-ms' type='u'><default>2000</default></key>";
+    g_autofree gchar *xml = g_strdup_printf
+          ("<schemalist><schema id='org.wyrelog.wyctl' "
+            "path='/org/wyrelog/wyctl/'>%s%s</schema></schemalist>",
+            url_key, timeout_key);
+    g_autofree gchar *path = g_build_filename (dir, "test.gschema.xml", NULL);
+    g_assert_true (g_file_set_contents (path, xml, -1, &error));
+    g_assert_no_error (error);
+    gchar *compile[] = { "glib-compile-schemas", "--strict", dir, NULL };
+    gint status = 0;
+    g_assert_true (g_spawn_sync (NULL, compile, NULL, G_SPAWN_SEARCH_PATH,
+        NULL, NULL, NULL, NULL, &status, &error));
+    g_assert_no_error (error);
+    g_assert_true (g_spawn_check_wait_status (status, &error));
+    g_assert_no_error (error);
+  }
+
+  gchar *status_argv[] = { WYL_TEST_WYCTL_PATH, "status", NULL };
+  gchar *uint_argv[] = { WYL_TEST_WYCTL_PATH, "status", "--daemon-url",
+                         "http://127.0.0.1:1", NULL };
+  gchar *explicit_argv[] = { WYL_TEST_WYCTL_PATH, "status", "--daemon-url",
+                             "http://127.0.0.1:1", "--timeout-ms", "100", NULL };
+  gchar *version_argv[] = { WYL_TEST_WYCTL_PATH, "--version", NULL };
+  gchar *help_argv[] = { WYL_TEST_WYCTL_PATH, "status", "--help", NULL };
+  g_autofree gchar *credential = g_build_filename (dir, "credential", NULL);
+  g_autofree gchar *output = g_build_filename (dir, "token", NULL);
+  gchar *auth_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                         "http://127.0.0.1:1", "auth", "service-token", "--credential-file",
+                         credential, "--token-output", output, NULL };
+  gchar **argv = status_argv;
+  if (uint_missing || uint_wrong)
+    argv = uint_argv;
+  else if (g_str_equal (mode, "explicit"))
+    argv = explicit_argv;
+  else if (g_str_equal (mode, "version"))
+    argv = version_argv;
+  else if (g_str_equal (mode, "help"))
+    argv = help_argv;
+  else if (auth) {
+    g_assert_true (g_file_set_contents (credential,
+        "{\"version\":1,\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_secret\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}\n",
+        -1, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (credential, 0600), ==, 0);
+    argv = auth_argv;
+  }
+
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (g_file_test (output, G_FILE_TEST_EXISTS));
+  remove_dir_recursive (dir);
+  g_test_message ("child stderr: %s", stderr_buf);
+  g_assert_true (WIFEXITED (wait_status));
+  if (argv == version_argv || argv == help_argv) {
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+    g_assert_cmpstr (stderr_buf, ==, "");
+  } else {
+    g_assert_cmpstr (stdout_buf, ==, "");
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==,
+        argv == explicit_argv || argv == uint_argv ? 1 : 2);
+    g_assert_nonnull (strstr (stderr_buf, auth ? "wyctl: invalid timeout" :
+        argv == status_argv ? "wyctl: missing daemon URL" :
+        "wyctl: daemon unavailable:"));
+  }
+  const gchar *prefix = "wyctl: GSettings fallback unavailable:";
+  const gchar *first = strstr (stderr_buf, prefix);
+  if (diagnostic) {
+    g_assert_nonnull (first);
+    g_assert_null (strstr (first + strlen (prefix), prefix));
+    g_assert_nonnull (strstr (stderr_buf, "org.wyrelog.wyctl"));
+    g_assert_nonnull (strstr (stderr_buf, "glib-compile-schemas"));
+    g_assert_nonnull (strstr (stderr_buf, "GSETTINGS_SCHEMA_DIR"));
+    if (missing)
+      g_assert_nonnull (strstr (stderr_buf, "schema not found"));
+    else {
+      g_assert_nonnull (strstr (stderr_buf,
+          uint_missing || uint_wrong ? "default-timeout-ms" : "daemon-url"));
+      g_assert_nonnull (strstr (stderr_buf,
+          missing_key || uint_missing ? "missing key" : "expected type"));
+    }
+  } else
+    g_assert_null (first);
+  g_assert_null (strstr (stderr_buf, "not-a-timeout-canary"));
+  g_assert_null (strstr (stderr_buf, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+}
+
+static void
 assert_status_invalid_timeout (const gchar *timeout_ms)
 {
   gchar *argv[] = {
@@ -3117,6 +3241,16 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+
+  static const gchar *settings_cases[] = {
+    "missing", "missing-key", "wrong-type", "uint-missing", "uint-wrong",
+    "disabled", "explicit", "empty", "version", "help", "auth-timeout",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (settings_cases); i++) {
+    g_autofree gchar *path = g_strdup_printf ("/wyctl/settings-diagnostic/%s",
+            settings_cases[i]);
+    g_test_add_data_func (path, settings_cases[i], test_settings_diagnostic);
+  }
 
   static const gchar *proxy_cases[] = {
     "status", "policy", "mfa", "automatic", "dummy", "version",

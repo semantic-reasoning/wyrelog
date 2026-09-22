@@ -2638,16 +2638,43 @@ and validation failures reached before HTTP client construction remain usable.
 - After install the package runs `glib-compile-schemas` against the
   schemas directory to refresh `gschemas.compiled`. Manual installs that
   copy the schema in place must run `glib-compile-schemas
-  ${datadir}/glib-2.0/schemas` afterwards or wyctl will silently fall
-  back to CLI-only mode.
+  ${datadir}/glib-2.0/schemas` afterwards. If the schema is unavailable,
+  wyctl still accepts CLI options and diagnoses the first attempted
+  GSettings fallback.
 
 ### When wyctl ignores a value `gsettings get` returns
 
-Two common reasons are below, and they have different answers.
-Establish which one you have before changing anything. A third, rarer
-one is a schema that declares a key with a type wyctl does not expect;
-wyctl treats that key as unset and says nothing, which issue #1197
-tracks.
+First check for a `wyctl: GSettings fallback unavailable:` message on
+stderr. wyctl emits at most one such diagnostic per invocation, when an
+option actually needs a fallback that cannot be read. It distinguishes:
+
+- `schema not found`: `org.wyrelog.wyctl` is not reachable.
+- `missing key`: the selected schema lacks the requested key.
+- `expected type`: the key exists but has an incompatible type. The message
+  gives the actual and expected types (`s` for strings, `u` for unsigned
+  32-bit values).
+
+Install the schema matching the wyctl version, run `glib-compile-schemas`
+for its directory, and check `GSETTINGS_SCHEMA_DIR`, `XDG_DATA_HOME`, and
+`XDG_DATA_DIRS`. An older schema earlier in the search path can shadow the
+installed one. Explicit CLI options let the command proceed without those
+fallbacks. The diagnostic contains schema/key names and types, never stored
+values or credentials.
+
+Only the first unusable fallback is reported; other affected options still
+resolve as unset. The command keeps its existing missing-option messages
+and exit status. Opening settings alone, help/version, explicit CLI values,
+valid empty defaults, and intentional `WYCTL_DISABLE_GSETTINGS=1` do not
+produce this diagnostic. A command that succeeds using an internal default
+may still print it for an unavailable fallback it attempted.
+
+These diagnostics check schema availability and shape, not source ownership.
+Schema-source precedence is unchanged, including for root. For privileged
+invocations, use the controlled target-account environment and explicit CLI
+options described in [offline maintenance](#offline-maintenance-defaults-via-gsettings);
+this does not make preserved user-controlled schema search paths trusted.
+
+Schema visibility and account-specific settings are separate problems:
 
 **The schema wyctl could reach.** wyctl once consulted only the first
 schema source in GLib's chain rather than walking it, so a correctly

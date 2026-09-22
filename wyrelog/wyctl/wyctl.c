@@ -1223,7 +1223,7 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
     return 1;
   }
   guint timeout_ms = 0;
-  g_autofree gchar *timeout_arg = wyctl_resolve_string_option
+  g_autofree gchar *timeout_arg = wyctl_resolve_uint_option_as_string
         (global_opts->timeout_ms_arg, global_opts->settings,
           "default-timeout-ms");
   if (!parse_timeout_ms (timeout_arg, &timeout_ms)) {
@@ -5062,6 +5062,7 @@ main (int argc, char **argv)
    * for unset CLI flags. NULL when the schema is missing or the
    * operator set WYCTL_DISABLE_GSETTINGS=1; the resolver tolerates
    * that and degrades to CLI-only. */
+  wyctl_enable_settings_diagnostics ();
   g_autoptr (GSettings) settings = wyctl_open_settings ();
   opts.settings = settings;
 
