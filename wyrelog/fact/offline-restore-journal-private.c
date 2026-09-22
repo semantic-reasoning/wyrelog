@@ -1204,3 +1204,157 @@ wyl_fact_offline_restore_journal_recovery
     return WYL_FACT_OFFLINE_RESTORE_RECOVERY_LIFECYCLE_HANDOFF;
   return WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE;
 }
+
+static gboolean
+journal_equal (const WylFactOfflineRestoreJournal *left,
+    const WylFactOfflineRestoreJournal *right)
+{
+  g_autoptr (GBytes) left_bytes = NULL;
+  g_autoptr (GBytes) right_bytes = NULL;
+  return wyl_fact_offline_restore_journal_encode (left, &left_bytes)
+         == WYRELOG_E_OK
+         && wyl_fact_offline_restore_journal_encode (right, &right_bytes)
+         == WYRELOG_E_OK
+         && g_bytes_equal (left_bytes, right_bytes);
+}
+
+static gboolean
+successor_from_candidate (GBytes *current_bytes,
+    const WylFactOfflineRestoreJournal *desired,
+    wyrelog_error_t (*mutate) (WylFactOfflineRestoreJournal *, gpointer),
+    gpointer data)
+{
+  WylFactOfflineRestoreJournal candidate = { 0 };
+  gboolean equal = wyl_fact_offline_restore_journal_decode
+        (current_bytes, &candidate) == WYRELOG_E_OK
+      && mutate (&candidate, data) == WYRELOG_E_OK
+      && journal_equal (&candidate, desired);
+  wyl_fact_offline_restore_journal_clear (&candidate);
+  return equal;
+}
+
+typedef struct
+{
+  const gchar *graph_id;
+  WylFactArtifactInventoryIdentity identity;
+} BindSuccessor;
+
+static wyrelog_error_t
+successor_bind (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  BindSuccessor *bind = data;
+  return wyl_fact_offline_restore_journal_bind_staged_identity
+           (journal, bind->graph_id, &bind->identity);
+}
+
+static wyrelog_error_t
+successor_preflight (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  return wyl_fact_offline_restore_journal_mark_preflight (journal, data);
+}
+
+static wyrelog_error_t
+successor_decide (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  return wyl_fact_offline_restore_journal_decide
+           (journal, GPOINTER_TO_UINT (data));
+}
+
+typedef struct
+{
+  const gchar *graph_id;
+  WylFactArtifactMainTransitionOp operation;
+} BeginSuccessor;
+
+static wyrelog_error_t
+successor_begin (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  BeginSuccessor *begin = data;
+  return wyl_fact_offline_restore_journal_begin_attempt
+           (journal, begin->graph_id, begin->operation);
+}
+
+typedef struct
+{
+  const gchar *graph_id;
+  WylFactArtifactMainTransitionState state;
+  WylFactArtifactMainTransitionOp next_op;
+  gboolean terminal;
+} CompleteSuccessor;
+
+static wyrelog_error_t
+successor_complete (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  CompleteSuccessor *complete = data;
+  return wyl_fact_offline_restore_journal_complete_attempt
+           (journal, complete->graph_id, complete->state, complete->next_op,
+             complete->terminal);
+}
+
+static wyrelog_error_t
+successor_policy (WylFactOfflineRestoreJournal *journal,
+    G_GNUC_UNUSED gpointer data)
+{
+  return wyl_fact_offline_restore_journal_mark_policy_published (journal);
+}
+
+static wyrelog_error_t
+successor_handoff (WylFactOfflineRestoreJournal *journal,
+    G_GNUC_UNUSED gpointer data)
+{
+  return wyl_fact_offline_restore_journal_mark_lifecycle_handoff (journal);
+}
+
+gboolean
+wyl_fact_offline_restore_journal_is_legal_successor
+  (const WylFactOfflineRestoreJournal *current,
+    const WylFactOfflineRestoreJournal *desired)
+{
+  if (current == NULL || desired == NULL || current->revision == G_MAXUINT64
+      || desired->revision != current->revision + 1
+      || current->graphs == NULL || desired->graphs == NULL
+      || current->graphs->len != desired->graphs->len)
+    return FALSE;
+  g_autoptr (GBytes) current_bytes = NULL;
+  g_autoptr (GBytes) desired_bytes = NULL;
+  if (wyl_fact_offline_restore_journal_encode (current, &current_bytes)
+      != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_encode (desired, &desired_bytes)
+      != WYRELOG_E_OK)
+    return FALSE;
+
+  for (guint i = 0; i < desired->graphs->len; i++) {
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (desired->graphs, i);
+    WylFactOfflineRestoreJournalGraph *old_graph =
+        g_ptr_array_index (current->graphs, i);
+    if (graph == NULL || old_graph == NULL)
+      return FALSE;
+    BindSuccessor bind = { graph->graph_id, graph->staged_main_identity };
+    if (successor_from_candidate (current_bytes, desired, successor_bind,
+        &bind)
+        || successor_from_candidate (current_bytes, desired,
+        successor_preflight, graph->graph_id))
+      return TRUE;
+    BeginSuccessor begin = { graph->graph_id, graph->pending_op };
+    if (successor_from_candidate (current_bytes, desired, successor_begin,
+        &begin))
+      return TRUE;
+    CompleteSuccessor complete = {
+      graph->graph_id, graph->transition_state, graph->next_op,
+      graph->transition_terminal,
+    };
+    if (old_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && successor_from_candidate (current_bytes, desired,
+        successor_complete, &complete))
+      return TRUE;
+  }
+  if (successor_from_candidate (current_bytes, desired, successor_decide,
+      GUINT_TO_POINTER (desired->decision))
+      || successor_from_candidate (current_bytes, desired, successor_policy,
+      NULL)
+      || successor_from_candidate (current_bytes, desired, successor_handoff,
+      NULL))
+    return TRUE;
+  return FALSE;
+}

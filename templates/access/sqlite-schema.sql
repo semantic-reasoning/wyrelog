@@ -2017,3 +2017,56 @@ CREATE TABLE IF NOT EXISTS totp_enrollments (
     enrolled_at        INTEGER NOT NULL,
     id_uuidv7          TEXT    NOT NULL
 );
+
+-- Durable, unpublished offline-restore journals and exclusive target claims.
+CREATE TABLE IF NOT EXISTS fact_offline_restore_journals (
+    operation_uuid TEXT PRIMARY KEY CHECK(typeof(operation_uuid)='text' AND length(operation_uuid)=36 AND operation_uuid=lower(operation_uuid) AND length(replace(operation_uuid,'-',''))=32 AND replace(operation_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(operation_uuid,9,1)='-' AND substr(operation_uuid,14,1)='-' AND substr(operation_uuid,15,1)='7' AND substr(operation_uuid,19,1)='-' AND substr(operation_uuid,20,1) GLOB '[89ab]' AND substr(operation_uuid,24,1)='-'),
+    tenant_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),
+    selected_graph_id TEXT,
+    revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9223372036854775807),
+    manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),
+    graph_count INTEGER NOT NULL CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 1 AND 1024),
+    journal_blob BLOB NOT NULL CHECK(typeof(journal_blob)='blob' AND length(journal_blob) BETWEEN 1 AND 8388608),
+    created_at INTEGER NOT NULL CHECK(typeof(created_at)='integer' AND created_at>=0),
+    updated_at INTEGER NOT NULL CHECK(typeof(updated_at)='integer' AND updated_at>=created_at),
+    CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)),
+    FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),
+    FOREIGN KEY(tenant_id,selected_graph_id) REFERENCES fact_graphs(tenant_id,graph_id)
+);
+CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims (
+    tenant_id TEXT PRIMARY KEY,
+    operation_uuid TEXT NOT NULL UNIQUE,
+    FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),
+    FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT
+);
+CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (
+    tenant_id TEXT NOT NULL,
+    graph_id TEXT NOT NULL,
+    operation_uuid TEXT NOT NULL UNIQUE,
+    PRIMARY KEY(tenant_id,graph_id),
+    FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),
+    FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished
+    ON fact_offline_restore_journals(tenant_id,operation_uuid);
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_update_guard
+BEFORE UPDATE ON fact_offline_restore_journals BEGIN
+    SELECT CASE WHEN NEW.operation_uuid!=OLD.operation_uuid OR NEW.tenant_id!=OLD.tenant_id OR NEW.scope!=OLD.scope OR NEW.selected_graph_id IS NOT OLD.selected_graph_id OR NEW.manifest_sha256!=OLD.manifest_sha256 OR NEW.graph_count!=OLD.graph_count OR NEW.created_at!=OLD.created_at OR NEW.revision!=OLD.revision+1 OR NEW.updated_at<OLD.updated_at THEN RAISE(ABORT,'invalid restore journal update') END;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard
+BEFORE DELETE ON fact_offline_restore_journals
+WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid)
+BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard
+BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='tenant' AND selected_graph_id IS NULL) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid tenant restore claim') END;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_insert_guard
+BEFORE INSERT ON fact_offline_restore_graph_claims BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='graph' AND selected_graph_id=NEW.graph_id) OR EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid graph restore claim') END;
+END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_update_guard
+BEFORE UPDATE ON fact_offline_restore_tenant_claims BEGIN SELECT RAISE(ABORT,'restore tenant claims are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_update_guard
+BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT RAISE(ABORT,'restore graph claims are immutable'); END;

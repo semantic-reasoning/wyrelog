@@ -53,6 +53,15 @@ test_offline_restore_journal = executable('test-fact-offline-restore-journal',
 )
 test('fact-offline-restore-journal', test_offline_restore_journal)
 
+test_offline_restore_journal_store = executable(
+  'test-fact-offline-restore-journal-store',
+  'test-fact-offline-restore-journal-store.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep],
+)
+test('fact-offline-restore-journal-store',
+  test_offline_restore_journal_store)
+
 test_offline_restore_validation = executable(
   'test-fact-offline-restore-validation',
   'test-fact-offline-restore-validation.c',
