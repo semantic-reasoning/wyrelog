@@ -451,6 +451,121 @@ copy_fixture_clear (CopyFixture *fixture)
   g_free (fixture->root);
 }
 
+static gchar *checksum_text (const guint8 *bytes, gsize length);
+
+#ifndef G_OS_WIN32
+typedef struct
+{
+  CopyFixture *fixture;
+  gboolean injected;
+} RestoreReaderOpenRace;
+
+static wyrelog_error_t
+replace_restore_stage_after_reader_open (const gchar *point,
+    gpointer user_data)
+{
+  RestoreReaderOpenRace *race = user_data;
+  if (!race->injected
+      && g_strcmp0 (point, "restore-stage-reader-opened") == 0) {
+    race->injected = TRUE;
+    g_autofree gchar *displaced = g_strconcat (race->fixture->path,
+            ".displaced", NULL);
+    if (g_rename (race->fixture->path, displaced) != 0)
+      return WYRELOG_E_IO;
+    gint fd = g_open (race->fixture->path,
+            O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0)
+      return WYRELOG_E_IO;
+    if (close (fd) != 0)
+      return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+#endif
+
+static void
+test_restore_stage_reader_reopen_read_only (void)
+{
+  WylFactOfflineRestoreStageReader *reader = NULL;
+#ifdef G_OS_WIN32
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open (NULL, NULL,
+      NULL, NULL, NULL, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+#else
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  const guint8 payload[] = "reopened restore payload";
+  g_autofree gchar *checksum = checksum_text (payload, sizeof payload - 1);
+  WylFactOfflineRestoreStage *stage = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_new (&fixture.resolver,
+      &fixture.directory, fixture.lease, fixture.operation_uuid,
+      sizeof payload - 1, checksum, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_sink (0, payload,
+      sizeof payload - 1, stage), ==, WYRELOG_E_OK);
+  guint64 written = 0;
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_stage_finalize (stage, &written,
+      &identity), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, sizeof payload - 1);
+  wyl_fact_offline_restore_stage_free (stage);
+
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+        (&fixture.resolver, &fixture.directory, fixture.lease,
+      fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_OK);
+  guint64 size = 0;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_get_size (reader,
+      &size), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (size, ==, sizeof payload - 1);
+  guint8 actual[sizeof payload - 1];
+  gsize bytes_read = 99;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_read_at (reader, 0,
+      actual, sizeof actual, &bytes_read), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (bytes_read, ==, sizeof actual);
+  g_assert_cmpmem (actual, sizeof actual, payload, sizeof payload - 1);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_read_at (reader,
+      size, actual, 1, &bytes_read), ==, WYRELOG_E_INVALID);
+  g_assert_cmpuint (bytes_read, ==, 0);
+
+  /* This capability authenticates namespace/object identity, not content.
+   * A caller must compare the consumed bytes with the journal digest. */
+  gint fd = g_open (fixture.path, O_WRONLY, 0);
+  g_assert_cmpint (fd, >=, 0);
+  const guint8 replacement = (guint8) (payload[0] ^ 0xff);
+  g_assert_cmpint (pwrite (fd, &replacement, 1, 0), ==, 1);
+  g_assert_cmpint (close (fd), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_read_at (reader, 0,
+      actual, sizeof actual, &bytes_read), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (bytes_read, ==, sizeof actual);
+  g_autofree gchar *observed_checksum = checksum_text (actual,
+          sizeof actual);
+  g_assert_cmpstr (observed_checksum, !=, checksum);
+  wyl_fact_offline_restore_stage_reader_free (reader);
+  reader = NULL;
+
+  identity.object++;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+        (&fixture.resolver, &fixture.directory, fixture.lease,
+      fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+  g_assert_true (g_file_test (fixture.path, G_FILE_TEST_IS_REGULAR));
+
+  RestoreReaderOpenRace race = { .fixture = &fixture };
+  fixture.directory.checkpoint = replace_restore_stage_after_reader_open;
+  fixture.directory.checkpoint_data = &race;
+  identity.object--;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+        (&fixture.resolver, &fixture.directory, fixture.lease,
+      fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_true (race.injected);
+  g_assert_null (reader);
+  g_autofree gchar *displaced = g_strconcat (fixture.path, ".displaced", NULL);
+  g_assert_true (g_file_test (displaced, G_FILE_TEST_IS_REGULAR));
+  fixture.directory.checkpoint = NULL;
+  fixture.directory.checkpoint_data = NULL;
+  copy_fixture_clear (&fixture);
+#endif
+}
+
 static void
 corrupt_first_byte (const gchar *path)
 {
@@ -764,6 +879,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-offline-restore-stage/create-write-finalize-collision",
       test_create_write_finalize_and_collision);
+  g_test_add_func ("/fact-offline-restore-stage/reopen-read-only",
+      test_restore_stage_reader_reopen_read_only);
   g_test_add_func ("/fact-offline-restore-stage/post-create-orphan",
       test_post_create_failure_leaves_unrecoverable_orphan);
   g_test_add_func ("/fact-offline-restore-stage/substitute-fails-closed",

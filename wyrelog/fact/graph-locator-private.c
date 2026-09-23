@@ -1133,6 +1133,239 @@ stage_populate_exact (WylFactGraphDirectory *directory, gint fd,
   return WYRELOG_E_OK;
 }
 
+struct WylFactGraphRestoreStageReader
+{
+  WylFactGraphDirectory *directory;
+  gint fd;
+  gchar *stage_basename;
+  guint64 device;
+  guint64 inode;
+  guint64 graph_device;
+  guint64 graph_inode;
+  guint64 size;
+  WylFactArtifactInventoryIdentity expected_identity;
+};
+
+static gboolean
+restore_reader_stat_matches (const struct stat *st,
+    const WylFactArtifactInventoryIdentity *identity)
+{
+  return S_ISREG (st->st_mode) && st->st_nlink == 1
+         && wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st->st_mode,
+             (guint64) st->st_uid, (guint64) geteuid (), 0600)
+         && identity->object_width == 0
+         && identity->domain == (guint64) st->st_dev
+         && identity->object == (guint64) st->st_ino
+         && memcmp (identity->object_bytes, (guint8[16]) { 0 }, 16) == 0;
+}
+
+static wyrelog_error_t
+restore_reader_check_name (WylFactGraphDirectory *directory,
+    const gchar *stage_basename,
+    const WylFactArtifactInventoryIdentity *expected_identity)
+{
+  struct stat named;
+  if (fstatat (directory->graph_fd, stage_basename, &named,
+      AT_SYMLINK_NOFOLLOW) != 0)
+    return errno_to_resolver_error (errno);
+  return restore_reader_stat_matches (&named, expected_identity)
+      ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_reader_open_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactGraphRestoreStageReader **out_reader)
+{
+  if (out_reader != NULL)
+    *out_reader = NULL;
+  if (directory == NULL || operation_uuid == NULL || expected_identity == NULL
+      || out_reader == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, names.stage);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (directory, names.stage, expected_identity);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-reader-before-open",
+            directory->checkpoint_data);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_names_clear (&names);
+    return rc;
+  }
+
+  struct stat before = { 0 };
+  if (fstatat (directory->graph_fd, names.stage, &before,
+      AT_SYMLINK_NOFOLLOW) != 0)
+    rc = errno_to_resolver_error (errno);
+  if (rc == WYRELOG_E_OK
+      && !restore_reader_stat_matches (&before, expected_identity))
+    rc = WYRELOG_E_POLICY;
+
+  gint fd = -1;
+  if (rc == WYRELOG_E_OK) {
+    fd = openat (directory->graph_fd, names.stage,
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+
+  struct stat held = { 0 };
+  if (rc == WYRELOG_E_OK && fstat (fd, &held) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!restore_reader_stat_matches (&held, expected_identity)
+      || held.st_dev != before.st_dev || held.st_ino != before.st_ino
+      || held.st_size < 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-reader-opened",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (directory, names.stage, expected_identity);
+
+  WylFactGraphRestoreStageReader *reader = NULL;
+  if (rc == WYRELOG_E_OK) {
+    reader = g_try_new0 (WylFactGraphRestoreStageReader, 1);
+    if (reader == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else
+      reader->fd = -1;
+  }
+  if (rc == WYRELOG_E_OK) {
+    reader->stage_basename = try_strdup (names.stage);
+    if (reader->stage_basename == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (rc == WYRELOG_E_OK) {
+    reader->directory = directory;
+    reader->fd = fd;
+    reader->device = (guint64) held.st_dev;
+    reader->inode = (guint64) held.st_ino;
+    reader->graph_device = directory->graph_device;
+    reader->graph_inode = directory->graph_inode;
+    reader->size = (guint64) held.st_size;
+    reader->expected_identity = *expected_identity;
+    fd = -1;
+    *out_reader = reader;
+    reader = NULL;
+  }
+  if (reader != NULL)
+    wyl_fact_graph_restore_stage_reader_free (reader);
+  if (fd >= 0)
+    close (fd);
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_revalidate
+  (WylFactGraphRestoreStageReader *reader)
+{
+  if (reader == NULL || reader->directory == NULL || reader->fd < 0
+      || reader->stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (reader->directory);
+  struct stat held;
+  if (rc == WYRELOG_E_OK && fstat (reader->fd, &held) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!restore_reader_stat_matches (&held, &reader->expected_identity)
+      || (guint64) held.st_dev != reader->device
+      || (guint64) held.st_ino != reader->inode || held.st_size < 0
+      || (guint64) held.st_size != reader->size
+      || reader->directory->graph_device != reader->graph_device
+      || reader->directory->graph_inode != reader->graph_inode))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (reader->directory,
+            reader->stage_basename, &reader->expected_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (reader->directory);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_get_size
+  (WylFactGraphRestoreStageReader *reader, guint64 *out_size)
+{
+  if (out_size != NULL)
+    *out_size = 0;
+  if (reader == NULL || out_size == NULL || reader->fd < 0)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_restore_stage_reader_revalidate
+        (reader);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  struct stat held;
+  if (fstat (reader->fd, &held) != 0)
+    return WYRELOG_E_IO;
+  if (!restore_reader_stat_matches (&held, &reader->expected_identity)
+      || (guint64) held.st_dev != reader->device
+      || (guint64) held.st_ino != reader->inode || held.st_size < 0
+      || (guint64) held.st_size != reader->size)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_restore_stage_reader_revalidate (reader);
+  if (rc == WYRELOG_E_OK)
+    *out_size = (guint64) held.st_size;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_read_at
+  (WylFactGraphRestoreStageReader *reader, guint64 offset, guint8 *buffer,
+    gsize length, gsize *out_bytes_read)
+{
+  if (out_bytes_read != NULL)
+    *out_bytes_read = 0;
+  if (reader == NULL || reader->fd < 0 || buffer == NULL
+      || out_bytes_read == NULL || length == 0 || length > 64u * 1024u
+      || offset > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  guint64 size = 0;
+  wyrelog_error_t rc = wyl_fact_graph_restore_stage_reader_get_size
+        (reader, &size);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (offset > size || (guint64) length > size - offset)
+    return WYRELOG_E_INVALID;
+  gsize total = 0;
+  while (total < length) {
+    ssize_t count = pread (reader->fd, buffer + total, length - total,
+            (off_t) (offset + total));
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0)
+      return count == 0 ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    total += (gsize) count;
+  }
+  rc = wyl_fact_graph_restore_stage_reader_get_size (reader, &size);
+  if (rc == WYRELOG_E_OK)
+    *out_bytes_read = total;
+  return rc;
+}
+
+void
+wyl_fact_graph_restore_stage_reader_free
+  (WylFactGraphRestoreStageReader *reader)
+{
+  if (reader == NULL)
+    return;
+  if (reader->fd >= 0)
+    close (reader->fd);
+  g_free (reader->stage_basename);
+  g_free (reader);
+}
+
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
     const gchar *operation_uuid, WylFactGraphStage *out_stage)

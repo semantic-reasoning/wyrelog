@@ -3,6 +3,7 @@
 
 #include <glib.h>
 
+#include "graph-artifact-inventory-private.h"
 #include "graph-locator-darwin-private.h"
 #include "wyrelog/error.h"
 
@@ -146,6 +147,26 @@ typedef struct
 #define WYL_FACT_GRAPH_REGULAR_FILE_INIT { .fd = -1 }
 #endif
 #define WYL_FACT_GRAPH_STAGE_INIT { .fd = -1 }
+
+/* Opaque, read-only access to one journal-identified offline-restore stage.
+ * It cannot publish, rename, unlink, or open the canonical main artifact. */
+typedef struct WylFactGraphRestoreStageReader WylFactGraphRestoreStageReader;
+
+wyrelog_error_t wyl_fact_graph_directory_restore_stage_reader_open_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactGraphRestoreStageReader **out_reader);
+wyrelog_error_t wyl_fact_graph_restore_stage_reader_revalidate
+  (WylFactGraphRestoreStageReader *reader);
+wyrelog_error_t wyl_fact_graph_restore_stage_reader_get_size
+  (WylFactGraphRestoreStageReader *reader, guint64 *out_size);
+wyrelog_error_t wyl_fact_graph_restore_stage_reader_read_at
+  (WylFactGraphRestoreStageReader *reader, guint64 offset, guint8 *buffer,
+    gsize length, gsize *out_bytes_read);
+void wyl_fact_graph_restore_stage_reader_free
+  (WylFactGraphRestoreStageReader *reader);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphRestoreStageReader,
+    wyl_fact_graph_restore_stage_reader_free)
 
 wyrelog_error_t wyl_fact_graph_component_encode (const gchar * value,
     gchar ** out_component);
