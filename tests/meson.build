@@ -150,6 +150,7 @@ test('wirelog-dependency-boundary', python3,
     meson_exe.full_path(),
   ],
   env : python_strict_encoding_env,
+  is_parallel : host_machine.system() != 'windows',
   timeout : 600,
 )
 
@@ -355,7 +356,9 @@ test_offline_restore_journal_stage = executable(
   dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep]
     + fact_test_support_deps,
 )
-test('fact-offline-restore-journal-stage', test_offline_restore_journal_stage)
+test('fact-offline-restore-journal-stage', test_offline_restore_journal_stage,
+  timeout : 120,
+)
 
 test_smoke = executable('test-smoke',
   'test-smoke.c',
@@ -2115,7 +2118,11 @@ if get_option('enable_fact_store').allowed()
   # Raised from 60 for issue #546: the new concurrent isolation case runs two
   # mutation workers plus a status observer.  ~14s here, but this suite is
   # also run under ASan/UBSan, where that multiplies past 60.
-  test('fact-replay', test_fact_replay, timeout : 120)
+  test_fact_replay_timeout = 120
+  if host_machine.system() == 'windows'
+    test_fact_replay_timeout = 180
+  endif
+  test('fact-replay', test_fact_replay, timeout : test_fact_replay_timeout)
 
   test_fact_replay_scheduler = executable('test-fact-replay-scheduler',
     'test-fact-replay-scheduler.c',

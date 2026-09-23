@@ -452,6 +452,7 @@ copy_fixture_clear (CopyFixture *fixture)
 }
 
 static gchar *checksum_text (const guint8 *bytes, gsize length);
+static void corrupt_first_byte (const gchar *path);
 
 #ifndef G_OS_WIN32
 typedef struct
@@ -562,6 +563,70 @@ test_restore_stage_reader_reopen_read_only (void)
   g_assert_true (g_file_test (displaced, G_FILE_TEST_IS_REGULAR));
   fixture.directory.checkpoint = NULL;
   fixture.directory.checkpoint_data = NULL;
+  copy_fixture_clear (&fixture);
+#endif
+}
+
+static void
+test_restore_stage_reader_verify_content (void)
+{
+#ifdef G_OS_WIN32
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (NULL, 0, NULL), ==, WYRELOG_E_POLICY);
+#else
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  const gsize length = 128 * 1024 + 17;
+  g_autofree guint8 *payload = g_malloc (length);
+  for (gsize i = 0; i < length; i++)
+    payload[i] = (guint8) ((i * 37u + 19u) & 0xffu);
+  g_autofree gchar *checksum = checksum_text (payload, length);
+  WylFactOfflineRestoreStage *stage = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_new (&fixture.resolver,
+      &fixture.directory, fixture.lease, fixture.operation_uuid, length,
+      checksum, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_sink (0, payload, length,
+      stage), ==, WYRELOG_E_OK);
+  guint64 written = 0;
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_stage_finalize (stage, &written,
+      &identity), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, length);
+  wyl_fact_offline_restore_stage_free (stage);
+
+  WylFactOfflineRestoreStageReader *reader = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+        (&fixture.resolver, &fixture.directory, fixture.lease,
+      fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, checksum), ==, WYRELOG_E_OK);
+  gint append_fd = g_open (fixture.path, O_WRONLY | O_APPEND, 0);
+  g_assert_cmpint (append_fd, >=, 0);
+  const guint8 appended = 0xa5;
+  g_assert_cmpint (write (append_fd, &appended, 1), ==, 1);
+  g_assert_cmpint (close (append_fd), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, checksum), ==, WYRELOG_E_POLICY);
+  g_assert_true (truncate_file (fixture.path, length));
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length - 1, checksum), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *wrong_checksum = checksum_text (payload + 1, length - 1);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, wrong_checksum), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, "sha256:ABC"), ==, WYRELOG_E_INVALID);
+
+  corrupt_first_byte (fixture.path);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, checksum), ==, WYRELOG_E_POLICY);
+  g_assert_true (truncate_file (fixture.path, length - 1));
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
+        (reader, length, checksum), ==, WYRELOG_E_POLICY);
+  wyl_fact_offline_restore_stage_reader_free (reader);
+  g_assert_true (g_file_test (fixture.path, G_FILE_TEST_IS_REGULAR));
+  g_autofree gchar *main_path = wyl_fact_graph_directory_descriptive_file
+        (&fixture.directory, "facts.duckdb");
+  g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
   copy_fixture_clear (&fixture);
 #endif
 }
@@ -881,6 +946,8 @@ main (int argc, char **argv)
       test_create_write_finalize_and_collision);
   g_test_add_func ("/fact-offline-restore-stage/reopen-read-only",
       test_restore_stage_reader_reopen_read_only);
+  g_test_add_func ("/fact-offline-restore-stage/reader-verify-content",
+      test_restore_stage_reader_verify_content);
   g_test_add_func ("/fact-offline-restore-stage/post-create-orphan",
       test_post_create_failure_leaves_unrecoverable_orphan);
   g_test_add_func ("/fact-offline-restore-stage/substitute-fails-closed",

@@ -37,6 +37,14 @@ wyrelog_error_t wyl_fact_offline_restore_stage_reader_get_size
 wyrelog_error_t wyl_fact_offline_restore_stage_reader_read_at
   (WylFactOfflineRestoreStageReader *reader, guint64 offset,
     guint8 *buffer, gsize length, gsize *out_bytes_read);
+/* Verify journal-supplied size and SHA-256 over the complete stage using only
+ * bounded reads through this identity-bound reader. This proves the bytes
+ * observed during this call, not immunity from a later same-size write. It
+ * does not load or mutate the journal, inspect database metadata, or authorize
+ * replay or publication. */
+wyrelog_error_t wyl_fact_offline_restore_stage_reader_verify_content
+  (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
+    const gchar *expected_checksum);
 void wyl_fact_offline_restore_stage_reader_free
   (WylFactOfflineRestoreStageReader *reader);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactOfflineRestoreStageReader,
