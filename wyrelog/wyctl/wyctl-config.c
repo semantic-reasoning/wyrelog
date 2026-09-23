@@ -91,16 +91,22 @@ linux_filesystem_magic_supported (long magic)
 #endif
 
 #ifdef WYCTL_CONFIG_TESTING
-static const gchar *test_untrusted_filesystem_path;
+static gboolean test_untrusted_filesystem_identity_set;
+static dev_t test_untrusted_filesystem_device;
+static ino_t test_untrusted_filesystem_inode;
 #endif
 
 static gboolean
 has_supported_filesystem (const gchar *path)
 {
 #ifdef WYCTL_CONFIG_TESTING
-  if (test_untrusted_filesystem_path != NULL &&
-      g_strcmp0 (path, test_untrusted_filesystem_path) == 0)
-    return FALSE;
+  if (test_untrusted_filesystem_identity_set) {
+    struct stat test_st;
+    if (stat (path, &test_st) == 0 &&
+        test_st.st_dev == test_untrusted_filesystem_device &&
+        test_st.st_ino == test_untrusted_filesystem_inode)
+      return FALSE;
+  }
 #endif
 #ifdef __linux__
   struct statfs fs;
@@ -446,7 +452,13 @@ wyctl_config_test_filesystem_path_supported (const gchar *path)
 void
 wyctl_config_test_reject_filesystem_path (const gchar *path)
 {
-  test_untrusted_filesystem_path = path;
+  struct stat st;
+  test_untrusted_filesystem_identity_set = path != NULL &&
+      stat (path, &st) == 0;
+  if (test_untrusted_filesystem_identity_set) {
+    test_untrusted_filesystem_device = st.st_dev;
+    test_untrusted_filesystem_inode = st.st_ino;
+  }
 }
 #endif
 #endif
