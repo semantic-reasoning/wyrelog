@@ -143,12 +143,16 @@ jobs:
             fact-artifact-transition-posix \
             --print-errorlogs
 
-      - name: Build fact-store production daemon
-        if: runner.os == 'Linux'
+      - name: Build fact-store tree
+        # Compiles every target, tests included, in the fact-store
+        # configuration (issues #497 and #1210).  Keep it free of a target
+        # list and a platform gate: some fact-store tests are compiled by no
+        # other POSIX job.  tests/test-ci-fact-store-compile-coverage.py pins
+        # this step.
         run: |
           meson setup build-fact -Denable_fact_store=enabled \
             -Denable_audit=enabled -Dduckdb_source=prebuilt
-          meson compile -C build-fact wyrelogd
+          meson compile -C build-fact
 
       - name: Provision secure DuckDB compile swap
         if: runner.os == 'Linux'
@@ -289,6 +293,7 @@ jobs:
           name: meson-logs-${{ matrix.os }}
           path: |
             builddir/meson-logs/
+            build-fact/meson-logs/
             build-secure-duckdb/meson-logs/
           if-no-files-found: ignore
 

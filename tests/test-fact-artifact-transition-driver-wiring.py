@@ -1239,6 +1239,9 @@ def require_meson_compiler_profile(
         "add_project_arguments",
     )
     if project_calls != [
+        "add_project_arguments( "
+        "cc.get_supported_arguments('-Werror=implicit-function-declaration'), "
+        "language : 'c')",
         "add_project_arguments('-DWYL_ENABLE_FAULT_INJECTION', language : 'c')",
         "add_project_arguments('-DWYL_ENABLE_WINDOWS_ARTIFACT_TEST_HOOKS', language : 'c')",
     ]:
