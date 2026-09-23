@@ -12,6 +12,7 @@
 #include "wyrelog/fact/offline-restore-journal-private.h"
 #include "wyrelog/fact/offline-restore-journal-stage-private.h"
 #include "wyrelog/fact/offline-restore-journal-store-private.h"
+#include "wyrelog/fact/offline-restore-validation-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-id-private.h"
@@ -25,6 +26,7 @@ typedef struct
   gchar *root;
   gchar *policy_path;
   wyl_policy_store_t *policy;
+  GBytes *manifest;
 } Fixture;
 
 static void
@@ -109,6 +111,7 @@ create_restore_journal (Fixture *fixture, const guint8 *bytes, gsize length,
   g_assert_true (created);
 
   g_autoptr (GBytes) manifest = manifest_bytes (bytes, length, two_graphs);
+  fixture->manifest = g_bytes_ref (manifest);
   g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
         ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
   static const gchar *const graph_ids[] = { "alpha", "zeta" };
@@ -178,6 +181,7 @@ fixture_clear (Fixture *fixture)
   remove_tree (fixture->root);
   g_clear_pointer (&fixture->policy_path, g_free);
   g_clear_pointer (&fixture->root, g_free);
+  g_clear_pointer (&fixture->manifest, g_bytes_unref);
 }
 
 static WylFactOfflineRestoreJournalGraph *
@@ -288,7 +292,7 @@ test_copy_finalize_and_durable_identity_binding (void)
 
   WylFactOfflineRestoreJournalStage *session = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
-      fixture.root, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
+      fixture.root, fixture.manifest, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
   stage_artifact (session, bytes, length);
   WylFactOfflineRestoreJournal committed = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_finish (session,
@@ -348,7 +352,7 @@ test_sequential_graph_binding_revision_accounting (void)
   for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
     WylFactOfflineRestoreJournalStage *session = NULL;
     g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new
-          (fixture.policy, fixture.root, OP_A, graphs[i], i + 1, &session),
+          (fixture.policy, fixture.root, fixture.manifest, OP_A, graphs[i], i + 1, &session),
         ==, WYRELOG_E_OK);
     stage_artifact (session, bytes, sizeof bytes - 1);
     WylFactOfflineRestoreJournal committed = { 0 };
@@ -377,7 +381,7 @@ test_sink_failure_terminalizes_without_journal_mutation (void)
   fixture_init (&fixture, bytes, sizeof bytes - 1, FALSE);
   WylFactOfflineRestoreJournalStage *session = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
-      fixture.root, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
+      fixture.root, fixture.manifest, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_sink (1, bytes,
       sizeof bytes - 1, session), !=, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_sink (0, bytes,
@@ -405,7 +409,7 @@ test_stale_cas_retains_stage_and_does_not_overwrite (void)
   fixture_init (&fixture, bytes, sizeof bytes - 1, TRUE);
   WylFactOfflineRestoreJournalStage *session = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
-      fixture.root, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
+      fixture.root, fixture.manifest, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
   stage_artifact (session, bytes, sizeof bytes - 1);
   WylFactOfflineRestoreJournal concurrent = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
@@ -451,7 +455,7 @@ test_ambiguous_commit_preserves_recovery_state (void)
   fixture_init (&fixture, bytes, sizeof bytes - 1, FALSE);
   WylFactOfflineRestoreJournalStage *session = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
-      fixture.root, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
+      fixture.root, fixture.manifest, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
   stage_artifact (session, bytes, sizeof bytes - 1);
   wyl_policy_store_offline_restore_fail_once (fixture.policy,
       WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
@@ -494,7 +498,7 @@ test_producer_failure_after_all_bytes_does_not_finalize_or_bind (void)
   fixture_init (&fixture, bytes, sizeof bytes - 1, FALSE);
   WylFactOfflineRestoreJournalStage *session = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
-      fixture.root, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
+      fixture.root, fixture.manifest, OP_A, "alpha", 1, &session), ==, WYRELOG_E_OK);
   stage_artifact (session, bytes, sizeof bytes - 1);
   WylFactOfflineRestoreJournal output = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_stage_finish (session,
@@ -512,6 +516,56 @@ test_producer_failure_after_all_bytes_does_not_finalize_or_bind (void)
   fixture_clear (&fixture);
 }
 
+static void
+test_manifest_mismatch_rejected_before_stage_creation (void)
+{
+  static const guint8 bytes[] = "manifest gate";
+  Fixture fixture = { 0 };
+  fixture_init (&fixture, bytes, sizeof bytes - 1, FALSE);
+  g_autoptr (GBytes) wrong_manifest = manifest_bytes
+        ((const guint8 *) "different content", 17, FALSE);
+  WylFactOfflineRestoreJournal malformed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, OP_A, &malformed), ==, WYRELOG_E_OK);
+  GPtrArray *saved_graphs = malformed.graphs;
+  malformed.graphs = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_manifest_preflight
+        (fixture.manifest, &malformed), ==, WYRELOG_E_INVALID);
+  malformed.graphs = saved_graphs;
+  wyl_fact_offline_restore_journal_clear (&malformed);
+  WylFactOfflineRestoreJournal malformed_scope = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, OP_A, &malformed_scope), ==, WYRELOG_E_OK);
+  malformed_scope.scope = (WylFactOfflineRestoreScope) 99;
+  g_assert_cmpint (wyl_fact_offline_restore_manifest_preflight
+        (fixture.manifest, &malformed_scope), ==, WYRELOG_E_INVALID);
+  wyl_fact_offline_restore_journal_clear (&malformed_scope);
+  WylFactOfflineRestoreJournalStage *session = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_stage_new (fixture.policy,
+      fixture.root, wrong_manifest, OP_A, "alpha", 1, &session),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null (session);
+  WylFactArtifactTransitionNames names = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_names_derive (OP_A, &names),
+      ==, WYRELOG_E_OK);
+  WylFactGraphLocator locator = { 0 };
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant-a", "alpha"),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *directory = wyl_fact_graph_locator_descriptive_path
+        (fixture.root, &locator);
+  g_autofree gchar *stage_path = g_build_filename (directory, names.stage, NULL);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_artifact_transition_names_clear (&names);
+  WylFactOfflineRestoreJournal persisted = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, OP_A, &persisted), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (persisted.revision, ==, 1);
+  assert_unbound_pristine (&persisted);
+  wyl_fact_offline_restore_journal_clear (&persisted);
+  fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -520,6 +574,8 @@ main (int argc, char **argv)
       test_copy_finalize_and_durable_identity_binding);
   g_test_add_func ("/fact-offline-restore-journal-stage/producer-failure",
       test_producer_failure_after_all_bytes_does_not_finalize_or_bind);
+  g_test_add_func ("/fact-offline-restore-journal-stage/manifest-gate",
+      test_manifest_mismatch_rejected_before_stage_creation);
   g_test_add_func ("/fact-offline-restore-journal-stage/sequential-graphs",
       test_sequential_graph_binding_revision_accounting);
   g_test_add_func ("/fact-offline-restore-journal-stage/sink-failure",

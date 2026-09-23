@@ -123,28 +123,6 @@ stage_identity (const WylFactGraphStage *stage,
 #endif
 }
 
-static void
-stage_disarm_native (WylFactGraphStage *stage)
-{
-  if (stage == NULL)
-    return;
-  stage->fd = -1;
-#ifdef G_OS_WIN32
-  memset (&stage->identity, 0, sizeof stage->identity);
-  memset (&stage->graph_identity, 0, sizeof stage->graph_identity);
-  memset (&stage->operation_evidence, 0, sizeof stage->operation_evidence);
-#else
-  stage->device = 0;
-  stage->inode = 0;
-  stage->graph_device = 0;
-  stage->graph_inode = 0;
-#endif
-  g_clear_pointer (&stage->stage_basename, g_free);
-  g_clear_pointer (&stage->final_basename, g_free);
-  stage->exact_provisioning_stage = FALSE;
-  stage->offline_restore_stage = FALSE;
-}
-
 wyrelog_error_t
 wyl_fact_offline_restore_stage_new (WylFactGraphResolver *resolver,
     WylFactGraphDirectory *directory, WylFactRootWriterLease *writer_lease,
@@ -348,9 +326,9 @@ wyl_fact_offline_restore_stage_finalize (WylFactOfflineRestoreStage *stage,
   if (rc == WYRELOG_E_OK) {
     stage_identity (&stage->native_stage, out_identity);
     *out_bytes_written = stage->bytes_written;
-    /* The held native handle now denotes a verified durable orphan. Do not
-     * close/unlink by its mutable name through the generic stage destructor. */
-    stage_disarm_native (&stage->native_stage);
+    /* Finalization retains the operation-named orphan on disk. Close only the
+     * held descriptor; the generic clear primitive never unlinks it. */
+    wyl_fact_graph_stage_clear (&stage->native_stage);
     stage->finalized = TRUE;
     stage->failed = FALSE;
   }
@@ -363,13 +341,7 @@ wyl_fact_offline_restore_stage_free (WylFactOfflineRestoreStage *stage)
   if (stage == NULL)
     return;
   /* Closing is not cleanup: operation-named orphans are recovery-owned. */
-  if (stage->native_stage.fd >= 0)
-    wyl_fact_graph_stage_clear (&stage->native_stage);
-  else {
-    g_free (stage->native_stage.stage_basename);
-    g_free (stage->native_stage.final_basename);
-    stage->native_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
-  }
+  wyl_fact_graph_stage_clear (&stage->native_stage);
   g_checksum_free (stage->stream_checksum);
   g_free (stage);
 }
