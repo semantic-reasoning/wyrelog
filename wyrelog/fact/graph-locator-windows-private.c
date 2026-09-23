@@ -18,6 +18,63 @@
 
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
 
+/* The restore journal does not yet persist the historical graph-directory
+ * identity required to reconstruct WylFactGraphWinOperationEvidence after a
+ * restart. Keep this lower-level operation fail-closed until that durable
+ * evidence exists; do not inspect the current namespace and synthesize it. */
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_reader_open_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactGraphRestoreStageReader **out_reader)
+{
+  (void) directory;
+  (void) operation_uuid;
+  (void) expected_identity;
+  if (out_reader != NULL)
+    *out_reader = NULL;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_revalidate
+  (WylFactGraphRestoreStageReader *reader)
+{
+  (void) reader;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_get_size
+  (WylFactGraphRestoreStageReader *reader, guint64 *out_size)
+{
+  (void) reader;
+  if (out_size != NULL)
+    *out_size = 0;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_read_at
+  (WylFactGraphRestoreStageReader *reader, guint64 offset, guint8 *buffer,
+    gsize length, gsize *out_bytes_read)
+{
+  (void) reader;
+  (void) offset;
+  (void) buffer;
+  (void) length;
+  if (out_bytes_read != NULL)
+    *out_bytes_read = 0;
+  return WYRELOG_E_POLICY;
+}
+
+void
+wyl_fact_graph_restore_stage_reader_free
+  (WylFactGraphRestoreStageReader *reader)
+{
+  (void) reader;
+}
+
 struct _WylFactRootWriterLease
 {
   WylFactGraphResolver resolver;

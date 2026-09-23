@@ -32,6 +32,166 @@ struct WylFactOfflineRestoreStage
   gboolean finalized;
 };
 
+struct WylFactOfflineRestoreStageReader
+{
+  WylFactGraphResolver *resolver;
+  WylFactGraphDirectory *directory;
+  WylFactRootWriterLease *writer_lease;
+  WylFactGraphRestoreStageReader *native_reader;
+};
+
+static gboolean same_root (const WylFactGraphResolver *resolver,
+    const WylFactGraphDirectory *directory);
+
+static wyrelog_error_t
+reader_authority_revalidate (WylFactOfflineRestoreStageReader *reader)
+{
+  if (reader == NULL || reader->resolver == NULL || reader->directory == NULL
+      || reader->writer_lease == NULL
+      || !same_root (reader->resolver, reader->directory))
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify
+        (reader->writer_lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver
+          (reader->writer_lease, reader->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (reader->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_stage_reader_revalidate
+          (reader->native_reader);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_reader_open (WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *directory, WylFactRootWriterLease *writer_lease,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactOfflineRestoreStageReader **out_reader)
+{
+  if (out_reader != NULL)
+    *out_reader = NULL;
+#ifdef G_OS_WIN32
+  (void) resolver;
+  (void) directory;
+  (void) writer_lease;
+  (void) operation_uuid;
+  (void) expected_identity;
+  return WYRELOG_E_POLICY;
+#else
+  if (resolver == NULL || directory == NULL || writer_lease == NULL
+      || operation_uuid == NULL || expected_identity == NULL
+      || out_reader == NULL || !same_root (resolver, directory))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (writer_lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (writer_lease,
+            resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  WylFactOfflineRestoreStageReader *reader = NULL;
+  if (rc == WYRELOG_E_OK) {
+    reader = g_try_new0 (WylFactOfflineRestoreStageReader, 1);
+    if (reader == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (rc == WYRELOG_E_OK) {
+    reader->resolver = resolver;
+    reader->directory = directory;
+    reader->writer_lease = writer_lease;
+    rc = wyl_fact_graph_directory_restore_stage_reader_open_exact
+          (directory, operation_uuid, expected_identity,
+            &reader->native_reader);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = reader_authority_revalidate (reader);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_offline_restore_stage_reader_free (reader);
+    return rc;
+  }
+  *out_reader = reader;
+  return WYRELOG_E_OK;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_reader_revalidate
+  (WylFactOfflineRestoreStageReader *reader)
+{
+#ifdef G_OS_WIN32
+  (void) reader;
+  return WYRELOG_E_POLICY;
+#else
+  return reader_authority_revalidate (reader);
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_reader_get_size
+  (WylFactOfflineRestoreStageReader *reader, guint64 *out_size)
+{
+  if (out_size != NULL)
+    *out_size = 0;
+#ifdef G_OS_WIN32
+  (void) reader;
+  return WYRELOG_E_POLICY;
+#else
+  if (reader == NULL || out_size == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = reader_authority_revalidate (reader);
+  guint64 size = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_stage_reader_get_size
+          (reader->native_reader, &size);
+  if (rc == WYRELOG_E_OK)
+    rc = reader_authority_revalidate (reader);
+  if (rc == WYRELOG_E_OK)
+    *out_size = size;
+  return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_reader_read_at
+  (WylFactOfflineRestoreStageReader *reader, guint64 offset,
+    guint8 *buffer, gsize length, gsize *out_bytes_read)
+{
+  if (out_bytes_read != NULL)
+    *out_bytes_read = 0;
+#ifdef G_OS_WIN32
+  (void) reader;
+  (void) offset;
+  (void) buffer;
+  (void) length;
+  return WYRELOG_E_POLICY;
+#else
+  if (reader == NULL || buffer == NULL || out_bytes_read == NULL
+      || length == 0 || length > RESTORE_STAGE_READ_CHUNK)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = reader_authority_revalidate (reader);
+  gsize bytes_read = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_stage_reader_read_at
+          (reader->native_reader, offset, buffer, length, &bytes_read);
+  if (rc == WYRELOG_E_OK)
+    rc = reader_authority_revalidate (reader);
+  if (rc == WYRELOG_E_OK)
+    *out_bytes_read = bytes_read;
+  return rc;
+#endif
+}
+
+void
+wyl_fact_offline_restore_stage_reader_free
+  (WylFactOfflineRestoreStageReader *reader)
+{
+  if (reader == NULL)
+    return;
+  wyl_fact_graph_restore_stage_reader_free (reader->native_reader);
+  g_free (reader);
+}
+
 static gboolean
 parse_checksum (const gchar *text, guint8 digest[32])
 {

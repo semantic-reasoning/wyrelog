@@ -11,6 +11,36 @@
 G_BEGIN_DECLS
 
 typedef struct WylFactOfflineRestoreStage WylFactOfflineRestoreStage;
+typedef struct WylFactOfflineRestoreStageReader
+    WylFactOfflineRestoreStageReader;
+
+/* Reopen a completed, operation-named stage using its journal-persisted
+ * identity. Resolver, directory, and root lease are borrowed and must remain
+ * alive for the reader. The opaque reader exposes bounded reads only; it does
+ * not expose a path/native handle or any mutation operation. POSIX/macOS are
+ * supported. Windows returns WYRELOG_E_POLICY until the journal persists the
+ * native creator evidence, and does so before inspecting the filesystem.
+ * It validates stage identity, path binding, security metadata, and stable
+ * size, but does not prove content integrity or immutability against external
+ * same-size writes. Callers must validate the bytes they consume (including
+ * any required digest/schema checks). Calls are single-threaded and
+ * non-reentrant. */
+wyrelog_error_t wyl_fact_offline_restore_stage_reader_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *writer_lease, const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactOfflineRestoreStageReader **out_reader);
+wyrelog_error_t wyl_fact_offline_restore_stage_reader_revalidate
+  (WylFactOfflineRestoreStageReader *reader);
+wyrelog_error_t wyl_fact_offline_restore_stage_reader_get_size
+  (WylFactOfflineRestoreStageReader *reader, guint64 *out_size);
+wyrelog_error_t wyl_fact_offline_restore_stage_reader_read_at
+  (WylFactOfflineRestoreStageReader *reader, guint64 offset,
+    guint8 *buffer, gsize length, gsize *out_bytes_read);
+void wyl_fact_offline_restore_stage_reader_free
+  (WylFactOfflineRestoreStageReader *reader);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactOfflineRestoreStageReader,
+    wyl_fact_offline_restore_stage_reader_free)
 
 /* Create an operation-named destination stage under a separately held
  * destination writer lease. Resolver, directory, and lease are borrowed and
