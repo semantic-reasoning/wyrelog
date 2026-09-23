@@ -904,12 +904,14 @@ if build_client and host_machine.system() != 'windows'
 
   test_wyctl_gschema = executable('test-wyctl-gschema',
     'test-wyctl-gschema.c',
+    c_args : [
+      '-DWYL_TEST_GSCHEMA_DIR="' + meson.current_build_dir() + '"',
+    ],
     dependencies : [glib_dep, gio_dep],
   )
 
   test('wyctl-gschema', test_wyctl_gschema,
     depends : wyctl_gschemas_compiled,
-    env : wyctl_gsettings_test_env,
   )
 
   test_wyctl_config = executable('test-wyctl-config',

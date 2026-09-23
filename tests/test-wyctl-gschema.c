@@ -3,6 +3,10 @@
 #include <gio/gio.h>
 #include <glib.h>
 
+#ifndef WYL_TEST_GSCHEMA_DIR
+#error "WYL_TEST_GSCHEMA_DIR must name the schema build directory"
+#endif
+
 #define WYCTL_SCHEMA_ID "org.wyrelog.wyctl"
 #define WYCTL_SCHEMA_PATH "/org/wyrelog/wyctl/"
 
@@ -13,16 +17,21 @@ typedef struct
 } KeySpec;
 
 /* This lookup stays non-recursive on purpose and does not mirror
- * wyctl_open_settings, which recurses (#1190).  The cases below assert the
- * contents of the schema this build compiled, so they must consult only the
- * head source that tests/meson.build points GSETTINGS_SCHEMA_DIR at.  A
- * recursive lookup could satisfy them from a schema installed elsewhere on
- * the machine and hide a stale or missing build artifact. */
+ * wyctl_open_settings, which recurses (#1190). The cases below assert the
+ * contents of the schema this build compiled, so they open that build
+ * directory directly instead of consulting the process-wide source chain. */
 static GSettingsSchema *
 lookup_schema (void)
 {
-  GSettingsSchemaSource *source = g_settings_schema_source_get_default ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSettingsSchemaSource) source =
+      g_settings_schema_source_new_from_directory (WYL_TEST_GSCHEMA_DIR,
+          NULL, FALSE, &error);
+  g_assert_no_error (error);
   g_assert_nonnull (source);
+
+  /* Open the compiled artifact under test directly. A NULL parent keeps a
+     machine-installed schema from satisfying this test by accident. */
   GSettingsSchema *schema = g_settings_schema_source_lookup (source,
           WYCTL_SCHEMA_ID, FALSE);
   g_assert_nonnull (schema);
