@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#ifndef G_OS_WIN32
+#ifndef _WIN32
 
 #if !defined(__APPLE__)
 #define _POSIX_C_SOURCE 200809L
@@ -616,4 +616,4 @@ wyl_fact_artifact_io_session_version_tag (
   return *out_tag != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
 
-#endif /* !G_OS_WIN32 */
+#endif /* !_WIN32 */
