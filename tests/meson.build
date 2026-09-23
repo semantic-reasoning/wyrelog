@@ -324,6 +324,16 @@ if get_option('enable_fact_store').allowed() and \
   )
 endif
 
+test_offline_restore_journal_stage = executable(
+  'test-fact-offline-restore-journal-stage',
+  'test-fact-offline-restore-journal-stage.c',
+  'fact-test-support.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep]
+    + fact_test_support_deps,
+)
+test('fact-offline-restore-journal-stage', test_offline_restore_journal_stage)
+
 test_smoke = executable('test-smoke',
   'test-smoke.c',
   dependencies : [wyrelog_dep],
