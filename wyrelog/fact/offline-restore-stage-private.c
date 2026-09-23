@@ -42,7 +42,11 @@ struct WylFactOfflineRestoreStageReader
 
 static gboolean same_root (const WylFactGraphResolver *resolver,
     const WylFactGraphDirectory *directory);
+static gboolean parse_checksum (const gchar *text, guint8 digest[32]);
+static gboolean checksum_matches (GChecksum *checksum,
+    const guint8 expected[32]);
 
+#ifndef G_OS_WIN32
 static wyrelog_error_t
 reader_authority_revalidate (WylFactOfflineRestoreStageReader *reader)
 {
@@ -62,6 +66,7 @@ reader_authority_revalidate (WylFactOfflineRestoreStageReader *reader)
           (reader->native_reader);
   return rc;
 }
+#endif
 
 wyrelog_error_t
 wyl_fact_offline_restore_stage_reader_open (WylFactGraphResolver *resolver,
@@ -179,6 +184,63 @@ wyl_fact_offline_restore_stage_reader_read_at
   if (rc == WYRELOG_E_OK)
     *out_bytes_read = bytes_read;
   return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_reader_verify_content
+  (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
+    const gchar *expected_checksum)
+{
+#ifdef G_OS_WIN32
+  (void) reader;
+  (void) expected_bytes;
+  (void) expected_checksum;
+  return WYRELOG_E_POLICY;
+#else
+  guint8 expected_digest[32];
+  if (reader == NULL || expected_bytes == 0 || expected_bytes > G_MAXINT64
+      || !parse_checksum (expected_checksum, expected_digest))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = reader_authority_revalidate (reader);
+  guint64 size = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_stage_reader_get_size (reader, &size);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (size != expected_bytes)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return WYRELOG_E_NOMEM;
+  guint8 buffer[RESTORE_STAGE_READ_CHUNK];
+  guint64 offset = 0;
+  while (offset < expected_bytes) {
+    guint64 remaining = expected_bytes - offset;
+    gsize request = (gsize) MIN ((guint64) sizeof buffer, remaining);
+    gsize bytes_read = 0;
+    rc = wyl_fact_offline_restore_stage_reader_read_at (reader, offset,
+            buffer, request, &bytes_read);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (bytes_read != request || bytes_read == 0
+        || bytes_read > expected_bytes - offset)
+      return WYRELOG_E_POLICY;
+    g_checksum_update (checksum, buffer, bytes_read);
+    offset += bytes_read;
+  }
+
+  /* The file may have grown while the bounded prefix was being read. Recheck
+   * its size so a matching prefix cannot be mistaken for the whole artifact. */
+  guint64 final_size = 0;
+  rc = wyl_fact_offline_restore_stage_reader_get_size (reader, &final_size);
+  if (rc == WYRELOG_E_OK && final_size != expected_bytes)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return checksum_matches (checksum, expected_digest)
+         ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 #endif
 }
 
