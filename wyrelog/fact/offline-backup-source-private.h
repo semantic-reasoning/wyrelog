@@ -3,6 +3,7 @@
 
 #include <glib.h>
 
+#include "fact/root-writer-lease-private.h"
 #include "fact/runtime-private.h"
 #include "wyrelog/error.h"
 #include "wyrelog/policy/store-private.h"
@@ -38,6 +39,15 @@ wyrelog_error_t wyl_fact_offline_backup_source_new
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
     gint64 drain_timeout_us, WylFactOfflineBackupSource **out_source);
+
+/* Variant for a coordinator that already holds exclusive authority for
+ * |fact_root|. The source borrows |root_lease|; the caller must keep it alive
+ * until after this source and all graph capabilities are freed. */
+wyrelog_error_t wyl_fact_offline_backup_source_new_with_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    gint64 drain_timeout_us, WylFactRootWriterLease *root_lease,
+    WylFactOfflineBackupSource **out_source);
 
 const gchar *wyl_fact_offline_backup_source_tenant_id
   (const WylFactOfflineBackupSource *source);

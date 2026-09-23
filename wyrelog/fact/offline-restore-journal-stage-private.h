@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "fact/offline-restore-journal-private.h"
+#include "fact/root-writer-lease-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/error.h"
 
@@ -27,6 +28,15 @@ wyrelog_error_t wyl_fact_offline_restore_journal_stage_new
   (wyl_policy_store_t *policy, const gchar *fact_root, GBytes *canonical_manifest,
     const gchar *operation_uuid, const gchar *graph_id,
     guint64 expected_revision,
+    WylFactOfflineRestoreJournalStage **out_session);
+
+/* Variant for a coordinator that already holds exclusive authority for
+ * |fact_root|. The session borrows |root_lease|; the caller must keep it
+ * alive through finish/free. */
+wyrelog_error_t wyl_fact_offline_restore_journal_stage_new_with_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root, GBytes *canonical_manifest,
+    const gchar *operation_uuid, const gchar *graph_id,
+    guint64 expected_revision, WylFactRootWriterLease *root_lease,
     WylFactOfflineRestoreJournalStage **out_session);
 
 /* Adapter for a complete sequential producer. Any sink error terminalizes the

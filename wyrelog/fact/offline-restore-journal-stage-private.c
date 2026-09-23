@@ -17,6 +17,7 @@ struct WylFactOfflineRestoreJournalStage
   gchar *fact_root;
   gchar *graph_id;
   WylFactRootWriterLease *lease;
+  gboolean owns_lease;
   WylFactGraphResolver resolver;
   WylFactGraphDirectory directory;
   WylFactOfflineRestoreStage *stage;
@@ -144,7 +145,8 @@ session_clear (WylFactOfflineRestoreJournalStage *session)
   if (session->resolver.fd >= 0)
 #endif
     wyl_fact_graph_resolver_clear (&session->resolver);
-  g_clear_pointer (&session->lease, wyl_fact_root_writer_lease_release);
+  if (session->owns_lease)
+    g_clear_pointer (&session->lease, wyl_fact_root_writer_lease_release);
   wyl_fact_offline_restore_journal_clear (&session->journal);
   g_clear_pointer (&session->graph_id, g_free);
   g_clear_pointer (&session->fact_root, g_free);
@@ -159,11 +161,11 @@ constructor_fail (WylFactOfflineRestoreJournalStage *session,
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
+static wyrelog_error_t
+offline_restore_journal_stage_new (wyl_policy_store_t *policy,
     const gchar *fact_root, GBytes *canonical_manifest,
     const gchar *operation_uuid, const gchar *graph_id,
-    guint64 expected_revision,
+    guint64 expected_revision, WylFactRootWriterLease *borrowed_lease,
     WylFactOfflineRestoreJournalStage **out_session)
 {
   if (out_session != NULL)
@@ -181,14 +183,19 @@ wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
   session->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   session->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
   session->policy = policy;
+  session->lease = borrowed_lease;
+  session->owns_lease = borrowed_lease == NULL;
   session->expected_revision = expected_revision;
   session->fact_root = g_strdup (fact_root);
   session->graph_id = g_strdup (graph_id);
   if (session->fact_root == NULL || session->graph_id == NULL)
     return constructor_fail (session, WYRELOG_E_NOMEM);
 
-  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root,
-          &session->lease);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (session->owns_lease)
+    rc = wyl_fact_root_writer_lease_acquire (fact_root, &session->lease);
+  else
+    rc = wyl_fact_root_writer_lease_verify (session->lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &session->resolver);
   if (rc == WYRELOG_E_OK)
@@ -239,6 +246,33 @@ wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
   session->expected_bytes = graph->logical_bytes;
   *out_session = session;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
+    const gchar *fact_root, GBytes *canonical_manifest,
+    const gchar *operation_uuid, const gchar *graph_id,
+    guint64 expected_revision,
+    WylFactOfflineRestoreJournalStage **out_session)
+{
+  return offline_restore_journal_stage_new (policy, fact_root,
+             canonical_manifest, operation_uuid, graph_id, expected_revision, NULL,
+             out_session);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_stage_new_with_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    GBytes *canonical_manifest, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    WylFactRootWriterLease *root_lease,
+    WylFactOfflineRestoreJournalStage **out_session)
+{
+  if (root_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return offline_restore_journal_stage_new (policy, fact_root,
+             canonical_manifest, operation_uuid, graph_id, expected_revision,
+             root_lease, out_session);
 }
 
 wyrelog_error_t

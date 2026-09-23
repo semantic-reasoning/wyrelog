@@ -152,6 +152,7 @@ if get_option('enable_fact_store').allowed()
     'fact/graph-seal-private.c',
     'fact/offline-backup-generation-private.c',
     'fact/offline-backup-source-private.c',
+    'fact/offline-restore-coordinator-private.c',
     'fact/legacy-store-identity-private.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay.c', 'fact/runtime-private.c',
     'fact/tenant-admission-private.c',

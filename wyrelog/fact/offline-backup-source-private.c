@@ -45,6 +45,7 @@ struct WylFactOfflineBackupSource
   wyl_policy_store_t *policy;
   WylFactGraphRuntimeManager *runtime_manager;
   WylFactRootWriterLease *root_lease;
+  gboolean owns_root_lease;
   gchar *tenant_id;
   WylPolicyTenantLifecycleState tenant_state;
   guint64 tenant_lifecycle_generation;
@@ -77,7 +78,9 @@ wyl_fact_offline_backup_source_free (WylFactOfflineBackupSource *source)
   g_clear_pointer (&source->graphs, g_ptr_array_unref);
   g_clear_pointer (&source->runtime_manager,
       wyl_fact_graph_runtime_manager_unref);
-  g_clear_pointer (&source->root_lease, wyl_fact_root_writer_lease_release);
+  if (source->owns_root_lease)
+    g_clear_pointer (&source->root_lease,
+        wyl_fact_root_writer_lease_release);
   g_free (source->tenant_id);
   g_free (source);
 }
@@ -456,10 +459,11 @@ wyl_fact_offline_backup_source_revalidate (WylFactOfflineBackupSource *source)
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
+static wyrelog_error_t
+offline_backup_source_new (wyl_policy_store_t *policy,
     const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
     const gchar *tenant_id, gint64 drain_timeout_us,
+    WylFactRootWriterLease *borrowed_lease,
     WylFactOfflineBackupSource **out_source)
 {
   if (out_source != NULL)
@@ -473,6 +477,8 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
   if (source == NULL)
     return WYRELOG_E_NOMEM;
   source->policy = policy;
+  source->root_lease = borrowed_lease;
+  source->owns_root_lease = borrowed_lease == NULL;
   source->runtime_manager = wyl_fact_graph_runtime_manager_ref
         (runtime_manager);
   source->tenant_id = g_strdup (tenant_id);
@@ -491,8 +497,12 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
   }
   WylPolicyFactBackupSnapshot *snapshot = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
-  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root,
-          &source->root_lease);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (source->owns_root_lease)
+    rc = wyl_fact_root_writer_lease_acquire (fact_root,
+            &source->root_lease);
+  else
+    rc = wyl_fact_root_writer_lease_verify (source->root_lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root,
             source->root_lease);
@@ -551,6 +561,29 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
   }
   *out_source = source;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
+    const gchar *tenant_id, gint64 drain_timeout_us,
+    WylFactOfflineBackupSource **out_source)
+{
+  return offline_backup_source_new (policy, fact_root, runtime_manager,
+             tenant_id, drain_timeout_us, NULL, out_source);
+}
+
+wyrelog_error_t
+wyl_fact_offline_backup_source_new_with_lease (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
+    const gchar *tenant_id, gint64 drain_timeout_us,
+    WylFactRootWriterLease *root_lease,
+    WylFactOfflineBackupSource **out_source)
+{
+  if (root_lease == NULL)
+    return WYRELOG_E_INVALID;
+  return offline_backup_source_new (policy, fact_root, runtime_manager,
+             tenant_id, drain_timeout_us, root_lease, out_source);
 }
 
 const gchar *
