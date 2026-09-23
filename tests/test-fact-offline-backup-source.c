@@ -10,6 +10,9 @@
 #include "wyrelog/fact/offline-backup-generation-private.h"
 #include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/fact/offline-backup-source-private.h"
+#include "wyrelog/fact/offline-restore-coordinator-private.h"
+#include "wyrelog/fact/offline-restore-journal-private.h"
+#include "wyrelog/fact/offline-restore-journal-store-private.h"
 #include "wyrelog/fact/provisioning-run-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
 #include "wyrelog/fact/store-open-private.h"
@@ -504,6 +507,20 @@ test_multi_graph_copy_and_lease_lifetime (void)
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &other),
       ==, WYRELOG_E_OK);
+  g_autoptr (WylFactOfflineBackupSource) borrowed = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_with_lease
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", 0, other,
+      &borrowed), ==, WYRELOG_E_OK);
+  g_clear_pointer (&borrowed, wyl_fact_offline_backup_source_free);
+  g_assert_cmpint (wyl_fact_root_writer_lease_verify (other), ==,
+      WYRELOG_E_OK);
+  WylFactRootWriterLease *duplicate = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root,
+      &duplicate), ==, WYRELOG_E_BUSY);
+  g_assert_null (duplicate);
+  wyl_fact_root_writer_lease_release (other);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root,
+      &other), ==, WYRELOG_E_OK);
   wyl_fact_root_writer_lease_release (other);
   fixture_clear (&fixture);
 }
@@ -759,6 +776,184 @@ test_generation_multi_graph_order (void)
   fixture_clear (&fixture);
 }
 
+static void
+create_restore_journal_for_manifest (BackupFixture *fixture, GBytes *manifest,
+    WylFactOfflineRestoreScope scope, const gchar *selected_graph_id,
+    const gchar *operation_uuid)
+{
+  WylPolicyTenantAuthorityRecord *tenant = NULL;
+  GPtrArray *authorities = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (fixture->policy,
+      "tenant-a", &tenant), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_list_graph_authorities (fixture->policy,
+      "tenant-a", &authorities), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
+  for (guint i = 0; i < authorities->len; i++) {
+    WylPolicyGraphAuthorityRecord *authority = g_ptr_array_index
+          (authorities, i);
+    if (scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        && g_strcmp0 (authority->graph_id, selected_graph_id) != 0)
+      continue;
+    WylFactOfflineRestoreTargetGraph *target = g_new0
+          (WylFactOfflineRestoreTargetGraph, 1);
+    target->graph_id = g_strdup (authority->graph_id);
+    target->lifecycle_generation = MAX (authority->lifecycle_generation,
+            (guint64) 1);
+    target->reconciliation_generation = MAX
+          (authority->reconciliation_generation, (guint64) 1);
+    target->expected_main_absent = TRUE;
+    g_ptr_array_add (targets, target);
+  }
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      operation_uuid, scope, selected_graph_id, tenant->lifecycle_generation,
+      tenant->reconciliation_generation, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  WylFactOfflineRestoreStoreResult result =
+      WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create
+        (fixture->policy, &journal, &result, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpuint (committed.revision, ==, 1);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  g_ptr_array_unref (authorities);
+  wyl_policy_tenant_authority_record_free (tenant);
+}
+
+static gboolean
+artifact_identity_is_zero (const WylFactArtifactInventoryIdentity *identity)
+{
+  WylFactArtifactInventoryIdentity zero = { 0 };
+  return wyl_fact_artifact_inventory_identity_equal (identity, &zero);
+}
+
+static void
+test_tenant_restore_staging_coordinator (void)
+{
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-offline-restore-coordinator-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "zeta");
+  create_graph (&fixture, "alpha");
+  seal_graph (&fixture, "zeta");
+  seal_graph (&fixture, "alpha");
+  seal_tenant (&fixture);
+
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  DestinationCapture capture;
+  destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, &capture), ==, WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_assert_nonnull (capture.manifest);
+  create_restore_journal_for_manifest (&fixture, capture.manifest,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL,
+      "018f22d0-7b6d-7a5b-8c31-123456789ab1");
+
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a",
+      capture.manifest, "018f22d0-7b6d-7a5b-8c31-123456789ab1", 1, 0,
+      &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 3);
+  g_assert_cmpuint (committed.graphs->len, ==, 2);
+  for (guint i = 0; i < committed.graphs->len; i++) {
+    WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+          (committed.graphs, i);
+    g_assert_false (artifact_identity_is_zero (&graph->staged_main_identity));
+    g_assert_false (graph->copied);
+    g_assert_false (graph->checksum_verified);
+    g_assert_false (graph->schema_verified);
+  }
+  wyl_fact_offline_restore_journal_clear (&committed);
+
+  /* A graph-local journal is rejected before source construction/drain. Use
+   * another policy store because active restore claims are exclusive per
+   * tenant and the successful tenant journal still owns this fixture. */
+  BackupFixture scope_fixture = { 0 };
+  fixture_init (&scope_fixture,
+      "wyl-offline-restore-coordinator-graph-scope-XXXXXX");
+  create_tenant (&scope_fixture);
+  create_graph (&scope_fixture, "alpha");
+  seal_graph (&scope_fixture, "alpha");
+  seal_tenant (&scope_fixture);
+  create_restore_journal_for_manifest (&scope_fixture, capture.manifest,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha",
+      "018f22d0-7b6d-7a5b-8c31-123456789ab2");
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
+        (scope_fixture.policy, scope_fixture.root, scope_fixture.runtime,
+      "tenant-a",
+      capture.manifest, "018f22d0-7b6d-7a5b-8c31-123456789ab2", 1, 0,
+      &committed), ==, WYRELOG_E_POLICY);
+  WylFactRootWriterLease *lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (scope_fixture.root,
+      &lease), ==, WYRELOG_E_OK);
+  wyl_fact_root_writer_lease_release (lease);
+  fixture_clear (&scope_fixture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+}
+
+static void
+test_tenant_restore_staging_rejects_bad_checksum (void)
+{
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-offline-restore-bad-checksum-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "orders");
+  seal_graph (&fixture, "orders");
+  seal_tenant (&fixture);
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  DestinationCapture capture;
+  destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, &capture), ==, WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+
+  WylFactOfflineBackupManifest manifest = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (capture.manifest,
+      &manifest), ==, WYRELOG_E_OK);
+  WylFactOfflineBackupArtifact *artifact = g_ptr_array_index
+        (manifest.artifacts, 0);
+  g_free (artifact->checksum);
+  artifact->checksum = g_strdup
+        ("sha256:0000000000000000000000000000000000000000000000000000000000000000");
+  g_autoptr (GBytes) bad_manifest = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
+      &bad_manifest), ==, WYRELOG_E_OK);
+  wyl_fact_offline_backup_manifest_clear (&manifest);
+  const gchar *const operation_uuid =
+      "018f22d0-7b6d-7a5b-8c31-123456789ab3";
+  create_restore_journal_for_manifest (&fixture, bad_manifest,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, operation_uuid);
+
+  WylFactOfflineRestoreJournal result = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a",
+      bad_manifest, operation_uuid, 1, 0, &result), ==, WYRELOG_E_POLICY);
+  g_assert_null (result.graphs);
+  WylFactOfflineRestoreJournal durable = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (fixture.policy,
+      operation_uuid, &durable), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (durable.revision, ==, 1);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (durable.graphs, 0);
+  g_assert_true (artifact_identity_is_zero (&graph->staged_main_identity));
+  wyl_fact_offline_restore_journal_clear (&durable);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -779,5 +974,10 @@ main (int argc, char **argv)
       test_generation_empty_tenant);
   g_test_add_func ("/fact-offline-backup-source/generation-multi-graph",
       test_generation_multi_graph_order);
+  g_test_add_func ("/fact-offline-backup-source/restore-staging-coordinator",
+      test_tenant_restore_staging_coordinator);
+  g_test_add_func
+    ("/fact-offline-backup-source/restore-staging-bad-checksum",
+      test_tenant_restore_staging_rejects_bad_checksum);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
