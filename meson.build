@@ -17,6 +17,12 @@ libsoup_dep = dependency('libsoup-3.0',
 sodium_dep = dependency('libsodium', required : true)
 sqlite_dep = dependency('sqlite3', required : true)
 cc = meson.get_compiler('c')
+# Strict C17 hides POSIX declarations unless a feature-test macro is set, and
+# GCC before 14 only warns when a call then falls back to an implicit
+# declaration; the libc symbol still links, so the build stays green (#1210).
+add_project_arguments(
+  cc.get_supported_arguments('-Werror=implicit-function-declaration'),
+  language : 'c')
 if not cc.has_function('sqlite3_deserialize', dependencies : sqlite_dep) or \
     not cc.has_function('sqlite3_serialize', dependencies : sqlite_dep)
   error('SQLite must provide sqlite3_deserialize/sqlite3_serialize for encrypted policy stores')

@@ -376,7 +376,7 @@ EXPECTED_BUILD_STEP_NAMES = (
     "Configure",
     "Build and test",
     "Verify artifact inventory consumer contract",
-    "Build fact-store production daemon",
+    "Build fact-store tree",
     "Provision secure DuckDB compile swap",
     "Build secure DuckDB backend from pinned source",
     "Test fact forget transaction cleanup with secure DuckDB",
@@ -398,7 +398,7 @@ EXPECTED_PRE_PROOF_HASHES = {
         "6e51525425fe4a197b0bf49e9401eb4a6f6387e3cf84972e37aa82fee34dc0f3",
         "d788fd0976e6e1a878d0359e912928961ee4fe15ea7b545855314c70c6f08373",
         "46a7d9b9533745c75e85fdf7ce7460c8cd6c881716603ff2b9e3d94e3896dd05",
-        "6966b52d2e6d96ac3712b8354e443d2a3a330ff715a039089bbbc8cd510ea94b",
+        "a7ab318fd810d4b885f71cdfc4c30d9ddc6d7cfe930811780d5b84629f7861f6",
         "d31df101913ddab60136579dd6729e388f2287cc6930a38d078ab6d8271c2efa",
     ),
     ".github/workflows/ci-main.yml": (
@@ -412,7 +412,7 @@ EXPECTED_PRE_PROOF_HASHES = {
         "2e1e6ace6dd96f006b3c9e59c3ec247d867ff998498f843e894f74e17bc9bec2",
         "d788fd0976e6e1a878d0359e912928961ee4fe15ea7b545855314c70c6f08373",
         "46a7d9b9533745c75e85fdf7ce7460c8cd6c881716603ff2b9e3d94e3896dd05",
-        "589018250102ae9f33a3148db617b648fd02397645ca421fb4a72e80f69e74ba",
+        "a7ab318fd810d4b885f71cdfc4c30d9ddc6d7cfe930811780d5b84629f7861f6",
         "d31df101913ddab60136579dd6729e388f2287cc6930a38d078ab6d8271c2efa",
     ),
 }

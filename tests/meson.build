@@ -3628,6 +3628,18 @@ test('ci-hosted-runner-contract-self-test', python3,
   env : python_strict_encoding_env,
 )
 
+test('ci-fact-store-compile-coverage', python3,
+  args : [files('test-ci-fact-store-compile-coverage.py'),
+    meson.project_source_root()],
+  env : python_strict_encoding_env,
+)
+
+test('ci-fact-store-compile-coverage-self-test', python3,
+  args : [files('test-ci-fact-store-compile-coverage.py'),
+    '--self-test', meson.project_source_root()],
+  env : python_strict_encoding_env,
+)
+
 check_no_derived_fsm_replay = find_program(
   '../tools/check-no-derived-fsm-replay.sh',
 )
