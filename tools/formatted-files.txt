@@ -61,6 +61,7 @@ tests/test-fact-graph-locator.c
 tests/test-fact-graph-seal.c
 tests/test-fact-offline-backup-manifest.c
 tests/test-fact-offline-backup-source.c
+tests/test-fact-offline-restore-journal-stage.c
 tests/test-fact-offline-restore-journal-store.c
 tests/test-fact-offline-restore-journal.c
 tests/test-fact-offline-restore-stage.c
@@ -269,6 +270,8 @@ wyrelog/fact/offline-backup-source-private.c
 wyrelog/fact/offline-backup-source-private.h
 wyrelog/fact/offline-restore-journal-private.c
 wyrelog/fact/offline-restore-journal-private.h
+wyrelog/fact/offline-restore-journal-stage-private.c
+wyrelog/fact/offline-restore-journal-stage-private.h
 wyrelog/fact/offline-restore-journal-store-private.c
 wyrelog/fact/offline-restore-journal-store-private.h
 wyrelog/fact/offline-restore-stage-private.c
