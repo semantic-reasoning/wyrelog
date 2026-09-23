@@ -1,4 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef _WIN32
+/* c_std=c17 is strict ISO C, so glibc hides pwrite() unless a feature-test
+ * macro is set before the first system header. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include "test-exit-status.h"
 
 #include <glib.h>

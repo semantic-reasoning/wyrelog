@@ -142,6 +142,12 @@ typedef struct
   guint pending_checks;
 } WylFactOfflineRestoreValidationResult;
 
+/* Validate only the immutable manifest/journal contract. This performs no
+ * filesystem or journal mutation and is safe to call before stage creation. */
+wyrelog_error_t wyl_fact_offline_restore_manifest_preflight
+  (GBytes *canonical_manifest,
+    const WylFactOfflineRestoreJournal *journal);
+
 /* Failure precedence is input/bounds, journal phase, manifest binding,
  * compatibility, admission, staged cardinality/order, then each graph's
  * inventory, entry, content, metadata, and replay evidence.  graph_index is

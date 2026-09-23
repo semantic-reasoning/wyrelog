@@ -24,7 +24,7 @@ typedef struct WylFactOfflineRestoreJournalStage
  * retain source/lifecycle authority and report producer success truthfully.
  * Operations are serialized and non-reentrant. */
 wyrelog_error_t wyl_fact_offline_restore_journal_stage_new
-  (wyl_policy_store_t *policy, const gchar *fact_root,
+  (wyl_policy_store_t *policy, const gchar *fact_root, GBytes *canonical_manifest,
     const gchar *operation_uuid, const gchar *graph_id,
     guint64 expected_revision,
     WylFactOfflineRestoreJournalStage **out_session);

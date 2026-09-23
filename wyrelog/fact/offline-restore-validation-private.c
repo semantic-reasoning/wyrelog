@@ -278,6 +278,84 @@ manifest_matches_journal (const WylFactOfflineBackupManifest *manifest,
   return TRUE;
 }
 
+wyrelog_error_t
+wyl_fact_offline_restore_manifest_preflight
+  (GBytes *canonical_manifest,
+    const WylFactOfflineRestoreJournal *journal)
+{
+  if (canonical_manifest == NULL || journal == NULL
+      || g_bytes_get_size (canonical_manifest) == 0
+      || g_bytes_get_size (canonical_manifest)
+      > WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES
+      || journal->graphs == NULL || journal->graphs->len == 0
+      || journal->graphs->len > WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS)
+    return WYRELOG_E_INVALID;
+  if (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
+    return WYRELOG_E_INVALID;
+  if ((journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && journal->selected_graph_id != NULL)
+      || (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      && !bounded_text (journal->selected_graph_id)))
+    return WYRELOG_E_INVALID;
+  if (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH) {
+    gboolean selected = FALSE;
+    for (guint i = 0; i < journal->graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (journal->graphs, i);
+      if (graph != NULL
+          && g_strcmp0 (graph->graph_id, journal->selected_graph_id) == 0)
+        selected = TRUE;
+    }
+    if (!selected)
+      return WYRELOG_E_INVALID;
+  }
+  WylFactOfflineBackupManifest manifest = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_backup_manifest_decode
+        (canonical_manifest, &manifest);
+  g_autoptr (GBytes) reencoded = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_backup_manifest_encode (&manifest, &reencoded);
+  if (rc == WYRELOG_E_OK
+      && (manifest.artifacts == NULL
+      || manifest.artifacts->len == 0
+      || manifest.artifacts->len > WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK || !g_bytes_equal (canonical_manifest, reencoded))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    for (guint i = 0; i < journal->graphs->len; i++)
+      if (g_ptr_array_index (journal->graphs, i) == NULL) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+  }
+  if (rc == WYRELOG_E_OK) {
+    guint8 digest[32];
+    sha256 (canonical_manifest, digest);
+    if (memcmp (digest, journal->manifest_sha256, sizeof digest) != 0
+        || !manifest_matches_journal (&manifest, journal))
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    for (guint i = 0; i < journal->graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (journal->graphs, i);
+      if (graph == NULL || graph->graph_id == NULL
+          || graph->logical_bytes == 0 || graph->logical_bytes > G_MAXINT64
+          || graph->format_version != WYL_FACT_STORE_FORMAT_VERSION
+          || graph->path_encoding_version != WYL_FACT_STORE_PATH_ENCODING_VERSION
+          || !canonical_uuid (graph->store_uuid)
+          || !canonical_sha256 (graph->checksum)
+          || !canonical_sha256 (graph->schema_digest)) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+    }
+  wyl_fact_offline_backup_manifest_clear (&manifest);
+  return rc;
+}
+
 WylFactOfflineRestoreValidationStatus
 wyl_fact_offline_restore_validate (WylFactOfflineRestoreValidationMode mode,
     GBytes *canonical_manifest, const WylFactOfflineRestoreJournal *journal,
@@ -380,6 +458,14 @@ wyl_fact_offline_restore_validate (WylFactOfflineRestoreValidationMode mode,
     }
   }
   wyl_fact_offline_backup_manifest_clear (&manifest);
+  /* Reuse the constructor's immutable contract check after the detailed
+   * precedence checks above; this keeps both entry points on one contract
+   * without changing the validator's stable failure taxonomy. */
+  if (wyl_fact_offline_restore_manifest_preflight (canonical_manifest, journal)
+      != WYRELOG_E_OK)
+    return blocked (out_result,
+               WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_MANIFEST_INVALID,
+               G_MAXUINT, 0);
 
   WylFactOfflineRestoreConflict conflict =
       wyl_fact_offline_restore_classify_admission (journal, admission);

@@ -7,6 +7,7 @@
 #include "fact/graph-locator-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 #include "fact/offline-restore-stage-private.h"
+#include "fact/offline-restore-validation-private.h"
 #include "fact/root-writer-lease-private.h"
 
 struct WylFactOfflineRestoreJournalStage
@@ -160,13 +161,15 @@ constructor_fail (WylFactOfflineRestoreJournalStage *session,
 
 wyrelog_error_t
 wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
-    const gchar *fact_root, const gchar *operation_uuid, const gchar *graph_id,
+    const gchar *fact_root, GBytes *canonical_manifest,
+    const gchar *operation_uuid, const gchar *graph_id,
     guint64 expected_revision,
     WylFactOfflineRestoreJournalStage **out_session)
 {
   if (out_session != NULL)
     *out_session = NULL;
   if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || canonical_manifest == NULL
       || operation_uuid == NULL || graph_id == NULL || out_session == NULL
       || expected_revision == 0 || expected_revision >= G_MAXINT64)
     return WYRELOG_E_INVALID;
@@ -203,6 +206,9 @@ wyl_fact_offline_restore_journal_stage_new (wyl_policy_store_t *policy,
   if (session->journal.revision != expected_revision)
     return constructor_fail (session, WYRELOG_E_BUSY);
   if (!journal_is_staging (&session->journal, expected_revision))
+    return constructor_fail (session, WYRELOG_E_POLICY);
+  if (wyl_fact_offline_restore_manifest_preflight (canonical_manifest,
+      &session->journal) != WYRELOG_E_OK)
     return constructor_fail (session, WYRELOG_E_POLICY);
   WylFactOfflineRestoreJournalGraph *graph = journal_graph (&session->journal,
           graph_id);
