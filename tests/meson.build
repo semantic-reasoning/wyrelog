@@ -34,6 +34,10 @@ endif
 
 meson_exe = find_program('meson')
 
+test('wyctl-private-tmpdir-runner-self-test', python3,
+  args : [files('test-wyctl-private-tmpdir-runner.py'),
+    files('run-wyctl-with-private-tmpdir.py')])
+
 test_offline_backup_manifest = executable('test-fact-offline-backup-manifest',
   'test-fact-offline-backup-manifest.c',
   '../wyrelog/fact/offline-backup-manifest-private.c',
@@ -972,7 +976,16 @@ if build_client and host_machine.system() != 'windows'
     dependencies : [wyrelog_dep, sodium_dep, publication_private_dep],
   )
 
-  test('wyctl-publication-posix', test_wyctl_publication_posix)
+  if meson.can_run_host_binaries()
+    test('wyctl-publication-posix', python3,
+      args : [files('run-wyctl-with-private-tmpdir.py'),
+        test_wyctl_publication_posix],
+      depends : test_wyctl_publication_posix,
+    )
+  else
+    # Let Meson mark this test skipped when no host executable wrapper exists.
+    test('wyctl-publication-posix', test_wyctl_publication_posix)
+  endif
 
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
@@ -982,11 +995,21 @@ if build_client and host_machine.system() != 'windows'
     dependencies : [glib_dep, gio_dep],
   )
 
-  test('wyctl-basic', test_wyctl_basic,
-    depends : [wyctl_exe, wyctl_gschemas_compiled],
-    env : wyctl_gsettings_test_env,
-    timeout : 60,
-  )
+  if meson.can_run_host_binaries()
+    test('wyctl-basic', python3,
+      args : [files('run-wyctl-with-private-tmpdir.py'), test_wyctl_basic],
+      depends : [wyctl_exe, wyctl_gschemas_compiled, test_wyctl_basic],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  else
+    # Keep Meson's normal cross-build skip behavior without an exe wrapper.
+    test('wyctl-basic', test_wyctl_basic,
+      depends : [wyctl_exe, wyctl_gschemas_compiled],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  endif
 
   test_wyctl_service_credential = executable('test-wyctl-service-credential',
     'test-wyctl-service-credential.c',
@@ -1030,11 +1053,21 @@ if build_client and host_machine.system() != 'windows'
   # GSETTINGS_SCHEMA_DIR and the memory backend, just like the
   # wyctl-config / wyctl-basic tests.  Per-test XDG-keyfile fixtures
   # then layer a real GSettings keyfile on top of that schema dir.
-  test('wyctl-mfa', test_wyctl_mfa,
-    depends : [wyctl_exe, wyctl_gschemas_compiled],
-    env : wyctl_gsettings_test_env,
-    timeout : 60,
-  )
+  if meson.can_run_host_binaries()
+    test('wyctl-mfa', python3,
+      args : [files('run-wyctl-with-private-tmpdir.py'), test_wyctl_mfa],
+      depends : [wyctl_exe, wyctl_gschemas_compiled, test_wyctl_mfa],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  else
+    # Keep Meson's normal cross-build skip behavior without an exe wrapper.
+    test('wyctl-mfa', test_wyctl_mfa,
+      depends : [wyctl_exe, wyctl_gschemas_compiled],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  endif
 
   # Drives `wyctl key status --store' and `wyctl key recover' as a subprocess
   # against an encrypted policy store, fabricating clean-NEW and interrupted
