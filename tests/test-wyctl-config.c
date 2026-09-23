@@ -1,10 +1,34 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#define _GNU_SOURCE
 #include "test-exit-status.h"
 #include <gio/gio.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
 #include "wyctl-config.h"
+
+#ifndef G_OS_WIN32
+#include <sys/types.h>
+#include <unistd.h>
+GSettingsSchemaSource *wyctl_config_test_open_filtered_source (uid_t owner);
+gboolean wyctl_config_test_trusted_path (const gchar *path, uid_t owner);
+gboolean wyctl_config_test_identity_is_secure (uid_t real_uid,
+    uid_t effective_uid, uid_t saved_uid, gid_t real_gid, gid_t effective_gid,
+    gid_t saved_gid, gboolean platform_secure);
+gboolean wyctl_config_test_filesystem_magic_supported (long magic,
+    gboolean inspection_succeeded);
+gboolean wyctl_config_test_filesystem_path_supported (const gchar *path);
+void wyctl_config_test_reject_filesystem_path (const gchar *path);
+#endif
+
+#ifndef G_OS_WIN32
+static gboolean
+root_filter_host_supported (void)
+{
+  return wyctl_config_test_filesystem_path_supported ("/") &&
+         wyctl_config_test_filesystem_path_supported (g_get_tmp_dir ());
+}
+#endif
 
 static GSettings *
 fresh_settings (void)
@@ -259,6 +283,26 @@ static const gchar STALE_WYCTL_GSCHEMA[] =
     "  </schema>\n"
     "</schemalist>\n";
 
+static const gchar POISONED_WYCTL_GSCHEMA[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<schemalist>\n"
+    "  <schema id=\"org.wyrelog.wyctl\" path=\"/org/wyrelog/wyctl/\">\n"
+    "    <key name=\"daemon-url\" type=\"s\">\n"
+    "      <default>'http://attacker.example/'</default>\n"
+    "    </key>\n"
+    "  </schema>\n"
+    "</schemalist>\n";
+
+static const gchar LOWER_WYCTL_GSCHEMA[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<schemalist>\n"
+    "  <schema id=\"org.wyrelog.wyctl\" path=\"/org/wyrelog/wyctl/\">\n"
+    "    <key name=\"daemon-url\" type=\"s\">\n"
+    "      <default>'http://lower.example/'</default>\n"
+    "    </key>\n"
+    "  </schema>\n"
+    "</schemalist>\n";
+
 /* A schema with an id wyctl never looks for.  Its only job is to make the
  * directory that holds it a schema source, so it can sit ahead of the real
  * one in the chain; GLib skips a directory that carries no compiled
@@ -371,6 +415,247 @@ test_open_settings_finds_schema_behind_a_decoy_source (void)
   remove_schema_dir (decoy);
   g_test_trap_assert_passed ();
 }
+
+#ifndef G_OS_WIN32
+static void
+test_root_filter_skips_writable_head_and_keeps_safe_parent (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  const gchar *saved = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_autofree gchar *saved_copy = g_strdup (saved);
+  g_autofree gchar *unsafe = make_schema_dir ("wyctl-poison-schema-XXXXXX",
+          POISONED_WYCTL_GSCHEMA);
+  g_autofree gchar *safe = make_schema_dir ("wyctl-safe-schema-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_autofree gchar *lower = make_schema_dir ("wyctl-lower-schema-XXXXXX",
+          LOWER_WYCTL_GSCHEMA);
+  g_assert_cmpint (g_chmod (unsafe, 0777), ==, 0);
+  g_autofree gchar *chain = g_strjoin (G_SEARCHPATH_SEPARATOR_S, unsafe,
+          safe, lower, NULL);
+  g_setenv ("GSETTINGS_SCHEMA_DIR", chain, TRUE);
+
+  g_autoptr (GSettingsSchemaSource) source =
+      wyctl_config_test_open_filtered_source (getuid ());
+  g_assert_nonnull (source);
+  g_autoptr (GSettingsSchema) schema = g_settings_schema_source_lookup
+        (source, WYCTL_GSETTINGS_SCHEMA_ID, TRUE);
+  g_assert_nonnull (schema);
+  g_autoptr (GSettingsSchemaKey) key = g_settings_schema_get_key (schema,
+          "daemon-url");
+  g_autoptr (GVariant) value = g_settings_schema_key_get_default_value (key);
+  g_assert_cmpstr (g_variant_get_string (value, NULL), ==,
+      "http://old.example/");
+
+  if (saved_copy != NULL)
+    g_setenv ("GSETTINGS_SCHEMA_DIR", saved_copy, TRUE);
+  else
+    g_unsetenv ("GSETTINGS_SCHEMA_DIR");
+  g_assert_cmpint (g_chmod (unsafe, 0700), ==, 0);
+  remove_schema_dir (unsafe);
+  remove_schema_dir (safe);
+  remove_schema_dir (lower);
+}
+
+static void
+test_root_filter_resolves_protected_symlink_and_dotdot (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  const gchar *saved = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_autofree gchar *saved_copy = g_strdup (saved);
+  g_autofree gchar *safe = make_schema_dir ("wyctl-link-schema-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_autofree gchar *link = g_strdup_printf ("%s-link", safe);
+  g_assert_cmpint (symlink (safe, link), ==, 0);
+  g_autofree gchar *basename = g_path_get_basename (safe);
+  g_autofree gchar *via_link = g_strconcat (link, "/../", basename, NULL);
+  /* The link target is the schema directory; traversing .. then its basename
+   * reaches the same protected directory while exercising actual resolution. */
+  g_setenv ("GSETTINGS_SCHEMA_DIR", via_link, TRUE);
+  g_autoptr (GSettingsSchemaSource) source =
+      wyctl_config_test_open_filtered_source (getuid ());
+  g_assert_nonnull (source);
+  g_autoptr (GSettingsSchema) schema = g_settings_schema_source_lookup
+        (source, WYCTL_GSETTINGS_SCHEMA_ID, TRUE);
+  g_assert_nonnull (schema);
+
+  if (saved_copy != NULL)
+    g_setenv ("GSETTINGS_SCHEMA_DIR", saved_copy, TRUE);
+  else
+    g_unsetenv ("GSETTINGS_SCHEMA_DIR");
+  g_unlink (link);
+  remove_schema_dir (safe);
+}
+
+static void
+test_root_filter_rejects_symlink_loop (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  g_autofree gchar *loop = g_dir_make_tmp ("wyctl-loop-schema-XXXXXX", NULL);
+  g_assert_nonnull (loop);
+  g_autofree gchar *link = g_build_filename (loop, "loop", NULL);
+  g_assert_cmpint (symlink ("loop", link), ==, 0);
+  g_autofree gchar *cache = g_build_filename (loop, "loop",
+          "gschemas.compiled", NULL);
+  g_assert_false (wyctl_config_test_trusted_path (cache, getuid ()));
+  g_unlink (link);
+  g_assert_cmpint (g_rmdir (loop), ==, 0);
+}
+
+static void
+test_root_filter_diagnostic_is_lazy_with_safe_fallback (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  if (g_test_subprocess ()) {
+    g_autoptr (GSettingsSchemaSource) source =
+        wyctl_config_test_open_filtered_source (getuid ());
+    g_assert_nonnull (source);
+    g_autoptr (GSettingsSchema) schema = g_settings_schema_source_lookup
+          (source, WYCTL_GSETTINGS_SCHEMA_ID, TRUE);
+    g_assert_nonnull (schema);
+    g_autoptr (GSettings) settings = g_settings_new_full (schema, NULL, NULL);
+    wyctl_enable_settings_diagnostics ();
+    g_autofree gchar *value = wyctl_resolve_string_option (NULL, settings,
+            "daemon-url");
+    g_assert_cmpstr (value, ==, "http://old.example/");
+    return;
+  }
+
+  const gchar *saved = g_getenv ("GSETTINGS_SCHEMA_DIR");
+  g_autofree gchar *saved_copy = g_strdup (saved);
+  g_autofree gchar *unsafe = make_schema_dir ("wyctl-diagnostic-poison-XXXXXX",
+          POISONED_WYCTL_GSCHEMA);
+  g_autofree gchar *safe = make_schema_dir ("wyctl-diagnostic-safe-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_assert_cmpint (g_chmod (unsafe, 0777), ==, 0);
+  g_autofree gchar *chain = g_strjoin (G_SEARCHPATH_SEPARATOR_S, unsafe,
+          safe, NULL);
+  g_setenv ("GSETTINGS_SCHEMA_DIR", chain, TRUE);
+  g_test_trap_subprocess (NULL, 0, 0);
+  if (saved_copy != NULL)
+    g_setenv ("GSETTINGS_SCHEMA_DIR", saved_copy, TRUE);
+  else
+    g_unsetenv ("GSETTINGS_SCHEMA_DIR");
+  g_assert_cmpint (g_chmod (unsafe, 0700), ==, 0);
+  remove_schema_dir (unsafe);
+  remove_schema_dir (safe);
+  g_test_trap_assert_passed ();
+  g_test_trap_assert_stderr ("*untrusted schema source was ignored*");
+}
+
+static void
+test_root_filter_rejects_writable_compiled_cache (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  g_autofree gchar *unsafe = make_schema_dir ("wyctl-writable-cache-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_autofree gchar *cache = g_build_filename (unsafe, "gschemas.compiled",
+          NULL);
+  g_assert_cmpint (g_chmod (cache, 0666), ==, 0);
+  g_assert_false (wyctl_config_test_trusted_path (cache, getuid ()));
+
+  g_assert_cmpint (g_chmod (cache, 0600), ==, 0);
+  remove_schema_dir (unsafe);
+}
+
+static void
+test_root_filter_rejects_writable_ancestor (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  g_autofree gchar *base = g_dir_make_tmp ("wyctl-writable-parent-XXXXXX",
+          NULL);
+  g_assert_nonnull (base);
+  g_autofree gchar *compiled = make_schema_dir ("wyctl-parent-child-XXXXXX",
+          STALE_WYCTL_GSCHEMA);
+  g_autofree gchar *schemas = g_build_filename (base, "schemas", NULL);
+  g_assert_cmpint (g_rename (compiled, schemas), ==, 0);
+  g_assert_cmpint (g_chmod (base, 0777), ==, 0);
+  g_autofree gchar *cache = g_build_filename (schemas, "gschemas.compiled",
+          NULL);
+  g_assert_false (wyctl_config_test_trusted_path (cache, getuid ()));
+  g_assert_cmpint (g_chmod (base, 0700), ==, 0);
+  remove_schema_dir (schemas);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
+test_secure_execution_identity_policy (void)
+{
+  g_assert_false (wyctl_config_test_identity_is_secure (1000, 1000, 1000,
+      1000, 1000, 1000, FALSE));
+  g_assert_true (wyctl_config_test_identity_is_secure (1000, 0, 0,
+      1000, 1000, 1000, FALSE));
+  g_assert_true (wyctl_config_test_identity_is_secure (0, 0, 0,
+      1000, 0, 0, FALSE));
+  g_assert_true (wyctl_config_test_identity_is_secure (1000, 1000, 1000,
+      1000, 1000, 1000, TRUE));
+}
+
+static void
+test_filesystem_trust_allowlist (void)
+{
+#ifdef __linux__
+  g_assert_true (wyctl_config_test_filesystem_magic_supported
+        (0x58465342, TRUE)); /* XFS */
+  g_assert_true (wyctl_config_test_filesystem_magic_supported
+        (0xEF53, TRUE)); /* ext2/ext3/ext4 */
+  g_assert_true (wyctl_config_test_filesystem_magic_supported
+        (0x9123683E, TRUE)); /* Btrfs */
+  g_assert_true (wyctl_config_test_filesystem_magic_supported
+        (0x01021994, TRUE)); /* tmpfs */
+  g_assert_true (wyctl_config_test_filesystem_magic_supported
+        (0x858458f6, TRUE)); /* ramfs */
+  g_assert_false (wyctl_config_test_filesystem_magic_supported
+        (0x794c7630, TRUE)); /* overlayfs */
+  g_assert_false (wyctl_config_test_filesystem_magic_supported
+        (0x6969, TRUE)); /* NFS */
+  g_assert_false (wyctl_config_test_filesystem_magic_supported
+        (0x65735546, TRUE)); /* FUSE */
+  g_assert_false (wyctl_config_test_filesystem_magic_supported
+        (0x58465342, FALSE)); /* inspection failure */
+#endif
+}
+
+static void
+test_root_filter_rejects_untrusted_filesystem_ancestor (void)
+{
+  if (!root_filter_host_supported ()) {
+    g_test_skip ("root schema filtering is unavailable on this filesystem");
+    return;
+  }
+  g_autofree gchar *base = g_dir_make_tmp ("wyctl-fs-parent-XXXXXX", NULL);
+  g_assert_nonnull (base);
+  g_autofree gchar *schemas = g_build_filename (base, "schemas", NULL);
+  g_assert_cmpint (g_mkdir (schemas, 0700), ==, 0);
+  g_autofree gchar *compiled = g_build_filename (schemas,
+          "gschemas.compiled", NULL);
+  g_assert_true (g_file_set_contents (compiled, "compiled", -1, NULL));
+  g_assert_true (wyctl_config_test_filesystem_path_supported (compiled));
+  wyctl_config_test_reject_filesystem_path (base);
+  g_assert_false (wyctl_config_test_trusted_path (compiled, getuid ()));
+  wyctl_config_test_reject_filesystem_path (NULL);
+  g_unlink (compiled);
+  g_assert_cmpint (g_rmdir (schemas), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+#endif
 
 static void
 test_open_settings_degrades_on_a_partial_schema (void)
@@ -554,5 +839,25 @@ main (int argc, char **argv)
       test_open_settings_degrades_on_a_partial_schema);
   g_test_add_func ("/wyctl/config/open/behind-decoy-source",
       test_open_settings_finds_schema_behind_a_decoy_source);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/wyctl/config/open/root-filter-skips-writable-head",
+      test_root_filter_skips_writable_head_and_keeps_safe_parent);
+  g_test_add_func ("/wyctl/config/open/root-filter-writable-cache",
+      test_root_filter_rejects_writable_compiled_cache);
+  g_test_add_func ("/wyctl/config/open/root-filter-writable-ancestor",
+      test_root_filter_rejects_writable_ancestor);
+  g_test_add_func ("/wyctl/config/open/secure-execution-identity",
+      test_secure_execution_identity_policy);
+  g_test_add_func ("/wyctl/config/open/root-filter-filesystem-allowlist",
+      test_filesystem_trust_allowlist);
+  g_test_add_func ("/wyctl/config/open/root-filter-unsupported-filesystem-ancestor",
+      test_root_filter_rejects_untrusted_filesystem_ancestor);
+  g_test_add_func ("/wyctl/config/open/root-filter-symlink-dotdot",
+      test_root_filter_resolves_protected_symlink_and_dotdot);
+  g_test_add_func ("/wyctl/config/open/root-filter-symlink-loop",
+      test_root_filter_rejects_symlink_loop);
+  g_test_add_func ("/wyctl/config/open/root-filter-diagnostic-lazy",
+      test_root_filter_diagnostic_is_lazy_with_safe_fallback);
+#endif
   return wyl_test_normalize_exit_status (g_test_run ());
 }

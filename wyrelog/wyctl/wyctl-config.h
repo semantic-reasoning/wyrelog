@@ -17,7 +17,9 @@ G_BEGIN_DECLS;
 void wyctl_enable_settings_diagnostics (void);
 
 /* Open the wyctl GSettings tree, or return NULL if the schema is
- * not installed or the operator has set WYCTL_DISABLE_GSETTINGS=1.
+ * unavailable, the process is in secure execution, or the operator has set
+ * WYCTL_DISABLE_GSETTINGS=1. Root uses only filesystem-protected schema
+ * sources; ordinary users retain GLib's default source chain.
  * Never aborts: a missing schema is reported as NULL, not g_error.
  * The returned object is owned by the caller; g_object_unref () to
  * release. */

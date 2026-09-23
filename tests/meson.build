@@ -935,14 +935,25 @@ if build_client and host_machine.system() != 'windows'
     c_args : [
       '-DWYL_TEST_GLIB_COMPILE_SCHEMAS="' +
         glib_compile_schemas_prog.full_path() + '"',
+      '-DWYCTL_CONFIG_TESTING',
     ],
     dependencies : [glib_dep, gio_dep],
   )
 
-  test('wyctl-config', test_wyctl_config,
-    depends : wyctl_gschemas_compiled,
-    env : wyctl_gsettings_test_env,
-  )
+  if meson.can_run_host_binaries()
+    test('wyctl-config', python3,
+      args : [files('run-wyctl-with-private-tmpdir.py'), test_wyctl_config],
+      depends : [wyctl_gschemas_compiled, test_wyctl_config],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  else
+    test('wyctl-config', test_wyctl_config,
+      depends : wyctl_gschemas_compiled,
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  endif
 
   test_wyctl_token_file_deps = [glib_dep]
   if host_machine.system() == 'windows'

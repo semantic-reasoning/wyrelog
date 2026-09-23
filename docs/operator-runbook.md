@@ -2649,6 +2649,9 @@ stderr. wyctl emits at most one such diagnostic per invocation, when an
 option actually needs a fallback that cannot be read. It distinguishes:
 
 - `schema not found`: `org.wyrelog.wyctl` is not reachable.
+- `untrusted schema source`: a source that could be changed by a non-root
+  user was ignored. A protected lower-priority source may still provide the
+  selected schema and value.
 - `missing key`: the selected schema lacks the requested key.
 - `expected type`: the key exists but has an incompatible type. The message
   gives the actual and expected types (`s` for strings, `u` for unsigned
@@ -2668,11 +2671,35 @@ valid empty defaults, and intentional `WYCTL_DISABLE_GSETTINGS=1` do not
 produce this diagnostic. A command that succeeds using an internal default
 may still print it for an unavailable fallback it attempted.
 
-These diagnostics check schema availability and shape, not source ownership.
-Schema-source precedence is unchanged, including for root. For privileged
-invocations, use the controlled target-account environment and explicit CLI
-options described in [offline maintenance](#offline-maintenance-defaults-via-gsettings);
-this does not make preserved user-controlled schema search paths trusted.
+When the effective UID is root, wyctl builds a separate schema-source chain
+and accepts only root-owned schema directories and regular `gschemas.compiled`
+files that are not group- or other-writable. It checks every directory and
+symlink in the path, including resolved symlink targets. On Linux, a
+root-owned sticky ancestor such as `/tmp` is allowed when the next path entry
+is itself protected. On macOS, extended ACLs that grant mutation access are
+rejected. Linux also requires each directory and the opened cache to reside on
+XFS, ext2/ext3/ext4, Btrfs, tmpfs, or ramfs; unknown filesystems and inspection
+errors are rejected. This intentionally excludes overlayfs, network
+filesystems, and FUSE mounts, including many container installations. Other
+Unix systems disable root's schema fallback because wyctl cannot verify their
+permission model. Unsupported or unverifiable permissions make that source
+unavailable. The chain keeps GLib's precedence among accepted locations:
+`GSETTINGS_SCHEMA_DIR`, the user data directory, then system data directories.
+There are no path-prefix exceptions: a protected custom prefix works, while
+a user-owned Homebrew or profile tree is ignored when running as root.
+
+Set-ID or secure-execution processes do not use wyctl's GSettings defaults.
+Explicit CLI options remain available. Opening settings alone is quiet; if a
+command actually needs a fallback, wyctl reports once that an unsafe source
+was ignored, even when a trusted lower-priority source supplied the value.
+
+This check protects schema defaults from unprivileged filesystem writers. It
+does not establish trust in values loaded from a GSettings backend selected by
+preserved environment variables, and it does not defend against root, mount
+administrators, or a filesystem that lies about ownership and permission
+metadata. For privileged invocations, use a controlled target-account
+environment and explicit CLI options as described in
+[offline maintenance](#offline-maintenance-defaults-via-gsettings).
 
 Schema visibility and account-specific settings are separate problems:
 
