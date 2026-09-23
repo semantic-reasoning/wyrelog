@@ -183,6 +183,25 @@ test('check-explicit-encoding-self-test', python3,
   timeout : 120,
 )
 
+feature_test_macro_platform_guard_checker = files(
+  'test-feature-test-macro-platform-guard.py',
+)
+test('feature-test-macro-platform-guard', python3,
+  args : [
+    feature_test_macro_platform_guard_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+)
+test('feature-test-macro-platform-guard-self', python3,
+  args : [
+    feature_test_macro_platform_guard_checker,
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
+
 posix_errno_capability_pair_checker = files(
   'test-posix-errno-capability-pair.py',
 )

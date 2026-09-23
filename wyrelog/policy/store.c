@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#ifndef G_OS_WIN32
+#ifndef _WIN32
 /* Expose POSIX.1-2008 openat/renameat/unlinkat/O_NOFOLLOW/O_CLOEXEC.
  * Must be set before any system header is pulled in. */
 #ifndef _POSIX_C_SOURCE
