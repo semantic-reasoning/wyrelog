@@ -256,6 +256,22 @@ def function_body(source: str, signature: str) -> str:
             if depth == 0:
                 return source[start:index + 1]
     raise AssertionError(f"unterminated function: {signature}")
+
+
+def optional_store_guard(source: str, position: int):
+    guards = list(re.finditer(
+        r"if\s*\(\s*store\s*!=\s*NULL\s*\)\s*\{",
+        source[:position],
+    ))
+    for guard in reversed(guards):
+        if is_top_level_statement(source, guard.start()):
+            opening = guard.end() - 1
+            closing = closing_brace(source, opening)
+            if opening < position < closing:
+                return guard, closing
+    return None
+
+
 def validate_session_profile(
     body: str, signature: str, raw_helper_names: set[str],
     duckdb_api: re.Pattern[str],
@@ -269,7 +285,15 @@ def validate_session_profile(
     if begin is None:
         raise AssertionError(f"session owner lost admission: {signature}")
     begin_at = begin.start()
-    if not is_top_level_statement(body, begin_at):
+    guard_match = optional_store_guard(body, begin_at)
+    guarded_optional_store = (
+        guard_match is not None
+        and is_top_level_statement(
+            body[guard_match[0].start():],
+            begin_at - guard_match[0].start(),
+        )
+    )
+    if not is_top_level_statement(body, begin_at) and not guarded_optional_store:
         raise AssertionError(
             f"session authority precedes successful admission: {signature}"
         )
@@ -292,6 +316,13 @@ def validate_session_profile(
             first_raw_helper_position(body, raw_helper_names),
         ) if position >= 0
     ]
+    if guard_match is not None and any(
+        not guard_match[0].end() - 1 < position < guard_match[1]
+        for position in authority_positions
+    ):
+        raise AssertionError(
+            f"session authority precedes successful admission: {signature}"
+        )
     failure_guard = re.match(
         r"\s*if\s*\(\s*rc\s*!=\s*WYRELOG_E_OK\s*\)\s*"
         r"return\s+rc\s*;", body[begin.end():],
@@ -338,7 +369,19 @@ def validate_session_profile(
     if not ends:
         raise AssertionError(f"session owner lost release: {signature}")
     final_start, final_end = ends[-1].start(), ends[-1].end()
-    if not is_top_level_statement(body, final_start, True):
+    end_guard_match = optional_store_guard(body, final_start)
+    guarded_optional_store_release = (
+        guard_match is not None
+        and end_guard_match is not None
+        and guard_match[0].start() == end_guard_match[0].start()
+        and is_top_level_statement(
+            body[guard_match[0].start():],
+            final_start - guard_match[0].start(),
+            True,
+        )
+    )
+    if not is_top_level_statement(body, final_start, True) \
+            and not guarded_optional_store_release:
         raise AssertionError(f"session owner lost release: {signature}")
     labels = {
         match.group(1): match.start()
@@ -746,7 +789,16 @@ def validate(files: dict[str, str]) -> None:
             if begin_statement is None:
                 raise AssertionError(f"session owner lost admission: {signature}")
             begin_at = begin_statement.start()
-            if not is_top_level_statement(body, begin_at):
+            begin_guard_match = optional_store_guard(body, begin_at)
+            guarded_optional_store = (
+                begin_guard_match is not None
+                and is_top_level_statement(
+                    body[begin_guard_match[0].start():],
+                    begin_at - begin_guard_match[0].start(),
+                )
+            )
+            if not is_top_level_statement(body, begin_at) \
+                    and not guarded_optional_store:
                 raise AssertionError(
                     f"session authority precedes successful admission: {signature}"
                 )
@@ -771,6 +823,15 @@ def validate(files: dict[str, str]) -> None:
                     first_raw_helper_position(body, raw_helper_names),
                 ) if position >= 0
             ]
+            if begin_guard_match is not None and any(
+                not begin_guard_match[0].end() - 1 < position
+                < begin_guard_match[1]
+                for position in authority_positions
+            ):
+                raise AssertionError(
+                    f"session authority precedes successful admission: "
+                    f"{signature}"
+                )
             failure_guard = re.match(
                 r"\s*if\s*\(\s*rc\s*!=\s*WYRELOG_E_OK\s*\)\s*"
                 r"return\s+rc\s*;",
@@ -827,7 +888,21 @@ def validate(files: dict[str, str]) -> None:
                 offset = found + len(call)
             if not ends_at:
                 raise AssertionError(f"session owner lost release: {signature}")
-            if not is_top_level_statement(body, ends_at[-1][0], True):
+            release_at = ends_at[-1][0]
+            release_guard_match = optional_store_guard(body, release_at)
+            guarded_optional_store_release = (
+                begin_guard_match is not None
+                and release_guard_match is not None
+                and begin_guard_match[0].start()
+                == release_guard_match[0].start()
+                and is_top_level_statement(
+                    body[begin_guard_match[0].start():],
+                    release_at - begin_guard_match[0].start(),
+                    True,
+                )
+            )
+            if not is_top_level_statement(body, release_at, True) \
+                    and not guarded_optional_store_release:
                 raise AssertionError(f"session owner lost release: {signature}")
             labels = {
                 match.group(1): match.start()
@@ -1437,7 +1512,7 @@ def validate(files: dict[str, str]) -> None:
         raise AssertionError("supplied-store replay seam drifted")
     replay_admission = function_body(replay, "open_graph_engine_with_store")
     for token in (
-        "wyl_fact_store_connection_session_begin (store,\n          &admission)",
+        "wyl_fact_store_connection_session_begin (store, &admission)",
         "wyl_fact_store_connection_session_end (&admission);",
         "list_replay_relations (policy, store, graph_info, policy_snapshot,\n"
         "          job_context,\n          &relations)",
