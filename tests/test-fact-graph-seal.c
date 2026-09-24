@@ -945,12 +945,10 @@ test_boot_reestablishes_admission_from_the_durable_seal (void)
   WylFactGraphRuntimeStatus reopened = status_of (manager, "tenant-a",
           "open-graph");
   g_assert_cmpint (reopened.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
-  /* The axis is restored; the graph is not.  The reopen runs after the
-   * refresh in the same pass, so the refresh that would have rebuilt the
-   * engine was still refused -- recovery takes a second pass.  Latent today
-   * because there is no unseal route at all, but it is the half the stated
-   * motivation actually needs, so it is pinned rather than assumed. */
-  g_assert_false (reopened.queryable);
+  /* The axis is restored from policy.  The schema-only graph was already
+   * queryable after the first refresh; reopening admission preserves its
+   * published engine. */
+  g_assert_true (reopened.queryable);
   wyl_fact_graph_runtime_status_clear (&reopened);
   /* And the sealed one is still closed after a second pass. */
   WylFactGraphRuntimeStatus still = status_of (manager, "tenant-a",

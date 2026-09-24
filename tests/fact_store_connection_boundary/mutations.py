@@ -228,8 +228,8 @@ def self_test(files: dict[str, str]) -> None:
         "{\n  return reject_audit_database_unlocked (store);\n}\n\n"
     )
     replay_admission = (
-        "  WylFactStoreConnectionSession session = { 0 };\n"
-        "  rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "    WylFactStoreConnectionSession session = { 0 };\n"
+        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
     )
     control["wyrelog/fact/replay.c"] = replay_source.replace(
         replay_marker, safe_collision + replay_marker, 1
@@ -287,14 +287,8 @@ def self_test(files: dict[str, str]) -> None:
         replay_marker, safe_assignment_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
-        "  void (*boundary_assignment_alias) (wyl_fact_store_t *) = "
-        "wyl_fact_store_close;\n"
-        "  {\n"
-        "    boundary_assignment_alias = "
-        "boundary_safe_assignment_target;\n"
-        "  }\n"
         "  wyl_fact_store_connection_session_end (&session);\n"
-        "  boundary_assignment_alias (store);\n",
+        "  boundary_safe_assignment_target (store);\n",
         1,
     )
     validation_controls.append(control)
@@ -454,8 +448,8 @@ def self_test(files: dict[str, str]) -> None:
         "}\n\n"
     )
     replay_admission = (
-        "  WylFactStoreConnectionSession session = { 0 };\n"
-        "  rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "    WylFactStoreConnectionSession session = { 0 };\n"
+        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
     )
     changed["wyrelog/fact/replay.c"] = replay_source.replace(
         replay_marker, local_alias_shadow + replay_marker, 1
@@ -1116,9 +1110,9 @@ def self_test(files: dict[str, str]) -> None:
         "&boundary_pointer_first;\n"
         "  boundary_pointer_retarget = &boundary_pointer_second;\n"
         "  *boundary_pointer_retarget = wyl_fact_store_close;\n"
-        "  wyl_fact_store_connection_session_end (&session);\n"
         "  boundary_pointer_outer (store);\n"
         "  boundary_pointer_first (store);\n"
+        "  wyl_fact_store_connection_session_end (&session);\n"
     )
     control["wyrelog/fact/replay.c"] = replay_source.replace(
         replay_marker, pointer_retarget_support + replay_marker, 1
@@ -3024,18 +3018,18 @@ def self_test(files: dict[str, str]) -> None:
     changed = dict(files)
     replay_source = changed["wyrelog/fact/replay.c"]
     admitted_region = (
-        "  rc = wyl_fact_store_connection_session_begin (store, &session);\n"
-        "  if (rc != WYRELOG_E_OK)\n"
-        "    return rc;\n"
-        "  duckdb_connection conn = "
+        "    rc = wyl_fact_store_connection_session_begin (store, &session);\n"
+        "    if (rc != WYRELOG_E_OK)\n"
+        "      return rc;\n"
+        "    duckdb_connection conn = "
         "wyl_fact_store_connection_session_get (&session);\n"
     )
     reordered_region = (
-        "  duckdb_connection conn = "
+        "    duckdb_connection conn = "
         "wyl_fact_store_connection_session_get (&session);\n"
-        "  rc = wyl_fact_store_connection_session_begin (store, &session);\n"
-        "  if (rc != WYRELOG_E_OK)\n"
-        "    return rc;\n"
+        "    rc = wyl_fact_store_connection_session_begin (store, &session);\n"
+        "    if (rc != WYRELOG_E_OK)\n"
+        "      return rc;\n"
     )
     if admitted_region not in replay_source:
         raise AssertionError("session dominance mutation fixture drifted")
@@ -3052,7 +3046,7 @@ def self_test(files: dict[str, str]) -> None:
     changed = dict(files)
     changed["wyrelog/fact/replay.c"] = replay_source.replace(
         admitted_region,
-        "  (void) duckdb_query (NULL, \"SELECT 1;\", NULL);\n"
+        "    (void) duckdb_query (NULL, \"SELECT 1;\", NULL);\n"
         + admitted_region,
         1,
     ).replace(
@@ -3254,8 +3248,8 @@ def self_test(files: dict[str, str]) -> None:
 
     changed = dict(files)
     replay_admission = (
-        "  WylFactStoreConnectionSession session = { 0 };\n"
-        "  rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "    WylFactStoreConnectionSession session = { 0 };\n"
+        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
     )
     changed["wyrelog/fact/replay.c"] = changed[
         "wyrelog/fact/replay.c"
@@ -3855,6 +3849,23 @@ def self_test(files: dict[str, str]) -> None:
     mutations.append(changed)
     require_boundary_rejection(
         "single-line-dead-session-release", "session owner lost release", changed
+    )
+
+    changed = dict(files)
+    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        "wyl_fact_store_connection_session_end (&session);",
+        "if (FALSE) {\n"
+        "      if (store != NULL) {\n"
+        "        wyl_fact_store_connection_session_end (&session);\n"
+        "      }\n"
+        "    }",
+        1,
+    )
+    mutations.append(changed)
+    require_boundary_rejection(
+        "nested-optional-store-session-release",
+        "session owner lost release",
+        changed,
     )
 
     for label, replacement in (
