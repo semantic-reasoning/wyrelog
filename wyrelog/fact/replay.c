@@ -98,6 +98,7 @@ typedef struct
   gchar *relation_name;
   guint32 schema_version;
   gboolean relation_visible;
+  gboolean has_durable_batches;
   wyl_policy_fact_relation_schema_column_t *columns;
   gsize n_columns;
   gchar *projection_table;
@@ -113,6 +114,9 @@ typedef struct
 
 static void replay_relation_free (gpointer data);
 static void replay_active_relation_free (gpointer data);
+static WylPolicyGraphMaterializationState
+graph_materialization_state_or_unknown (wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *graph_info);
 
 typedef struct
 {
@@ -357,6 +361,7 @@ replay_relation_clone (const ReplayRelation *source)
   copy->relation_name = g_strdup (source->relation_name);
   copy->schema_version = source->schema_version;
   copy->relation_visible = source->relation_visible;
+  copy->has_durable_batches = source->has_durable_batches;
   copy->n_columns = source->n_columns;
   copy->projection_table = g_strdup (source->projection_table);
   copy->wirelog_relation = g_strdup (source->wirelog_relation);
@@ -475,18 +480,47 @@ replay_relation_seen_key (const gchar *namespace_id, const gchar *relation_name)
   return g_strconcat (namespace_id, "\x1f", relation_name, NULL);
 }
 
+static gchar *
+replay_relation_version_key (const gchar *namespace_id,
+    const gchar *relation_name, guint32 schema_version)
+{
+  return g_strdup_printf ("%s\x1f%s\x1f%u", namespace_id, relation_name,
+             schema_version);
+}
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const wyl_policy_fact_graph_info_t *graph;
+  WylFactReplayJobContext *job_context;
+  GPtrArray *schemas;
+} ReplayRegisteredSchemaCollectCtx;
+
+static wyrelog_error_t
+collect_replay_registered_schema (const gchar *namespace_id,
+    const gchar *relation_name, guint32 schema_version, gpointer user_data)
+{
+  ReplayRegisteredSchemaCollectCtx *ctx = user_data;
+  if (ctx->job_context != NULL) {
+    wyrelog_error_t rc = wyl_fact_replay_job_context_checkpoint
+          (ctx->job_context);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  ReplayRelation *schema = NULL;
+  wyrelog_error_t rc = load_relation_schema (ctx->policy, ctx->graph,
+          namespace_id, relation_name, schema_version, &schema);
+  if (rc == WYRELOG_E_OK)
+    g_ptr_array_add (ctx->schemas, schema);
+  return rc;
+}
+
 static void replay_interrupt_cancelled (GCancellable *cancellable,
     gpointer user_data);
 
-/* Enumerates the relations to replay for one graph.  The policy activation
- * registry is authoritative (#545): every relation it lists active contributes
- * EXACTLY ONE schema version, so a registered-but-never-appended relation is
- * still declared, and two schema versions of one relation can never both be
- * declared (which would collide on the unversioned wirelog relation name).
- * Relations not yet owned by the registry fall back to the historical
- * fact_batches enumeration, per (namespace, relation), so graphs predating
- * schema convergence keep replaying exactly as before -- the union is strictly
- * additive and cannot regress an existing graph. */
+/* Active versions take precedence. Batch-backed versions retain their
+ * historical enumeration; a uniquely registered visible schema with no
+ * batches is also declared so its empty relation survives replay. */
 static wyrelog_error_t
 list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
     const wyl_policy_fact_graph_info_t *graph,
@@ -494,12 +528,16 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
     WylFactReplayJobContext *job_context, GPtrArray **out_relations)
 {
   *out_relations = NULL;
-  if (policy == NULL || store == NULL || graph == NULL)
+  if (policy == NULL || graph == NULL)
     return WYRELOG_E_INVALID;
 
   g_autoptr (GPtrArray) relations =
       g_ptr_array_new_with_free_func (replay_relation_free);
   g_autoptr (GHashTable) seen =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  g_autoptr (GHashTable) batch_names =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  g_autoptr (GHashTable) batch_versions =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 
   wyrelog_error_t rc = job_context == NULL ? WYRELOG_E_OK
@@ -556,86 +594,96 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
 
   g_autoptr (GPtrArray) stored_keys =
       g_ptr_array_new_with_free_func (replay_relation_key_free);
-  WylFactStoreConnectionSession session = { 0 };
-  rc = wyl_fact_store_connection_session_begin (store, &session);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
-  GCancellable *cancellable = job_context == NULL ? NULL
+  if (store != NULL) {
+    WylFactStoreConnectionSession session = { 0 };
+    rc = wyl_fact_store_connection_session_begin (store, &session);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
+    GCancellable *cancellable = job_context == NULL ? NULL
       : wyl_fact_replay_job_context_get_cancellable (job_context);
-  gulong interrupt_handler = cancellable == NULL ? 0
+    gulong interrupt_handler = cancellable == NULL ? 0
       : g_cancellable_connect (cancellable,
-          G_CALLBACK (replay_interrupt_cancelled), conn, NULL);
+            G_CALLBACK (replay_interrupt_cancelled), conn, NULL);
 #if defined(WYL_TEST_HANDLE_SEAMS)
-  validation_connected_test_hook_invoke (job_context);
+    validation_connected_test_hook_invoke (job_context);
 #endif
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
-  static const gchar *sql =
-      "SELECT DISTINCT namespace_id, relation_name, schema_version "
-      "FROM fact_batches WHERE tenant_id = ? AND graph_id = ? "
-      "ORDER BY namespace_id, relation_name, schema_version;";
-  if (job_context != NULL)
-    rc = wyl_fact_replay_job_context_checkpoint (job_context);
-  if (rc == WYRELOG_E_OK
-      && duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    rc = WYRELOG_E_IO;
-  }
-  if (rc == WYRELOG_E_OK
-      && (duckdb_bind_varchar (stmt, 1, graph->tenant_id) != DuckDBSuccess
-      || duckdb_bind_varchar (stmt, 2, graph->graph_id) != DuckDBSuccess)) {
-    rc = WYRELOG_E_IO;
-  }
-  if (rc == WYRELOG_E_OK
-      && duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
-    rc = job_context == NULL ? WYRELOG_E_IO
-        : wyl_fact_replay_job_context_checkpoint (job_context);
-    if (rc == WYRELOG_E_OK)
-      rc = WYRELOG_E_IO;
-  }
-
-  for (idx_t row = 0; rc == WYRELOG_E_OK && row < duckdb_row_count (&result);
-      row++) {
-    if (job_context != NULL) {
+    duckdb_prepared_statement stmt = NULL;
+    duckdb_result result = { 0 };
+    static const gchar *sql =
+        "SELECT DISTINCT namespace_id, relation_name, schema_version "
+        "FROM fact_batches WHERE tenant_id = ? AND graph_id = ? "
+        "ORDER BY namespace_id, relation_name, schema_version;";
+    if (job_context != NULL)
       rc = wyl_fact_replay_job_context_checkpoint (job_context);
-      if (rc != WYRELOG_E_OK)
-        break;
+    if (rc == WYRELOG_E_OK
+        && duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
+      duckdb_destroy_prepare (&stmt);
+      rc = WYRELOG_E_IO;
     }
-    if (duckdb_value_is_null (&result, 0, row)
-        || duckdb_value_is_null (&result, 1, row)
-        || duckdb_value_is_null (&result, 2, row)) {
-      rc = WYRELOG_E_POLICY;
-      break;
+    if (rc == WYRELOG_E_OK
+        && (duckdb_bind_varchar (stmt, 1, graph->tenant_id) != DuckDBSuccess
+        || duckdb_bind_varchar (stmt, 2, graph->graph_id) != DuckDBSuccess)) {
+      rc = WYRELOG_E_IO;
     }
-    gchar *namespace_id = duckdb_value_varchar (&result, 0, row);
-    gchar *relation_name = duckdb_value_varchar (&result, 1, row);
-    gint64 schema_version = duckdb_value_int64 (&result, 2, row);
-    if (namespace_id == NULL || relation_name == NULL || schema_version <= 0
-        || schema_version > G_MAXUINT32) {
-      rc = WYRELOG_E_POLICY;
-    } else {
-      ReplayRelationKey *key = g_new0 (ReplayRelationKey, 1);
-      key->namespace_id = g_strdup (namespace_id);
-      key->relation_name = g_strdup (relation_name);
-      key->schema_version = (guint32) schema_version;
-      if (key->namespace_id == NULL || key->relation_name == NULL) {
-        replay_relation_key_free (key);
-        rc = WYRELOG_E_NOMEM;
-      } else {
-        g_ptr_array_add (stored_keys, key);
+    if (rc == WYRELOG_E_OK
+        && duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+      rc = job_context == NULL ? WYRELOG_E_IO
+        : wyl_fact_replay_job_context_checkpoint (job_context);
+      if (rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_IO;
+    }
+
+    for (idx_t row = 0; rc == WYRELOG_E_OK && row < duckdb_row_count (&result);
+        row++) {
+      if (job_context != NULL) {
+        rc = wyl_fact_replay_job_context_checkpoint (job_context);
+        if (rc != WYRELOG_E_OK)
+          break;
       }
+      if (duckdb_value_is_null (&result, 0, row)
+          || duckdb_value_is_null (&result, 1, row)
+          || duckdb_value_is_null (&result, 2, row)) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+      gchar *namespace_id = duckdb_value_varchar (&result, 0, row);
+      gchar *relation_name = duckdb_value_varchar (&result, 1, row);
+      gint64 schema_version = duckdb_value_int64 (&result, 2, row);
+      if (namespace_id == NULL || relation_name == NULL || schema_version <= 0
+          || schema_version > G_MAXUINT32) {
+        rc = WYRELOG_E_POLICY;
+      } else {
+        ReplayRelationKey *key = g_new0 (ReplayRelationKey, 1);
+        key->namespace_id = g_strdup (namespace_id);
+        key->relation_name = g_strdup (relation_name);
+        key->schema_version = (guint32) schema_version;
+        if (key->namespace_id == NULL || key->relation_name == NULL) {
+          replay_relation_key_free (key);
+          rc = WYRELOG_E_NOMEM;
+        } else {
+          g_ptr_array_add (stored_keys, key);
+        }
+      }
+      duckdb_free (namespace_id);
+      duckdb_free (relation_name);
     }
-    duckdb_free (namespace_id);
-    duckdb_free (relation_name);
+    if (interrupt_handler != 0)
+      g_cancellable_disconnect (cancellable, interrupt_handler);
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    wyl_fact_store_connection_session_end (&session);
   }
-  if (interrupt_handler != 0)
-    g_cancellable_disconnect (cancellable, interrupt_handler);
-  duckdb_destroy_prepare (&stmt);
-  duckdb_destroy_result (&result);
-  wyl_fact_store_connection_session_end (&session);
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  for (guint i = 0; i < stored_keys->len; i++) {
+    ReplayRelationKey *stored = g_ptr_array_index (stored_keys, i);
+    g_hash_table_add (batch_names, replay_relation_seen_key (
+          stored->namespace_id, stored->relation_name));
+    g_hash_table_add (batch_versions, replay_relation_version_key (
+          stored->namespace_id, stored->relation_name, stored->schema_version));
+  }
 
   for (guint i = 0; rc == WYRELOG_E_OK && i < stored_keys->len; i++) {
     if (job_context != NULL) {
@@ -660,12 +708,90 @@ list_replay_relations (wyl_policy_store_t *policy, wyl_fact_store_t *store,
         rc = load_relation_schema (policy, graph, stored->namespace_id,
                 stored->relation_name, stored->schema_version, &rel);
       }
-      if (rc == WYRELOG_E_OK)
+      if (rc == WYRELOG_E_OK) {
+        rel->has_durable_batches = TRUE;
         g_ptr_array_add (relations, rel);
+      }
     }
   }
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  g_autoptr (GPtrArray) registered = NULL;
+  if (policy_snapshot != NULL) {
+    registered = g_ptr_array_new_with_free_func (replay_relation_free);
+    for (guint i = 0; i < policy_snapshot->schemas->len; i++) {
+      if (job_context != NULL) {
+        rc = wyl_fact_replay_job_context_checkpoint (job_context);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+      }
+      g_ptr_array_add (registered, replay_relation_clone (
+            g_ptr_array_index (policy_snapshot->schemas, i)));
+    }
+  } else {
+    registered = g_ptr_array_new_with_free_func (replay_relation_free);
+    ReplayRegisteredSchemaCollectCtx collect = {
+      .policy = policy,
+      .graph = graph,
+      .job_context = job_context,
+      .schemas = registered,
+    };
+    rc = wyl_policy_store_foreach_fact_relation_schema_key (policy,
+            graph->tenant_id, graph->graph_id,
+            collect_replay_registered_schema, &collect);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  g_autoptr (GHashTable) candidate_names =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+          (GDestroyNotify) g_ptr_array_unref);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < registered->len; i++) {
+    if (job_context != NULL)
+      rc = wyl_fact_replay_job_context_checkpoint (job_context);
+    if (rc != WYRELOG_E_OK)
+      break;
+    ReplayRelation *schema = g_ptr_array_index (registered, i);
+    if (!schema->relation_visible)
+      continue;
+    g_autofree gchar *logical = replay_relation_seen_key (schema->namespace_id,
+            schema->relation_name);
+    if (g_hash_table_contains (seen, logical)
+        || g_hash_table_contains (batch_names, logical)) {
+      continue;
+    }
+    GPtrArray *versions = g_hash_table_lookup (candidate_names, logical);
+    if (versions == NULL) {
+      versions = g_ptr_array_new ();
+      g_hash_table_insert (candidate_names, g_strdup (logical), versions);
+    }
+    g_ptr_array_add (versions, schema);
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  GHashTableIter candidate_iter;
+  gpointer candidate_key = NULL;
+  gpointer candidate_value = NULL;
+  g_hash_table_iter_init (&candidate_iter, candidate_names);
+  while (rc == WYRELOG_E_OK
+      && g_hash_table_iter_next (&candidate_iter, &candidate_key,
+      &candidate_value)) {
+    GPtrArray *versions = candidate_value;
+    if (versions->len != 1) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    g_ptr_array_add (relations, replay_relation_clone (
+          g_ptr_array_index (versions, 0)));
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  for (guint i = 0; i < relations->len; i++) {
+    ReplayRelation *rel = g_ptr_array_index (relations, i);
+    g_autofree gchar *version = replay_relation_version_key (rel->namespace_id,
+            rel->relation_name, rel->schema_version);
+    rel->has_durable_batches = g_hash_table_contains (batch_versions, version);
+  }
 
   *out_relations = g_steal_pointer (&relations);
   return WYRELOG_E_OK;
@@ -805,6 +931,8 @@ replay_relation_into_engine (wyl_fact_store_t *store,
       : wyl_fact_replay_job_context_checkpoint (job_context);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (!rel->has_durable_batches)
+    return WYRELOG_E_OK;
   g_autoptr (GString) sql = g_string_new ("SELECT ");
   for (gsize i = 0; i < rel->n_columns; i++) {
     if (i > 0)
@@ -1083,7 +1211,7 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
 {
   if (out_engine != NULL)
     *out_engine = NULL;
-  if (policy == NULL || store == NULL || graph_info == NULL
+  if (policy == NULL || graph_info == NULL
       || out_engine == NULL)
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
@@ -1104,22 +1232,24 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
    * another thread poisons after this admission, each later store session
    * rechecks health before any DuckDB access and the unpublished engine is
    * destroyed on failure. */
-  WylFactStoreConnectionSession admission = { 0 };
-  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
-          &admission);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  wyl_fact_store_connection_session_end (&admission);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (store != NULL) {
+    WylFactStoreConnectionSession admission = { 0 };
+    rc = wyl_fact_store_connection_session_begin (store, &admission);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    wyl_fact_store_connection_session_end (&admission);
 
-  /* The path in policy is caller-owned expectation, while a store's identity
-   * is evidence from the artifact itself.  Check both before enumerating or
-   * publishing any facts; otherwise a relocated graph can serve another
-   * graph's data successfully.  This is deliberately read-only and does not
-   * bind legacy metadata during replay. */
-  rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
-          graph_info->graph_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+    /* The path in policy is caller-owned expectation, while a store's identity
+     * is evidence from the artifact itself.  Check both before enumerating or
+     * publishing any facts; otherwise a relocated graph can serve another
+     * graph's data successfully.  This is deliberately read-only and does not
+     * bind legacy metadata during replay. */
+    rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
+            graph_info->graph_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   g_autoptr (GPtrArray) relations = NULL;
   rc = list_replay_relations (policy, store, graph_info, policy_snapshot,
@@ -1127,6 +1257,8 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
           &relations);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (relations->len == 0)
+    return WYRELOG_E_NOT_FOUND;
 
   g_autofree gchar *program = build_graph_program (relations);
   if (program == NULL)
@@ -1138,8 +1270,9 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
     return rc;
   wyl_engine_set_owner (engine, WYL_ENGINE_OWNER_READ);
 
-  rc = replay_relations_into_engine (store, graph_info, relations, engine,
-          job_context);
+  if (store != NULL)
+    rc = replay_relations_into_engine (store, graph_info, relations, engine,
+            job_context);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (engine);
     return rc;
@@ -1186,6 +1319,22 @@ open_graph_engine_with_artifact_lease (wyl_policy_store_t *policy,
           artifact_namespace, artifact_lease,
           wyl_fact_replay_job_context_get_resource_recorder (job_context),
           &store);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    WylPolicyGraphMaterializationState state = policy_snapshot == NULL
+        ? graph_materialization_state_or_unknown (policy, graph_info)
+        : policy_snapshot->materialization_state;
+    if (state == WYL_POLICY_GRAPH_MATERIALIZATION_NEVER) {
+      WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+      rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
+              graph_info->tenant_id, graph_info->graph_id, FALSE, &directory);
+      wyl_fact_graph_directory_clear (&directory);
+      if (rc == WYRELOG_E_OK)
+        return open_graph_engine_with_store (policy, NULL, graph_info,
+                   policy_snapshot, job_context, out_engine);
+      if (rc == WYRELOG_E_NOT_FOUND)
+        rc = WYRELOG_E_IO;
+    }
+  }
   if (rc != WYRELOG_E_OK) {
     if (job_context != NULL && rc == WYRELOG_E_RESOURCE_LIMIT)
       wyl_fact_replay_job_context_record_quota_rejection (job_context);
