@@ -2215,6 +2215,19 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_dep, duckdb_dep],
   )
   test('secure-duckdb-bridge', test_secure_duckdb_bridge)
+  test_fact_offline_restore_stage_metadata = executable(
+    'test-fact-offline-restore-stage-metadata',
+    'test-fact-offline-restore-stage-metadata.cc',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
+    override_options : ['cpp_std=c++17'],
+  )
+  test('fact-offline-restore-stage-metadata',
+    test_fact_offline_restore_stage_metadata,
+    timeout : 120,
+  )
   test_secure_duckdb_recording_filesystem = executable(
     'test-secure-duckdb-recording-filesystem',
     'test-secure-duckdb-recording-filesystem.cc',
