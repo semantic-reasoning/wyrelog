@@ -14,6 +14,8 @@
 
 #include "wyrelog/error.h"
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/offline-restore-stage-private.h"
+#include "fact/store-identity-types-private.h"
 
 G_BEGIN_DECLS;
 
@@ -61,6 +63,48 @@ wyrelog_error_t
 wyl_secure_duckdb_bridge_release_live (WylSecureDuckdbBridge * self);
 WylFactArtifactMutationLease *
 wyl_secure_duckdb_bridge_authority_lease (WylSecureDuckdbBridge * self);
+
+/* One-shot, read-only validation of an operation-bound restore stage. The
+ * caller retains the reader and its resolver/directory/lease for the entire
+ * call. The function verifies size and checksum before and after opening
+ * DuckDB, exposes no DuckDB handle or path, and only returns the result of
+ * validating the persisted store identity. It does not update the journal or
+ * validate schema digest/replay. Windows fails closed. */
+wyrelog_error_t wyl_secure_duckdb_bridge_validate_restore_stage_identity
+  (WylFactOfflineRestoreStageReader * reader, guint64 expected_bytes,
+    const gchar * expected_checksum,
+    const WylFactStoreIdentity * expected_identity,
+    WylFactStoreIdentityResult * out_result);
+
+typedef enum
+{
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_IDENTITY = 1,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_CLOSE,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_FIRST_READ,
+} WylSecureDuckdbRestoreStageTestPoint;
+typedef void (*WylSecureDuckdbRestoreStageTestHook)
+  (WylSecureDuckdbRestoreStageTestPoint point, gpointer user_data);
+void wyl_secure_duckdb_bridge_set_restore_stage_test_hook_for_test
+  (WylSecureDuckdbRestoreStageTestHook hook, gpointer user_data);
+
+enum
+{
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CGROUP_HIDDEN = 1u << 0,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_SECRET_PATHS_VIRTUAL = 1u << 1,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_HOST_PATH_DISPATCHED = 1u << 2,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_HOST_PATH_REJECTED = 1u << 3,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_ALIAS_REJECTED = 1u << 4,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_WRITE_REJECTED = 1u << 5,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_APPEND_REJECTED = 1u << 6,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CREATE_REJECTED = 1u << 7,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_DIRECT_IO_REJECTED = 1u << 8,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_MUTATION_REJECTED = 1u << 9,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_PARALLEL_READ_ALLOWED = 1u << 10,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CLOSED_HANDLE_REJECTED = 1u << 11,
+};
+wyrelog_error_t
+wyl_secure_duckdb_bridge_test_restore_stage_filesystem_contract
+  (WylFactOfflineRestoreStageReader * reader, guint64 * out_contract);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSecureDuckdbBridge,
     wyl_secure_duckdb_bridge_free)

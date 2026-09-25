@@ -4,11 +4,16 @@
 #include "fact/secure-duckdb-filesystem-private.hpp"
 #include "fact/store-identity-private.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <duckdb.hpp>
@@ -41,6 +46,722 @@ struct WylSecureDuckdbBridge
 };
 
 namespace {
+
+  constexpr duckdb::idx_t restore_stage_read_chunk = 64 * 1024;
+  constexpr char restore_stage_main_name[] = "facts.duckdb";
+  constexpr char restore_stage_wal_name[] = "facts.duckdb.wal";
+  constexpr char restore_stage_wal_checkpoint_name[] =
+      "facts.duckdb.wal.checkpoint";
+  constexpr char restore_stage_wal_recovery_name[] =
+      "facts.duckdb.wal.recovery";
+  constexpr char restore_stage_virtual_secret_directory[] =
+      "facts.duckdb/.duckdb/stored_secrets";
+  constexpr char restore_stage_virtual_secret_parent[] =
+      "facts.duckdb/.duckdb";
+
+  bool
+  restore_stage_path_allowed_for_configuration (const duckdb::string &path)
+  {
+    return path == restore_stage_main_name || path == restore_stage_wal_name
+           || path == restore_stage_wal_checkpoint_name
+           || path == restore_stage_wal_recovery_name
+           || path == restore_stage_virtual_secret_parent
+           || path == restore_stage_virtual_secret_directory;
+  }
+
+  std::mutex restore_stage_test_mutex;
+  WylSecureDuckdbRestoreStageTestHook restore_stage_test_hook = nullptr;
+  gpointer restore_stage_test_data = nullptr;
+
+  void
+  restore_stage_test_fire (WylSecureDuckdbRestoreStageTestPoint point)
+  {
+    WylSecureDuckdbRestoreStageTestHook hook = nullptr;
+    gpointer data = nullptr;
+    {
+      std::lock_guard<std::mutex> lock (restore_stage_test_mutex);
+      hook = restore_stage_test_hook;
+      data = restore_stage_test_data;
+    }
+    if (hook != nullptr)
+      hook (point, data);
+  }
+
+  [[noreturn]] void
+  restore_stage_io_reject (const char *operation)
+  {
+    throw duckdb::IOException ("offline restore stage filesystem rejected %s",
+        operation);
+  }
+
+  class RestoreStageReaderFileSystem;
+
+  class RestoreStageReaderFileHandle final: public duckdb::FileHandle
+  {
+public:
+    RestoreStageReaderFileHandle (duckdb::FileSystem &file_system,
+        const duckdb::string &path, duckdb::FileOpenFlags flags)
+      : duckdb::FileHandle (file_system, path, flags)
+    {
+    }
+
+    void Close () override
+    {
+      closed_.store (true);
+    }
+
+    bool Closed () const
+    {
+      return closed_.load ();
+    }
+
+    int64_t Offset () const
+    {
+      return offset_;
+    }
+
+    void SetOffset (int64_t offset)
+    {
+      offset_ = offset;
+    }
+
+private:
+    std::atomic<bool> closed_ { false };
+    int64_t offset_ = 0;
+  };
+
+  class RestoreStageReaderFileSystem final: public duckdb::FileSystem
+  {
+public:
+    RestoreStageReaderFileSystem (WylFactOfflineRestoreStageReader *reader,
+        std::shared_ptr<WylSecureDuckdbHealth> health)
+      : reader_ (reader), health_ (std::move (health))
+    {
+      if (reader_ == nullptr || health_ == nullptr)
+        throw duckdb::IOException ("offline restore stage reader missing");
+    }
+
+    duckdb::unique_ptr<duckdb::FileHandle>
+    OpenFile (const duckdb::string &path, duckdb::FileOpenFlags flags,
+        duckdb::optional_ptr<duckdb::FileOpener> opener = nullptr) override
+    {
+      (void) opener;
+      RequireHealthy ("open");
+      if (path == restore_stage_wal_name && flags.ReturnNullIfNotExists ())
+        return nullptr;
+      if (path != restore_stage_main_name || !flags.OpenForReading ()
+          || flags.OpenForWriting () || flags.OpenForAppending ()
+          || flags.CreateFileIfNotExists () || flags.OverwriteExistingFile ()
+          || flags.ExclusiveCreate () || flags.ReturnNullIfExists ()
+          || flags.DirectIO () || flags.CreatePrivateFile ()
+          || flags.EnableExtensionInstall ()
+          || flags.Lock () == duckdb::FileLockType::WRITE_LOCK) {
+        Reject ("open path or flags");
+      }
+      /* DuckDB marks read-only database handles as parallel/multi-client.
+       * Every reader callback is serialized below, and writes remain denied. */
+      return duckdb::make_uniq<RestoreStageReaderFileHandle> (*this, path,
+             flags);
+    }
+
+    void Read (duckdb::FileHandle &handle, void *buffer, int64_t bytes,
+        duckdb::idx_t location) override
+    {
+      auto &stage_handle = Handle (handle);
+      if (bytes == 0)
+        return;
+      if (buffer == nullptr || bytes < 0
+          || location > static_cast<duckdb::idx_t> (G_MAXINT64)
+          || static_cast<uint64_t> (bytes)
+          > static_cast<uint64_t> (G_MAXINT64) -location)
+        Reject ("read bounds");
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      ReadExact (static_cast<uint8_t *> (buffer),
+          static_cast<uint64_t> (location), static_cast<uint64_t> (bytes));
+      (void) stage_handle;
+    }
+
+    int64_t Read (duckdb::FileHandle &handle, void *buffer,
+        int64_t bytes) override
+    {
+      if (bytes == 0)
+        return 0;
+      if (buffer == nullptr || bytes < 0)
+        Reject ("sequential read bounds");
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      auto &stage_handle = Handle (handle);
+      const int64_t count = ReadSome (static_cast<uint8_t *> (buffer), bytes,
+              stage_handle.Offset ());
+      stage_handle.SetOffset (stage_handle.Offset () + count);
+      return count;
+    }
+
+    bool Trim (duckdb::FileHandle &, duckdb::idx_t,
+        duckdb::idx_t) override
+    {
+      Reject ("trim");
+    }
+
+    int64_t GetFileSize (duckdb::FileHandle &handle) override
+    {
+      (void) Handle (handle);
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      return Size ();
+    }
+
+    duckdb::timestamp_t GetLastModifiedTime (duckdb::FileHandle &handle)
+    override
+    {
+      (void) Handle (handle);
+      RequireHealthy ("modified time");
+      return duckdb::timestamp_t::ninfinity ();
+    }
+
+    duckdb::string GetVersionTag (duckdb::FileHandle &handle) override
+    {
+      (void) Handle (handle);
+      RequireHealthy ("version tag");
+      return "offline-restore-stage";
+    }
+
+    duckdb::FileType GetFileType (duckdb::FileHandle &handle) override
+    {
+      (void) Handle (handle);
+      RequireHealthy ("file type");
+      return duckdb::FileType::FILE_TYPE_REGULAR;
+    }
+
+    duckdb::FileMetadata Stats (duckdb::FileHandle &handle) override
+    {
+      duckdb::FileMetadata result;
+      result.file_size = GetFileSize (handle);
+      result.last_modification_time = GetLastModifiedTime (handle);
+      result.file_type = GetFileType (handle);
+      return result;
+    }
+
+    void Truncate (duckdb::FileHandle &, int64_t) override
+    {
+      Reject ("truncate");
+    }
+
+    bool DirectoryExists (const duckdb::string &path,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      if (path == restore_stage_virtual_secret_parent
+          || path == restore_stage_virtual_secret_directory) {
+        RequireHealthy ("virtual secret directory check");
+        return false;
+      }
+      Reject ("directory existence");
+    }
+
+    void CreateDirectory (const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("directory creation");
+    }
+
+    void CreateDirectoriesRecursive (const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("recursive directory creation");
+    }
+
+    void RemoveDirectory (const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("directory removal");
+    }
+
+    bool ListFiles (const duckdb::string &,
+        const std::function<void(const duckdb::string &, bool)> &,
+        duckdb::FileOpener * = nullptr) override
+    {
+      Reject ("directory listing");
+    }
+
+    void MoveFile (const duckdb::string &, const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("rename");
+    }
+
+    bool FileExists (const duckdb::string &path,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      RequireHealthy ("existence check");
+      if (path == restore_stage_main_name)
+        return true;
+      if (path == restore_stage_wal_name)
+        return false;
+      /* DuckDB probes this host resource file to estimate memory limits.
+       * Do not expose the host filesystem: report it absent so DuckDB uses
+       * its conservative fallback, and continue rejecting every other path. */
+      if (path == "/proc/self/cgroup")
+        return false;
+      Reject ("existence path");
+    }
+
+    bool IsPipe (const duckdb::string &path,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      if (path != restore_stage_main_name)
+        Reject ("pipe path");
+      RequireHealthy ("pipe check");
+      return false;
+    }
+
+    void RemoveFile (const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("file removal");
+    }
+
+    bool TryRemoveFile (const duckdb::string &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("conditional file removal");
+    }
+
+    void RemoveFiles (const duckdb::vector<duckdb::string> &,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      Reject ("multiple file removal");
+    }
+
+    void FileSync (duckdb::FileHandle &) override
+    {
+      Reject ("sync");
+    }
+
+    duckdb::string GetHomeDirectory () override
+    {
+      RequireHealthy ("home directory");
+      /* SecretManager requires a home string during initialization. Keep its
+       * derived path inside the database's virtual namespace; never map it to
+       * the host home directory. */
+      return restore_stage_main_name;
+    }
+
+    duckdb::string ExpandPath (const duckdb::string &path) override
+    {
+      if (!restore_stage_path_allowed_for_configuration (path))
+        Reject ("path expansion");
+      RequireHealthy ("path expansion");
+      return path;
+    }
+
+    duckdb::string PathSeparator (const duckdb::string &path) override
+    {
+      if (!restore_stage_path_allowed_for_configuration (path))
+        Reject ("path separator");
+      RequireHealthy ("path separator");
+      return "/";
+    }
+
+    bool IsPathAbsolute (const duckdb::string &path) override
+    {
+      if (!restore_stage_path_allowed_for_configuration (path))
+        Reject ("absolute path check");
+      RequireHealthy ("absolute path check");
+      return false;
+    }
+
+    duckdb::vector<duckdb::OpenFileInfo> Glob (const duckdb::string &,
+        duckdb::FileOpener * = nullptr) override
+    {
+      Reject ("glob");
+    }
+
+    void RegisterSubSystem (duckdb::unique_ptr<duckdb::FileSystem>) override
+    {
+      Reject ("subsystem registration");
+    }
+
+    void RegisterSubSystem (duckdb::FileCompressionType,
+        duckdb::unique_ptr<duckdb::FileSystem>) override
+    {
+      Reject ("compression subsystem registration");
+    }
+
+    void UnregisterSubSystem (const duckdb::string &) override
+    {
+      Reject ("subsystem removal");
+    }
+
+    duckdb::unique_ptr<duckdb::FileSystem> ExtractSubSystem
+      (const duckdb::string &) override
+    {
+      Reject ("subsystem extraction");
+    }
+
+    duckdb::vector<duckdb::string> ListSubSystems () override
+    {
+      return {};
+    }
+
+    bool CanHandleFile (const duckdb::string &) override
+    {
+      RequireHealthy ("file handler check");
+      return true;
+    }
+
+    void Seek (duckdb::FileHandle &handle, duckdb::idx_t location) override
+    {
+      if (location > static_cast<duckdb::idx_t> (G_MAXINT64))
+        Reject ("seek bounds");
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      auto &stage_handle = Handle (handle);
+      const int64_t size = Size ();
+      if (static_cast<int64_t> (location) > size)
+        Reject ("seek past end");
+      stage_handle.SetOffset (static_cast<int64_t> (location));
+    }
+
+    void Reset (duckdb::FileHandle &handle) override
+    {
+      Seek (handle, 0);
+    }
+
+    duckdb::idx_t SeekPosition (duckdb::FileHandle &handle) override
+    {
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      return static_cast<duckdb::idx_t> (Handle (handle).Offset ());
+    }
+
+    bool IsManuallySet () override
+    {
+      return true;
+    }
+
+    bool CanSeek () override
+    {
+      return true;
+    }
+
+    bool OnDiskFile (duckdb::FileHandle &handle) override
+    {
+      (void) Handle (handle);
+      RequireHealthy ("on-disk query");
+      return false;
+    }
+
+    duckdb::unique_ptr<duckdb::FileHandle> OpenCompressedFile
+      (duckdb::QueryContext, duckdb::unique_ptr<duckdb::FileHandle>, bool)
+    override
+    {
+      Reject ("compressed file");
+    }
+
+    bool IsLocalFileSystem () const override
+    {
+      /* Claim all path spellings so DuckDB cannot fall back to host I/O. */
+      return true;
+    }
+
+    std::string GetName () const override
+    {
+      return "wyrelog-offline-restore-stage-reader";
+    }
+
+    void SetDisabledFileSystems (const duckdb::vector<duckdb::string> &)
+    override
+    {
+    }
+
+    bool SubSystemIsDisabled (const duckdb::string &) override
+    {
+      return true;
+    }
+
+    bool IsDisabledForPath (const duckdb::string &) override
+    {
+      return false;
+    }
+
+    duckdb::string CanonicalizePath (const duckdb::string &path,
+        duckdb::optional_ptr<duckdb::FileOpener> = nullptr) override
+    {
+      if (!restore_stage_path_allowed_for_configuration (path))
+        Reject ("path canonicalization");
+      RequireHealthy ("path canonicalization");
+      return path;
+    }
+
+protected:
+    duckdb::unique_ptr<duckdb::FileHandle> OpenFileExtended
+      (const duckdb::OpenFileInfo &info, duckdb::FileOpenFlags flags,
+        duckdb::optional_ptr<duckdb::FileOpener> opener) override
+    {
+      return OpenFile (info.path, flags, opener);
+    }
+
+    bool SupportsOpenFileExtended () const override
+    {
+      return true;
+    }
+
+    bool ListFilesExtended (const duckdb::string &,
+        const std::function<void(duckdb::OpenFileInfo &)> &,
+        duckdb::optional_ptr<duckdb::FileOpener>) override
+    {
+      Reject ("extended directory listing");
+    }
+
+    bool SupportsListFilesExtended () const override
+    {
+      return false;
+    }
+
+    duckdb::unique_ptr<duckdb::MultiFileList> GlobFilesExtended
+      (const duckdb::string &, const duckdb::FileGlobInput &,
+        duckdb::optional_ptr<duckdb::FileOpener>) override
+    {
+      Reject ("extended glob");
+    }
+
+    bool SupportsGlobExtended () const override
+    {
+      return false;
+    }
+
+private:
+    RestoreStageReaderFileHandle &Handle (duckdb::FileHandle &handle)
+    {
+      if (&handle.file_system != this)
+        Reject ("foreign file handle");
+      auto &stage_handle = handle.Cast<RestoreStageReaderFileHandle> ();
+      if (stage_handle.Closed ())
+        Reject ("closed file handle");
+      return stage_handle;
+    }
+
+    void RequireHealthy (const char *operation)
+    {
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      const wyrelog_error_t health = health_->Status ();
+      if (health != WYRELOG_E_OK)
+        throw WylSecureDuckdbAuthorityException (health,
+            duckdb::StringUtil::Format ("restore-stage %s after failure",
+            operation));
+      const wyrelog_error_t rc =
+          wyl_fact_offline_restore_stage_reader_revalidate (reader_);
+      if (rc != WYRELOG_E_OK) {
+        health_->Poison (rc);
+        throw WylSecureDuckdbAuthorityException (rc,
+            duckdb::StringUtil::Format ("restore-stage %s authority",
+            operation));
+      }
+    }
+
+    [[noreturn]] void Reject (const char *operation)
+    {
+      health_->Poison (WYRELOG_E_POLICY);
+      restore_stage_io_reject (operation);
+    }
+
+    int64_t Size ()
+    {
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      RequireHealthy ("size");
+      guint64 size = 0;
+      const wyrelog_error_t rc =
+          wyl_fact_offline_restore_stage_reader_get_size (reader_, &size);
+      if (rc != WYRELOG_E_OK || size > static_cast<guint64> (G_MAXINT64)) {
+        const wyrelog_error_t error = rc == WYRELOG_E_OK
+            ? WYRELOG_E_POLICY : rc;
+        health_->Poison (error);
+        throw WylSecureDuckdbAuthorityException (error,
+            "restore-stage size unavailable");
+      }
+      return static_cast<int64_t> (size);
+    }
+
+    void ReadExact (uint8_t *buffer, uint64_t offset, uint64_t bytes)
+    {
+      std::lock_guard<std::recursive_mutex> lock (reader_mutex_);
+      if (!first_read_hook_fired_) {
+        first_read_hook_fired_ = true;
+        restore_stage_test_fire
+          (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_FIRST_READ);
+      }
+      uint64_t done = 0;
+      while (done < bytes) {
+        const gsize request = static_cast<gsize> (std::min<uint64_t> (
+              restore_stage_read_chunk, bytes - done));
+        gsize actual = 0;
+        const wyrelog_error_t rc =
+            wyl_fact_offline_restore_stage_reader_read_at (reader_,
+                offset + done, buffer + done, request, &actual);
+        if (rc != WYRELOG_E_OK || actual != request || actual == 0) {
+          const wyrelog_error_t error = rc == WYRELOG_E_OK
+              ? WYRELOG_E_IO : rc;
+          health_->Poison (error);
+          throw WylSecureDuckdbAuthorityException (error,
+              "restore-stage bounded read failed");
+        }
+        done += actual;
+      }
+    }
+
+    int64_t ReadSome (uint8_t *buffer, int64_t requested, int64_t offset)
+    {
+      if (requested == 0)
+        return 0;
+      const int64_t size = Size ();
+      if (offset < 0 || offset > size)
+        Reject ("read offset");
+      const uint64_t remaining = static_cast<uint64_t> (size - offset);
+      const uint64_t bytes = std::min<uint64_t> (
+        static_cast<uint64_t> (requested), remaining);
+      ReadExact (buffer, static_cast<uint64_t> (offset), bytes);
+      return static_cast<int64_t> (bytes);
+    }
+
+    WylFactOfflineRestoreStageReader *reader_;
+    std::shared_ptr<WylSecureDuckdbHealth> health_;
+    std::recursive_mutex reader_mutex_;
+    bool first_read_hook_fired_ = false;
+  };
+
+  guint64
+  test_restore_stage_filesystem_contract
+    (WylFactOfflineRestoreStageReader *reader)
+  {
+    guint64 verified = 0;
+    auto probe = [reader] (const std::function<void
+        (RestoreStageReaderFileSystem &)> &operation) {
+      auto health = std::make_shared<WylSecureDuckdbHealth> ();
+      RestoreStageReaderFileSystem filesystem (reader, health);
+      try {
+        operation (filesystem);
+      } catch (...)
+      {
+        return health->Status () == WYRELOG_E_POLICY;
+      }
+      return false;
+    };
+
+    auto health = std::make_shared<WylSecureDuckdbHealth> ();
+    RestoreStageReaderFileSystem filesystem (reader, health);
+    if (!filesystem.FileExists ("/proc/self/cgroup"))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CGROUP_HIDDEN;
+    if (!filesystem.DirectoryExists (restore_stage_virtual_secret_parent)
+        && !filesystem.DirectoryExists
+          (restore_stage_virtual_secret_directory))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_SECRET_PATHS_VIRTUAL;
+    try {
+      auto dispatch_health = std::make_shared<WylSecureDuckdbHealth> ();
+      duckdb::DBConfig config;
+      config.options.load_extensions = false;
+      config.options.use_temporary_directory = false;
+      config.options.maximum_threads = 1;
+      config.options.checkpoint_on_shutdown = false;
+      config.file_system = duckdb::make_uniq<RestoreStageReaderFileSystem>
+          (reader, dispatch_health);
+      duckdb::DuckDB database (nullptr, &config);
+      auto &local = duckdb::FileSystem::GetLocal (*database.instance);
+      try {
+        (void) local.FileExists ("/etc/passwd");
+      } catch (...)
+      {
+        if (dispatch_health->Status () == WYRELOG_E_POLICY) {
+          verified |=
+              WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_HOST_PATH_DISPATCHED;
+          verified |=
+              WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_HOST_PATH_REJECTED;
+        }
+      }
+    } catch (...)
+    {
+    }
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      auto handle = fs.OpenFile ("facts.duckdb/../etc/passwd",
+      duckdb::FileOpenFlags::FILE_FLAGS_READ);
+      (void) handle;
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_ALIAS_REJECTED;
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      auto handle = fs.OpenFile (restore_stage_main_name,
+      duckdb::FileOpenFlags (duckdb::FileOpenFlags::FILE_FLAGS_READ
+      | duckdb::FileOpenFlags::FILE_FLAGS_WRITE));
+      (void) handle;
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_WRITE_REJECTED;
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      auto handle = fs.OpenFile (restore_stage_main_name,
+      duckdb::FileOpenFlags (duckdb::FileOpenFlags::FILE_FLAGS_READ
+      | duckdb::FileOpenFlags::FILE_FLAGS_APPEND));
+      (void) handle;
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_APPEND_REJECTED;
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      auto handle = fs.OpenFile (restore_stage_main_name,
+      duckdb::FileOpenFlags (duckdb::FileOpenFlags::FILE_FLAGS_READ
+      | duckdb::FileOpenFlags::FILE_FLAGS_FILE_CREATE));
+      (void) handle;
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CREATE_REJECTED;
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      auto handle = fs.OpenFile (restore_stage_main_name,
+      duckdb::FileOpenFlags (duckdb::FileOpenFlags::FILE_FLAGS_READ
+      | duckdb::FileOpenFlags::FILE_FLAGS_DIRECT_IO));
+      (void) handle;
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_DIRECT_IO_REJECTED;
+    if (probe ([] (RestoreStageReaderFileSystem &fs) {
+      fs.MoveFile (restore_stage_main_name, "facts.duckdb.copy");
+    }) && probe ([] (RestoreStageReaderFileSystem &fs) {
+      fs.RemoveFile (restore_stage_main_name);
+    }) && probe ([] (RestoreStageReaderFileSystem &fs) {
+      (void) fs.Glob ("*");
+    }))
+      verified |= WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_MUTATION_REJECTED;
+
+    try {
+      const duckdb::idx_t flags = duckdb::FileOpenFlags::FILE_FLAGS_READ
+          | duckdb::FileOpenFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS
+          | duckdb::FileOpenFlags::FILE_FLAGS_PARALLEL_ACCESS
+          | duckdb::FileOpenFlags::FILE_FLAGS_MULTI_CLIENT_ACCESS;
+      auto handle = filesystem.OpenFile (restore_stage_main_name,
+              duckdb::FileOpenFlags (flags));
+      std::atomic<bool> read_ok { true };
+      int64_t counts[2] = { 0, 0 };
+      auto read = [&] (size_t index) {
+        uint8_t bytes[4096];
+        try {
+          counts[index] = filesystem.Read (*handle, bytes, sizeof bytes);
+        } catch (...)
+        {
+          read_ok.store (false);
+        }
+      };
+      std::thread first (read, 0);
+      std::thread second (read, 1);
+      first.join ();
+      second.join ();
+      if (read_ok.load () && counts[0] == 4096 && counts[1] == 4096
+          && filesystem.SeekPosition (*handle) == 8192) {
+        filesystem.Seek (*handle, 0);
+        if (filesystem.SeekPosition (*handle) == 0)
+          verified |=
+              WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_PARALLEL_READ_ALLOWED;
+      }
+      handle->Close ();
+      try {
+        (void) filesystem.SeekPosition (*handle);
+      } catch (...)
+      {
+        if (health->Status () == WYRELOG_E_POLICY)
+          verified |=
+              WYL_SECURE_DUCKDB_RESTORE_STAGE_FS_TEST_CLOSED_HANDLE_REJECTED;
+      }
+    } catch (...)
+    {
+    }
+    return verified;
+  }
 
   std::mutex pinned_test_control_mutex;
   WylFactStorePinnedTestHook pinned_test_hook = nullptr;
@@ -349,6 +1070,68 @@ namespace {
   }
 
   wyrelog_error_t
+  validate_restore_stage_identity_once
+    (WylFactOfflineRestoreStageReader *reader,
+      const WylFactStoreIdentity *expected_identity,
+      WylFactStoreIdentityResult *out_identity_result)
+  {
+    std::unique_ptr<WylSecureDuckdbBridge> bridge;
+    wyrelog_error_t result = WYRELOG_E_OK;
+    try {
+      bridge = std::make_unique<WylSecureDuckdbBridge> ();
+      bridge->mode = WYL_SECURE_DUCKDB_VALIDATE_ONLY;
+      bridge->health = std::make_shared<WylSecureDuckdbHealth> ();
+
+      duckdb::DBConfig config;
+      config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+      config.options.load_extensions = false;
+      config.options.use_temporary_directory = false;
+      config.options.maximum_threads = 1;
+      config.options.checkpoint_on_shutdown = false;
+      config.SetOptionByName ("enable_external_access", duckdb::Value (false));
+      config.SetOptionByName ("allow_community_extensions",
+          duckdb::Value (false));
+      config.SetOptionByName ("autoinstall_known_extensions",
+          duckdb::Value (false));
+      config.SetOptionByName ("autoload_known_extensions",
+          duckdb::Value (false));
+      config.file_system = duckdb::make_uniq<RestoreStageReaderFileSystem>
+          (reader, bridge->health);
+
+      bridge->database = std::make_unique<duckdb::DuckDB>
+          (restore_stage_main_name, &config);
+      bridge->connection =
+          std::make_unique<duckdb::Connection> (*bridge->database);
+
+      result = wyl_fact_offline_restore_stage_reader_revalidate (reader);
+      if (result == WYRELOG_E_OK) {
+        WylFactStoreIdentityExecutor executor = {
+          bridge->connection.get (), cpp_identity_execute, nullptr
+        };
+        result = wyl_fact_store_identity_execute (&executor,
+                expected_identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+                out_identity_result);
+        if (result == WYRELOG_E_OK)
+          restore_stage_test_fire
+            (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_IDENTITY);
+      }
+    } catch (...)
+    {
+      result = current_exception_error ();
+    }
+    if (bridge != nullptr) {
+      const wyrelog_error_t close_result =
+          bridge_finalize_storage (bridge.get (), false);
+      if (close_result != WYRELOG_E_OK) {
+        result = close_result;
+        *out_identity_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+      }
+    }
+    restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_CLOSE);
+    return result;
+  }
+
+  wyrelog_error_t
   pinned_authority_revalidate (WylSecureDuckdbBridge *bridge,
       WylFactArtifactNamespace *namespace_)
   {
@@ -423,6 +1206,82 @@ bridge_query_health (WylSecureDuckdbBridge *self)
       return self->health->Status ();
     return WYRELOG_E_INTERNAL;
   }
+}
+
+extern "C" void
+wyl_secure_duckdb_bridge_set_restore_stage_test_hook_for_test
+  (WylSecureDuckdbRestoreStageTestHook hook, gpointer user_data)
+{
+  std::lock_guard<std::mutex> lock (restore_stage_test_mutex);
+  restore_stage_test_hook = hook;
+  restore_stage_test_data = user_data;
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_test_restore_stage_filesystem_contract
+  (WylFactOfflineRestoreStageReader *reader, guint64 *out_contract)
+{
+  if (out_contract != nullptr)
+    *out_contract = 0;
+  if (reader == nullptr || out_contract == nullptr)
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  return WYRELOG_E_POLICY;
+#else
+  *out_contract = test_restore_stage_filesystem_contract (reader);
+  return WYRELOG_E_OK;
+#endif
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_validate_restore_stage_identity
+  (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
+    const gchar *expected_checksum,
+    const WylFactStoreIdentity *expected_identity,
+    WylFactStoreIdentityResult *out_result)
+{
+  if (out_result != nullptr)
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  if (reader == nullptr || expected_bytes == 0 || expected_checksum == nullptr
+      || expected_identity == nullptr || out_result == nullptr
+      || !wyl_fact_store_identity_input_is_valid (expected_identity))
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  return WYRELOG_E_POLICY;
+#else
+  wyrelog_error_t rc =
+      wyl_fact_offline_restore_stage_reader_verify_content (reader,
+          expected_bytes, expected_checksum);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylFactStoreIdentityResult identity_result =
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  {
+    wyl_fact_store_identity_process_guard_lock ();
+    struct ProcessGuard
+    {
+      ~ProcessGuard ()
+      {
+        wyl_fact_store_identity_process_guard_unlock ();
+      }
+    } process_guard;
+    rc = validate_restore_stage_identity_once (reader, expected_identity,
+            &identity_result);
+  }
+
+  const wyrelog_error_t authority =
+      wyl_fact_offline_restore_stage_reader_revalidate (reader);
+  const wyrelog_error_t content =
+      wyl_fact_offline_restore_stage_reader_verify_content (reader,
+          expected_bytes, expected_checksum);
+  if (authority != WYRELOG_E_OK)
+    return authority;
+  if (content != WYRELOG_E_OK)
+    return content;
+  *out_result = identity_result;
+  return rc;
+#endif
 }
 
 extern "C" wyrelog_error_t
