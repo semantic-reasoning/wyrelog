@@ -5050,6 +5050,20 @@ main (int argc, char **argv)
   g_autoptr (GOptionContext) context =
       g_option_context_new ("COMMAND - wyrelog control client");
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_summary (context,
+      "Commands:\n"
+      "  status                     Check daemon health and readiness\n"
+      "  policy                     Check decisions and manage permissions/roles\n"
+      "  graph                      Create and inspect fact graphs\n"
+      "  fact                       Manage schemas, facts, and quotas\n"
+      "  datalog                    Query stored facts\n"
+      "  audit                      Query the audit trail\n"
+      "  key                        Inspect and rotate policy keys\n"
+      "  mfa                        Enroll or reset TOTP factors\n"
+      "  auth                       Exchange service credentials for tokens\n"
+      "  service-principal          Manage service principals\n"
+      "  service-credential         Manage service credentials\n"
+      "  service-permission-closure Inspect or apply permission closures");
   g_option_context_set_strict_posix (context, TRUE);
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {

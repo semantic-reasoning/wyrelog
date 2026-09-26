@@ -1132,6 +1132,16 @@ if build_client and host_machine.system() != 'windows'
     depends : wyctl_exe,
   )
 
+  test('wyctl-runbook-options', python3,
+    args : [
+      files('test-wyctl-runbook-options.py'),
+      wyctl_exe.full_path(),
+      meson.project_source_root() / 'docs' / 'operator-runbook.md',
+    ],
+    depends : wyctl_exe,
+    timeout : 60,
+  )
+
   # End-to-end: drives wyctl as a subprocess against an in-process daemon
   # so the policy mutation subcommands exercise the full client -> HTTP
   # -> handler path, including bearer-only credentials and the privileged
