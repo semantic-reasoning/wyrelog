@@ -127,7 +127,7 @@ TOKEN_PASTE_ALLOWLIST = {
 
 CXX_SOURCE_DIGESTS = {
     "wyrelog/fact/secure-duckdb-bridge-private.cc":
-        "402a83d4ce2bbe79a3bf63589d66e7f2f046b5a999cf76f24b8278ee7f08cdff",
+        "7059df77e896ad44677bd62a16587966ab5a3a0b0f731e7923be7d2a7ca17584",
     "wyrelog/fact/secure-duckdb-file-handle-private.cc":
         "e8bc7ae828e424cf8ba18828d1b966e12b0e561d60237a5ea745499389968d36",
     "wyrelog/fact/secure-duckdb-file-handle-private.hpp":
