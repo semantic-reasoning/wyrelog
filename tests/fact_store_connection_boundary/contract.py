@@ -191,10 +191,12 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "wyl_fact_replay_refresh_graph_publication",
         "wyl_fact_replay_validate_graph",
         "open_graph_engine_with_artifact_lease",
+        "replay_store_with_snapshot",
         "refresh_graph_closed_internal",
         "validate_graph_internal",
         "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
         "wyl_fact_replay_validate_graph_with_artifact_lease",
+        "wyl_fact_replay_validate_store_for_restore",
     },
     "wyrelog/fact/store.c": {
         "fact_store_close_checked",
@@ -1510,7 +1512,7 @@ def validate(files: dict[str, str]) -> None:
     )
     if "open_graph_engine_with_store" not in replay_test_entry:
         raise AssertionError("supplied-store replay seam drifted")
-    replay_admission = function_body(replay, "open_graph_engine_with_store")
+    replay_admission = function_body(replay, "replay_store_with_snapshot")
     for token in (
         "wyl_fact_store_connection_session_begin (store, &admission)",
         "wyl_fact_store_connection_session_end (&admission);",
@@ -1526,6 +1528,11 @@ def validate(files: dict[str, str]) -> None:
         "          job_context,\n          &relations)"
     ):
         raise AssertionError("supplied-store health check occurs after policy work")
+    restore_preflight = function_body(
+        replay, "wyl_fact_replay_validate_store_for_restore"
+    )
+    if "replay_store_with_snapshot" not in restore_preflight:
+        raise AssertionError("restore preflight bypasses supplied-store admission")
     replay_seam_start = replay.rfind(
         "#if defined(WYL_TEST_HANDLE_SEAMS)", 0,
         replay.index("wyl_fact_replay_open_graph_engine_with_store_for_test"),
