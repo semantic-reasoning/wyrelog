@@ -8,6 +8,7 @@ import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
+import posixpath
 import re
 import sys
 
@@ -62,11 +63,15 @@ def _lambda_ranges(masked: str, start: int, end: int) -> list[tuple[int, int]]:
   return ranges
 
 
-def _main_returns(text: str, source: str
+def _main_returns(text: str, source: str,
+    parsed: tuple[str, list[tuple[int, int]], str] | None = None
     ) -> tuple[int, list[dict[str, object]]]:
   language = PARSER.source_language(source)
-  logical, source_offsets = PARSER.c_logical_source(text, language)
-  masked = PARSER.mask_noncode(logical)
+  if parsed is not None:
+    logical, source_offsets, masked = parsed
+  else:
+    logical, source_offsets = PARSER.c_logical_source(text, language)
+    masked = PARSER.mask_noncode(logical)
   def source_line(logical_offset: int) -> int:
     original = PARSER.original_offset(source_offsets, logical_offset, len(text))
     return PARSER._source_line(text, original)
@@ -92,11 +97,15 @@ def _main_returns(text: str, source: str
   return len(mains), rows
 
 
-def _termination_sites(text: str, source: str
+def _termination_sites(text: str, source: str,
+    parsed: tuple[str, list[tuple[int, int]], str] | None = None
     ) -> list[dict[str, object]]:
   language = PARSER.source_language(source)
-  logical, source_offsets = PARSER.c_logical_source(text, language)
-  masked = PARSER.mask_noncode(logical)
+  if parsed is not None:
+    logical, source_offsets, masked = parsed
+  else:
+    logical, source_offsets = PARSER.c_logical_source(text, language)
+    masked = PARSER.mask_noncode(logical)
   def source_line(logical_offset: int) -> int:
     original = PARSER.original_offset(source_offsets, logical_offset, len(text))
     return PARSER._source_line(text, original)
@@ -154,13 +163,17 @@ def inventory(root: Path) -> tuple[dict[str, object], list[dict[str, object]]]:
   for path in _sources(root):
     relative = path.relative_to(root).as_posix()
     text = path.read_text(encoding="utf-8", errors="replace")
-    mains, returns = _main_returns(text, relative)
+    language = PARSER.source_language(relative)
+    logical, source_offsets = PARSER.c_logical_source(text, language)
+    masked = PARSER.mask_noncode(logical)
+    parsed = (logical, source_offsets, masked)
+    mains, returns = _main_returns(text, relative, parsed=parsed)
     if mains:
       source_rows.append({"path": relative,
           "main_definitions": mains, "normalized_returns": len(returns)})
     main_count += mains
     return_count += len(returns)
-    sites.extend(_termination_sites(text, relative))
+    sites.extend(_termination_sites(text, relative, parsed=parsed))
   returns_data = {"schema": 1, "source_count": len(source_rows),
       "main_definitions": main_count, "normalized_returns": return_count,
       "source_census_sha256": hashlib.sha256(json.dumps(source_rows,
@@ -418,7 +431,7 @@ def _header_contexts(root: Path,
     local_paths.update(header_overrides)
   if source_overrides:
     local_paths.update(source_overrides)
-  local_basenames = {Path(path).name for path in local_paths}
+  local_basenames = {posixpath.basename(path) for path in local_paths}
   contexts: dict[str, dict[str, list[
       tuple[tuple[str, ...], tuple[str, ...]]]]] = {}
   if source_overrides is not None:
@@ -440,7 +453,6 @@ def _header_contexts(root: Path,
       return header_overrides[relative]
     return (root / relative).read_text(encoding="utf-8", errors="replace")
 
-  root_absolute = root.resolve()
   for unit_relative, unit_path in sorted(units.items()):
     try:
       language = PARSER.source_language(unit_relative)
@@ -456,21 +468,20 @@ def _header_contexts(root: Path,
         raise ValueError(
             f"{current}: unresolved local include directive(s): "
             + "; ".join(unresolved) + f" (chain {' -> '.join(chain)})")
+      current_dir = posixpath.dirname(current)
       for include, conditions, delimiter in includes:
         candidates = []
         if delimiter == '"':
-          candidates.append(((root / current).parent / include).resolve())
-        candidates.extend([(root / include).resolve(),
-            (root / "wyrelog" / include).resolve(),
-            (root / "wyrelog" / "wyctl" / include).resolve()])
+          candidates.append(posixpath.normpath(posixpath.join(current_dir, include)))
+        candidates.extend([
+            posixpath.normpath(include),
+            posixpath.normpath(posixpath.join("wyrelog", include)),
+            posixpath.normpath(posixpath.join("wyrelog", "wyctl", include))
+        ])
         relative = None
         for candidate in candidates:
-          try:
-            possible = candidate.relative_to(root_absolute).as_posix()
-          except ValueError:
-            continue
-          if possible in local_paths:
-            relative = possible
+          if candidate in local_paths:
+            relative = candidate
             break
         if relative is None:
           if (delimiter == '"' or
@@ -478,7 +489,7 @@ def _header_contexts(root: Path,
                (include.startswith(("wyrelog/", "tests/"))
                 or include.startswith(("access/", "fact/", "auth/",
                     "daemon/", "wyctl/"))
-                or Path(include).name in local_basenames))):
+                or posixpath.basename(include) in local_basenames))):
             raise ValueError(
                 f"{current}: unresolved repository-local include "
                 f"{delimiter}{include}{'>' if delimiter == '<' else chr(34)} "
@@ -499,12 +510,15 @@ def _header_contexts(root: Path,
 
 def _validate_test_header_bindings(root: Path,
     overrides: dict[str, str] | None = None,
-    source_overrides: dict[str, str] | None = None) -> list[str]:
+    source_overrides: dict[str, str] | None = None,
+    contexts: dict[str, dict[str, list[
+        tuple[tuple[str, ...], tuple[str, ...]]]]] | None = None) -> list[str]:
   errors: list[str] = []
-  try:
-    contexts = _header_contexts(root, overrides, source_overrides)
-  except ValueError as error:
-    return [str(error)]
+  if contexts is None:
+    try:
+      contexts = _header_contexts(root, overrides, source_overrides)
+    except ValueError as error:
+      return [str(error)]
   if overrides or source_overrides:
     header_paths = set(overrides or {})
   else:
@@ -559,7 +573,7 @@ def _validate_header(root: Path,
   shape_errors = [error for language in languages
       for error in _validate_header_text(header, language)]
   return (shape_errors + _validate_test_header_bindings(root,
-      header_overrides, source_overrides))
+      header_overrides, source_overrides, contexts=contexts))
 
 
 def validate_repository(root: Path) -> list[str]:
