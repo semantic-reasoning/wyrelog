@@ -376,10 +376,16 @@ wyrelogd --production \
   --bootstrap-admin-allow-skip-mfa
 ```
 
-At this point `alice` can log in through `/auth/login?…&skip_mfa=true`
-because the bootstrap flag installed the `wr.login.skip_mfa` direct
-permission. Enroll `alice`'s TOTP factor from an operator shell that has
-read access to the bootstrap access token:
+At this point `alice` can request an MFA-bypassed login because the bootstrap
+flag installed the `wr.login.skip_mfa` direct permission. Create protected
+access and refresh token files, then enroll `alice`'s TOTP factor:
+
+```sh
+wyctl --daemon-url "$BASE_URL" auth login \
+  --subject alice --tenant __wr_default --skip-mfa \
+  --token-output /run/wyrelog/bootstrap.token \
+  --refresh-token-output /run/wyrelog/bootstrap.refresh
+```
 
 ```sh
 wyctl mfa enroll \
@@ -574,10 +580,12 @@ code for the access and refresh tokens.
 POST /auth/login?username=<subject>&tenant=<tenant>
   -> 200 { session_token, principal_state: "mfa_required" }
 
-POST /auth/mfa/verify?session_token=<token>&code=NNNNNN
+POST /auth/mfa/verify
+Content-Type: application/json
+{"session_token":"<token>","code":"NNNNNN"}
   -> 200 { access_token, expires_in, refresh_token, refresh_expires_in,
            principal_state: "authenticated" }
-  -> 400 invalid_mfa_request   (malformed query)
+  -> 400 invalid_mfa_request   (malformed body or any query parameters)
   -> 400 tenant_sealed | tenant_invalid
                                (session's tenant no longer active)
   -> 401 mfa_auth_required     (missing or unknown session token)
@@ -598,6 +606,34 @@ issued with, not the remaining life of one already in hand: `/auth/refresh`
 answers a retried request by rebuilding the original response, so a decaying
 value there would make a replay differ from what it replays. The service
 token response does not carry `expires_in`; its lifetime is 300 seconds.
+
+`wyctl` provides the human login and local token lifecycle. Query-form MFA
+verification is no longer accepted; older callers must send the session token
+and code in the JSON body shown above. `wyctl` prompts without echo on a TTY;
+when stdin is redirected, provide one six-digit code line through stdin. Token
+values are never accepted as command-line arguments or printed:
+
+```sh
+wyctl --daemon-url "$BASE_URL" auth login \
+  --subject alice --tenant __wr_default \
+  --token-output "$TOKEN" --refresh-token-output "$REFRESH_TOKEN"
+
+wyctl --daemon-url "$BASE_URL" auth refresh \
+  --tenant __wr_default --token-file "$TOKEN" \
+  --refresh-token-file "$REFRESH_TOKEN"
+
+wyctl --daemon-url "$BASE_URL" auth logout \
+  --tenant __wr_default --token-file "$TOKEN" \
+  --refresh-token-file "$REFRESH_TOKEN"
+```
+
+The two output files must be different protected paths. Refresh serializes
+with logout through a persistent sidecar lock. It replaces the refresh file
+first; if access-token replacement fails afterward, the prior access token
+remains usable and another refresh can recover the pair. A durability-uncertain
+refresh-file replacement requires a new login rather than an automatic retry.
+On Windows, `MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem
+may provide weaker parent-directory metadata durability than POSIX `fsync`.
 
 A 401 from a route that takes a bearer carries an RFC 6750 challenge, so a
 client can tell a credential it should refresh from one it never sent:
@@ -1218,57 +1254,25 @@ wyrelogd --production \
 Use the bootstrap bypass only to enroll the administrator's TOTP factor. A
 successful enrollment atomically revokes `wr.login.skip_mfa`; it does not mint
 the MFA-assured session needed to arm permissions. After enrollment, perform a
-fresh normal login, verify TOTP, and use only the resulting access token for
-permission transitions and Datalog operations.
+fresh normal login. `wyctl` prompts for TOTP without echo and writes the
+MFA-assured access and refresh tokens to protected files:
 The enrollment-confirmation code cannot be replayed for login; if the current
 30-second TOTP code was just used to enroll, wait for the next code before
 completing the fresh login below.
 
 ```sh
-python3 - <<'PY'
-import json, os, urllib.request
-url = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default&skip_mfa=true"
-req = urllib.request.Request(url, method="POST")
-with urllib.request.urlopen(req) as response:
-    token = json.load(response)["access_token"]
-token_path = "/run/wyrelog/operator.token"
-fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as output:
-    output.write(token + "\n")
-PY
+wyctl --daemon-url "$BASE_URL" auth login \
+  --subject alice --tenant __wr_default --skip-mfa \
+  --token-output /run/wyrelog/operator.token \
+  --refresh-token-output /run/wyrelog/operator.refresh
 
 wyctl --daemon-url "$BASE_URL" mfa enroll \
   --subject alice \
   --access-token-file "$TOKEN"
 
-python3 - "$BASE_URL" "$TOKEN" <<'PY'
-import getpass
-import json
-import os
-import sys
-import urllib.parse
-import urllib.request
-
-base, token_path = sys.argv[1:]
-login_url = base + "/auth/login?" + urllib.parse.urlencode({
-    "username": "alice", "tenant": "__wr_default",
-})
-with urllib.request.urlopen(urllib.request.Request(login_url, method="POST")) as response:
-    login = json.load(response)
-if login.get("principal_state") != "mfa_required":
-    raise SystemExit("fresh login did not return an MFA challenge")
-code = getpass.getpass("Current 6-digit TOTP code: ")
-verify_url = base + "/auth/mfa/verify?" + urllib.parse.urlencode({
-    "session_token": login["session_token"], "code": code,
-})
-with urllib.request.urlopen(urllib.request.Request(verify_url, method="POST")) as response:
-    verified = json.load(response)
-if verified.get("principal_state") != "authenticated" or not verified.get("access_token"):
-    raise SystemExit("MFA verification did not return an access token")
-with open(token_path, "w", encoding="utf-8") as output:
-    output.write(verified["access_token"] + "\n")
-os.chmod(token_path, 0o600)
-PY
+wyctl --daemon-url "$BASE_URL" auth login \
+  --subject alice --tenant __wr_default \
+  --token-output "$TOKEN" --refresh-token-output "$REFRESH_TOKEN"
 
 wyctl --daemon-url "$BASE_URL" audit query \
   --filter 'action=bootstrap_admin_apply' --limit 10 \

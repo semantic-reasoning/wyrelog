@@ -22,9 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sodium.h>
 
+#include "auth/mfa-validator.h"
 #include "daemon/delta.h"
 #include "daemon/http.h"
+#include "auth/totp.h"
 #include "wyrelog/client.h"
 #ifdef WYL_HAS_FACT_STORE
 #include "wyrelog/fact/store-private.h"
@@ -285,6 +288,187 @@ run_wyctl (gchar **argv, gchar **stdout_buf, gchar **stderr_buf,
 }
 
 static void
+run_wyctl_with_stdin (gchar **argv, const gchar *stdin_data,
+    gchar **stdout_buf, gchar **stderr_buf, gint *wait_status)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocess) process = g_subprocess_newv
+        ((const gchar * const *) argv,
+          G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+          G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (process);
+  g_assert_true (g_subprocess_communicate_utf8 (process, stdin_data, NULL,
+      stdout_buf, stderr_buf, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_get_if_exited (process));
+  *wait_status = g_subprocess_get_exit_status (process) << 8;
+}
+
+static void
+test_wyctl_human_auth_flow (WylHandle *handle, const gchar *base_url)
+{
+  static const guint8 seed[WYL_TOTP_SEED_BYTES] = {
+    0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+    0x39, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
+    0x37, 0x38, 0x39, 0x30,
+  };
+  const gchar *subject = "wyctl-human-auth-user";
+  WylTotpEnrollment enrollment = { 0 };
+  enrollment.subject_id = g_strdup (subject);
+  memcpy (enrollment.secret, seed, sizeof seed);
+  enrollment.last_verified_step = G_MININT64;
+  enrollment.enrolled_at = 1700000000;
+  g_assert_cmpint (wyl_policy_store_totp_enrollment_insert
+        (wyl_handle_get_policy_store (handle), &enrollment), ==, WYRELOG_E_OK);
+  wyl_totp_enrollment_clear (&enrollment);
+  wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
+
+  g_autofree gchar *directory = g_dir_make_tmp ("wyctl-human-auth-XXXXXX",
+          NULL);
+  g_assert_nonnull (directory);
+  g_autofree gchar *access_path = g_build_filename (directory, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (directory, "refresh", NULL);
+  gchar *placeholder = NULL;
+  gint fd = g_file_open_tmp ("wyctl-human-old-access-XXXXXX", &placeholder,
+          NULL);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_unlink (placeholder);
+  g_autofree gchar *old_access_path = g_steal_pointer (&placeholder);
+
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  guint64 step = (guint64) now / WYL_TOTP_STEP_SECONDS;
+  guint code = 0;
+  g_assert_cmpint (wyl_totp_code_at_step (seed, sizeof seed, step, &code, NULL),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *code_line = g_strdup_printf ("%06u\n", code);
+  gchar *login_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "auth", "login",
+    "--subject", (gchar *) subject,
+    "--tenant", WYL_TENANT_DEFAULT,
+    "--token-output", access_path,
+    "--refresh-token-output", refresh_path,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_wyctl_with_stdin (login_argv, code_line, &stdout_buf, &stderr_buf,
+      &wait_status);
+  g_assert_true (g_spawn_check_wait_status (wait_status, NULL));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  g_autofree gchar *old_access = NULL;
+  gsize old_access_len = 0;
+  g_assert_true (g_file_get_contents (access_path, &old_access,
+      &old_access_len, NULL));
+  g_assert_cmpuint (old_access_len, >, 16);
+  g_assert_null (strstr (stdout_buf, old_access));
+  g_assert_null (strstr (stderr_buf, old_access));
+  g_assert_true (g_file_set_contents (old_access_path, old_access,
+      (gssize) old_access_len, NULL));
+  g_assert_cmpint (g_chmod (old_access_path, 0600), ==, 0);
+
+  gchar *bearer_check_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "policy", "check",
+    "--user", (gchar *) subject,
+    "--permission", "wr.audit.read",
+    "--resource", "audit/events",
+    "--access-token-file", access_path,
+    NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_wyctl (bearer_check_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpstr (stdout_buf, ==, "deny\n");
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  g_autofree gchar *old_refresh = NULL;
+  gsize old_refresh_len = 0;
+  g_assert_true (g_file_get_contents (refresh_path, &old_refresh,
+      &old_refresh_len, NULL));
+  /* Simulate a process stop after the refresh file was created but before the
+   * access file became visible. Refresh must rebuild the missing access file
+   * from the still-current refresh credential. */
+  g_assert_cmpint (g_unlink (access_path), ==, 0);
+  gchar *refresh_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "auth", "refresh",
+    "--tenant", WYL_TENANT_DEFAULT,
+    "--token-file", access_path,
+    "--refresh-token-file", refresh_path,
+    NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_wyctl (refresh_argv, &stdout_buf, &stderr_buf, &wait_status);
+  if (!g_spawn_check_wait_status (wait_status, NULL))
+    g_error ("human auth refresh failed (%d): stdout=%s stderr=%s",
+        wait_status, stdout_buf != NULL ? stdout_buf : "(null)",
+        stderr_buf != NULL ? stderr_buf : "(null)");
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  /* A successful ordinary rotation leaves the old access token usable. */
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  gchar *old_bearer_check_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "policy", "check",
+    "--user", (gchar *) subject,
+    "--permission", "wr.audit.read",
+    "--resource", "audit/events",
+    "--access-token-file", old_access_path,
+    NULL,
+  };
+  run_wyctl (old_bearer_check_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpstr (stdout_buf, ==, "deny\n");
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  gchar *logout_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "auth", "logout",
+    "--tenant", WYL_TENANT_DEFAULT,
+    "--token-file", access_path,
+    "--refresh-token-file", refresh_path,
+    NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_wyctl (logout_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (g_spawn_check_wait_status (wait_status, NULL));
+  g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_wyctl (old_bearer_check_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 3);
+  g_assert_null (strstr (stderr_buf, old_access));
+
+  g_unlink (old_access_path);
+  g_autofree gchar *lock_path = g_strconcat (refresh_path, ".lock", NULL);
+  g_unlink (lock_path);
+  g_rmdir (directory);
+  sodium_memzero (old_access, old_access_len);
+  sodium_memzero (old_refresh, old_refresh_len);
+}
+
+static void
 assert_wyctl_ok (gchar **argv)
 {
   g_autofree gchar *stdout_buf = NULL;
@@ -431,6 +615,8 @@ main (void)
     return wyl_test_normalize_exit_status (4);
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  test_wyctl_human_auth_flow (handle, base_url);
 
   /* Login an operator with skip-mfa so we get a bearer access token, then
    * grant it both authorities the daemon mutation handlers require:

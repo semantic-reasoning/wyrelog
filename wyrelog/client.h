@@ -442,10 +442,17 @@ wyrelog_error_t wyl_client_login (WylClient * client,
  */
 wyrelog_error_t wyl_client_login_skip_mfa (WylClient * client,
     const gchar * username);
+wyrelog_error_t wyl_client_login_for_tenant (WylClient * client,
+    const gchar * username, const gchar * tenant);
+wyrelog_error_t wyl_client_login_skip_mfa_for_tenant (WylClient * client,
+    const gchar * username, const gchar * tenant);
 wyrelog_error_t wyl_client_set_bearer_credentials (WylClient * client,
     const gchar * access_token, const gchar * tenant);
+wyrelog_error_t wyl_client_set_refresh_token (WylClient * client,
+    const gchar * refresh_token);
 gchar *wyl_client_dup_session_token (const WylClient * client);
 gchar *wyl_client_dup_access_token (const WylClient * client);
+gchar *wyl_client_dup_refresh_token (const WylClient * client);
 gchar *wyl_client_dup_username (const WylClient * client);
 /*
  * Returns a heap-allocated copy of the tenant currently bound to
@@ -458,6 +465,7 @@ guint wyl_client_get_last_http_status (const WylClient * client);
 gchar *wyl_client_dup_last_error_code (const WylClient * client);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);
 wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
+wyrelog_error_t wyl_client_logout (WylClient * client);
 
 /* Decide */
 wyrelog_error_t wyl_client_decide (WylClient * client,

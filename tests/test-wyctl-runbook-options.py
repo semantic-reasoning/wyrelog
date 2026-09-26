@@ -32,6 +32,9 @@ COMMAND_PATHS = {
     ("mfa", "enroll"): 2,
     ("mfa", "reset"): 2,
     ("auth", "service-token"): 2,
+    ("auth", "login"): 2,
+    ("auth", "refresh"): 2,
+    ("auth", "logout"): 2,
     ("service-principal", "create"): 2,
     ("service-principal", "list"): 2,
     ("service-principal", "disable"): 2,
@@ -145,19 +148,21 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
     errors: list[str] = []
     content = runbook.read_text(encoding="utf-8")
     for required in (
-        "tenant=__wr_default&skip_mfa=true",
-        "os.O_EXCL",
+        "auth login",
+        "auth refresh",
+        "auth logout",
         "/auth/mfa/verify",
-        "new MFA-assured access token",
+        "application/json",
+        "refresh-token-output",
     ):
         if required not in content:
             errors.append(f"{runbook}: bootstrap flow is missing {required!r}")
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 41:
+    if len(invocations) != 47:
         errors.append(
-            f"{runbook}: expected 41 reviewed wyctl invocations, found "
+            f"{runbook}: expected 47 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(

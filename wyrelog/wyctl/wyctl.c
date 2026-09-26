@@ -1,11 +1,19 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <gio/gio.h>
+#include <glib/gstdio.h>
 #include <libsoup/soup.h>
 #include <sodium.h>
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <termios.h>
+#include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
+#endif
 
 #include "auth/totp.h"
 #include "auth/mfa-enrollment-private.h"
@@ -194,6 +202,17 @@ typedef struct
 typedef struct
 {
   gchar *subject;
+  gchar *tenant;
+  gchar *token_output;
+  gchar *refresh_token_output;
+  gchar *access_token_file;
+  gchar *refresh_token_file;
+  gboolean skip_mfa;
+} WyctlHumanAuthOptions;
+
+typedef struct
+{
+  gchar *subject;
   gchar *credential_id;
   gchar *tenant;
   gchar *destination;
@@ -226,6 +245,20 @@ wyctl_options_clear (WyctlOptions *opts)
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlOptions, wyctl_options_clear);
+
+static void
+wyctl_human_auth_options_clear (WyctlHumanAuthOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->token_output, g_free);
+  g_clear_pointer (&opts->refresh_token_output, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->refresh_token_file, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlHumanAuthOptions,
+    wyctl_human_auth_options_clear);
 
 static void
 wyctl_policy_options_clear (WyctlPolicyOptions *opts)
@@ -1120,6 +1153,23 @@ emit_token_file_diagnostic (WyctlTokenFileStatus status, const gchar *path)
   }
   g_printerr (fmt, path != NULL ? path : "(null)");
   g_printerr ("\n");
+}
+
+static gboolean
+token_paths_alias (const gchar *left, const gchar *right)
+{
+  if (left == NULL || right == NULL)
+    return FALSE;
+  g_autofree gchar *left_full = g_canonicalize_filename (left, NULL);
+  g_autofree gchar *right_full = g_canonicalize_filename (right, NULL);
+  if (g_strcmp0 (left_full, right_full) == 0)
+    return TRUE;
+  GStatBuf left_stat;
+  GStatBuf right_stat;
+  return g_stat (left_full, &left_stat) == 0
+         && g_stat (right_full, &right_stat) == 0
+         && left_stat.st_dev == right_stat.st_dev
+         && left_stat.st_ino == right_stat.st_ino;
 }
 
 static int
@@ -3901,6 +3951,371 @@ run_key (gint argc, gchar **argv)
 }
 
 static int
+read_mfa_code (gchar **out_code)
+{
+  if (out_code == NULL)
+    return 2;
+  *out_code = NULL;
+  gchar buffer[32] = { 0 };
+#ifdef G_OS_WIN32
+  gboolean tty = _isatty (_fileno (stdin)) != 0;
+  HANDLE console = GetStdHandle (STD_INPUT_HANDLE);
+  DWORD original_mode = 0;
+  gboolean restore = FALSE;
+  if (tty) {
+    if (console == INVALID_HANDLE_VALUE ||
+        !GetConsoleMode (console, &original_mode) ||
+        !SetConsoleMode (console, original_mode & ~ENABLE_ECHO_INPUT))
+      return 2;
+    restore = TRUE;
+    g_printerr ("MFA code: ");
+  }
+  gboolean read_ok = fgets (buffer, sizeof buffer, stdin) != NULL;
+  if (restore) {
+    (void) SetConsoleMode (console, original_mode);
+    g_printerr ("\n");
+  }
+#else
+  gboolean tty = isatty (STDIN_FILENO);
+  struct termios original = { 0 };
+  gboolean restore = FALSE;
+  if (tty) {
+    if (tcgetattr (STDIN_FILENO, &original) != 0)
+      return 2;
+    struct termios hidden = original;
+    hidden.c_lflag &= (tcflag_t) ~ECHO;
+    if (tcsetattr (STDIN_FILENO, TCSAFLUSH, &hidden) != 0)
+      return 2;
+    restore = TRUE;
+    g_printerr ("MFA code: ");
+  }
+  gboolean read_ok = fgets (buffer, sizeof buffer, stdin) != NULL;
+  if (restore) {
+    (void) tcsetattr (STDIN_FILENO, TCSAFLUSH, &original);
+    g_printerr ("\n");
+  }
+#endif
+  if (!read_ok) {
+    sodium_memzero (buffer, sizeof buffer);
+    return 2;
+  }
+  g_strchomp (buffer);
+  if (strlen (buffer) != 6 || strspn (buffer, "0123456789") != 6) {
+    sodium_memzero (buffer, sizeof buffer);
+    return 2;
+  }
+  *out_code = g_strdup (buffer);
+  sodium_memzero (buffer, sizeof buffer);
+  return *out_code != NULL ? 0 : 2;
+}
+
+static int
+run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlHumanAuthOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+     "Login subject", "SUBJECT"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Tenant to authenticate in", "TENANT"},
+    {"token-output", 0, 0, G_OPTION_ARG_STRING, &opts.token_output,
+     "Protected access-token output path", "PATH"},
+    {"refresh-token-output", 0, 0, G_OPTION_ARG_STRING,
+     &opts.refresh_token_output, "Protected refresh-token output path", "PATH"},
+    {"skip-mfa", 0, 0, G_OPTION_ARG_NONE, &opts.skip_mfa,
+     "Request daemon-authorized MFA bypass", NULL},
+    {NULL}
+  };
+  g_autoptr (GOptionContext) context = g_option_context_new ("login");
+  g_autoptr (GError) error = NULL;
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_strict_posix (context, TRUE);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc != 1 || opts.subject == NULL || opts.subject[0] == '\0'
+      || opts.tenant == NULL || opts.tenant[0] == '\0'
+      || opts.token_output == NULL || opts.token_output[0] == '\0'
+      || opts.refresh_token_output == NULL
+      || opts.refresh_token_output[0] == '\0') {
+    g_printerr ("wyctl: login requires --subject, --tenant, --token-output, "
+        "and --refresh-token-output\n");
+    return 2;
+  }
+  g_autofree gchar *access_path = g_canonicalize_filename
+        (opts.token_output, NULL);
+  g_autofree gchar *refresh_path = g_canonicalize_filename
+        (opts.refresh_token_output, NULL);
+  if (g_strcmp0 (access_path, refresh_path) == 0) {
+    g_printerr ("wyctl: access and refresh token paths must differ\n");
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option
+        (global_opts->daemon_url, global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_arg = wyctl_resolve_uint_option_as_string
+        (global_opts->timeout_ms_arg, global_opts->settings,
+          "default-timeout-ms");
+  guint timeout_ms = 0;
+  if (daemon_url == NULL || !daemon_url_is_valid (daemon_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  if (!parse_timeout_ms (timeout_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+  if (!wyctl_check_proxy_environment ())
+    return 1;
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK)
+    return 1;
+  wyl_client_set_timeout_ms (client, timeout_ms);
+  wyrelog_error_t rc = opts.skip_mfa
+      ? wyl_client_login_skip_mfa_for_tenant (client, opts.subject, opts.tenant)
+      : wyl_client_login_for_tenant (client, opts.subject, opts.tenant);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: login failed\n");
+    return 1;
+  }
+  g_autofree gchar *principal_state = wyl_client_dup_principal_state (client);
+  if (!opts.skip_mfa && g_strcmp0 (principal_state, "mfa_required") == 0) {
+    g_autofree gchar *code = NULL;
+    if (read_mfa_code (&code) != 0) {
+      g_printerr ("wyctl: MFA code input failed; retry login\n");
+      return 1;
+    }
+    rc = wyl_client_mfa_verify (client, code);
+    sodium_memzero (code, strlen (code));
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyctl: MFA verification failed; retry login\n");
+      return 1;
+    }
+  }
+  g_autofree gchar *access = wyl_client_dup_access_token (client);
+  g_autofree gchar *refresh = wyl_client_dup_refresh_token (client);
+  if (access == NULL || refresh == NULL) {
+    g_printerr ("wyctl: login returned no token pair\n");
+    return 1;
+  }
+  WyctlTokenFileStatus status = wyctl_token_file_write_pair_protected
+        (refresh_path, refresh, strlen (refresh), access_path, access,
+          strlen (access));
+  sodium_memzero (access, strlen (access));
+  sodium_memzero (refresh, strlen (refresh));
+  if (status != WYCTL_TOKEN_FILE_OK) {
+    (void) wyl_client_logout (client);
+    g_printerr ("wyctl: token-file publication failed; server logout was "
+        "attempted; retry login and inspect protected files\n");
+    return 1;
+  }
+  return 0;
+}
+
+static int
+run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlHumanAuthOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Tenant bound to the access token", "TENANT"},
+    {"token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Protected access-token file", "PATH"},
+    {"refresh-token-file", 0, 0, G_OPTION_ARG_STRING,
+     &opts.refresh_token_file, "Protected refresh-token file", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GOptionContext) context = g_option_context_new ("refresh");
+  g_autoptr (GError) error = NULL;
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_strict_posix (context, TRUE);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc != 1 || opts.tenant == NULL || opts.access_token_file == NULL
+      || opts.refresh_token_file == NULL) {
+    g_printerr ("wyctl: refresh requires --tenant, --token-file, and "
+        "--refresh-token-file; --token-file may name a missing access file "
+        "after interrupted login publication\n");
+    return 2;
+  }
+  if (token_paths_alias (opts.access_token_file, opts.refresh_token_file)) {
+    g_printerr ("wyctl: access and refresh token paths must differ\n");
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option
+        (global_opts->daemon_url, global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_arg = wyctl_resolve_uint_option_as_string
+        (global_opts->timeout_ms_arg, global_opts->settings,
+          "default-timeout-ms");
+  guint timeout_ms = 0;
+  if (daemon_url == NULL || !daemon_url_is_valid (daemon_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)
+      || !parse_timeout_ms (timeout_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid daemon URL or timeout\n");
+    return 2;
+  }
+  if (!wyctl_check_proxy_environment ())
+    return 1;
+  g_autoptr (WyctlTokenFileLock) lock = NULL;
+  if (wyctl_token_file_lock_refresh (opts.refresh_token_file, &lock)
+      != WYCTL_TOKEN_FILE_OK) {
+    g_printerr ("wyctl: unable to lock refresh-token file\n");
+    return 1;
+  }
+  g_autofree gchar *access = NULL;
+  g_autofree gchar *refresh = NULL;
+  WyctlTokenFileStatus access_read = wyctl_token_file_read
+        (opts.access_token_file, &access);
+  gboolean access_missing = access_read == WYCTL_TOKEN_FILE_NOT_FOUND;
+  if ((!access_missing && (access_read != WYCTL_TOKEN_FILE_OK
+      || !normalize_access_token_file (access,
+      access != NULL ? strlen (access) : 0)))
+      || wyctl_token_file_read (opts.refresh_token_file, &refresh)
+      != WYCTL_TOKEN_FILE_OK || !normalize_access_token_file (refresh,
+      refresh != NULL ? strlen (refresh) : 0)) {
+    if (access != NULL)
+      sodium_memzero (access, strlen (access));
+    if (refresh != NULL)
+      sodium_memzero (refresh, strlen (refresh));
+    g_printerr ("wyctl: unable to read protected token files\n");
+    return 1;
+  }
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK
+      || (!access_missing && wyl_client_set_bearer_credentials
+        (client, access, opts.tenant) != WYRELOG_E_OK)
+      || wyl_client_set_refresh_token (client, refresh) != WYRELOG_E_OK) {
+    if (access != NULL)
+      sodium_memzero (access, strlen (access));
+    sodium_memzero (refresh, strlen (refresh));
+    return 1;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+  wyrelog_error_t rc = wyl_client_token_refresh (client);
+  if (access != NULL)
+    sodium_memzero (access, strlen (access));
+  sodium_memzero (refresh, strlen (refresh));
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: refresh failed; do not retry automatically; login may "
+        "be required\n");
+    return 1;
+  }
+  g_autofree gchar *new_access = wyl_client_dup_access_token (client);
+  g_autofree gchar *new_refresh = wyl_client_dup_refresh_token (client);
+  if (new_access == NULL || new_refresh == NULL)
+    return 1;
+  WyctlTokenFileStatus status = wyctl_token_file_replace_protected
+        (opts.refresh_token_file, new_refresh, strlen (new_refresh));
+  sodium_memzero (new_refresh, strlen (new_refresh));
+  if (status != WYCTL_TOKEN_FILE_OK) {
+    sodium_memzero (new_access, strlen (new_access));
+    g_printerr ("wyctl: refresh rotated at daemon but local refresh-token "
+        "publication failed; do not retry; login may be required\n");
+    return 1;
+  }
+  status = access_missing
+      ? wyctl_token_file_write_protected (opts.access_token_file,
+          new_access, strlen (new_access))
+      : wyctl_token_file_replace_protected (opts.access_token_file,
+          new_access, strlen (new_access));
+  sodium_memzero (new_access, strlen (new_access));
+  if (status != WYCTL_TOKEN_FILE_OK) {
+    if (access_missing)
+      g_printerr ("wyctl: refresh token was saved; access-file creation "
+          "failed, so another refresh can recover the missing access file\n");
+    else
+      g_printerr ("wyctl: refresh token was saved; old access token remains "
+          "usable and another refresh can recover the access file\n");
+    return 1;
+  }
+  return 0;
+}
+
+static int
+run_auth_logout (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlHumanAuthOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Tenant bound to the access token", "TENANT"},
+    {"token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Protected access-token file", "PATH"},
+    {"refresh-token-file", 0, 0, G_OPTION_ARG_STRING,
+     &opts.refresh_token_file, "Protected refresh-token file", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GOptionContext) context = g_option_context_new ("logout");
+  g_autoptr (GError) error = NULL;
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_strict_posix (context, TRUE);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc != 1 || opts.tenant == NULL || opts.access_token_file == NULL
+      || opts.refresh_token_file == NULL) {
+    g_printerr ("wyctl: logout requires --tenant, --token-file, and "
+        "--refresh-token-file\n");
+    return 2;
+  }
+  if (token_paths_alias (opts.access_token_file, opts.refresh_token_file)) {
+    g_printerr ("wyctl: access and refresh token paths must differ\n");
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option
+        (global_opts->daemon_url, global_opts->settings, "daemon-url");
+  if (daemon_url == NULL || !daemon_url_is_valid (daemon_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  if (!wyctl_check_proxy_environment ())
+    return 1;
+  g_autoptr (WyctlTokenFileLock) lock = NULL;
+  if (wyctl_token_file_lock_refresh (opts.refresh_token_file, &lock)
+      != WYCTL_TOKEN_FILE_OK) {
+    g_printerr ("wyctl: unable to lock refresh-token file\n");
+    return 1;
+  }
+  g_autofree gchar *access = NULL;
+  if (wyctl_token_file_read (opts.access_token_file, &access)
+      != WYCTL_TOKEN_FILE_OK || !normalize_access_token_file
+        (access, access != NULL ? strlen (access) : 0)) {
+    if (access != NULL)
+      sodium_memzero (access, strlen (access));
+    g_printerr ("wyctl: unable to read protected access-token file\n");
+    return 1;
+  }
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK
+      || wyl_client_set_bearer_credentials (client, access, opts.tenant)
+      != WYRELOG_E_OK) {
+    sodium_memzero (access, strlen (access));
+    return 1;
+  }
+  sodium_memzero (access, strlen (access));
+  if (wyl_client_logout (client) != WYRELOG_E_OK) {
+    g_printerr ("wyctl: logout failed; local token files were retained\n");
+    return 1;
+  }
+  WyctlTokenFileStatus refresh_status = wyctl_token_file_remove_protected
+        (opts.refresh_token_file);
+  WyctlTokenFileStatus access_status = refresh_status == WYCTL_TOKEN_FILE_OK
+      ? wyctl_token_file_remove_protected (opts.access_token_file)
+      : WYCTL_TOKEN_FILE_IO;
+  if (refresh_status != WYCTL_TOKEN_FILE_OK
+      || access_status != WYCTL_TOKEN_FILE_OK) {
+    g_printerr ("wyctl: server logout succeeded; local token-file cleanup "
+        "was incomplete\n");
+    return 1;
+  }
+  return 0;
+}
+
+static int
 run_auth (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -3909,6 +4324,12 @@ run_auth (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "service-token") == 0)
     return run_auth_service_token (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "login") == 0)
+    return run_auth_login (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "refresh") == 0)
+    return run_auth_refresh (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "logout") == 0)
+    return run_auth_logout (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown auth command: %s\n", argv[1]);
   return 2;
 }

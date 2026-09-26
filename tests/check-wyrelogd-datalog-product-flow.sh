@@ -207,10 +207,11 @@ step = int(time.time()) // 30
 digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
 offset = digest[-1] & 0x0f
 code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
-verify_url = base + "/auth/mfa/verify?" + urllib.parse.urlencode({
-    "session_token": session_token, "code": f"{code:06d}",
-})
-request = urllib.request.Request(verify_url, method="POST")
+verify_url = base + "/auth/mfa/verify"
+request = urllib.request.Request(verify_url, method="POST",
+    data=json.dumps({"session_token": session_token,
+        "code": f"{code:06d}"}).encode("utf-8"))
+request.add_header("Content-Type", "application/json")
 with urllib.request.urlopen(request, timeout=3) as response:
     verified = json.load(response)
 token = verified.get("access_token")
