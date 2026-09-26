@@ -124,6 +124,7 @@ typedef struct
   gboolean info_valid;
   GPtrArray *schemas;
   GPtrArray *active;
+  gchar *active_schema_digest;
   WylPolicyGraphMaterializationState materialization_state;
 } ReplayPolicyGraphSnapshot;
 
@@ -152,6 +153,7 @@ replay_policy_graph_snapshot_clear (ReplayPolicyGraphSnapshot *snapshot)
   snapshot->info_valid = FALSE;
   g_clear_pointer (&snapshot->schemas, g_ptr_array_unref);
   g_clear_pointer (&snapshot->active, g_ptr_array_unref);
+  g_clear_pointer (&snapshot->active_schema_digest, g_free);
   snapshot->materialization_state =
       WYL_POLICY_GRAPH_MATERIALIZATION_UNKNOWN;
 }
@@ -1203,7 +1205,7 @@ open_graph_store (wyl_policy_store_t *policy, const gchar *fact_root,
 }
 
 static wyrelog_error_t
-open_graph_engine_with_store (wyl_policy_store_t *policy,
+replay_store_with_snapshot (wyl_policy_store_t *policy,
     wyl_fact_store_t *store,
     const wyl_policy_fact_graph_info_t *graph_info,
     const ReplayPolicyGraphSnapshot *policy_snapshot,
@@ -1211,11 +1213,8 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
 {
   if (out_engine != NULL)
     *out_engine = NULL;
-  if (policy == NULL || graph_info == NULL
-      || out_engine == NULL)
+  if (policy == NULL || graph_info == NULL || out_engine == NULL)
     return WYRELOG_E_INVALID;
-  if (graph_info->sealed)
-    return WYRELOG_E_POLICY;
   if (job_context != NULL) {
     wyrelog_error_t checkpoint_rc =
         wyl_fact_replay_job_context_checkpoint (job_context);
@@ -1228,10 +1227,10 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
     return WYRELOG_E_IO;
 #endif
 
-  /* Reject an already poisoned supplied store before policy enumeration.  If
-   * another thread poisons after this admission, each later store session
-   * rechecks health before any DuckDB access and the unpublished engine is
-   * destroyed on failure. */
+  /* A restore preflight supplies a read-only store opened from its retained
+   * stage reader. Existing empty-graph replay may still have no store at all.
+   * When supplied, reject a poisoned store and verify its persisted scope
+   * before policy enumeration or any row replay. */
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (store != NULL) {
     WylFactStoreConnectionSession admission = { 0 };
@@ -1239,12 +1238,6 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
     if (rc != WYRELOG_E_OK)
       return rc;
     wyl_fact_store_connection_session_end (&admission);
-
-    /* The path in policy is caller-owned expectation, while a store's identity
-     * is evidence from the artifact itself.  Check both before enumerating or
-     * publishing any facts; otherwise a relocated graph can serve another
-     * graph's data successfully.  This is deliberately read-only and does not
-     * bind legacy metadata during replay. */
     rc = wyl_fact_store_validate_scope (store, graph_info->tenant_id,
             graph_info->graph_id);
     if (rc != WYRELOG_E_OK)
@@ -1280,6 +1273,23 @@ open_graph_engine_with_store (wyl_policy_store_t *policy,
 
   *out_engine = engine;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+open_graph_engine_with_store (wyl_policy_store_t *policy,
+    wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const ReplayPolicyGraphSnapshot *policy_snapshot,
+    WylFactReplayJobContext *job_context, WylEngine **out_engine)
+{
+  if (out_engine != NULL)
+    *out_engine = NULL;
+  if (policy == NULL || graph_info == NULL || out_engine == NULL)
+    return WYRELOG_E_INVALID;
+  if (graph_info->sealed)
+    return WYRELOG_E_POLICY;
+  return replay_store_with_snapshot (policy, store, graph_info,
+             policy_snapshot, job_context, out_engine);
 }
 
 static wyrelog_error_t
@@ -1553,6 +1563,10 @@ capture_replay_policy_graph_snapshot_locked (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK && !snapshot->info_valid)
     rc = WYRELOG_E_NOT_FOUND;
   const wyl_policy_fact_graph_info_t *owned_info = &snapshot->info;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
+          (policy, owned_info->tenant_id, owned_info->graph_id,
+            &snapshot->active_schema_digest);
   if (rc == WYRELOG_E_OK) {
     wyrelog_error_t materialization_rc =
         wyl_policy_store_read_fact_graph_materialization
@@ -1621,6 +1635,68 @@ capture_replay_policy_graph_snapshot (wyl_policy_store_t *policy,
     rc = wyl_fact_replay_job_context_checkpoint (job_context);
   if (rc != WYRELOG_E_OK)
     replay_policy_graph_snapshot_clear (snapshot);
+  return rc;
+}
+
+static gboolean
+canonical_sha256_text (const gchar *text)
+{
+  if (text == NULL || strlen (text) != 71
+      || !g_str_has_prefix (text, "sha256:"))
+    return FALSE;
+  for (guint i = 7; i < 71; i++)
+    if (!g_ascii_isdigit (text[i])
+        && !(text[i] >= 'a' && text[i] <= 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_fact_replay_validate_store_for_restore (wyl_policy_store_t *policy,
+    wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *expected_schema_digest,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest)
+{
+  if (out_schema_digest != NULL)
+    *out_schema_digest = NULL;
+  if (policy == NULL || store == NULL || graph_info == NULL
+      || graph_info->tenant_id == NULL || graph_info->graph_id == NULL
+      || !canonical_sha256_text (expected_schema_digest)
+      || job_context == NULL || out_schema_digest == NULL)
+    return WYRELOG_E_INVALID;
+
+  ReplayPolicyGraphSnapshot snapshot;
+  wyrelog_error_t rc = capture_replay_policy_graph_snapshot (policy,
+          graph_info, job_context, &snapshot);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Restore is permitted to preflight only an already sealed graph. The
+   * captured copy, not a later policy read, supplies both the digest and all
+   * schema inputs used to replay the supplied store. */
+  if (!snapshot.info.sealed
+      || g_strcmp0 (snapshot.info.tenant_id, graph_info->tenant_id) != 0
+      || g_strcmp0 (snapshot.info.graph_id, graph_info->graph_id) != 0
+      || !canonical_sha256_text (snapshot.active_schema_digest)
+      || g_strcmp0 (snapshot.active_schema_digest,
+      expected_schema_digest) != 0) {
+    replay_policy_graph_snapshot_clear (&snapshot);
+    return WYRELOG_E_POLICY;
+  }
+
+  WylEngine *engine = NULL;
+  rc = replay_store_with_snapshot (policy, store, &snapshot.info, &snapshot,
+          job_context, &engine);
+  if (engine != NULL)
+    g_object_unref (engine);
+  if (rc == WYRELOG_E_OK)
+    *out_schema_digest = g_strdup (snapshot.active_schema_digest);
+  if (rc == WYRELOG_E_OK && *out_schema_digest == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_schema_digest, g_free);
+  replay_policy_graph_snapshot_clear (&snapshot);
   return rc;
 }
 

@@ -114,6 +114,17 @@ wyrelog_error_t wyl_fact_replay_validate_graph_with_artifact_lease_bounded
     WylFactArtifactNamespace * artifact_namespace,
     WylFactArtifactMutationLease * artifact_lease,
     WylFactReplayJobContext * job_context);
+/* Validate the complete row replay of a caller-supplied read-only store using
+ * one immutable policy snapshot. Restore callers must supply a store opened
+ * from the operation-bound stage reader and retain that reader/authority until
+ * after the checked close and final content validation. This function returns
+ * observational evidence only; it does not publish an engine or change the
+ * journal. */
+wyrelog_error_t wyl_fact_replay_validate_store_for_restore
+  (wyl_policy_store_t *policy, wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *expected_schema_digest,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest);
 #if defined(WYL_TEST_HANDLE_SEAMS)
 typedef enum
 {

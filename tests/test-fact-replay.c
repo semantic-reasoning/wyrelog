@@ -361,6 +361,110 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
   g_assert_no_error (error);
 }
 
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  wyl_fact_store_t *store;
+  const wyl_policy_fact_graph_info_t *graph_info;
+  const gchar *expected_schema_digest;
+  gchar *observed_schema_digest;
+} RestoreReplayCall;
+
+static wyrelog_error_t
+restore_replay_job (WylFactReplayJobContext *context, gpointer user_data)
+{
+  RestoreReplayCall *call = user_data;
+  return wyl_fact_replay_validate_store_for_restore (call->policy,
+             call->store, call->graph_info, call->expected_schema_digest, context,
+             &call->observed_schema_digest);
+}
+
+static wyrelog_error_t
+run_restore_replay_job (RestoreReplayCall *call)
+{
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  wyrelog_error_t rc = wyl_fact_replay_scheduler_new (&config, NULL,
+          &scheduler);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylFactReplayFuture *future = NULL;
+  rc = wyl_fact_replay_scheduler_submit (scheduler,
+          call->graph_info->tenant_id, call->graph_info->graph_id, NULL,
+          restore_replay_job, call, NULL, &future);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_future_wait (future);
+  g_clear_pointer (&future, wyl_fact_replay_future_unref);
+  wyrelog_error_t shutdown_rc =
+      wyl_fact_replay_scheduler_shutdown (scheduler);
+  return rc == WYRELOG_E_OK ? shutdown_rc : rc;
+}
+
+static void
+test_restore_replay_uses_one_sealed_policy_snapshot (void)
+{
+  const gchar *tenant_id = "tenant-restore-replay";
+  const gchar *graph_id = "orders";
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-restore-replay-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, tenant_id, graph_id);
+  append_order_batches (policy, root, tenant_id, graph_id);
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, tenant_id,
+      graph_id), ==, WYRELOG_E_OK);
+
+  WylPolicyFactBackupSnapshot *backup = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (policy,
+      tenant_id, &backup), ==, WYRELOG_E_OK);
+  g_assert_nonnull (backup);
+  const WylPolicyFactBackupGraphSnapshot *backup_graph = NULL;
+  for (guint i = 0; i < backup->graphs->len; i++) {
+    const WylPolicyFactBackupGraphSnapshot *candidate = g_ptr_array_index
+          (backup->graphs, i);
+    if (g_strcmp0 (candidate->authority->graph_id, graph_id) == 0)
+      backup_graph = candidate;
+  }
+  g_assert_nonnull (backup_graph);
+  g_autofree gchar *expected_digest = g_strdup
+        (backup_graph->active_schema_digest);
+  wyl_policy_fact_backup_snapshot_free (backup);
+
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  wyl_policy_fact_graph_info_t graph_info = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .schema_version = 1,
+    .sealed = TRUE,
+  };
+  RestoreReplayCall call = {
+    .policy = policy,
+    .store = store,
+    .graph_info = &graph_info,
+    .expected_schema_digest = expected_digest,
+  };
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (call.observed_schema_digest, ==, expected_digest);
+  g_clear_pointer (&call.observed_schema_digest, g_free);
+
+  call.expected_schema_digest =
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_POLICY);
+  g_assert_null (call.observed_schema_digest);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  remove_tree (root);
+}
+
 static void
 put_route_compounds (wyl_fact_store_t *store, const gchar *tenant_id,
     const gchar *graph_id, gint64 *out_child_ref, gint64 *out_parent_ref)
@@ -5521,6 +5625,8 @@ main (int argc, char **argv)
       test_evicted_and_closed_reports_evicted_not_sealed);
   g_test_add_func ("/fact-replay/rejects-cross-scope-store",
       test_replay_rejects_store_from_another_scope);
+  g_test_add_func ("/fact-replay/restore-store-snapshot-replay",
+      test_restore_replay_uses_one_sealed_policy_snapshot);
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
   g_test_add_func ("/fact-replay/unleased-metadata-refused",
       test_unleased_replay_rejects_metadata);

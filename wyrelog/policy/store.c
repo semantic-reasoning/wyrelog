@@ -18581,6 +18581,22 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    gchar **out_digest)
+{
+  if (out_digest != NULL)
+    *out_digest = NULL;
+  if (store == NULL || tenant_id == NULL || graph_id == NULL
+      || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_store_fact_replay_snapshot_is_current (store))
+    return WYRELOG_E_BUSY;
+  return active_fact_schema_digest_unlocked (store, tenant_id, graph_id,
+             out_digest);
+}
+
+wyrelog_error_t
 wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
     const gchar *tenant_id, WylPolicyFactBackupSnapshot **out_snapshot)
 {
