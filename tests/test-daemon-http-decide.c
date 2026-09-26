@@ -13736,12 +13736,14 @@ check_audit_query_session_token_fallback (WylHandle *handle,
   if (wyl_totp_code_at_step (AUDIT_SESSION_TEST_TOTP_SEED,
       sizeof AUDIT_SESSION_TEST_TOTP_SEED, step, &code, NULL) != WYRELOG_E_OK)
     return 2835;
-  g_autofree gchar *verify_path = g_strdup_printf
-        ("/auth/mfa/verify?session_token=%s&code=%06u", session_token, code);
+  g_autofree gchar *verify_body = g_strdup_printf
+        ("{\"session_token\":\"%s\",\"code\":\"%06u\"}",
+          session_token, code);
   g_autoptr (SoupSession) http = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw_path (http, "POST", base_url, verify_path, &status, &body) != 0
+  if (send_raw_path_probe (http, "POST", base_url, "/auth/mfa/verify",
+      NULL, verify_body, &status, &body) != 0
       || status != 200)
     return 2836;
 
@@ -22990,11 +22992,11 @@ check_session_token_authn_contract (void)
     }
   }
   {
-    g_autofree gchar *verify_path = g_strdup_printf
-          ("/auth/mfa/verify?session_token=%s&code=000000",
+    g_autofree gchar *verify_body = g_strdup_printf
+          ("{\"session_token\":\"%s\",\"code\":\"000000\"}",
             skip_attach_session);
-    if (send_raw_path (session, "POST", base_url, verify_path, &status,
-        &body) != 0 || status != 401
+    if (send_raw_path_probe (session, "POST", base_url,
+        "/auth/mfa/verify", NULL, verify_body, &status, &body) != 0 || status != 401
         || strstr (body, "\"mfa_auth_required\"") == NULL) {
       result = 23219;
       goto cleanup;

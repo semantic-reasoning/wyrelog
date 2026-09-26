@@ -16365,10 +16365,42 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
 
   const gchar *session_token = NULL;
   const gchar *code = NULL;
-  if (query != NULL) {
-    session_token = g_hash_table_lookup (query, "session_token");
-    code = g_hash_table_lookup (query, "code");
+  /* MFA proofs and their challenge token are credentials. Keep both out of
+   * request targets (which commonly reach access logs) and accept exactly a
+   * strict JSON object in the request body. */
+  if (query != NULL && g_hash_table_size (query) != 0) {
+    set_json_error (msg, 400, "invalid_mfa_request");
+    return;
   }
+  SoupMessageHeaders *request_headers =
+      soup_server_message_get_request_headers (msg);
+  const gchar *content_type = soup_message_headers_get_one (request_headers,
+          "Content-Type");
+  g_autofree gchar *media_type = content_type != NULL
+      ? g_ascii_strdown (content_type, -1) : NULL;
+  if (media_type == NULL ||
+      !(g_str_has_prefix (media_type, "application/json") &&
+      (media_type[16] == '\0' || media_type[16] == ';' ||
+      g_ascii_isspace (media_type[16])))) {
+    set_json_error (msg, 400, "invalid_mfa_request");
+    return;
+  }
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"session_token", WYL_ID_STRING_BUF - 1,
+     WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"code", 6, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024,
+      fields, G_N_ELEMENTS (fields), values)) {
+    set_json_error (msg, 400, "invalid_mfa_request");
+    return;
+  }
+  g_autoptr (WylSensitiveChar) owned_session_token =
+      g_steal_pointer (&values[0]);
+  g_autoptr (WylSensitiveChar) owned_code = g_steal_pointer (&values[1]);
+  session_token = owned_session_token;
+  code = owned_code;
 
   /*
    * F5 (enumeration): a missing or empty session_token funnels into

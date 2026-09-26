@@ -2467,12 +2467,20 @@ main (void)
   if (g_strcmp0 (http.last_guard_risk, "69") != 0)
     return wyl_test_normalize_exit_status (160);
 
-  if (wyl_client_mfa_verify (local_client, NULL) == WYRELOG_E_OK)
+  if (wyl_client_mfa_verify (local_client, NULL) != WYRELOG_E_INVALID)
     return wyl_test_normalize_exit_status (140);
-  if (wyl_client_mfa_verify (local_client, "") == WYRELOG_E_OK)
+  if (wyl_client_mfa_verify (local_client, "") != WYRELOG_E_INVALID)
     return wyl_test_normalize_exit_status (141);
-  if (wyl_client_mfa_verify (local_client, "123456") == WYRELOG_E_OK)
+  http.body = "{\"session_token\":\"session-verified\",\"username\":\"alice\","
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-verified\","
+      "\"refresh_token\":\"refresh-verified\"}";
+  if (wyl_client_mfa_verify (local_client, "123456") != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (142);
+  if (g_strcmp0 (http.last_path, "/auth/mfa/verify") != 0
+      || strstr (http.last_body, "\"session_token\":\"session-3\"") == NULL
+      || strstr (http.last_body, "\"code\":\"123456\"") == NULL)
+    return wyl_test_normalize_exit_status (250);
 
   http.body = "{\"session_token\":\"session-bad\",\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","

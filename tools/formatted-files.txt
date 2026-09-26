@@ -330,6 +330,7 @@ wyrelog/version.h
 wyrelog/wyctl/wyctl-config.c
 wyrelog/wyctl/wyctl-config.h
 wyrelog/wyctl/wyctl-publication-posix-private.c
+wyrelog/wyctl/wyctl-token-file.c
 wyrelog/wyctl/wyctl-token-file.h
 wyrelog/wyctl/wyctl.c
 wyrelog/wyl-boot-private.h

@@ -77,8 +77,10 @@ extract_json_string (const gchar *body, const gchar *name)
 }
 
 static gint
-send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
-    const gchar *path_and_query, guint *out_status, gchar **out_body)
+send_raw_body (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path_and_query,
+    const gchar *content_type, const gchar *request_body, guint *out_status,
+    gchar **out_body)
 {
   if (out_status == NULL || out_body == NULL)
     return 1;
@@ -92,6 +94,11 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 2;
+  if (request_body != NULL) {
+    g_autoptr (GBytes) bytes = g_bytes_new (request_body,
+            strlen (request_body));
+    soup_message_set_request_body_from_bytes (msg, content_type, bytes);
+  }
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
           &error);
@@ -106,6 +113,14 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
+    const gchar *path_and_query, guint *out_status, gchar **out_body)
+{
+  return send_raw_body (session, method, base_url, path_and_query, NULL, NULL,
+             out_status, out_body);
 }
 
 static gint
@@ -187,9 +202,13 @@ send_mfa_verify (SoupSession *session, const gchar *base_url,
     const gchar *session_token, const gchar *code, guint *out_status,
     gchar **out_body)
 {
-  g_autofree gchar *path = g_strdup_printf
-        ("/auth/mfa/verify?session_token=%s&code=%s", session_token, code);
-  return send_raw (session, "POST", base_url, path, out_status, out_body);
+  g_autofree gchar *escaped_session = g_strescape (session_token, NULL);
+  g_autofree gchar *escaped_code = g_strescape (code, NULL);
+  g_autofree gchar *body = g_strdup_printf
+        ("{\"session_token\":\"%s\",\"code\":\"%s\"}",
+          escaped_session, escaped_code);
+  return send_raw_body (session, "POST", base_url, "/auth/mfa/verify",
+             "application/json", body, out_status, out_body);
 }
 
 static gint
@@ -294,12 +313,10 @@ check_happy_path (SoupServer *server, WylHandle *handle, const gchar *base_url)
   if (compute_current_code (proof) != 0)
     return 102;
 
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 103;
   if (status != 200)
     return 104;
@@ -355,12 +372,10 @@ check_wrong_code_rejected (SoupServer *server, WylHandle *handle,
   gchar proof[8];
   g_snprintf (proof, sizeof proof, "%06u", wrong);
 
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 203;
   if (status != 401)
     return 204;
@@ -383,12 +398,10 @@ check_no_enrollment_returns_enrollment_required (SoupServer *server,
   if (do_login (session, base_url, "mfa.no-enroll", &session_token) != 0)
     return 300;
   /* Intentionally do NOT seed an enrollment row. */
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=000000",
-          session_token);
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, "000000", &status,
+      &body) != 0)
     return 301;
   if (status != 401)
     return 302;
@@ -408,14 +421,14 @@ check_missing_session_token (SoupServer *server, const gchar *base_url)
   if (send_raw (session, "POST", base_url,
       "/auth/mfa/verify?code=000000", &status, &body) != 0)
     return 400;
-  if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
+  if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
     return 401;
   g_clear_pointer (&body, g_free);
 
   if (send_raw (session, "POST", base_url,
       "/auth/mfa/verify?session_token=&code=000000", &status, &body) != 0)
     return 402;
-  if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
+  if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
     return 403;
   return 0;
 }
@@ -428,9 +441,8 @@ check_unknown_session_token (SoupServer *server, const gchar *base_url)
   guint status = 0;
   g_autofree gchar *body = NULL;
 
-  if (send_raw (session, "POST", base_url,
-      "/auth/mfa/verify?session_token=bogus-token&code=000000",
-      &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, "bogus-token", "000000", &status,
+      &body) != 0)
     return 500;
   /* F5: same error code as missing-token; never leak existence. */
   if (status != 401 || strstr (body, "\"mfa_auth_required\"") == NULL)
@@ -465,10 +477,8 @@ check_wrong_state_session (SoupServer *server, WylHandle *handle,
     return 602;
   g_clear_pointer (&body, g_free);
 
-  g_autofree gchar *verify_path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=000000",
-          session_token);
-  if (send_raw (session, "POST", base_url, verify_path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, "000000", &status,
+      &body) != 0)
     return 603;
   /* F5: wrong-state session must return the same code as
    * unknown-session, not a distinguishable one. */
@@ -511,9 +521,8 @@ check_authenticated_principal_reauth (SoupServer *server, WylHandle *handle,
   gchar proof[8];
   if (compute_current_code (proof) != 0)
     return 613;
-  g_autofree gchar *path = g_strdup_printf
-        ("/auth/mfa/verify?session_token=%s&code=%s", session_token, proof);
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 614;
   if (status != 200 || strstr (body, "\"principal_state\":\"authenticated\"")
       == NULL || strstr (body, "\"access_token\":\"") == NULL)
@@ -561,9 +570,8 @@ check_unproven_session_not_authenticated_by_peer (SoupServer *server,
   gchar proof[8];
   if (compute_current_code (proof) != 0)
     return 621;
-  g_autofree gchar *verify_path = g_strdup_printf
-        ("/auth/mfa/verify?session_token=%s&code=%s", proving_token, proof);
-  if (send_raw (session, "POST", base_url, verify_path, &status, &body) != 0
+  if (send_mfa_verify (session, base_url, proving_token, proof, &status,
+      &body) != 0
       || status != 200
       || strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
     return 622;
@@ -591,21 +599,62 @@ check_missing_code (SoupServer *server, const gchar *base_url)
     return 700;
   guint status = 0;
   g_autofree gchar *body = NULL;
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s", session_token);
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  g_autofree gchar *missing_code_body = g_strdup_printf
+        ("{\"session_token\":\"%s\"}", session_token);
+  if (send_raw_body (session, "POST", base_url, "/auth/mfa/verify",
+      "application/json", missing_code_body, &status, &body) != 0)
     return 701;
   if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
     return 702;
   g_clear_pointer (&body, g_free);
 
-  g_autofree gchar *path_empty =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=",
-          session_token);
-  if (send_raw (session, "POST", base_url, path_empty, &status, &body) != 0)
+  g_autofree gchar *empty_code_body = g_strdup_printf
+        ("{\"session_token\":\"%s\",\"code\":\"\"}", session_token);
+  if (send_raw_body (session, "POST", base_url, "/auth/mfa/verify",
+      "application/json", empty_code_body, &status, &body) != 0)
     return 703;
   if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
     return 704;
+  return 0;
+}
+
+static gint
+check_strict_body_only (SoupServer *server, const gchar *base_url)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  static const struct
+  {
+    const gchar *payload;
+    const gchar *type;
+  } invalid[] = {
+    {"{\"session_token\":\"s\",\"code\":\"123456\",\"extra\":\"x\"}",
+     "application/json"},
+    {"{\"session_token\":\"s\",\"session_token\":\"t\","
+     "\"code\":\"123456\"}", "application/json"},
+    {"{\"session_token\":\"s\",\"code\":123456}", "application/json"},
+    {"{\"session_token\":\"s\",\"code\":\"123456\"}",
+     "text/plain"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    if (send_raw_body (session, "POST", base_url, "/auth/mfa/verify",
+        invalid[i].type, invalid[i].payload, &status, &body) != 0)
+      return 730 + (gint) i;
+    if (status != 400 || strstr (body, "invalid_mfa_request") == NULL
+        || strstr (body, "123456") != NULL || strstr (body, "session_token") != NULL)
+      return 740 + (gint) i;
+  }
+  if (send_raw_body (session, "POST", base_url,
+      "/auth/mfa/verify?session_token=secret-session&code=654321",
+      "application/json",
+      "{\"session_token\":\"body-session\",\"code\":\"123456\"}",
+      &status, &body) != 0)
+    return 750;
+  if (status != 400 || strstr (body, "secret-session") != NULL
+      || strstr (body, "654321") != NULL || strstr (body, "123456") != NULL)
+    return 751;
   return 0;
 }
 
@@ -631,12 +680,10 @@ check_malformed_codes (SoupServer *server, const gchar *base_url)
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
-    g_autofree gchar *path =
-        g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-            session_token, cases[i].code);
     guint status = 0;
     g_autofree gchar *body = NULL;
-    if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+    if (send_mfa_verify (session, base_url, session_token, cases[i].code,
+        &status, &body) != 0)
       return 801 + (gint) i *10;
     if (status != 400 || strstr (body, "\"invalid_mfa_request\"") == NULL)
       return 802 + (gint) i *10;
@@ -678,12 +725,10 @@ check_replay_rejection (SoupServer *server, WylHandle *handle,
   if (compute_current_code (proof) != 0)
     return 1002;
 
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 1003;
   if (status != 200)
     return 1004;
@@ -694,7 +739,8 @@ check_replay_rejection (SoupServer *server, WylHandle *handle,
    * must be rejected as a replay.  The session-state gate will catch
    * this first (it is now authenticated, not mfa_required), so the
    * surfaced code is the uniform mfa_auth_required. */
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 1005;
   if (status != 401)
     return 1006;
@@ -744,10 +790,8 @@ check_tenant_sealed_between_login_and_verify (SoupServer *server,
     (void) wyl_policy_store_set_tenant_sealed (store, tenant_id, FALSE);
     return 1106;
   }
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-          session_token, proof);
-  gint send_rc = send_raw (session, "POST", base_url, path, &status, &body);
+  gint send_rc = send_mfa_verify (session, base_url, session_token, proof,
+          &status, &body);
   /* Unseal before asserting so a failure does not leave the harness
    * with a sealed tenant for any follow-up test. */
   (void) wyl_policy_store_set_tenant_sealed (store, tenant_id, FALSE);
@@ -795,12 +839,10 @@ check_locked_principal_returns_locked (SoupServer *server, WylHandle *handle,
   gchar proof[8];
   if (compute_current_code (proof) != 0)
     return 1203;
-  g_autofree gchar *path =
-      g_strdup_printf ("/auth/mfa/verify?session_token=%s&code=%s",
-          session_token, proof);
   guint status = 0;
   g_autofree gchar *body = NULL;
-  if (send_raw (session, "POST", base_url, path, &status, &body) != 0)
+  if (send_mfa_verify (session, base_url, session_token, proof, &status,
+      &body) != 0)
     return 1204;
   /* Per issue #331 spec: HTTP 429 with mfa_locked code. */
   if (status != 429)
@@ -975,6 +1017,8 @@ main (void)
   if ((rc = check_unknown_session_token (http.server, base_url)) != 0)
     goto out;
   if ((rc = check_missing_code (http.server, base_url)) != 0)
+    goto out;
+  if ((rc = check_strict_body_only (http.server, base_url)) != 0)
     goto out;
   if ((rc = check_malformed_codes (http.server, base_url)) != 0)
     goto out;
