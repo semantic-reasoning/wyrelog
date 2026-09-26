@@ -205,6 +205,13 @@ wyl_client_dup_access_token (const WylClient *client)
 }
 
 gchar *
+wyl_client_dup_refresh_token (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->refresh_token);
+}
+
+gchar *
 wyl_client_dup_username (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
@@ -464,7 +471,7 @@ wyl_client_send_message (WylClient *client, SoupMessage *message,
 
 static wyrelog_error_t
 client_login_internal (WylClient *client, const gchar *username,
-    const gchar *password, gboolean skip_mfa)
+    const gchar *password, gboolean skip_mfa, const gchar *requested_tenant)
 {
   if (client == NULL || !WYL_IS_CLIENT (client) || username == NULL ||
       username[0] == '\0')
@@ -477,18 +484,25 @@ client_login_internal (WylClient *client, const gchar *username,
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (base_url == NULL)
     return WYRELOG_E_INVALID;
+  if (!wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
 
   g_autofree gchar *escaped_username =
       g_uri_escape_string (username, NULL, TRUE);
+  g_autofree gchar *escaped_tenant = requested_tenant != NULL
+      ? g_uri_escape_string (requested_tenant, NULL, TRUE) : NULL;
   g_autofree gchar *uri = NULL;
   if (skip_mfa) {
-    uri = g_strdup_printf ("%s/auth/login?username=%s&skip_mfa=true",
-            base_url, escaped_username);
+    uri = g_strdup_printf ("%s/auth/login?username=%s&skip_mfa=true%s%s",
+            base_url, escaped_username,
+            escaped_tenant != NULL ? "&tenant=" : "",
+            escaped_tenant != NULL ? escaped_tenant : "");
   } else {
-    uri = g_strdup_printf ("%s/auth/login?username=%s", base_url,
-            escaped_username);
+    uri = g_strdup_printf ("%s/auth/login?username=%s%s%s", base_url,
+            escaped_username, escaped_tenant != NULL ? "&tenant=" : "",
+            escaped_tenant != NULL ? escaped_tenant : "");
   }
 
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
@@ -534,13 +548,31 @@ wyrelog_error_t
 wyl_client_login (WylClient *client, const gchar *username,
     const gchar *password)
 {
-  return client_login_internal (client, username, password, FALSE);
+  return client_login_internal (client, username, password, FALSE, NULL);
 }
 
 wyrelog_error_t
 wyl_client_login_skip_mfa (WylClient *client, const gchar *username)
 {
-  return client_login_internal (client, username, NULL, TRUE);
+  return client_login_internal (client, username, NULL, TRUE, NULL);
+}
+
+wyrelog_error_t
+wyl_client_login_for_tenant (WylClient *client, const gchar *username,
+    const gchar *tenant)
+{
+  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  return client_login_internal (client, username, "", FALSE, tenant);
+}
+
+wyrelog_error_t
+wyl_client_login_skip_mfa_for_tenant (WylClient *client,
+    const gchar *username, const gchar *tenant)
+{
+  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  return client_login_internal (client, username, NULL, TRUE, tenant);
 }
 
 wyrelog_error_t
@@ -556,6 +588,17 @@ wyl_client_set_bearer_credentials (WylClient *client,
   client->access_token = g_strdup (access_token);
   client->tenant = g_strdup (tenant);
   client->selected_tenant = g_strdup (tenant);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_set_refresh_token (WylClient *client, const gchar *refresh_token)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) ||
+      !credential_part_is_valid (refresh_token))
+    return WYRELOG_E_INVALID;
+  g_free (client->refresh_token);
+  client->refresh_token = g_strdup (refresh_token);
   return WYRELOG_E_OK;
 }
 
@@ -586,7 +629,10 @@ wyl_client_token_refresh (WylClient *client)
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
-  if (base_url == NULL)
+  if (base_url == NULL
+      || !wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
+  if (!wyl_client_secret_url_is_canonical_literal_loopback (base_url))
     return WYRELOG_E_INVALID;
   while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
     base_url[strlen (base_url) - 1] = '\0';
@@ -672,9 +718,102 @@ wyl_client_token_refresh (WylClient *client)
 wyrelog_error_t
 wyl_client_mfa_verify (WylClient *client, const gchar *otp)
 {
-  (void) client;
-  (void) otp;
-  return WYRELOG_E_INTERNAL;
+  if (client == NULL || !WYL_IS_CLIENT (client) || otp == NULL
+      || strlen (otp) != 6 || strspn (otp, "0123456789") != 6
+      || client->session_token == NULL || client->session_token[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL
+      || !wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  g_autofree gchar *uri = g_strdup_printf ("%s/auth/mfa/verify", base_url);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) json = g_string_new ("{\"session_token\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, client->session_token);
+  g_string_append (json, ",\"code\":");
+  append_json_string (json, otp);
+  g_string_append_c (json, '}');
+  gsize json_len = json->len;
+  gpointer request_data = g_memdup2 (json->str, json_len);
+  if (request_data == NULL)
+    return WYRELOG_E_NOMEM;
+  ClientSecretBytes *owner = g_new (ClientSecretBytes, 1);
+  if (owner == NULL) {
+    sodium_memzero (request_data, json_len);
+    g_free (request_data);
+    return WYRELOG_E_NOMEM;
+  }
+  owner->data = request_data;
+  owner->size = json_len;
+  g_autoptr (GBytes) request_body = g_bytes_new_with_free_func (request_data,
+          json_len, client_secret_bytes_free, owner);
+  if (request_body == NULL) {
+    client_secret_bytes_free (owner);
+    return WYRELOG_E_NOMEM;
+  }
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request_body);
+  sodium_memzero (json->str, json->len);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = wyl_client_send_message (client, message, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize body_size = 0;
+  const gchar *body_data = g_bytes_get_data (body, &body_size);
+  g_autofree gchar *session_token = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *refresh_token = NULL;
+  g_autofree gchar *username = NULL;
+  g_autofree gchar *tenant = NULL;
+  g_autofree gchar *principal_state = NULL;
+  g_autofree gchar *session_state = NULL;
+  if (!parse_login_response_json (body_data, body_size, &session_token,
+      &access_token, &refresh_token, &username, &tenant, &principal_state,
+      &session_state))
+    return WYRELOG_E_IO;
+  wyl_client_clear_login_state (client);
+  client->session_token = g_steal_pointer (&session_token);
+  client->access_token = g_steal_pointer (&access_token);
+  client->refresh_token = g_steal_pointer (&refresh_token);
+  client->username = g_steal_pointer (&username);
+  client->tenant = g_steal_pointer (&tenant);
+  client->selected_tenant = g_strdup (client->tenant);
+  client->principal_state = g_steal_pointer (&principal_state);
+  client->session_state = g_steal_pointer (&session_state);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_logout (WylClient *client)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) || client->access_token == NULL
+      || client->access_token[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL
+      || !wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  g_autofree gchar *uri = g_strdup_printf ("%s/auth/logout", base_url);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+          client->access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+      "Authorization", authorization);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = wyl_client_send_message (client, message, &body);
+  if (rc == WYRELOG_E_OK)
+    wyl_client_clear_login_state (client);
+  return rc;
 }
 
 static wyrelog_error_t
