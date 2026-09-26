@@ -12,7 +12,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#ifndef G_OS_WIN32
+#include <poll.h>
+#endif
 
 #ifdef G_OS_WIN32
 #include <windows.h>
@@ -299,7 +303,7 @@ test_status_message_table_has_no_token_placeholder (void)
    * placeholder may exist for the token bytes themselves; that
    * would risk leaking credentials into stderr. */
   for (int s = WYCTL_TOKEN_FILE_OK;
-      s <= WYCTL_TOKEN_FILE_WINDOWS_ACL_UNAVAILABLE; s++) {
+      s <= WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN; s++) {
     const gchar *msg = wyctl_token_file_status_message (
       (WyctlTokenFileStatus) s);
     if (msg == NULL)
@@ -334,6 +338,104 @@ test_protected_writer_is_no_replace (void)
   g_assert_cmpstr (token, ==, "access-1");
   g_unlink (path);
 }
+
+static void
+test_protected_replace_and_remove (void)
+{
+  g_autofree gchar *path = NULL;
+  gint fd = g_file_open_tmp ("wyctl-replace-XXXXXX", &path, NULL);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_unlink (path);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "old-token", 9),
+      ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_replace_protected (path, "new-token", 9),
+      ==, WYCTL_TOKEN_FILE_OK);
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (path, &token), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpstr (token, ==, "new-token");
+  g_assert_cmpint (wyctl_token_file_remove_protected (path), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+}
+
+static void
+test_protected_pair_rolls_back_only_its_refresh_file (void)
+{
+  g_autofree gchar *directory = g_dir_make_tmp ("wyctl-pair-XXXXXX", NULL);
+  g_assert_nonnull (directory);
+  g_autofree gchar *refresh_path = g_build_filename (directory, "refresh",
+          NULL);
+  g_autofree gchar *access_path = g_build_filename (directory, "access", NULL);
+  g_assert_cmpint (wyctl_token_file_write_protected (access_path,
+      "preexisting", 11), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh_path,
+      "refresh-new", 11, access_path, "access-new", 10), !=,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+  g_autofree gchar *access = NULL;
+  g_assert_cmpint (wyctl_token_file_read (access_path, &access), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpstr (access, ==, "preexisting");
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh_path,
+      "refresh-new", 11, access_path, "access-new", 10), !=,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpstr (access, ==, "preexisting");
+  g_unlink (access_path);
+  g_rmdir (directory);
+}
+
+#ifndef G_OS_WIN32
+static void
+test_refresh_lock_serializes_processes (void)
+{
+  g_autofree gchar *path = NULL;
+  gint fd = g_file_open_tmp ("wyctl-lock-XXXXXX", &path, NULL);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_unlink (path);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "token", 5), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_autofree gchar *parent = g_path_get_dirname (path);
+  g_autofree gchar *basename = g_path_get_basename (path);
+  g_autofree gchar *path_alias = g_strdup_printf ("%s/./%s", parent,
+          basename);
+  WyctlTokenFileLock *parent_lock = NULL;
+  g_assert_cmpint (wyctl_token_file_lock_refresh (path, &parent_lock), ==,
+      WYCTL_TOKEN_FILE_OK);
+  gint pipe_fds[2];
+  g_assert_cmpint (pipe (pipe_fds), ==, 0);
+  pid_t child = fork ();
+  g_assert_cmpint (child, >=, 0);
+  if (child == 0) {
+    close (pipe_fds[0]);
+    WyctlTokenFileLock *child_lock = NULL;
+    if (wyctl_token_file_lock_refresh (path_alias, &child_lock)
+        != WYCTL_TOKEN_FILE_OK)
+      WYL_TEST_EXIT (2);
+    (void) write (pipe_fds[1], "x", 1);
+    wyctl_token_file_unlock_refresh (child_lock);
+    WYL_TEST_EXIT (0);
+  }
+  close (pipe_fds[1]);
+  struct pollfd probe = { .fd = pipe_fds[0], .events = POLLIN };
+  g_assert_cmpint (poll (&probe, 1, 100), ==, 0);
+  wyctl_token_file_unlock_refresh (parent_lock);
+  g_assert_cmpint (poll (&probe, 1, 2000), ==, 1);
+  gchar byte = 0;
+  g_assert_cmpint (read (pipe_fds[0], &byte, 1), ==, 1);
+  g_assert_cmpint (byte, ==, 'x');
+  gint child_status = 0;
+  g_assert_cmpint (waitpid (child, &child_status, 0), ==, child);
+  g_assert_true (WIFEXITED (child_status));
+  g_assert_cmpint (WEXITSTATUS (child_status), ==, 0);
+  close (pipe_fds[0]);
+  g_autofree gchar *lock_path = g_strconcat (path, ".lock", NULL);
+  g_unlink (lock_path);
+  g_unlink (path);
+}
+#endif
 
 #ifndef G_OS_WIN32
 static void
@@ -484,6 +586,14 @@ main (int argc, char **argv)
       test_windows_attrs_reject_reparse_point);
   g_test_add_func ("/wyctl/token-file/protected-writer-no-replace",
       test_protected_writer_is_no_replace);
+  g_test_add_func ("/wyctl/token-file/protected-replace-and-remove",
+      test_protected_replace_and_remove);
+  g_test_add_func ("/wyctl/token-file/protected-pair-rollback",
+      test_protected_pair_rolls_back_only_its_refresh_file);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/wyctl/token-file/refresh-lock-serializes-processes",
+      test_refresh_lock_serializes_processes);
+#endif
 #ifndef G_OS_WIN32
   g_test_add_func ("/wyctl/token-file/protected-writer-rejects-parent-symlink",
       test_protected_writer_rejects_parent_symlink);

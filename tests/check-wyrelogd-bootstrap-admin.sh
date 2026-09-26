@@ -360,8 +360,9 @@ digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
 offset = digest[-1] & 0x0f
 code = (struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7fffffff) % 1000000
 verify = urllib.request.Request(
-    f"{base_url}/auth/mfa/verify?session_token={session}&code={code:06d}",
-    method="POST")
+    f"{base_url}/auth/mfa/verify", method="POST",
+    data=json.dumps({"session_token": session, "code": f"{code:06d}"}).encode())
+verify.add_header("Content-Type", "application/json")
 with urllib.request.urlopen(verify, timeout=3) as response:
     token = json.load(response)["access_token"]
 with open(token_path, "w", encoding="utf-8") as f:
@@ -626,7 +627,9 @@ digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
 offset = digest[-1] & 15
 code = (struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000
 verify = urllib.request.Request(
-    f"{base}/auth/mfa/verify?session_token={session}&code={code:06d}", method="POST")
+    f"{base}/auth/mfa/verify", method="POST",
+    data=json.dumps({"session_token": session, "code": f"{code:06d}"}).encode())
+verify.add_header("Content-Type", "application/json")
 with urllib.request.urlopen(verify, timeout=3) as response:
     token = json.load(response)["access_token"]
 with open(token_path, "w", encoding="utf-8") as f: f.write(token + "\n")

@@ -34,6 +34,7 @@ typedef enum
   WYCTL_TOKEN_FILE_TOO_LARGE,
   WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY,
   WYCTL_TOKEN_FILE_WINDOWS_ACL_UNAVAILABLE,
+  WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN,
 } WyctlTokenFileStatus;
 
 /* Open the token file safely and copy its bytes into *out_token.
@@ -59,6 +60,25 @@ void wyctl_token_file_free_sensitive (gchar * value, gsize capacity);
 /* Create a protected, no-replace bearer-token destination. */
 WyctlTokenFileStatus wyctl_token_file_write_protected (const gchar * path,
     const gchar * token, gsize token_len);
+WyctlTokenFileStatus wyctl_token_file_write_pair_protected (
+  const gchar * refresh_path, const gchar * refresh_token,
+  gsize refresh_token_len, const gchar * access_path,
+  const gchar * access_token, gsize access_token_len);
+
+/* Replace a previously validated protected token file atomically. A
+ * durability-uncertain result means the namespace replacement happened but
+ * the parent-directory flush failed; callers must not replay a consumed
+ * refresh token automatically. */
+WyctlTokenFileStatus wyctl_token_file_replace_protected (const gchar * path,
+    const gchar * token, gsize token_len);
+WyctlTokenFileStatus wyctl_token_file_remove_protected (const gchar * path);
+
+typedef struct _WyctlTokenFileLock WyctlTokenFileLock;
+WyctlTokenFileStatus wyctl_token_file_lock_refresh (const gchar * path,
+    WyctlTokenFileLock ** out_lock);
+void wyctl_token_file_unlock_refresh (WyctlTokenFileLock * lock);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WyctlTokenFileLock,
+    wyctl_token_file_unlock_refresh)
 
 #ifndef G_OS_WIN32
 /* Pure-function classifier: given the result of fstat on an already-

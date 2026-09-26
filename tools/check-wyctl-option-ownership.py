@@ -10,6 +10,9 @@ import tempfile
 
 EXPECTED_FIELDS = {
     "WyctlOptions": ("daemon_url", "timeout_ms_arg"),
+    "WyctlHumanAuthOptions":
+        ("subject", "tenant", "token_output", "refresh_token_output",
+         "access_token_file", "refresh_token_file"),
     "WyctlPolicyOptions":
         ("user", "permission", "resource", "access_token_file"),
     "WyctlAuditOptions":
@@ -68,6 +71,9 @@ EXPECTED_FIELDS = {
 EXPECTED_PARSE_SITES = {
     "run_status": "WyctlOptions",
     "run_auth_service_token": "WyctlServiceTokenOptions",
+    "run_auth_login": "WyctlHumanAuthOptions",
+    "run_auth_refresh": "WyctlHumanAuthOptions",
+    "run_auth_logout": "WyctlHumanAuthOptions",
     "run_policy_decision_command": "WyctlPolicyOptions",
     "run_policy_permission_mutation_command": "WyctlPolicyPermissionOptions",
     "run_policy_role_mutation_command": "WyctlPolicyRoleOptions",
@@ -99,7 +105,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 173
+EXPECTED_STRING_DESTINATIONS = 183
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

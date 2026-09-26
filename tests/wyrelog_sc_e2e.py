@@ -175,9 +175,10 @@ def cmd_totp_admin(args):
         sys.stderr.write("totp-admin: no session_token in %s\n" % lbody)
         return 1
 
-    verify_url = "%s/auth/mfa/verify?session_token=%s&code=%06d" % (
-        args.base_url, session, _totp(seed))
-    status, vbody = _post(verify_url)
+    verify_url = "%s/auth/mfa/verify" % args.base_url
+    verify_body = json.dumps({"session_token": session,
+        "code": "%06d" % _totp(seed)}).encode("utf-8")
+    status, vbody = _post(verify_url, data=verify_body)
     if status != 200:
         sys.stderr.write("totp-admin: mfa/verify HTTP %d: %s\n" % (
             status, vbody))
@@ -213,9 +214,10 @@ def cmd_login_totp(args):
         session = json.loads(lbody).get("session_token")
         if not session:
             return status, "login: no session_token in " + lbody, None
-        verify_url = "%s/auth/mfa/verify?session_token=%s&code=%06d" % (
-            args.base_url, session, _totp(seed))
-        vstatus, vbody = _post(verify_url)
+        verify_url = "%s/auth/mfa/verify" % args.base_url
+        verify_body = json.dumps({"session_token": session,
+            "code": "%06d" % _totp(seed)}).encode("utf-8")
+        vstatus, vbody = _post(verify_url, data=verify_body)
         if vstatus != 200:
             return vstatus, "verify: " + vbody, None
         token = json.loads(vbody).get("access_token")
