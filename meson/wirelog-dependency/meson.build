@@ -60,6 +60,7 @@ wirelog_nofallback_error = (
 
 wirelog_force_fallback = (
   wrap_mode == 'forcefallback' or 'wirelog' in force_fallback_for
+      or get_option('product_install')
 )
 wirelog_dep = disabler()
 wirelog_system_rejection = ''

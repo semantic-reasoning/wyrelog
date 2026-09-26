@@ -321,6 +321,10 @@ test('wirelog-provider', consumer)
 """,
     )
     write(fixture / "consumer.c", consumer_source(expected))
+    write(
+        fixture / "meson_options.txt",
+        "option('product_install', type : 'boolean', value : false)\n",
+    )
     selector_destination = fixture / "meson" / "wirelog-dependency"
     selector_destination.mkdir(parents=True)
     shutil.copy2(selector_path, selector_destination / "meson.build")

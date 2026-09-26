@@ -43,6 +43,73 @@ jobs:
           ./tools/check-format.sh --changed "origin/${{ github.base_ref }}"
           ./tools/test-format-tooling.sh
 
+  product-install-linux:
+    name: product-install-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install Linux product build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config patch python3 gcc g++ binutils \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
+            libtss2-dev
+
+      - name: Restore pinned subproject packagecache
+        # actions/cache v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-product-install-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            ${{ runner.os }}-product-install-
+
+      - name: Configure canonical Linux product profile
+        run: |
+          meson setup build-product-install \
+            --prefix=/usr --libdir=lib --buildtype=release \
+            -Dproduct_install=true \
+            -Denable_tpm=enabled -Drequire_tpm=true \
+            -Denable_audit=enabled -Denable_fact_store=enabled \
+            -Denable_client=enabled -Denable_break_glass=false \
+            -Denable_secure_duckdb_bridge=disabled \
+            -Drequire_template_manifest=true \
+            -Denable_fault_injection=disabled \
+            -Denable_windows_artifact_test_hooks=disabled \
+            -Dduckdb_source=prebuilt \
+            -Ddefault_library=shared \
+            -Dwyrelog_log_max_level=warn \
+            -Dforce_fallback_for=wirelog,libchronoid
+
+      - name: Build product runtime targets
+        run: |
+          meson compile -C build-product-install \
+            wyrelog/wyrelogd wyrelog/wyctl
+
+      - name: Install into an empty DESTDIR and verify manifest and ELF closure
+        run: |
+          set -euo pipefail
+          install_stage="$(mktemp -d "$RUNNER_TEMP/wyrelog-product.XXXXXX")"
+          python3 tools/stage-product-install.py \
+            --builddir build-product-install \
+            --destdir "$install_stage" --prefix /usr
+          python3 tools/check-product-install-tree.py --self-test
+          python3 tools/stage-product-install.py --self-test
+
+      - name: Upload product install Meson logs on failure
+        if: ${{ failure() }}
+        # actions/upload-artifact v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: product-install-linux-meson-logs
+          path: build-product-install/meson-logs/
+          if-no-files-found: ignore
+
   build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}

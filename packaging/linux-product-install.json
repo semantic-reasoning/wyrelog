@@ -1,0 +1,120 @@
+{
+  "profile": {
+    "buildtype": "release",
+    "default_library": "shared",
+    "duckdb_source": "prebuilt",
+    "enable_audit": "enabled",
+    "enable_break_glass": false,
+    "enable_client": "enabled",
+    "enable_fact_store": "enabled",
+    "enable_fault_injection": "disabled",
+    "enable_secure_duckdb_bridge": "disabled",
+    "enable_tpm": "enabled",
+    "enable_windows_artifact_test_hooks": "disabled",
+    "force_fallback_for": ["wirelog", "libchronoid"],
+    "libdir": "lib",
+    "prefix": "/usr",
+    "product_install": true,
+    "require_template_manifest": true,
+    "require_tpm": true,
+    "wyrelog_log_max_level": "warn"
+  },
+  "subprojects": {
+    "duckdb-prebuilt-linux": "1.5.5",
+    "libchronoid": "1.2.0",
+    "nanoarrow": "0.10.0-SNAPSHOT",
+    "wirelog": "0.70.0",
+    "xxhash": "0.8.4"
+  },
+  "wrap_revisions": {
+    "wirelog.wrap": "c353350232c35356b34085abf5780a2fcb81e80f",
+    "libchronoid.wrap": "v1.2.0"
+  },
+  "nested_wrap_pins": {
+    "nanoarrow.wrap": "ec8a58cae18beaa241c7fea7cb26816ac27c280f",
+    "xxhash.wrap": "5738270935e7c3d38a79b3adf7c9692566ce7895a25f67de43ad52ab504acd32"
+  },
+  "external_libraries": {
+    "libduckdb.so": {
+      "build_artifact": "subprojects/duckdb-prebuilt-linux-amd64/libduckdb.so",
+      "package": "DuckDB",
+      "version": "1.5.5"
+    }
+  },
+  "system_libraries": [
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libgio-2.0.so.0",
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libm.so.6",
+    "libsodium.so.23",
+    "libsodium.so.26",
+    "libsoup-3.0.so.0",
+    "libsqlite3.so.0"
+  ],
+  "allowed_paths": [
+    "bin/wyctl",
+    "bin/wyrelogd",
+    "etc/wyrelog/*.env",
+    "lib/libchronoid.so.1",
+    "lib/libchronoid.so.1.2.0",
+    "lib/libnanoarrow.so",
+    "lib/libwirelog.so.0.70.0",
+    "lib/libwirelog.so.1",
+    "lib/libwyrelog-client.so.0",
+    "lib/libwyrelog.so.0",
+    "lib/libxxhash.so.0",
+    "lib/libxxhash.so.0.8.4",
+    "lib/systemd/system/*.service",
+    "lib/sysusers.d/wyrelog.conf",
+    "lib/tmpfiles.d/wyrelog.conf",
+    "share/doc/libchronoid/LICENSE",
+    "share/doc/libchronoid/LICENSE.MIT",
+    "share/doc/libchronoid/NOTICE",
+    "share/glib-2.0/schemas/org.wyrelog.wyctl.gschema.xml",
+    "share/wyrelog/access/bootstrap.dl",
+    "share/wyrelog/access/decision.dl",
+    "share/wyrelog/access/duckdb-schema.sql",
+    "share/wyrelog/access/fsm/permission_scope.dl",
+    "share/wyrelog/access/fsm/principal.dl",
+    "share/wyrelog/access/fsm/session.dl",
+    "share/wyrelog/access/lobac/decision.dl",
+    "share/wyrelog/access/manifest.ini",
+    "share/wyrelog/access/migrations/0000-baseline.ini",
+    "share/wyrelog/access/sqlite-schema.sql",
+    "share/wyrelog/examples/wyrelogd-service.conf.example",
+    "share/wyrelog/examples/wyrelogd-system.conf.example",
+    "share/wyrelog/tools/verify-template-release.sh"
+  ],
+  "prune_paths": [
+    "bin/wirelog_cli",
+    "bin/xxhsum",
+    "include/**",
+    "lib/libchronoid.so",
+    "lib/libwirelog.so",
+    "lib/libwyrelog-client.so",
+    "lib/libwyrelog.so",
+    "lib/libxxhash.so",
+    "lib/*.a",
+    "lib/pkgconfig/**",
+    "share/man/man1/xxhsum.1"
+  ],
+  "required_paths": [
+    "bin/wyctl",
+    "bin/wyrelogd",
+    "lib/systemd/system/wyrelog-service.service",
+    "lib/systemd/system/wyrelog-system.service",
+    "lib/systemd/system/wyrelog.service",
+    "share/wyrelog/access/manifest.ini",
+    "share/wyrelog/tools/verify-template-release.sh"
+  ],
+  "required_staged_libraries": [
+    "libchronoid.so.1",
+    "libnanoarrow.so",
+    "libwirelog.so.1",
+    "libwyrelog.so.0",
+    "libxxhash.so.0"
+  ],
+  "duckdb_wrap_sha256": "1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb"
+}

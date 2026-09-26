@@ -104,10 +104,17 @@ wirelog_version = '>= 0.70.0'
 libchronoid_version = '>= 1.2.0'
 force_fallback_for = get_option('force_fallback_for')
 wrap_mode = get_option('wrap_mode')
+product_install = get_option('product_install')
+if product_install and host_machine.system() != 'linux'
+  error('product_install is currently supported only for Linux packages')
+endif
 
 subdir('meson/wirelog-dependency')
 
 libchronoid_force_fallback = wrap_mode == 'forcefallback' or 'libchronoid' in force_fallback_for
+if get_option('product_install')
+  libchronoid_force_fallback = true
+endif
 libchronoid_dep = disabler()
 if not libchronoid_force_fallback
   libchronoid_dep = dependency('libchronoid',
