@@ -205,6 +205,36 @@ test_version (void)
 }
 
 static void
+test_top_level_help (void)
+{
+  gchar *help_argv[] = { WYL_TEST_WYCTL_PATH, "--help", NULL };
+  gchar *empty_argv[] = { WYL_TEST_WYCTL_PATH, NULL };
+  const gchar *const commands[] = {
+    "status", "policy", "graph", "fact", "datalog", "audit", "key",
+    "mfa", "auth", "service-principal", "service-credential",
+    "service-permission-closure", "--daemon-url", "--timeout-ms",
+    "--version", NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (help_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stderr_buf, ==, "");
+  for (gsize i = 0; commands[i] != NULL; i++)
+    g_assert_nonnull (g_strstr_len (stdout_buf, -1, commands[i]));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (empty_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (stderr_buf);
+  for (gsize i = 0; commands[i] != NULL; i++)
+    g_assert_nonnull (g_strstr_len (stderr_buf, -1, commands[i]));
+}
+
+static void
 test_status_connection_failure (void)
 {
   gchar *argv[] = {
@@ -3263,6 +3293,7 @@ main (int argc, char **argv)
   }
 
   g_test_add_func ("/wyctl/version", test_version);
+  g_test_add_func ("/wyctl/top-level-help", test_top_level_help);
   g_test_add_func ("/wyctl/status-connection-failure",
       test_status_connection_failure);
   g_test_add_func ("/wyctl/status-rejects-invalid-timeout",
