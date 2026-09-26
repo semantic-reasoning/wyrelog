@@ -4438,6 +4438,40 @@ check_postcommit_not_found_is_internal (void)
   return 0;
 }
 
+static wyrelog_error_t
+verify_postcommit_policy_probe (WylEngineVerification *verification,
+    gpointer data)
+{
+  (void) verification;
+  (void) data;
+  return WYRELOG_E_POLICY;
+}
+
+static gint
+check_postcommit_policy_is_internal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 916;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_engine_session_run_committed_publication (session,
+      mutate_postcommit_not_found_probe, NULL,
+      verify_postcommit_policy_probe, NULL, NULL, NULL, NULL)
+      != WYRELOG_E_INTERNAL)
+    return 917;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists
+        (wyl_handle_get_policy_store (handle), "postcommit-not-found-user",
+      "wr.audit.read", "postcommit-not-found-scope", &exists)
+      != WYRELOG_E_OK || !exists || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 918;
+  return 0;
+}
+
 typedef struct
 {
   const gchar *scope;
@@ -4540,6 +4574,123 @@ check_retained_external_publication_outcomes (void)
       || !wyl_handle_engine_pair_is_poisoned (uncertain_handle))
     return 863;
   g_clear_pointer (&session, wyl_engine_session_release);
+  return 0;
+}
+
+static gint
+check_external_postcommit_policy_is_internal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 919;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_direct_permission (store,
+      "external-postcommit-policy-user", "wr.audit.read",
+      "external-postcommit-policy-scope") != WYRELOG_E_OK)
+    return 920;
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 921;
+
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_engine_session_finish_external_publication (session, store,
+      generation, WYL_DURABLE_COMMIT_COMMITTED,
+      verify_postcommit_policy_probe, NULL) != WYRELOG_E_INTERNAL)
+    return 922;
+  g_clear_pointer (&session, wyl_engine_session_release);
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists (store,
+      "external-postcommit-policy-user", "wr.audit.read",
+      "external-postcommit-policy-scope", &exists) != WYRELOG_E_OK
+      || !exists || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 923;
+  return 0;
+}
+
+static gint
+check_repair_postcommit_policy_is_internal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 924;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  if (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease)
+      != WYRELOG_E_OK)
+    return 925;
+  guint64 generation = 0;
+  if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
+      != WYRELOG_E_OK)
+    return 926;
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL
+      || wyl_handle_fail_committed_engine_projection (session,
+      WYRELOG_E_POLICY) != WYRELOG_E_POLICY
+      || !wyl_handle_engine_pair_is_poisoned (handle))
+    return 927;
+
+  wyrelog_error_t rc = wyl_engine_session_repair_committed_publication
+        (session, lease, store, generation, verify_postcommit_policy_probe, NULL);
+  g_clear_pointer (&session, wyl_engine_session_release);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  wyl_service_auth_write_lease_free (lease);
+  if (rc != WYRELOG_E_INTERNAL || release_rc != WYRELOG_E_OK
+      || !wyl_handle_engine_pair_is_poisoned (handle)
+      || wyl_handle_engine_pair_is_ready (handle))
+    return 928;
+  return 0;
+}
+
+static gint
+check_candidate_accepted_input_witness (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 929;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "candidate-witness-perm",
+      "candidate witness", "basic") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+      "candidate-witness-user", "candidate-witness-perm",
+      "candidate-witness-scope") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 930;
+  gint64 row[] = { 0, 0, 0 };
+  const gchar *symbols[] = { "candidate-witness-user",
+                             "candidate-witness-perm", "candidate-witness-scope" };
+  for (guint i = 0; i < G_N_ELEMENTS (symbols); i++)
+    if (wyl_handle_intern_engine_symbol (handle, symbols[i], &row[i])
+        != WYRELOG_E_OK)
+      return 931 + (gint) i;
+  WylEngine *read = wyl_handle_get_read_engine (handle);
+  gboolean exact = FALSE;
+  if (wyl_engine_owned_has_exact_accepted_input_row (read,
+      "direct_permission", row, G_N_ELEMENTS (row), TRUE, &exact)
+      != WYRELOG_E_OK || !exact)
+    return 934;
+  if (wyl_engine_owned_insert (read, "direct_permission", row,
+      G_N_ELEMENTS (row)) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_input_row (read,
+      "direct_permission", row, G_N_ELEMENTS (row), TRUE, &exact)
+      != WYRELOG_E_OK || exact)
+    return 935;
+  if (wyl_engine_owned_remove (read, "direct_permission", row,
+      G_N_ELEMENTS (row)) != WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_input_row (read,
+      "direct_permission", row, G_N_ELEMENTS (row), TRUE, &exact)
+      != WYRELOG_E_OK || !exact)
+    return 936;
+  if (wyl_engine_owned_insert (read, "invalid_relation_for_witness_test", row,
+      G_N_ELEMENTS (row)) == WYRELOG_E_OK
+      || wyl_engine_owned_has_exact_accepted_input_row (read,
+      "direct_permission", row, G_N_ELEMENTS (row), TRUE, &exact)
+      != WYRELOG_E_OK || !exact)
+    return 937;
   return 0;
 }
 
@@ -7707,6 +7858,14 @@ main (int argc, char **argv)
   if ((rc = check_replacement_faults_preserve_published_pair ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_postcommit_not_found_is_internal ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_postcommit_policy_is_internal ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_external_postcommit_policy_is_internal ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_repair_postcommit_policy_is_internal ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_candidate_accepted_input_witness ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_committed_publication_fault_stages_and_bundle_classifier ())
       != 0)

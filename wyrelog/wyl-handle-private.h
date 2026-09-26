@@ -594,6 +594,24 @@ wyrelog_error_t wyl_engine_verification_contains
 wyrelog_error_t wyl_engine_verification_has_exact_keyed_row
   (WylEngineVerification * verification, const gchar * relation,
     gint64 key, const gint64 * expected, gsize ncols, gboolean * out_exact);
+/* Proves that no candidate row exists for @relation with @key in column 0. */
+wyrelog_error_t wyl_engine_verification_has_no_keyed_row
+  (WylEngineVerification * verification, const gchar * relation,
+    gint64 key, gboolean * out_absent);
+/* Checks an exact host-accepted input fact retained by this read candidate.
+ * Unlike snapshot queries this can prove EDB rows that are not IDB outputs. */
+wyrelog_error_t wyl_engine_verification_has_exact_input_row
+  (WylEngineVerification * verification, const gchar * relation,
+    const gint64 * row, gsize ncols, gboolean expected_present,
+    gboolean * out_exact);
+wyrelog_error_t wyl_engine_verification_has_no_input_key
+  (WylEngineVerification * verification, const gchar * relation,
+    gint64 key, gboolean * out_absent);
+wyrelog_error_t wyl_engine_verification_verify_audit_event
+  (WylEngineVerification * verification, const gchar * id,
+    gint64 created_at_us, gboolean allowed, const gchar * subject,
+    const gchar * action, const gchar * resource, const gchar * deny_reason,
+    const gchar * origin, const gchar * request_id);
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef enum
 {

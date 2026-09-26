@@ -145,6 +145,14 @@ verify_principal_event_row (WylEngineVerification *verification, gpointer data)
           "principal_fired", ctx->event_id, row, G_N_ELEMENTS (row), &exact);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (!exact)
+    return WYRELOG_E_POLICY;
+  gint64 source_row[] = { row[0], row[1], row[3], row[2], row[4] };
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "principal_event", source_row, G_N_ELEMENTS (source_row), TRUE,
+          &exact);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 

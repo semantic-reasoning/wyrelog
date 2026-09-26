@@ -65,6 +65,10 @@ struct _WylEngine
    * so publication verification uses this narrow EDB receipt rather than a
    * raw evaluator read. */
   GHashTable *member_of_input_rows;
+  /* Exact multiplicities for host-accepted EDB rows. Snapshot APIs expose
+   * derived relations, not every input relation, so publication witnesses
+   * are retained by the read candidate as facts are loaded. */
+  GHashTable *accepted_input_rows;
 };
 
 /*
@@ -143,18 +147,29 @@ wyrelog_error_t wyl_engine_owned_insert (WylEngine * self,
 wyrelog_error_t wyl_engine_owned_remove (WylEngine * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 wyrelog_error_t wyl_engine_owned_get_accepted_session_state
-    (WylEngine * self, const gchar * relation, gint64 scope,
+  (WylEngine * self, const gchar * relation, gint64 scope,
     gint64 * out_state);
 wyrelog_error_t wyl_engine_owned_has_exact_accepted_member_of
-    (WylEngine * self, const gchar * relation, const gint64 row[3],
+  (WylEngine * self, const gchar * relation, const gint64 row[3],
     gboolean * out_exact);
+wyrelog_error_t wyl_engine_owned_has_exact_accepted_input_row
+  (WylEngine * self, const gchar * relation, const gint64 * row,
+    gsize ncols, gboolean expected_present, gboolean * out_exact);
+wyrelog_error_t wyl_engine_owned_has_no_accepted_input_key
+  (WylEngine * self, const gchar * relation, gint64 key,
+    gboolean * out_absent);
+#ifdef WYL_TEST_HANDLE_SEAMS
+wyrelog_error_t wyl_engine_owned_set_accepted_input_row_for_test
+  (WylEngine * self, const gchar * relation, const gint64 * row,
+    gsize ncols, guint64 multiplicity);
+#endif
 wyrelog_error_t wyl_engine_owned_step (WylEngine * self);
 wyrelog_error_t wyl_engine_owned_set_delta_callback (WylEngine * self,
     WylDeltaCallback cb, gpointer user_data);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 wyrelog_error_t wyl_engine_owned_set_session_state_witness_for_test
-    (WylEngine * self, const gint64 row[2], guint64 row_multiplicity,
+  (WylEngine * self, const gint64 row[2], guint64 row_multiplicity,
     guint64 scope_total);
 #endif
 
