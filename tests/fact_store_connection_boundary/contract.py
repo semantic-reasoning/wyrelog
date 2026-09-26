@@ -13,11 +13,13 @@ ROLE_OWNERS = {
     "wyrelog/fact/store.c",
     "wyrelog/fact/compound.c",
     "wyrelog/fact/replay.c",
+    "wyrelog/fact/replay-store-private.c",
 }
 EXPECTED_RAW_INVENTORY = {
     "wyrelog/fact/store.c": (54, 389, 4, 3),
-    "wyrelog/fact/compound.c": (0, 125, 16, 0),
-    "wyrelog/fact/replay.c": (0, 34, 3, 0),
+    "wyrelog/fact/compound.c": (0, 63, 8, 0),
+    "wyrelog/fact/replay.c": (0, 0, 0, 0),
+    "wyrelog/fact/replay-store-private.c": (0, 21, 3, 0),
 }
 EXPECTED_RAW_MEMBER_FUNCTIONS = {
     "wyrelog/fact/store.c": {
@@ -60,6 +62,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
     },
     "wyrelog/fact/compound.c": {},
     "wyrelog/fact/replay.c": {},
+    "wyrelog/fact/replay-store-private.c": {},
 }
 EXPECTED_DUCKDB_CALL_FUNCTIONS = {
     "wyrelog/fact/compound.c": {
@@ -68,15 +71,17 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "exec_sql": 3,
         "insert_arg_unlocked": 18,
         "insert_term_unlocked": 13,
-        "load_logical_arg_unlocked": 29,
-        "load_term_unlocked": 20,
-        "replay_unlocked": 12,
-        "compound_interrupt_cancelled": 1,
     },
     "wyrelog/fact/replay.c": {
-        "list_replay_relations": 16,
-        "replay_relation_into_engine": 17,
-        "replay_interrupt_cancelled": 1,
+    },
+    "wyrelog/fact/replay-store-private.c": {
+        "replay_store_interrupt": 1,
+        "bind_request": 6,
+        "text_cell": 2,
+        "int64_cell": 2,
+        "bool_cell": 2,
+        "emit_result_row": 3,
+        "c_store_execute": 5,
     },
     "wyrelog/fact/store.c": {
         "append_value": 4,
@@ -274,18 +279,35 @@ def optional_store_guard(source: str, position: int):
     return None
 
 
+def session_store_matches(body: str, actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    return (
+        expected == "c_store->store"
+        and actual == "store"
+        and re.search(
+            r"\bwyl_fact_store_t\s*\*\s*store\s*=\s*"
+            r"c_store\s*->\s*store\s*;",
+            body,
+        ) is not None
+    )
+
+
 def validate_session_profile(
     body: str, signature: str, raw_helper_names: set[str],
-    duckdb_api: re.Pattern[str],
+    duckdb_api: re.Pattern[str], expected_store: str,
 ) -> None:
     begin = re.search(
         r"(?:wyrelog_error_t\s+)?rc\s*=\s*"
         r"wyl_fact_store_connection_session_begin\s*"
-        r"\(\s*store\s*,\s*&\s*(?P<session>[A-Za-z_]\w*)\s*\)\s*;",
+        r"\(\s*(?P<store>(?:[A-Za-z_]\w*)(?:(?:->|\.)[A-Za-z_]\w*)*)"
+        r"\s*,\s*&\s*(?P<session>[A-Za-z_]\w*)\s*\)\s*;",
         body,
     )
     if begin is None:
         raise AssertionError(f"session owner lost admission: {signature}")
+    if not session_store_matches(body, begin.group("store"), expected_store):
+        raise AssertionError(f"session owner changed backing store: {signature}")
     begin_at = begin.start()
     guard_match = optional_store_guard(body, begin_at)
     guarded_optional_store = (
@@ -437,6 +459,7 @@ def validate(files: dict[str, str]) -> None:
     store = files["wyrelog/fact/store.c"]
     compound = files["wyrelog/fact/compound.c"]
     replay = files["wyrelog/fact/replay.c"]
+    replay_store = files["wyrelog/fact/replay-store-private.c"]
     meson = files["tests/meson.build"]
     raw_authority_names = set(EXPECTED_TRANSITIVE_RAW_WRAPPERS)
     for inventory in EXPECTED_RAW_MEMBER_FUNCTIONS.values():
@@ -676,8 +699,9 @@ def validate(files: dict[str, str]) -> None:
                     )
     expected_calls = {
         "wyrelog/fact/store.c": (16, 4, 20),
-        "wyrelog/fact/compound.c": (6, 6, 8),
-        "wyrelog/fact/replay.c": (3, 2, 3),
+        "wyrelog/fact/compound.c": (3, 3, 5),
+        "wyrelog/fact/replay.c": (1, 0, 1),
+        "wyrelog/fact/replay-store-private.c": (1, 1, 1),
     }
     for path, (begins, gets, ends) in expected_calls.items():
         text = files[path]
@@ -708,13 +732,12 @@ def validate(files: dict[str, str]) -> None:
             "wyl_fact_compound_create_schema",
             "wyl_fact_compound_ref_exists",
             "wyl_fact_compound_put",
-            "wyl_fact_compound_replay",
-            "wyl_fact_compound_replay_cached",
-            "wyl_fact_compound_replay_cached_bounded",
         ),
         "wyrelog/fact/replay.c": (
-            "list_replay_relations",
-            "replay_relation_into_engine",
+            "replay_store_with_snapshot",
+        ),
+        "wyrelog/fact/replay-store-private.c": (
+            "c_store_execute",
         ),
     }
     session_owner_keys = {
@@ -753,7 +776,6 @@ def validate(files: dict[str, str]) -> None:
         key for key in all_raw_helper_keys
         if key[1] not in excluded_raw_helpers
     }
-    call = "wyl_fact_store_connection_session_end (&session);"
     for path, signatures in session_functions.items():
         for signature in signatures:
             owner_match = re.search(r"([A-Za-z_]\w*)\s*\(", signature + "(")
@@ -777,19 +799,30 @@ def validate(files: dict[str, str]) -> None:
             profile_bodies = expanded_function_profiles(
                 files, path, signature, source_body
             )
+            expected_store = "c_store->store" if owner == "c_store_execute" \
+                else "store"
             for profile_body in profile_bodies:
                 validate_session_profile(
-                    profile_body, signature, raw_helper_names, duckdb_api
+                    profile_body, signature, raw_helper_names, duckdb_api,
+                    expected_store,
                 )
             body = profile_bodies[0]
             begin_statement = re.search(
                 r"(?:wyrelog_error_t\s+)?rc\s*=\s*"
                 r"wyl_fact_store_connection_session_begin\s*"
-                r"\(\s*store\s*,\s*&\s*(?P<session>[A-Za-z_]\w*)\s*\)\s*;",
+                r"\(\s*(?P<store>(?:[A-Za-z_]\w*)"
+                r"(?:(?:->|\.)[A-Za-z_]\w*)*)\s*,\s*&\s*"
+                r"(?P<session>[A-Za-z_]\w*)\s*\)\s*;",
                 body,
             )
             if begin_statement is None:
                 raise AssertionError(f"session owner lost admission: {signature}")
+            if not session_store_matches(
+                body, begin_statement.group("store"), expected_store
+            ):
+                raise AssertionError(
+                    f"session owner changed backing store: {signature}"
+                )
             begin_at = begin_statement.start()
             begin_guard_match = optional_store_guard(body, begin_at)
             guarded_optional_store = (
@@ -881,13 +914,13 @@ def validate(files: dict[str, str]) -> None:
                         f"{signature}"
                     )
             ends_at = []
-            offset = 0
-            while True:
-                found = body.find(call, offset)
-                if found < 0:
-                    break
-                ends_at.append((found, found + len(call)))
-                offset = found + len(call)
+            for match in re.finditer(
+                r"wyl_fact_store_connection_session_end\s*"
+                r"\(\s*&\s*([A-Za-z_]\w*)\s*\)\s*;",
+                body,
+            ):
+                if match.group(1) == admitted_session:
+                    ends_at.append((match.start(), match.end()))
             if not ends_at:
                 raise AssertionError(f"session owner lost release: {signature}")
             release_at = ends_at[-1][0]
@@ -1516,7 +1549,7 @@ def validate(files: dict[str, str]) -> None:
     for token in (
         "wyl_fact_store_connection_session_begin (store, &admission)",
         "wyl_fact_store_connection_session_end (&admission);",
-        "list_replay_relations (policy, store, graph_info, policy_snapshot,\n"
+        "list_replay_relations (policy, replay_store, graph_info, policy_snapshot,\n"
         "          job_context,\n          &relations)",
     ):
         if token not in replay_admission:
@@ -1524,7 +1557,7 @@ def validate(files: dict[str, str]) -> None:
     if replay_admission.index(
         "wyl_fact_store_connection_session_end (&admission);"
     ) > replay_admission.index(
-        "list_replay_relations (policy, store, graph_info, policy_snapshot,\n"
+        "list_replay_relations (policy, replay_store, graph_info, policy_snapshot,\n"
         "          job_context,\n          &relations)"
     ):
         raise AssertionError("supplied-store health check occurs after policy work")
@@ -1545,43 +1578,55 @@ def validate(files: dict[str, str]) -> None:
     ):
         raise AssertionError("supplied-store replay seam escaped test guard")
 
-    relation_end = replay.index(
-        "wyl_fact_store_connection_session_end (&session);",
-        replay.index("list_replay_relations"),
+    replay_provider = function_body(
+        replay_store, "c_store_execute (gpointer provider"
     )
-    schema_load = replay.index("load_relation_schema", relation_end)
-    if relation_end >= schema_load:
-        raise AssertionError("policy schema load occurs while DuckDB is held")
-    relation_post = replay[relation_end:schema_load]
-    if "duckdb_" in relation_post or " conn" in relation_post:
-        raise AssertionError("stale DuckDB authority used after relation unlock")
-    row_end = replay.index(
-        "wyl_fact_store_connection_session_end (&session);",
-        replay.index("replay_relation_into_engine"),
-    )
-    materialize = replay.index("materialize_owned_cell", row_end)
-    if row_end >= materialize:
-        raise AssertionError("engine materialization occurs while DuckDB is held")
-    replay_rows = function_body(replay, "replay_relation_into_engine")
-    released_rows = replay_rows[replay_rows.index(
-        "wyl_fact_store_connection_session_end (&session);") + 1:]
-    if "duckdb_" in released_rows or " conn" in released_rows:
-        raise AssertionError("stale DuckDB authority used after row unlock")
-    for start, end in (
-        (replay.index("list_replay_relations"), relation_end),
-        (replay.index("replay_relation_into_engine"), row_end),
-    ):
-        region = replay[start:end]
-        if "duckdb_destroy_result" not in region:
-            raise AssertionError("DuckDB result is not destroyed in its session")
     for token in (
-        "key->namespace_id = g_strdup (namespace_id);",
-        "key->relation_name = g_strdup (relation_name);",
-        "owned->cells[c].text = g_strdup (value);",
+        "duckdb_destroy_prepare (&stmt);",
+        "duckdb_destroy_result (&result);",
+        "g_cancellable_disconnect (cancellable, interrupt_handler);",
+        "wyl_fact_store_connection_session_end (&session);",
+    ):
+        if token not in replay_provider:
+            raise AssertionError(f"replay provider cleanup drifted: {token}")
+    if not (
+        replay_provider.index("duckdb_destroy_prepare (&stmt);")
+        < replay_provider.index("duckdb_destroy_result (&result);")
+        < replay_provider.index(
+            "g_cancellable_disconnect (cancellable, interrupt_handler);"
+        )
+        < replay_provider.index("wyl_fact_store_connection_session_end (&session);")
+    ):
+        raise AssertionError(
+            "replay provider releases authority before cleanup completes"
+        )
+    projection_replay = function_body(
+        replay, "replay_relation_into_engine (WylFactReplayStore *store"
+    )
+    store_read = projection_replay.index("wyl_fact_replay_store_execute (")
+    materialize = projection_replay.index("materialize_owned_cell")
+    if store_read >= materialize:
+        raise AssertionError("engine materialization occurs before store read")
+    result_rows = function_body(
+        replay_store, "emit_result_row (duckdb_result *result"
+    )
+    if not (
+        result_rows.index("row_func (cells, n_cells, row_data)")
+        < result_rows.index("duckdb_free ((void *) cells[i].value.text)")
+    ):
+        raise AssertionError("replay row text is freed before callback copies it")
+    replay_rows = function_body(replay, "replay_relation_into_engine")
+    if "duckdb_" in replay_rows or "wyl_fact_store_connection_session_" \
+            in replay_rows:
+        raise AssertionError("replay bypasses its fixed-operation store")
+    for token in (
+        "key->namespace_id = g_strdup (cells[0].value.text);",
+        "key->relation_name = g_strdup (cells[1].value.text);",
+        "owned->cells[c].text = g_strdup (cells[c].value.text);",
     ):
         if token not in replay:
             raise AssertionError(f"replay retained provider-owned text: {token}")
-    if "owned->cells[c].text = value;" in replay:
+    if "owned->cells[c].text = cells[c].value.text;" in replay:
         raise AssertionError("replay borrowed DuckDB text past result destruction")
 
     seam_targets = (
