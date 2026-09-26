@@ -2077,17 +2077,60 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
    systemctl stop wyrelog-system.service
    ```
 
-2. Back up the active profile's KeyProvider root, policy store, audit
-   store, event spool when present, and the output of
-   `wyrelogd --template-info`.
+2. While both units are stopped, take one offline backup set for each enabled
+   profile. The policy store and the profile's complete Datalog fact root are
+   a pair: the policy store is bound to that fact root, so capture and restore
+   them from the same point in time and at the same paths. Include the entire
+   fact root tree, not only selected `facts.duckdb` files.
 
-3. Restore the files with the same ownership and modes, then run the
-   production `--check` command before restarting.
+   Packaged paths are:
+
+   | Profile | Policy store | Fact root |
+   | --- | --- | --- |
+   | `system` | `/var/lib/wyrelog/system/policy.sqlite` | `/var/lib/wyrelog/system/facts` |
+   | `service` | `/var/lib/wyrelog/service/policy.sqlite` | `/var/lib/wyrelog/service/facts` |
+
+   Include each profile's KeyProvider root and audit store in the same backup
+   set, plus the service event spool when present and the output of
+   `wyrelogd --template-info`. Record the package and template release identity
+   needed to restore the matching software and templates.
+
+3. Keep both daemons stopped while restoring a backup set. Restore the policy
+   store and its matching complete fact root together to their original paths,
+   along with the matching KeyProvider, audit store, event spool when present,
+   and template artifacts. Preserve owner, group, and mode throughout the
+   restored trees. In particular, each packaged fact root must remain
+   `0700 wyrelog:wyrelog` as defined by
+   `packaging/tmpfiles.d/wyrelog.conf`; preserve the existing metadata of
+   subordinate directories and files as well.
+
+4. Before restarting, run the production `--check` command for each enabled
+   profile with its restored policy store, KeyProvider, audit store, and
+   explicit fact root. The system-profile command is shown in
+   [First Install](#first-install); use the corresponding service-profile
+   paths for `service`. This checks production startup/readiness requirements;
+   it does not replace the post-start graph health checks below.
+
+5. Start the profile units and verify each profile's fact health. Query
+   `/facts/status?tenant=$TENANT` with a fresh authenticated token for every
+   tenant whose graph stores were restored; inspect the returned graph states.
+   Also query `/readyz?format=json` on each profile listener and check the
+   `subsystems.facts` totals, ready, degraded, and sealed counts against the
+   expected graph inventory. `/facts/status` supplies tenant-scoped graph
+   detail; `/readyz?format=json` supplies process-wide aggregate counts.
+
+This is an offline file-level recovery procedure. Validated staged restore and
+publication are future work tracked by [#552](https://github.com/semantic-reasoning/wyrelog/issues/552).
 
 ## Template Upgrade
 
-1. Install the new package without starting the daemon.
-2. Verify the installed template tree against the release note values:
+1. Stop both profile units and create the paired profile backups described in
+   [Backup And Restore](#backup-and-restore) before changing the package or
+   templates. Keep the previous package, installed template tree, and each
+   profile's policy-store/fact-root pair available as one rollback set.
+
+2. Install the new package without starting either daemon. Verify the
+   installed template tree against the release note values:
 
    ```sh
    /usr/share/wyrelog/tools/verify-template-release.sh \
@@ -2096,10 +2139,16 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
      EXPECTED_MIGRATIONS EXPECTED_LATEST_MIGRATION_VERSION
    ```
 
-3. Run production `--check` against the existing policy and audit stores.
-4. Restart the service.
-5. If readiness fails, roll back by restoring the previous package, template
-   tree, policy store, audit store, and KeyProvider backup together.
+3. Run production `--check` for each profile against its existing policy,
+   audit, KeyProvider, and fact-root paths.
+4. Start the profile units. Check `/readyz?format=json` for aggregate fact
+   health and use authenticated `/facts/status?tenant=$TENANT` requests to
+   inspect each restored tenant's graph states.
+5. If verification fails, stop both units and roll back the package and
+   template tree together with the matching policy-store/fact-root pair,
+   KeyProvider, audit store, and event spool backup when present. Preserve
+   ownership and modes, rerun production `--check` for both profiles, then
+   restart and repeat the health checks.
 
 ## Template Artifact Release And Replay Policy
 
