@@ -722,6 +722,87 @@ check_revoke_removes_engine_grant (void)
 }
 
 static gint
+check_revoke_direct_grant_preserves_role_derived_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 180;
+  if (seed_role_permission (handle, "site.dual-path-role",
+      "site.dual-path-permission") != 0)
+    return 181;
+
+  g_autoptr (wyl_role_grant_req_t) role_grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (role_grant, "dual-path-user");
+  wyl_role_grant_req_set_role_id (role_grant, "site.dual-path-role");
+  wyl_role_grant_req_set_scope (role_grant, "dual-path-scope");
+  if (wyl_role_grant (handle, role_grant) != WYRELOG_E_OK)
+    return 182;
+  gint64 permission_row[3] = { 0 };
+  const gchar *permission_symbols[] = { "dual-path-user",
+                                        "site.dual-path-permission", "dual-path-scope" };
+  for (guint i = 0; i < G_N_ELEMENTS (permission_symbols); i++)
+    if (wyl_handle_intern_engine_symbol (handle, permission_symbols[i],
+        &permission_row[i]) != WYRELOG_E_OK)
+      return 194 + (gint) i;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_contains (handle, "has_permission", permission_row,
+      G_N_ELEMENTS (permission_row), &allowed) != WYRELOG_E_OK || !allowed)
+    return 197;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "dual-path-user");
+  wyl_grant_req_set_action (grant, "site.dual-path-permission");
+  wyl_grant_req_set_resource_id (grant, "dual-path-scope");
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
+    return 183;
+  if (insert_perm_state (handle, "dual-path-user",
+      "site.dual-path-permission", "dual-path-scope", "armed") != 0)
+    return 184;
+
+  g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
+  wyl_revoke_req_set_subject_id (revoke, "dual-path-user");
+  wyl_revoke_req_set_action (revoke, "site.dual-path-permission");
+  wyl_revoke_req_set_resource_id (revoke, "dual-path-scope");
+  if (wyl_perm_revoke (handle, revoke) != WYRELOG_E_OK)
+    return 185;
+  if (wyl_handle_engine_pair_is_poisoned (handle))
+    return 186;
+
+  gboolean direct_exists = TRUE;
+  if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
+        (handle), "dual-path-user", "site.dual-path-permission",
+      "dual-path-scope", &direct_exists) != WYRELOG_E_OK)
+    return 187;
+  if (direct_exists)
+    return 188;
+
+  gboolean role_membership_exists = FALSE;
+  if (wyl_policy_store_role_membership_exists (wyl_handle_get_policy_store
+        (handle), "dual-path-user", "site.dual-path-role",
+      "dual-path-scope", &role_membership_exists) != WYRELOG_E_OK)
+    return 192;
+  if (!role_membership_exists)
+    return 193;
+
+  allowed = FALSE;
+  if (wyl_handle_engine_contains (handle, "has_permission", permission_row,
+      G_N_ELEMENTS (permission_row), &allowed) != WYRELOG_E_OK || !allowed)
+    return 198;
+
+  g_autoptr (wyl_role_revoke_req_t) role_revoke = wyl_role_revoke_req_new ();
+  wyl_role_revoke_req_set_subject_id (role_revoke, "dual-path-user");
+  wyl_role_revoke_req_set_role_id (role_revoke, "site.dual-path-role");
+  wyl_role_revoke_req_set_scope (role_revoke, "dual-path-scope");
+  if (wyl_role_revoke (handle, role_revoke) != WYRELOG_E_OK)
+    return 199;
+  allowed = TRUE;
+  if (wyl_handle_engine_contains (handle, "has_permission", permission_row,
+      G_N_ELEMENTS (permission_row), &allowed) != WYRELOG_E_OK || allowed)
+    return 200;
+  return 0;
+}
+
+static gint
 check_role_revoke_removes_engine_membership (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -898,6 +979,9 @@ main (void)
   if ((rc = check_role_revoke_removes_store_membership ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_revoke_removes_engine_grant ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_revoke_direct_grant_preserves_role_derived_permission ())
+      != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_role_revoke_removes_engine_membership ()) != 0)
     return wyl_test_normalize_exit_status (rc);

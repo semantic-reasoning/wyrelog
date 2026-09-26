@@ -1650,7 +1650,7 @@ test_tenant_seal_publication_recovery_classification (void)
     wyrelog_error_t rc = wyl_tenant_seal_keyed_with_runtime (handle, tenant,
             "operator", request_id, 1, &runtime, &outcome);
     if (fault == 0) {
-      g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+      g_assert_cmpint (rc, ==, WYRELOG_E_INTERNAL);
       g_assert_cmpuint (probe.recovery_retain_calls, ==, 1);
       g_assert_cmpuint (probe.recovery_discard_calls, ==, 0);
       WylServiceAuthUnavailableReason reason =
@@ -1670,7 +1670,8 @@ test_tenant_seal_publication_recovery_classification (void)
       assert_service_auth_latch (handle,
           WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
     } else {
-      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+      g_assert_cmpint (rc, ==,
+          fault == 3 ? WYRELOG_E_INTERNAL : WYRELOG_E_BUSY);
       g_assert_cmpuint (probe.recovery_retain_calls, ==, 1);
       g_assert_cmpuint (probe.recovery_discard_calls, ==, fault == 3 ? 1 : 0);
       assert_service_auth_latch (handle,

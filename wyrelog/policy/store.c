@@ -36202,6 +36202,7 @@ static wyrelog_error_t
 apply_bootstrap_admin_internal (wyl_policy_store_t *store,
     const gchar *subject_id, gboolean allow_login_skip_mfa,
     gboolean *out_applied, gchar **out_existing_subject,
+    gint64 *out_session_event_id, gint64 *out_permission_state_event_id,
     gboolean manage_transaction)
 {
   if (store == NULL || store->db == NULL || out_applied == NULL
@@ -36209,6 +36210,12 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
   *out_applied = FALSE;
   *out_existing_subject = NULL;
+  if (out_session_event_id != NULL)
+    *out_session_event_id = -1;
+  if (out_permission_state_event_id != NULL)
+    *out_permission_state_event_id = -1;
+  gint64 session_event_id = -1;
+  gint64 permission_state_event_id = -1;
 
   if (wyl_policy_subject_has_service_prefix (subject_id))
     return WYRELOG_E_POLICY;
@@ -36374,7 +36381,7 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
     return rc;
   }
   rc = wyl_policy_store_append_session_event (store, WYL_TENANT_DEFAULT,
-          "request", "idle", "active", NULL);
+          "request", "idle", "active", &session_event_id);
   if (rc != WYRELOG_E_OK) {
     bootstrap_admin_rollback (store, manage_transaction);
     return rc;
@@ -36401,7 +36408,7 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
     }
     rc = wyl_policy_store_append_permission_state_event (store, subject_id,
             "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "grant",
-            "dormant", "armed", NULL);
+            "dormant", "armed", &permission_state_event_id);
     if (rc != WYRELOG_E_OK) {
       bootstrap_admin_rollback (store, manage_transaction);
       return rc;
@@ -36428,6 +36435,10 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
       return rc;
     }
   }
+  if (out_session_event_id != NULL)
+    *out_session_event_id = session_event_id;
+  if (out_permission_state_event_id != NULL)
+    *out_permission_state_event_id = permission_state_event_id;
   *out_applied = TRUE;
   return WYRELOG_E_OK;
 }
@@ -36438,16 +36449,19 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
     gboolean *out_applied, gchar **out_existing_subject)
 {
   return apply_bootstrap_admin_internal (store, subject_id,
-             allow_login_skip_mfa, out_applied, out_existing_subject, TRUE);
+             allow_login_skip_mfa, out_applied, out_existing_subject, NULL,
+             NULL, TRUE);
 }
 
 wyrelog_error_t
 wyl_policy_store_apply_bootstrap_admin_body (wyl_policy_store_t *store,
     const gchar *subject_id, gboolean allow_login_skip_mfa,
-    gboolean *out_applied, gchar **out_existing_subject)
+    gboolean *out_applied, gchar **out_existing_subject,
+    gint64 *out_session_event_id, gint64 *out_permission_state_event_id)
 {
   return apply_bootstrap_admin_internal (store, subject_id,
-             allow_login_skip_mfa, out_applied, out_existing_subject, FALSE);
+             allow_login_skip_mfa, out_applied, out_existing_subject,
+             out_session_event_id, out_permission_state_event_id, FALSE);
 }
 
 /* ----------------------------------------------------------------------

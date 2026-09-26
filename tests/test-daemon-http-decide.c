@@ -9400,6 +9400,30 @@ direct_permission_exists (WylHandle *handle, const gchar *subject,
   return exists;
 }
 
+static wyrelog_error_t
+engine_has_permission (WylHandle *handle, const gchar *subject,
+    const gchar *perm, const gchar *scope, gboolean *out_found)
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  if (handle == NULL || subject == NULL || perm == NULL || scope == NULL
+      || out_found == NULL)
+    return WYRELOG_E_INVALID;
+  gint64 row[3] = { 0 };
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL)
+    return WYRELOG_E_BUSY;
+  const gchar *symbols[] = { subject, perm, scope };
+  for (guint i = 0; i < G_N_ELEMENTS (symbols); i++) {
+    wyrelog_error_t rc = wyl_engine_session_intern_symbol (session,
+            symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return wyl_engine_session_contains (session, "has_permission", row,
+             G_N_ELEMENTS (row), out_found);
+}
+
 static gboolean
 tenant_state_matches (wyl_policy_store_t *store, const gchar *tenant,
     gboolean expected_exists, gboolean expected_active)
@@ -9505,11 +9529,20 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   wyl_daemon_http_tenant_recovery_descriptor_counts_for_test
     (&recovery_allocations_after_a, &recovery_frees_after_a);
   gboolean request_a_detached = request_a.rc
-      == (detach_before_owner_release ? WYRELOG_E_POLICY : WYRELOG_E_BUSY)
+      == WYRELOG_E_INTERNAL
       && wyl_handle_engine_pair_is_poisoned (handle)
       && tenant_state_matches (store, tenant, TRUE, FALSE)
       && recovery_allocations_after_a == recovery_allocations_before + 1
       && recovery_frees_after_a == recovery_frees_before;
+  if (!request_a_detached)
+    g_printerr ("WYRELOG_TEST_DIAG tenant_recovery_detach owner_rc=%d "
+        "expected_rc=%d poisoned=%d tenant_inactive=%d alloc_before=%u "
+        "alloc_after=%u frees_before=%u frees_after=%u\n", request_a.rc,
+        WYRELOG_E_INTERNAL,
+        wyl_handle_engine_pair_is_poisoned (handle),
+        tenant_state_matches (store, tenant, TRUE, FALSE),
+        recovery_allocations_before, recovery_allocations_after_a,
+        recovery_frees_before, recovery_frees_after_a);
 
   tenant_recovery_barrier_release (&claim_barrier);
   g_thread_join (g_steal_pointer (&thread_b));
@@ -12836,6 +12869,30 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 2688;
+
+  /* Reproduce #1235: the direct grant is one of two independent paths.  The
+   * post-revoke engine must retain the role-derived has_permission row. */
+  const gchar *dual_path_role = "site.http-dual-path";
+  if (wyl_policy_store_upsert_role (store, dual_path_role,
+      "HTTP dual-path regression role") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, dual_path_role,
+      "site.policy.read") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 2930;
+  g_autofree gchar *dual_path_role_query = g_strdup_printf
+        ("subject=target&role=%s&scope=tenant-a&session_token=%s"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=29",
+          dual_path_role, session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/policy/roles/grant", dual_path_role_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL
+      || !role_membership_exists (handle, "target", dual_path_role,
+      "tenant-a"))
+    return 2931;
+  g_clear_pointer (&body, g_free);
+
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/revoke", grant_query, &status, &body);
   if (rc != 0)
@@ -12845,6 +12902,19 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (direct_permission_exists (handle, "target", "site.policy.read",
       "tenant-a"))
     return 138;
+  gboolean role_path_allows = FALSE;
+  if (engine_has_permission (handle, "target", "site.policy.read",
+      "tenant-a", &role_path_allows) != WYRELOG_E_OK || !role_path_allows
+      || wyl_handle_engine_pair_is_poisoned (handle))
+    return 2935;
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0 || status != 200 || g_strcmp0 (body, "ready\n") != 0)
+    return 2936;
+  g_clear_pointer (&body, g_free);
+  if (send_raw_login (session, "POST", base_url,
+      "username=target&tenant=tenant-a", &status, &body) != 0
+      || status != 200 || strstr (body, "\"session_token\":\"") == NULL)
+    return 2937;
   /* The body from the revoke above outlived its last use once a request was
    * inserted after it: send_raw_policy_mutation overwrites the slot without
    * freeing, so whoever adds a request here owns the previous body. */

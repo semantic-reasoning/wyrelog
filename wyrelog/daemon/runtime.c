@@ -510,9 +510,12 @@ bootstrap_admin_requested (const WylDaemonOptions *opts)
 
 typedef struct
 {
+  wyl_policy_store_t *store;
   const gchar *subject;
   gboolean allow_skip_mfa;
   gboolean applied;
+  gint64 session_event_id;
+  gint64 permission_state_event_id;
   gchar *existing_subject;
 } WylBootstrapPublication;
 
@@ -520,10 +523,14 @@ static wyrelog_error_t
 mutate_bootstrap_publication (wyl_policy_store_t *store, gpointer data)
 {
   WylBootstrapPublication *ctx = data;
+  ctx->store = store;
+  ctx->session_event_id = -1;
+  ctx->permission_state_event_id = -1;
   g_clear_pointer (&ctx->existing_subject, g_free);
   ctx->applied = FALSE;
   return wyl_policy_store_apply_bootstrap_admin_body (store, ctx->subject,
-             ctx->allow_skip_mfa, &ctx->applied, &ctx->existing_subject);
+             ctx->allow_skip_mfa, &ctx->applied, &ctx->existing_subject,
+             &ctx->session_event_id, &ctx->permission_state_event_id);
 }
 
 static wyrelog_error_t
@@ -547,6 +554,76 @@ verify_bootstrap_row (WylEngineVerification *verification,
   return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+typedef struct
+{
+  const gchar *key;
+  const gchar *expected;
+  gboolean found;
+  gboolean conflict;
+} WylBootstrapStateProbe;
+
+static wyrelog_error_t
+verify_bootstrap_session_state (const gchar *session_id, const gchar *state,
+    gpointer user_data)
+{
+  WylBootstrapStateProbe *probe = user_data;
+  if (g_strcmp0 (session_id, probe->key) != 0)
+    return WYRELOG_E_OK;
+  if (g_strcmp0 (state, probe->expected) == 0)
+    probe->found = TRUE;
+  else
+    probe->conflict = TRUE;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  gint64 event_id;
+  const gchar *subject;
+  const gchar *perm;
+  const gchar *scope;
+  gboolean found;
+} WylBootstrapPermissionEventProbe;
+
+static wyrelog_error_t
+verify_bootstrap_permission_event (gint64 event_id, const gchar *subject,
+    const gchar *perm, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  WylBootstrapPermissionEventProbe *probe = user_data;
+  if (event_id == probe->event_id
+      && g_strcmp0 (subject, probe->subject) == 0
+      && g_strcmp0 (perm, probe->perm) == 0
+      && g_strcmp0 (scope, probe->scope) == 0
+      && g_strcmp0 (event, "grant") == 0
+      && g_strcmp0 (from_state, "dormant") == 0
+      && g_strcmp0 (to_state, "armed") == 0)
+    probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  gint64 event_id;
+  const gchar *session_id;
+  gboolean found;
+} WylBootstrapSessionEventProbe;
+
+static wyrelog_error_t
+verify_bootstrap_session_event (gint64 event_id, const gchar *session_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  WylBootstrapSessionEventProbe *probe = user_data;
+  if (event_id == probe->event_id
+      && g_strcmp0 (session_id, probe->session_id) == 0
+      && g_strcmp0 (event, "request") == 0
+      && g_strcmp0 (from_state, "idle") == 0
+      && g_strcmp0 (to_state, "active") == 0)
+    probe->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 verify_bootstrap_publication (WylEngineVerification *verification,
     gpointer data)
@@ -554,15 +631,153 @@ verify_bootstrap_publication (WylEngineVerification *verification,
   WylBootstrapPublication *ctx = data;
   if (!ctx->applied)
     return WYRELOG_E_OK;
-  const gchar *membership[] = {
-    ctx->subject,
-    "wr.system_admin",
-    WYL_TENANT_DEFAULT,
-  };
-  wyrelog_error_t rc = verify_bootstrap_row (verification,
-          "effective_member", membership, G_N_ELEMENTS (membership));
-  if (rc != WYRELOG_E_OK || !ctx->allow_skip_mfa)
+  if (ctx->store == NULL)
+    return WYRELOG_E_INTERNAL;
+  const gchar *membership[] = { ctx->subject, "wr.system_admin",
+                                WYL_TENANT_DEFAULT };
+  gint64 membership_row[G_N_ELEMENTS (membership)] = { 0 };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; i < G_N_ELEMENTS (membership); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification, membership[i],
+            &membership_row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean exact = FALSE;
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "member_of", membership_row, G_N_ELEMENTS (membership_row), TRUE,
+          &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  gboolean exists = FALSE;
+  rc = wyl_policy_store_role_membership_exists (ctx->store,
+          ctx->subject, "wr.system_admin", WYL_TENANT_DEFAULT, &exists);
+  if (rc != WYRELOG_E_OK)
     return rc;
+  if (!exists)
+    return WYRELOG_E_POLICY;
+  WylBootstrapStateProbe tenant_state = {
+    .key = WYL_TENANT_DEFAULT,
+    .expected = "active",
+  };
+  rc = wyl_policy_store_foreach_session_state (ctx->store,
+          verify_bootstrap_session_state, &tenant_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!tenant_state.found || tenant_state.conflict || ctx->session_event_id <= 0)
+    return WYRELOG_E_POLICY;
+  const gchar *session_state_symbols[] = { WYL_TENANT_DEFAULT, "active" };
+  gint64 session_state_row[G_N_ELEMENTS (session_state_symbols)] = { 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (session_state_symbols); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+            session_state_symbols[i], &session_state_row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "session_state", session_state_row,
+          G_N_ELEMENTS (session_state_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  const gchar *session_event_symbols[] = {
+    WYL_TENANT_DEFAULT, "request", "idle", "active",
+  };
+  gint64 session_event_row[] = { ctx->session_event_id, 0, 0, 0, 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (session_event_symbols); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+            session_event_symbols[i], &session_event_row[i + 1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "session_event", session_event_row,
+          G_N_ELEMENTS (session_event_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  WylBootstrapSessionEventProbe session_event = {
+    .event_id = ctx->session_event_id,
+    .session_id = WYL_TENANT_DEFAULT,
+  };
+  rc = wyl_policy_store_foreach_session_event (ctx->store,
+          verify_bootstrap_session_event, &session_event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!session_event.found)
+    return WYRELOG_E_POLICY;
+  if (!ctx->allow_skip_mfa)
+    return WYRELOG_E_OK;
+  rc = wyl_policy_store_direct_permission_exists (ctx->store, ctx->subject,
+          "wr.login.skip_mfa", "login", &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_POLICY;
+  const gchar *permission_symbols[] = { ctx->subject, "wr.login.skip_mfa",
+                                        "login" };
+  gint64 permission_row[G_N_ELEMENTS (permission_symbols)] = { 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (permission_symbols); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+            permission_symbols[i], &permission_row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "direct_permission", permission_row,
+          G_N_ELEMENTS (permission_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  if (ctx->permission_state_event_id <= 0)
+    return WYRELOG_E_POLICY;
+  WylBootstrapPermissionEventProbe permission_event = {
+    .event_id = ctx->permission_state_event_id,
+    .subject = ctx->subject,
+    .perm = "wr.login.skip_mfa",
+    .scope = "login",
+  };
+  rc = wyl_policy_store_foreach_permission_state_event (ctx->store,
+          verify_bootstrap_permission_event, &permission_event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!permission_event.found)
+    return WYRELOG_E_POLICY;
+  const gchar *permission_state_symbols[] = {
+    ctx->subject, "wr.login.skip_mfa", "login", "armed",
+  };
+  gint64 permission_state_row[G_N_ELEMENTS (permission_state_symbols)] = { 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (permission_state_symbols); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+            permission_state_symbols[i], &permission_state_row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "perm_state", permission_state_row,
+          G_N_ELEMENTS (permission_state_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  const gchar *permission_event_symbols[] = {
+    ctx->subject, "wr.login.skip_mfa", "login", "grant", "dormant", "armed",
+  };
+  gint64 permission_event_row[] = { ctx->permission_state_event_id,
+                                    0, 0, 0, 0, 0, 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (permission_event_symbols); i++) {
+    rc = wyl_engine_verification_lookup_symbol (verification,
+            permission_event_symbols[i], &permission_event_row[i + 1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "perm_state_event", permission_event_row,
+          G_N_ELEMENTS (permission_event_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK || !exact)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  rc = wyl_policy_store_permission_state_is (ctx->store, ctx->subject,
+          "wr.login.skip_mfa", "login", "armed",
+          &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_POLICY;
   const gchar *skip_mfa[] = { ctx->subject };
   return verify_bootstrap_row (verification, "login_skip_mfa_authz", skip_mfa,
              G_N_ELEMENTS (skip_mfa));
@@ -683,6 +898,8 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
    * exists before any HTTP traffic. */
   if (bootstrap_admin_requested (opts)) {
     WylBootstrapPublication publication = {
+      .session_event_id = -1,
+      .permission_state_event_id = -1,
       .subject = opts->bootstrap_admin_subject,
       .allow_skip_mfa = opts->bootstrap_admin_allow_skip_mfa,
     };

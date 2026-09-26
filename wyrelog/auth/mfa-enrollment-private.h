@@ -17,6 +17,7 @@ typedef struct
   gchar *enrollment_audit_id;
   gint64 enrollment_audit_created_at_us;
   gboolean skip_mfa_revoked;
+  gint64 permission_state_event_id;
   gchar *revocation_audit_id;
   gint64 revocation_audit_created_at_us;
 } WylMfaEnrollmentMutation;
