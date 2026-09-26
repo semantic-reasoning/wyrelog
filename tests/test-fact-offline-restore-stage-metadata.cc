@@ -9,6 +9,7 @@
 #endif
 
 #include "fact-test-support.h"
+#include "test-exit-status.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/offline-restore-stage-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
@@ -421,5 +422,5 @@ main (int argc, char **argv)
 #endif
   g_test_add_func ("/fact/offline-restore-stage-metadata/windows-fail-closed",
       test_windows_fails_closed_before_reader_access);
-  return g_test_run ();
+  return wyl_test_normalize_exit_status (g_test_run ());
 }
