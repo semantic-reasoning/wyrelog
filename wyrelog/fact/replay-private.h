@@ -10,6 +10,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "fact/graph-artifact-namespace-private.h"
 #include "fact/replay-scheduler-private.h"
+#include "fact/replay-store-private.h"
 
 G_BEGIN_DECLS;
 
@@ -122,6 +123,19 @@ wyrelog_error_t wyl_fact_replay_validate_graph_with_artifact_lease_bounded
  * journal. */
 wyrelog_error_t wyl_fact_replay_validate_store_for_restore
   (wyl_policy_store_t *policy, wyl_fact_store_t *store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *expected_schema_digest,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest);
+/* Consume the supplied fixed-operation replay store on every call, including
+ * invalid input. The caller/provider-construction boundary must already have
+ * bound the provider to this tenant, graph, store UUID, format version, and
+ * path-encoding version; this interface cannot inspect provider identity.
+ * Retain any stage reader/authority through checked close. Policy snapshot
+ * validation precedes replay preflight and provider reads. Close failure takes
+ * precedence over replay errors; a digest is returned only after complete
+ * replay and successful checked close. */
+wyrelog_error_t wyl_fact_replay_validate_replay_store_for_restore
+  (wyl_policy_store_t *policy, WylFactReplayStore **inout_store,
     const wyl_policy_fact_graph_info_t *graph_info,
     const gchar *expected_schema_digest,
     WylFactReplayJobContext *job_context, gchar **out_schema_digest);

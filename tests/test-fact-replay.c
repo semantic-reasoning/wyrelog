@@ -366,6 +366,7 @@ typedef struct
 {
   wyl_policy_store_t *policy;
   wyl_fact_store_t *store;
+  WylFactReplayStore **replay_store;
   const wyl_policy_fact_graph_info_t *graph_info;
   const gchar *expected_schema_digest;
   gchar *observed_schema_digest;
@@ -375,9 +376,151 @@ static wyrelog_error_t
 restore_replay_job (WylFactReplayJobContext *context, gpointer user_data)
 {
   RestoreReplayCall *call = user_data;
+  if (call->replay_store != NULL)
+    return wyl_fact_replay_validate_replay_store_for_restore (call->policy,
+               call->replay_store, call->graph_info,
+               call->expected_schema_digest, context,
+               &call->observed_schema_digest);
   return wyl_fact_replay_validate_store_for_restore (call->policy,
              call->store, call->graph_info, call->expected_schema_digest, context,
              &call->observed_schema_digest);
+}
+
+typedef struct
+{
+  guint operation_count[4];
+  guint close_count;
+  guint destroy_count;
+  const gchar *expected_tenant_id;
+  const gchar *expected_graph_id;
+  gboolean scope_valid;
+  gboolean operation_scope_valid[4];
+  gboolean fail_projection;
+  gboolean fail_close;
+} RestoreReplayProviderProbe;
+
+typedef struct
+{
+  WylFactReplayStore *inner;
+  RestoreReplayProviderProbe *probe;
+} RestoreReplayForwardProvider;
+
+static wyrelog_error_t
+restore_replay_forward_execute (gpointer user_data,
+    WylFactReplayStoreOperation operation,
+    const WylFactReplayStoreRequest *request,
+    WylFactReplayJobContext *job_context,
+    WylFactReplayStoreRowFunc row_func, gpointer row_data)
+{
+  RestoreReplayForwardProvider *provider = user_data;
+  RestoreReplayProviderProbe *probe = provider->probe;
+  if (operation < WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS
+      || operation > WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS
+      || request == NULL)
+    return WYRELOG_E_INVALID;
+  probe->operation_count[operation]++;
+  gboolean scope_valid =
+      g_strcmp0 (request->tenant_id, probe->expected_tenant_id) == 0
+      && g_strcmp0 (request->graph_id, probe->expected_graph_id) == 0;
+  switch (operation) {
+    case WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS:
+      scope_valid = scope_valid && request->namespace_id == NULL
+          && request->compound_ref == 0
+          && request->projection_schema == NULL;
+      break;
+    case WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS: {
+      const wyl_policy_fact_relation_schema_options_t *schema =
+          request->projection_schema;
+      scope_valid = scope_valid && request->namespace_id == NULL
+          && request->compound_ref == 0 && schema != NULL
+          && g_strcmp0 (schema->tenant_id, probe->expected_tenant_id) == 0
+          && g_strcmp0 (schema->graph_id, probe->expected_graph_id) == 0
+          && g_strcmp0 (schema->namespace_id, "logistics") == 0
+          && (g_strcmp0 (schema->relation_name, "shipment-route") == 0
+          || g_strcmp0 (schema->relation_name, "shipment-audit") == 0)
+          && schema->schema_version == 1 && schema->n_columns == 1
+          && schema->columns != NULL
+          && g_strcmp0 (schema->columns[0].column_name, "route") == 0
+          && g_strcmp0 (schema->columns[0].column_type,
+              "compound_ref") == 0;
+      break;
+    }
+    case WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM:
+    case WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS:
+      scope_valid = scope_valid
+          && g_strcmp0 (request->namespace_id, "logistics") == 0
+          && request->compound_ref > 0
+          && request->projection_schema == NULL;
+      break;
+    default:
+      scope_valid = FALSE;
+      break;
+  }
+  probe->scope_valid = probe->scope_valid && scope_valid;
+  probe->operation_scope_valid[operation] =
+      probe->operation_scope_valid[operation] && scope_valid;
+  if (!scope_valid)
+    return WYRELOG_E_POLICY;
+  if (operation == WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS) {
+    if (probe->fail_projection)
+      return WYRELOG_E_POLICY;
+  }
+  return wyl_fact_replay_store_execute (provider->inner, operation, request,
+             job_context, row_func, row_data);
+}
+
+static wyrelog_error_t
+restore_replay_forward_close (gpointer user_data)
+{
+  RestoreReplayForwardProvider *provider = user_data;
+  provider->probe->close_count++;
+  const wyrelog_error_t rc =
+      wyl_fact_replay_store_close_checked (provider->inner);
+  return provider->probe->fail_close ? WYRELOG_E_IO : rc;
+}
+
+static void
+restore_replay_forward_destroy (gpointer user_data)
+{
+  RestoreReplayForwardProvider *provider = user_data;
+  provider->probe->destroy_count++;
+  wyl_fact_replay_store_free (provider->inner);
+  g_free (provider);
+}
+
+static const WylFactReplayStoreProvider restore_replay_forward_ops = {
+  .execute = restore_replay_forward_execute,
+  .close = restore_replay_forward_close,
+  .destroy = restore_replay_forward_destroy,
+};
+
+static wyrelog_error_t
+restore_replay_forward_store_new (wyl_fact_store_t *store,
+    RestoreReplayProviderProbe *probe, const gchar *expected_tenant_id,
+    const gchar *expected_graph_id, WylFactReplayStore **out_store)
+{
+  *out_store = NULL;
+  probe->expected_tenant_id = expected_tenant_id;
+  probe->expected_graph_id = expected_graph_id;
+  probe->scope_valid = TRUE;
+  for (guint i = 0; i < G_N_ELEMENTS (probe->operation_scope_valid); i++)
+    probe->operation_scope_valid[i] = TRUE;
+  g_autoptr (WylFactReplayStore) inner = NULL;
+  wyrelog_error_t rc = wyl_fact_replay_store_new_c_store (store, NULL,
+          &inner);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  RestoreReplayForwardProvider *provider = g_new0
+        (RestoreReplayForwardProvider, 1);
+  if (provider == NULL)
+    return WYRELOG_E_NOMEM;
+  provider->inner = g_steal_pointer (&inner);
+  provider->probe = probe;
+  rc = wyl_fact_replay_store_new (&restore_replay_forward_ops, provider,
+          out_store);
+  if (rc != WYRELOG_E_OK)
+    restore_replay_forward_destroy (provider);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -402,11 +545,14 @@ run_restore_replay_job (RestoreReplayCall *call)
   return rc == WYRELOG_E_OK ? shutdown_rc : rc;
 }
 
+static void append_compound_route_batches (wyl_policy_store_t *policy,
+    const gchar *tenant_id, const gchar *graph_id);
+
 static void
 test_restore_replay_uses_one_sealed_policy_snapshot (void)
 {
   const gchar *tenant_id = "tenant-restore-replay";
-  const gchar *graph_id = "orders";
+  const gchar *graph_id = "shipments";
   g_autoptr (GError) error = NULL;
   g_autofree gchar *root = wyl_test_make_secure_fact_root
         ("wyl-fact-restore-replay-XXXXXX", &error);
@@ -414,8 +560,22 @@ test_restore_replay_uses_one_sealed_policy_snapshot (void)
   g_autoptr (wyl_policy_store_t) policy = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
-  create_graph_with_schema (policy, root, tenant_id, graph_id);
-  append_order_batches (policy, root, tenant_id, graph_id);
+  create_compound_graph_with_schemas (policy, root, tenant_id, graph_id);
+
+  /* Newly registered graphs have no fact store yet; live replay must continue
+   * building the empty engine through the no-store core path. */
+  wyl_policy_fact_graph_info_t unmaterialized_info = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .schema_version = 1,
+  };
+  WylEngine *empty_engine = NULL;
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root,
+      &unmaterialized_info, &empty_engine), ==, WYRELOG_E_OK);
+  g_assert_nonnull (empty_engine);
+  g_clear_pointer (&empty_engine, wyl_engine_close);
+
+  append_compound_route_batches (policy, tenant_id, graph_id);
   g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, tenant_id,
       graph_id), ==, WYRELOG_E_OK);
 
@@ -457,6 +617,139 @@ test_restore_replay_uses_one_sealed_policy_snapshot (void)
   g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_OK);
   g_assert_cmpstr (call.observed_schema_digest, ==, expected_digest);
   g_clear_pointer (&call.observed_schema_digest, g_free);
+  guint admissions_before_fault =
+      wyl_fact_store_test_session_admission_count (store);
+  wyl_fact_replay_set_test_fault (WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (wyl_fact_store_test_session_admission_count (store), ==,
+      admissions_before_fault);
+  g_assert_null (call.observed_schema_digest);
+
+  RestoreReplayProviderProbe provider_probe = { 0 };
+  g_autoptr (WylFactReplayStore) replay_store = NULL;
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  call.replay_store = &replay_store;
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_OK);
+  g_assert_null (replay_store);
+  g_assert_cmpstr (call.observed_schema_digest, ==, expected_digest);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS], >, 0);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS], >, 0);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM], >, 0);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS], >, 0);
+  g_assert_true (provider_probe.scope_valid);
+  for (guint i = 0; i < G_N_ELEMENTS (provider_probe.operation_scope_valid); i++)
+    g_assert_true (provider_probe.operation_scope_valid[i]);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+  g_clear_pointer (&call.observed_schema_digest, g_free);
+
+  provider_probe = (RestoreReplayProviderProbe) { .fail_close = TRUE };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_IO);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+
+  provider_probe = (RestoreReplayProviderProbe) {
+    .fail_projection = TRUE,
+    .fail_close = TRUE,
+  };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_IO);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+
+  provider_probe = (RestoreReplayProviderProbe) { 0 };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  guint admissions_before_cancel =
+      wyl_fact_store_test_session_admission_count (store);
+  wyl_fact_replay_set_validation_connected_test_hook
+    (cancel_connected_validation, NULL);
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_CANCELLED);
+  wyl_fact_replay_set_validation_connected_test_hook (NULL, NULL);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS], ==, 1);
+  g_assert_cmpuint (wyl_fact_store_test_session_admission_count (store), ==,
+      admissions_before_cancel);
+
+  provider_probe = (RestoreReplayProviderProbe) { 0 };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  wyl_fact_replay_set_test_fault (WYL_FACT_REPLAY_TEST_FAULT_OPEN_GRAPH_ENGINE);
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_IO);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+  for (guint i = 0; i < G_N_ELEMENTS (provider_probe.operation_count); i++)
+    g_assert_cmpuint (provider_probe.operation_count[i], ==, 0);
+
+  provider_probe = (RestoreReplayProviderProbe) { 0 };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  call.expected_schema_digest = "not-a-digest";
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_INVALID);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+  call.expected_schema_digest = expected_digest;
+
+  provider_probe = (RestoreReplayProviderProbe) { .fail_close = TRUE };
+  g_assert_cmpint (restore_replay_forward_store_new (store, &provider_probe,
+      tenant_id, graph_id, &replay_store), ==, WYRELOG_E_OK);
+  call.expected_schema_digest =
+      "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_IO);
+  g_assert_null (replay_store);
+  g_assert_null (call.observed_schema_digest);
+  g_assert_cmpuint (provider_probe.close_count, ==, 1);
+  g_assert_cmpuint (provider_probe.destroy_count, ==, 1);
+  g_assert_cmpuint (provider_probe.operation_count
+      [WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS], ==, 0);
+  call.expected_schema_digest = expected_digest;
+
+  /* A valid sealed snapshot for another graph lets replay reach store-scope
+   * validation, whose failure jumps to release_snapshot before store setup. */
+  create_graph_with_schema (policy, root, "tenant-other", "other-graph");
+  g_assert_cmpint (wyl_policy_store_seal_fact_graph (policy, "tenant-other",
+      "other-graph"), ==, WYRELOG_E_OK);
+  WylPolicyFactBackupSnapshot *other_backup = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (policy,
+      "tenant-other", &other_backup), ==, WYRELOG_E_OK);
+  g_assert_nonnull (other_backup);
+  g_assert_cmpuint (other_backup->graphs->len, ==, 1);
+  g_autofree gchar *other_digest = g_strdup (((WylPolicyFactBackupGraphSnapshot *)
+          g_ptr_array_index (other_backup->graphs, 0))->active_schema_digest);
+  wyl_policy_fact_backup_snapshot_free (other_backup);
+  wyl_policy_fact_graph_info_t other_graph_info = {
+    .tenant_id = "tenant-other",
+    .graph_id = "other-graph",
+    .schema_version = 1,
+    .sealed = TRUE,
+  };
+  call.replay_store = NULL;
+  call.store = store;
+  call.graph_info = &other_graph_info;
+  call.expected_schema_digest = other_digest;
+  g_assert_cmpint (run_restore_replay_job (&call), ==, WYRELOG_E_POLICY);
+  g_assert_null (call.observed_schema_digest);
+  call.graph_info = &graph_info;
 
   call.expected_schema_digest =
       "sha256:0000000000000000000000000000000000000000000000000000000000000000";

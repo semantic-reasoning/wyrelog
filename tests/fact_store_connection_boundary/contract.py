@@ -349,7 +349,8 @@ def validate_session_profile(
         )
     failure_guard = re.match(
         r"\s*if\s*\(\s*rc\s*!=\s*WYRELOG_E_OK\s*\)\s*"
-        r"return\s+rc\s*;", body[begin.end():],
+        r"(?:return\s+rc\s*;|\{[^{}]*return\s+rc\s*;\s*\})",
+        body[begin.end():], re.DOTALL,
     )
     success_guard = re.match(
         r"\s*(?:duckdb_result\s+\w+\s*=\s*\{\s*0\s*\}\s*;\s*)?"
@@ -700,7 +701,7 @@ def validate(files: dict[str, str]) -> None:
     expected_calls = {
         "wyrelog/fact/store.c": (16, 4, 20),
         "wyrelog/fact/compound.c": (3, 3, 5),
-        "wyrelog/fact/replay.c": (1, 0, 1),
+        "wyrelog/fact/replay.c": (2, 0, 2),
         "wyrelog/fact/replay-store-private.c": (1, 1, 1),
     }
     for path, (begins, gets, ends) in expected_calls.items():
@@ -735,6 +736,7 @@ def validate(files: dict[str, str]) -> None:
         ),
         "wyrelog/fact/replay.c": (
             "replay_store_with_snapshot",
+            "wyl_fact_replay_validate_store_for_restore",
         ),
         "wyrelog/fact/replay-store-private.c": (
             "c_store_execute",
@@ -869,8 +871,9 @@ def validate(files: dict[str, str]) -> None:
                 )
             failure_guard = re.match(
                 r"\s*if\s*\(\s*rc\s*!=\s*WYRELOG_E_OK\s*\)\s*"
-                r"return\s+rc\s*;",
+                r"(?:return\s+rc\s*;|\{[^{}]*return\s+rc\s*;\s*\})",
                 body[begin_statement.end():],
+                re.DOTALL,
             )
             success_guard = re.match(
                 r"\s*(?:duckdb_result\s+\w+\s*=\s*\{\s*0\s*\}\s*;\s*)?"
@@ -1547,25 +1550,43 @@ def validate(files: dict[str, str]) -> None:
         raise AssertionError("supplied-store replay seam drifted")
     replay_admission = function_body(replay, "replay_store_with_snapshot")
     for token in (
+        "replay_preflight (job_context);",
         "wyl_fact_store_connection_session_begin (store, &admission)",
         "wyl_fact_store_connection_session_end (&admission);",
-        "list_replay_relations (policy, replay_store, graph_info, policy_snapshot,\n"
-        "          job_context,\n          &relations)",
+        "replay_with_replay_store_and_snapshot (policy, replay_store,",
     ):
         if token not in replay_admission:
             raise AssertionError(f"supplied-store replay admission drifted: {token}")
-    if replay_admission.index(
-        "wyl_fact_store_connection_session_end (&admission);"
-    ) > replay_admission.index(
-        "list_replay_relations (policy, replay_store, graph_info, policy_snapshot,\n"
-        "          job_context,\n          &relations)"
+    if not (
+        replay_admission.index("replay_preflight (job_context);")
+        < replay_admission.index(
+            "wyl_fact_store_connection_session_begin (store, &admission)"
+        )
+        < replay_admission.index(
+            "wyl_fact_store_connection_session_end (&admission);"
+        )
+        < replay_admission.index(
+            "replay_with_replay_store_and_snapshot (policy, replay_store,"
+        )
     ):
         raise AssertionError("supplied-store health check occurs after policy work")
     restore_preflight = function_body(
         replay, "wyl_fact_replay_validate_store_for_restore"
     )
-    if "replay_store_with_snapshot" not in restore_preflight:
+    restore_order = (
+        "restore_snapshot_matches (&snapshot, graph_info,",
+        "replay_preflight (job_context);",
+        "wyl_fact_store_connection_session_begin (store, &admission)",
+        "wyl_fact_store_connection_session_end (&admission);",
+        "validate_replay_store_with_snapshot (policy,",
+    )
+    if any(token not in restore_preflight for token in restore_order):
         raise AssertionError("restore preflight bypasses supplied-store admission")
+    if not all(
+        restore_preflight.index(left) < restore_preflight.index(right)
+        for left, right in zip(restore_order, restore_order[1:])
+    ):
+        raise AssertionError("restore preflight changes validation/admission order")
     replay_seam_start = replay.rfind(
         "#if defined(WYL_TEST_HANDLE_SEAMS)", 0,
         replay.index("wyl_fact_replay_open_graph_engine_with_store_for_test"),
