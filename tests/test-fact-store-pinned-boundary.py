@@ -3,6 +3,7 @@
 
 from pathlib import Path
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -42,12 +43,34 @@ for required in (
 
 for forbidden in (
     "/proc/self/fd",
-    "LocalFileSystem",
     "ToString",
     "wyl_fact_store_t **",
+    # Both construct a host LocalFileSystem without naming the type.
+    "CreateLocal",
+    "VirtualFileSystem",
 ):
     if forbidden in bridge:
         raise SystemExit(f"pinned source adapter escaped its boundary: {forbidden}")
+# Match the host filesystem type as a whole identifier.  A reader overriding
+# the FileSystem::IsLocalFileSystem() virtual makes DuckDB adopt the reader as
+# its local filesystem instead of building a host LocalFileSystem; that name
+# is not a use of the type.
+if re.search(r"(?<![A-Za-z0-9_])LocalFileSystem(?![A-Za-z0-9_])", bridge):
+    raise SystemExit(
+        "pinned source adapter escaped its boundary: LocalFileSystem"
+    )
+# DuckDB reuses the configured filesystem only while it answers true here;
+# false makes it build an independent host LocalFileSystem behind the reader.
+overrides = re.findall(
+    r"\bIsLocalFileSystem \(\) const override\s*\{(.*?)\}", bridge, re.S
+)
+if not overrides or any(
+    re.sub(r"/\*.*?\*/", "", body, flags=re.S).split() != ["return", "true;"]
+    for body in overrides
+):
+    raise SystemExit(
+        "pinned source adapter must claim IsLocalFileSystem () with true"
+    )
 
 for required in (
     "connection->Prepare (sql)",
