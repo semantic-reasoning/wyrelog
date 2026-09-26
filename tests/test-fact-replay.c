@@ -9,6 +9,7 @@
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
+#include "wyrelog/fact/replay-store-private.h"
 #include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/fact/publication-lock-event-private.h"
 #include "wyrelog/fact/store-private.h"
@@ -2862,6 +2863,358 @@ test_compound_replay_cache_reuses_nested_child (void)
   remove_tree (root);
 }
 
+typedef struct
+{
+  guint rows;
+  gsize expected_cells;
+  gboolean fail;
+  gboolean saw_bool;
+  gboolean saw_int64;
+  gboolean saw_text;
+  gboolean saw_null;
+} ReplayStoreOperationProbe;
+
+static wyrelog_error_t
+replay_store_operation_probe_row (const WylFactReplayCell *cells,
+    gsize n_cells, gpointer user_data)
+{
+  ReplayStoreOperationProbe *probe = user_data;
+  g_assert_nonnull (cells);
+  if (probe->expected_cells != 0)
+    g_assert_cmpuint (n_cells, ==, probe->expected_cells);
+  for (gsize i = 0; i < n_cells; i++) {
+    probe->saw_bool |= cells[i].type == WYL_FACT_REPLAY_CELL_BOOL;
+    probe->saw_int64 |= cells[i].type == WYL_FACT_REPLAY_CELL_INT64;
+    probe->saw_text |= cells[i].type == WYL_FACT_REPLAY_CELL_TEXT;
+    probe->saw_null |= cells[i].type == WYL_FACT_REPLAY_CELL_NULL;
+  }
+  probe->rows++;
+  return probe->fail ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  GCancellable *cancellable;
+  GThread *cancel_thread;
+  gint execution_started;
+  gint execution_finished;
+  gint cancel_sent;
+  gint query_execute_state;
+} ReplayStoreCancellationProbe;
+
+static gpointer
+replay_store_cancel_during_execute (gpointer user_data)
+{
+  ReplayStoreCancellationProbe *probe = user_data;
+  while (!g_atomic_int_get (&probe->execution_started)
+      && !g_atomic_int_get (&probe->execution_finished))
+    g_usleep (100);
+  g_usleep (10 * 1000);
+  if (!g_atomic_int_get (&probe->execution_finished)) {
+    g_atomic_int_set (&probe->cancel_sent, TRUE);
+    g_cancellable_cancel (probe->cancellable);
+  }
+  return NULL;
+}
+
+static void
+replay_store_cancellation_test_hook (duckdb_connection connection,
+    WylFactReplayStoreOperation operation, WylFactReplayStoreTestPhase phase,
+    duckdb_state execute_state, gpointer user_data)
+{
+  ReplayStoreCancellationProbe *probe = user_data;
+  (void) connection;
+  g_assert_cmpint (operation, ==,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS);
+  if (phase == WYL_FACT_REPLAY_STORE_TEST_BEFORE_EXECUTE) {
+    probe->cancel_thread = g_thread_new ("replay-query-cancel",
+            replay_store_cancel_during_execute, probe);
+  } else if (phase == WYL_FACT_REPLAY_STORE_TEST_QUERY_CALL_STARTED) {
+    g_atomic_int_set (&probe->execution_started, TRUE);
+  } else if (phase == WYL_FACT_REPLAY_STORE_TEST_AFTER_EXECUTE) {
+    g_atomic_int_set (&probe->query_execute_state, execute_state);
+    g_atomic_int_set (&probe->execution_finished, TRUE);
+    g_thread_join (probe->cancel_thread);
+    probe->cancel_thread = NULL;
+    probe->cancellable = NULL;
+  }
+}
+
+typedef struct
+{
+  WylFactReplayStore *replay_store;
+  const wyl_policy_fact_relation_schema_options_t *schema;
+  ReplayStoreCancellationProbe *probe;
+} ReplayStoreCancellationCall;
+
+static wyrelog_error_t
+replay_store_cancellation_job (WylFactReplayJobContext *job_context,
+    gpointer user_data)
+{
+  ReplayStoreCancellationCall *call = user_data;
+  call->probe->cancellable = wyl_fact_replay_job_context_get_cancellable
+        (job_context);
+  WylFactReplayStoreRequest request = {
+    .tenant_id = call->schema->tenant_id,
+    .graph_id = call->schema->graph_id,
+    .projection_schema = call->schema,
+  };
+  ReplayStoreOperationProbe rows = {
+    .expected_cells = call->schema->n_columns + 1,
+  };
+  return wyl_fact_replay_store_execute (call->replay_store,
+             WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &request,
+             job_context, replay_store_operation_probe_row, &rows);
+}
+
+static void
+test_replay_store_c_adapter_fixed_operations (void)
+{
+  TEST ("C replay-store adapter scopes and cleans up each fixed operation");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-replay-store-ops-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_compound_graph_with_schemas (policy, root, "tenant-a", "shipments");
+  append_compound_route_batches (policy, "tenant-a", "shipments");
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "shipments");
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) fact_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &fact_store), ==,
+      WYRELOG_E_OK);
+  gint64 child_ref = 0;
+  gint64 parent_ref = 0;
+  put_route_compounds (fact_store, "tenant-a", "shipments", &child_ref,
+      &parent_ref);
+  g_autoptr (WylFactReplayStore) replay_store = NULL;
+  g_assert_cmpint (wyl_fact_replay_store_new_c_store (fact_store, NULL,
+      &replay_store), ==, WYRELOG_E_OK);
+
+  WylFactReplayStoreRequest request = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipments",
+  };
+  ReplayStoreOperationProbe probe = { .expected_cells = 3 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 2);
+  g_assert_true (probe.saw_text);
+  g_assert_true (probe.saw_int64);
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"route", "compound_ref", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_route_schema
+        ("tenant-a", "shipments", "shipment-route", columns,
+          G_N_ELEMENTS (columns));
+  request.projection_schema = &schema;
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 2 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 1);
+  g_assert_true (probe.saw_int64);
+  g_assert_true (probe.saw_bool);
+
+  request.projection_schema = NULL;
+  request.namespace_id = "logistics";
+  request.compound_ref = parent_ref;
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 1);
+  g_assert_true (probe.saw_text);
+  g_assert_true (probe.saw_int64);
+
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 7 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 1);
+  g_assert_true (probe.saw_int64);
+  g_assert_true (probe.saw_text);
+  g_assert_true (probe.saw_null);
+
+  const wyl_fact_compound_arg_t mixed_args[] = {
+    {.type = WYL_FACT_COMPOUND_ARG_SYMBOL,.as.text = "symbol-value"},
+    {.type = WYL_FACT_COMPOUND_ARG_STRING,.as.text = "string-value"},
+    {.type = WYL_FACT_COMPOUND_ARG_INT64,.as.int64_value = 42},
+    {.type = WYL_FACT_COMPOUND_ARG_BOOL,.as.bool_value = TRUE},
+    {.type = WYL_FACT_COMPOUND_ARG_COMPOUND_REF,.as.compound_ref = child_ref},
+  };
+  const wyl_fact_compound_value_t mixed_value = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipments",
+    .namespace_id = "logistics",
+    .functor = "mixed",
+    .args = mixed_args,
+    .n_args = G_N_ELEMENTS (mixed_args),
+  };
+  gint64 mixed_ref = 0;
+  g_assert_cmpint (wyl_fact_compound_put (fact_store, &mixed_value,
+      &mixed_ref), ==, WYRELOG_E_OK);
+  request.compound_ref = mixed_ref;
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 7 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, G_N_ELEMENTS (mixed_args));
+  g_assert_true (probe.saw_text);
+  g_assert_true (probe.saw_int64);
+  g_assert_true (probe.saw_bool);
+  g_assert_true (probe.saw_null);
+  request.compound_ref = parent_ref;
+
+  request.tenant_id = "tenant-wrong";
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 7 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 0);
+
+  request.tenant_id = "tenant-a";
+  request.graph_id = "graph-wrong";
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 7 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 0);
+
+  request.graph_id = "shipments";
+  request.namespace_id = "namespace-wrong";
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 7 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 0);
+
+  request.namespace_id = "logistics";
+  request.tenant_id = "tenant-a";
+  probe = (ReplayStoreOperationProbe) {
+    .expected_cells = 3,
+    .fail = TRUE,
+  };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_POLICY);
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 2);
+
+  wyl_policy_fact_relation_schema_options_t missing_schema = schema;
+  missing_schema.relation_name = "missing-relation";
+  request.projection_schema = &missing_schema;
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 2 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_IO);
+  request.projection_schema = NULL;
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 2);
+
+  g_autofree gchar *projection_table =
+      wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *seed_long_query = g_strdup_printf (
+    "INSERT INTO \"%s\" (route, __wyl_tenant_id, __wyl_graph_id, "
+    "__wyl_seq, __wyl_batch_id, __wyl_row_index, __wyl_valid) "
+    "SELECT 1, 'tenant-a', 'shipments', 3000000 - i, "
+    "'replay-long-' || i, i, TRUE FROM range(3000000) AS rows(i);",
+    projection_table);
+  g_assert_cmpint (wyl_fact_store_test_exec_sql (fact_store, seed_long_query),
+      ==, WYRELOG_E_OK);
+  WylFactReplaySchedulerConfig scheduler_config;
+  wyl_fact_replay_scheduler_config_defaults (&scheduler_config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&scheduler_config, NULL,
+      &scheduler), ==, WYRELOG_E_OK);
+  ReplayStoreCancellationProbe cancellation_probe = { 0 };
+  ReplayStoreCancellationCall cancellation_call = {
+    .replay_store = replay_store,
+    .schema = &schema,
+    .probe = &cancellation_probe,
+  };
+  wyl_fact_replay_store_set_before_execute_test_hook
+    (replay_store_cancellation_test_hook, &cancellation_probe);
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      "shipments", NULL, replay_store_cancellation_job, &cancellation_call,
+      NULL, &future), ==, WYRELOG_E_OK);
+  wyrelog_error_t cancel_rc = wyl_fact_replay_future_wait (future);
+  wyl_fact_replay_store_set_before_execute_test_hook (NULL, NULL);
+  g_assert_cmpint (cancel_rc, ==, WYRELOG_E_CANCELLED);
+  g_assert_true (g_atomic_int_get (&cancellation_probe.cancel_sent));
+  g_assert_cmpint (g_atomic_int_get (&cancellation_probe.query_execute_state),
+      ==, DuckDBError);
+  g_assert_null (cancellation_probe.cancel_thread);
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
+  request.projection_schema = NULL;
+  g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 2);
+
+  create_graph_with_schema (policy, root, "tenant-b", "orders");
+  append_order_batches (policy, root, "tenant-b", "orders");
+  g_autofree gchar *text_storage_path = lookup_graph_storage_path (policy,
+          "tenant-b", "orders");
+  g_autofree gchar *text_fact_path = g_build_filename (text_storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) text_store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (text_fact_path, &text_store), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactReplayStore) text_replay_store = NULL;
+  g_assert_cmpint (wyl_fact_replay_store_new_c_store (text_store, NULL,
+      &text_replay_store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t text_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t text_schema = make_schema
+        ("tenant-b", "orders", text_columns, G_N_ELEMENTS (text_columns));
+  WylFactReplayStoreRequest text_request = {
+    .tenant_id = "tenant-b",
+    .graph_id = "orders",
+    .projection_schema = &text_schema,
+  };
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 4 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (text_replay_store,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &text_request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 3);
+  g_assert_true (probe.saw_text);
+  g_assert_true (probe.saw_int64);
+  g_assert_true (probe.saw_bool);
+  wyl_fact_replay_store_set_projection_failure_column_for_test (1);
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 4 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (text_replay_store,
+      WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS, &text_request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (probe.rows, ==, 0);
+  probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
+  g_assert_cmpint (wyl_fact_replay_store_execute (text_replay_store,
+      WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS, &text_request, NULL,
+      replay_store_operation_probe_row, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.rows, ==, 1);
+
+  g_clear_pointer (&replay_store, wyl_fact_replay_store_free);
+  g_clear_pointer (&fact_store, wyl_fact_store_close);
+  remove_tree (root);
+}
+
 static void
 test_handle_replay_is_idempotent_and_graph_local (void)
 {
@@ -5585,6 +5938,8 @@ main (int argc, char **argv)
       test_direct_replay_shares_compounds_across_relations);
   g_test_add_func ("/fact-replay/compound-cache-nested",
       test_compound_replay_cache_reuses_nested_child);
+  g_test_add_func ("/fact-replay/replay-store-c-fixed-operations",
+      test_replay_store_c_adapter_fixed_operations);
   g_test_add_func ("/fact-replay/handle",
       test_handle_replay_is_idempotent_and_graph_local);
   g_test_add_func ("/fact-replay/handle-root-replacement",

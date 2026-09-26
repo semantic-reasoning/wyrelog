@@ -297,6 +297,8 @@ wyrelog/fact/recovery-mac-private.h
 wyrelog/fact/replay-private.h
 wyrelog/fact/replay-scheduler-private.c
 wyrelog/fact/replay-scheduler-private.h
+wyrelog/fact/replay-store-private.c
+wyrelog/fact/replay-store-private.h
 wyrelog/fact/replay.c
 wyrelog/fact/runtime-private.c
 wyrelog/fact/runtime-private.h

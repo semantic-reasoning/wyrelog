@@ -8,6 +8,7 @@
 typedef struct _WylEngine WylEngine;
 typedef struct wyl_fact_store_t wyl_fact_store_t;
 typedef struct _WylFactReplayJobContext WylFactReplayJobContext;
+typedef struct WylFactReplayStore WylFactReplayStore;
 
 G_BEGIN_DECLS;
 
@@ -57,6 +58,11 @@ wyrelog_error_t wyl_fact_compound_replay_cached (wyl_fact_store_t * store,
     gint64 * out_handle);
 wyrelog_error_t wyl_fact_compound_replay_cached_bounded
   (wyl_fact_store_t *store, WylEngine *engine, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *namespace_id, gint64 compound_ref,
+    GHashTable *handles, WylFactReplayJobContext *job_context,
+    gint64 *out_handle);
+wyrelog_error_t wyl_fact_compound_replay_cached_from_replay_store
+  (WylFactReplayStore *store, WylEngine *engine, const gchar *tenant_id,
     const gchar *graph_id, const gchar *namespace_id, gint64 compound_ref,
     GHashTable *handles, WylFactReplayJobContext *job_context,
     gint64 *out_handle);
