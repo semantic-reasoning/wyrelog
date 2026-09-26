@@ -211,7 +211,16 @@ Apply and verify:
 systemctl daemon-reload
 systemctl restart wyrelog-system.service
 journalctl -u wyrelog-system.service -n 50
+wyctl --daemon-url http://127.0.0.1:8765 audit query \
+  --filter 'action=bootstrap_admin_apply' \
+  --access-token-file /run/wyrelog/auditor.token \
+  --guard-timestamp "$(date +%s)" \
+  --guard-loc-class trusted --guard-risk 29
 ```
+
+Audit queries require a separately provisioned, MFA-authenticated auditor;
+the `wr.system_admin` operator token is deliberately not allowed to read the
+audit stream. See [Day-2 Operations](#day-2-operations) before using this check.
 
 Once `alice` has rotated to an IdP-issued bearer, drop the
 `--bootstrap-admin-allow-skip-mfa` flag from the drop-in and run
@@ -285,14 +294,16 @@ Use this token only to enroll TOTP. Then repeat the normal `/auth/login` and
 `/auth/mfa/verify` flow and replace the file with the newly issued
 MFA-assured access token before guarded permission transitions.
 
-Verify through `wyctl.exe`:
+After provisioning a separate MFA-authenticated auditor at `__wr_default` and
+arming `wr.audit.read` as described under [Day-2 Operations](#day-2-operations),
+verify through `wyctl.exe` with the auditor's token (not the system operator's):
 
 ```powershell
-wyctl.exe --daemon-url http://127.0.0.1:8765 audit query ^
-  --filter "action=bootstrap_admin_apply" ^
-  --access-token-file C:\ProgramData\Wyrelog\bootstrap.token ^
-  --guard-timestamp 1780000000 ^
-  --guard-loc-class internal_network --guard-risk 10
+wyctl.exe --daemon-url http://127.0.0.1:8765 audit query `
+  --filter "action=bootstrap_admin_apply" `
+  --access-token-file "C:\ProgramData\Wyrelog\auditor.token" `
+  --guard-timestamp "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" `
+  --guard-loc-class trusted --guard-risk 29
 ```
 
 ### Operational Notes
@@ -343,9 +354,9 @@ decision-trace tool:
 ```sh
 wyctl --daemon-url http://127.0.0.1:8765 audit query \
   --filter 'action=permission_revoke' --limit 10 \
-  --access-token-file /run/wyrelog/operator.token \
+  --access-token-file /run/wyrelog/auditor.token \
   --guard-timestamp "$(date +%s)" \
-  --guard-loc-class internal_network --guard-risk 10
+  --guard-loc-class trusted --guard-risk 29
 ```
 
 ## TOTP Multi-Factor Authentication (MFA)
@@ -2027,12 +2038,52 @@ The daemon's error code is printed on stderr for every remote failure.
 
 - Audit query:
 
+  The audit database is profile-wide: an auditor can read events from every
+  tenant in this daemon profile. Grant `wr.auditor` only at the reserved
+  system scope `__wr_default`; a grant at an application-tenant scope does
+  not authorize this endpoint. The auditor must be a separate principal from
+  anyone with control or mutation authority at any scope. This includes
+  direct or inherited `wr.sys.*` administration, policy writes and role
+  grants, tenant management or MFA bypass, service/security operations,
+  service-principal or credential management, graph/schema/fact writes,
+  reserved-stream writes, and audit writes. Read-only permissions such as
+  `wr.policy.read`, `wr.fact.read`, and `wr.datalog.query` alone do not
+  disqualify an auditor. These boundaries apply across tenants because the
+  audit endpoint returns the whole profile stream. A policy decision uses the
+  published policy snapshot; a request already authorized may finish if the
+  auditor grant is revoked while that request is in flight, while subsequent
+  requests use the updated policy.
+  Enroll the auditor in MFA and log in through `/auth/login` followed by
+  `/auth/mfa/verify` as described in [the HTTP login flow](#http-api-summary).
+  `wr.audit.read` is guarded: each query must supply an acceptable guard
+  context, and risk must be below 70. For example, an existing MFA-authenticated
+  operator can grant the role with:
+
+  ```sh
+  wyctl --daemon-url http://127.0.0.1:8765 policy role-grant \
+    --subject auditor --role wr.auditor --scope __wr_default \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class trusted --guard-risk 29
+  ```
+
+  Arm `wr.audit.read` for the auditor through the guarded policy-transition
+  endpoint, using the MFA-authenticated operator token:
+
+  ```sh
+  curl -fsS -X POST \
+    -H "Authorization: Bearer $(cat /run/wyrelog/operator.token)" \
+    "http://127.0.0.1:8765/policy/permissions/transition?subject=auditor&perm=wr.audit.read&scope=__wr_default&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+  ```
+
+  Then use the auditor's MFA-issued token, not the operator token:
+
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 audit query \
     --filter 'decision=deny' --limit 50 \
-    --access-token-file /run/wyrelog/operator.token \
+    --access-token-file /run/wyrelog/auditor.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 29
   ```
 
 - Restart:

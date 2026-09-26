@@ -943,6 +943,29 @@ if build_client and host_machine.system() != 'windows'
     meson.current_build_dir())
   wyctl_gsettings_test_env.set('GSETTINGS_BACKEND', 'memory')
 
+  if host_machine.system() != 'windows' and get_option('enable_audit').allowed()
+    wyrelogd_audit_operator_env = environment()
+    wyrelogd_audit_operator_env.set('GSETTINGS_SCHEMA_DIR',
+      meson.current_build_dir())
+    wyrelogd_audit_operator_env.set('GSETTINGS_BACKEND', 'memory')
+    wyrelogd_audit_operator_env.set('PYTHONWARNDEFAULTENCODING', '1')
+    wyrelogd_audit_operator_env.set('PYTHONWARNINGS',
+      'error::EncodingWarning')
+    test('wyrelogd-audit-operator-flow', sh,
+      args : [
+        meson.current_source_dir() / 'check-wyrelogd-audit-operator-flow.sh',
+        wyrelogd_exe.full_path(),
+        wyctl_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        python3.full_path(),
+      ],
+      depends : [wyctl_gschemas_compiled, wyctl_exe, wyrelogd_exe],
+      env : wyrelogd_audit_operator_env,
+      is_parallel : false,
+      timeout : 240,
+    )
+  endif
+
   test_wyctl_gschema = executable('test-wyctl-gschema',
     'test-wyctl-gschema.c',
     c_args : [

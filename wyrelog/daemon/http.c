@@ -10268,8 +10268,14 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
     filter = g_hash_table_lookup (query, "filter");
 
   WylDaemonHttpContext *ctx = user_data;
+  /* This returns the profile-wide audit stream. The store rejects any
+   * snapshot combining a default-scope audit reader with incompatible control
+   * authority at any scope; every supported mutation validates before commit,
+   * and engine open/reload validates before publication. The decision against
+   * that published policy snapshot is the request's authorization point, so a
+   * later revocation does not cancel an already-authorized in-flight query. */
   if (!authorize_guarded_session_action (server, msg, query, ctx,
-      "wr.audit.read", NULL, "audit_auth_required",
+      "wr.audit.read", WYL_TENANT_DEFAULT, "audit_auth_required",
       "invalid_audit_auth", "audit_denied", "audit_auth_failed", NULL))
     return;
 
