@@ -2204,8 +2204,23 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
               ? wyl_client_fact_append_result_get_payload_digest (result)
               : "");
     } else {
-      g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
-          "inserted" : "duplicate");
+      const gchar *result_batch_id =
+          wyl_client_fact_append_result_get_batch_id (result);
+      const gchar *result_operation_id =
+          wyl_client_fact_append_result_get_operation_id (result);
+      const gchar *mutation_class =
+          wyl_client_fact_append_result_get_mutation_class (result);
+      g_autofree gchar *batch_id = g_uri_escape_string (
+        result_batch_id != NULL ? result_batch_id : opts.batch_id, NULL,
+        TRUE);
+      g_autofree gchar *operation_id = g_uri_escape_string (
+        result_operation_id != NULL ? result_operation_id :
+        opts.idempotency_key, NULL, TRUE);
+      g_print ("action=%s batch_id=%s operation_id=%s replay=%s "
+          "mutation_class=%s effect=unknown\n", retract ? "retract" : "put",
+          batch_id, operation_id,
+          wyl_client_fact_append_result_get_inserted (result) ? "false" :
+          "true", mutation_class != NULL ? mutation_class : "unknown");
     }
   }
   return exit_rc;
