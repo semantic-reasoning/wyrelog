@@ -7263,7 +7263,7 @@ check_policy_store_service_admin_auditor_membership_fails_open (void)
 }
 
 static gint
-check_policy_store_auditor_admin_cross_scope_opens (void)
+check_policy_store_auditor_admin_cross_scope_fails_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -7280,15 +7280,40 @@ check_policy_store_auditor_admin_cross_scope_opens (void)
       "wr.service_admin", "admin-scope") != WYRELOG_E_OK)
     return 509;
   if (wyl_policy_store_grant_role_membership (store, "sod-user",
-      "wr.auditor", "audit-scope") != WYRELOG_E_OK)
+      "wr.auditor", WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
     return 510;
 
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
-      != WYRELOG_E_OK)
+      != WYRELOG_E_POLICY)
     return 511;
-  if (wyl_handle_get_read_engine (handle) == NULL)
+  if (wyl_handle_get_read_engine (handle) != NULL)
     return 525;
-  return wyl_handle_get_delta_engine (handle) != NULL ? 0 : 513;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 513;
+}
+
+static gint
+check_policy_store_cross_scope_reload_preserves_valid_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK
+      || wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 571;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (read_engine == NULL || delta_engine == NULL
+      || wyl_policy_store_grant_role_membership (store, "reload-sod-user",
+      "wr.service_admin", "admin-scope") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "reload-sod-user",
+      "wr.auditor", WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
+    return 572;
+
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 573;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 574;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 575;
 }
 
 static gint
@@ -7996,7 +8021,10 @@ main (int argc, char **argv)
   if ((rc = check_policy_store_service_admin_auditor_membership_fails_open ())
       != 0)
     return wyl_test_normalize_exit_status (rc);
-  if ((rc = check_policy_store_auditor_admin_cross_scope_opens ()) != 0)
+  if ((rc = check_policy_store_auditor_admin_cross_scope_fails_open ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_policy_store_cross_scope_reload_preserves_valid_pair ())
+      != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_inherited_auditor_admin_membership_fails_open ())
       != 0)

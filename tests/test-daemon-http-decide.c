@@ -13278,6 +13278,41 @@ grant_audit_read (WylHandle *handle, const gchar *subject_id,
   return insert_symbol_row1 (handle, "session_active", "active");
 }
 
+static gint send_raw_audit_bearer (SoupSession *session,
+    const gchar *base_url, const gchar *query, const gchar *access_token,
+    guint *out_status, gchar **out_body);
+
+static gint
+check_audit_tenant_scoped_reader_denied (WylHandle *handle,
+    const gchar *base_url)
+{
+  const gchar *subject = "http-audit-tenant-reader";
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (base_url, &client) != WYRELOG_E_OK
+      || grant_audit_read (handle, subject, "tenant-a") != WYRELOG_E_OK)
+    return 2844;
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyrelog_error_t login_rc = wyl_client_login_skip_mfa (client, subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != WYRELOG_E_OK)
+    return 2845;
+
+  g_autofree gchar *token = wyl_client_dup_access_token (client);
+  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
+  if (g_strcmp0 (tenant, WYL_TENANT_DEFAULT) != 0)
+    return 2847;
+  g_autoptr (SoupSession) http = soup_session_new ();
+  const gchar *query = "guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69";
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_audit_bearer (http, base_url, query, token, &status, &body)
+      != 0 || status != 403 || strstr (body, "\"audit_denied\"") == NULL)
+    return 2846;
+  return 0;
+}
+
 static gchar *
 build_audit_uri (const gchar *base_url, const gchar *query)
 {
@@ -13823,7 +13858,7 @@ check_audit_query_session_token_fallback (WylHandle *handle,
   g_clear_pointer (&access_token, g_free);
   access_token = wyl_client_dup_access_token (session_only);
   if (access_token != NULL
-      || grant_audit_read (handle, subject, session_token) != WYRELOG_E_OK)
+      || grant_audit_read (handle, subject, WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
     return 2837;
   g_autoptr (WylAuditIter) iter = NULL;
   if (wyl_client_audit_query_with_guard_context (session_only,
@@ -25254,7 +25289,11 @@ audit_variant_checks (void)
     return 85;
   if (audit_access_token == NULL)
     return 89;
-  if (grant_audit_read (handle, "http-audit-user", audit_session_token) !=
+  gint tenant_scope_rc = check_audit_tenant_scoped_reader_denied (handle,
+          base_url);
+  if (tenant_scope_rc != 0)
+    return tenant_scope_rc;
+  if (grant_audit_read (handle, "http-audit-user", WYL_TENANT_DEFAULT) !=
       WYRELOG_E_OK)
     return 86;
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);

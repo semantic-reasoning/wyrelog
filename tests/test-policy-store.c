@@ -6812,6 +6812,144 @@ check_store_fact_graph_materialization_state (void)
   return cleanup_fact_graph_root (root) ? 0 : 989;
 }
 
+static gint
+check_audit_scope_rejects_cross_scope_privilege (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9401;
+
+  if (wyl_policy_store_apply_role_membership_mutation (store,
+      "cross-scope-auditor", "wr.system_admin", "tenant-a", TRUE)
+      != WYRELOG_E_OK)
+    return 9402;
+  wyrelog_error_t cross_scope_rc =
+      wyl_policy_store_apply_role_membership_mutation (store,
+          "cross-scope-auditor", "wr.auditor", "__wr_default", TRUE);
+  if (cross_scope_rc != WYRELOG_E_POLICY)
+    return 9403;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_role_membership_exists (store, "cross-scope-auditor",
+      "wr.auditor", "__wr_default", &exists) != WYRELOG_E_OK || exists)
+    return 9404;
+
+  /* A separate dedicated auditor may coexist with a distinct operator. */
+  if (wyl_policy_store_apply_role_membership_mutation (store,
+      "separate-admin", "wr.system_admin", "__wr_default", TRUE)
+      != WYRELOG_E_OK
+      || wyl_policy_store_apply_role_membership_mutation (store,
+      "separate-auditor", "wr.auditor", "__wr_default", TRUE)
+      != WYRELOG_E_OK
+      || wyl_policy_store_apply_direct_permission_mutation (store,
+      "separate-auditor", "wr.fact.read", "tenant-z", TRUE)
+      != WYRELOG_E_OK)
+    return 9407;
+
+  if (wyl_policy_store_upsert_role (store, "site.audit-reader",
+      "custom audit reader") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, "site.audit-reader",
+      "wr.audit.read") != WYRELOG_E_OK)
+    return 9405;
+  /* A custom role with audit-read authority may not coexist with privileged
+   * authority at a different scope. */
+  if (wyl_policy_store_grant_role_membership (store, "cross-scope-custom",
+      "site.audit-reader", "__wr_default") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "cross-scope-custom",
+      "wr.system_admin", "tenant-b") != WYRELOG_E_OK
+      || wyl_policy_store_validate_snapshot (store) != WYRELOG_E_POLICY)
+    return 9406;
+  return 0;
+}
+
+static gint
+check_audit_so_d_permission_taxonomy (void)
+{
+  static const gchar *const incompatible_permissions[] = {
+    WYL_AUDIT_INCOMPATIBLE_PERMISSION_IDS
+  };
+  static const gchar *const incompatible_roles[] = {
+    WYL_AUDIT_INCOMPATIBLE_ROLE_IDS
+  };
+  static const gchar *const audit_permissions[] = {
+    WYL_PROFILE_WIDE_AUDIT_PERMISSION_IDS
+  };
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9411;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_permissions); i++) {
+    if (wyl_policy_store_apply_direct_permission_mutation (store,
+        "direct-audit-reader", audit_permissions[i], "__wr_default", TRUE)
+        != WYRELOG_E_OK)
+      return 9412;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (incompatible_permissions); i++) {
+    gboolean exists = FALSE;
+    if (wyl_policy_store_apply_direct_permission_mutation (store,
+        "direct-audit-reader", incompatible_permissions[i], "tenant-a",
+        TRUE) != WYRELOG_E_POLICY
+        || wyl_policy_store_direct_permission_exists (store,
+        "direct-audit-reader", incompatible_permissions[i], "tenant-a",
+        &exists) != WYRELOG_E_OK || exists)
+      return 9413;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (incompatible_roles); i++) {
+    gboolean exists = FALSE;
+    gboolean role_exists = FALSE;
+    wyrelog_error_t role_rc = wyl_policy_store_role_exists (store,
+            incompatible_roles[i], &role_exists);
+    if (role_rc == WYRELOG_E_OK && !role_exists)
+      role_rc = wyl_policy_store_upsert_role (store, incompatible_roles[i],
+              incompatible_roles[i]);
+    wyrelog_error_t membership_rc = role_rc == WYRELOG_E_OK
+        ? wyl_policy_store_apply_role_membership_mutation (store,
+            "direct-audit-reader", incompatible_roles[i], "tenant-role",
+            TRUE) : role_rc;
+    wyrelog_error_t exists_rc = membership_rc == WYRELOG_E_POLICY
+        ? wyl_policy_store_role_membership_exists (store,
+            "direct-audit-reader", incompatible_roles[i], "tenant-role",
+            &exists) : membership_rc;
+    if (role_rc != WYRELOG_E_OK || membership_rc != WYRELOG_E_POLICY
+        || exists_rc != WYRELOG_E_OK || exists)
+      return 9418;
+  }
+
+  for (gsize i = 0; i < G_N_ELEMENTS (incompatible_permissions); i++) {
+    g_clear_pointer (&store, wyl_policy_store_close);
+    if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 9414;
+    if (wyl_policy_store_upsert_role (store, "site.audit-reader",
+        "custom profile-wide audit reader") != WYRELOG_E_OK)
+      return 9415;
+    for (gsize j = 0; j < G_N_ELEMENTS (audit_permissions); j++) {
+      if (wyl_policy_store_grant_role_permission (store, "site.audit-reader",
+          audit_permissions[j]) != WYRELOG_E_OK)
+        return 9416;
+    }
+    if (wyl_policy_store_grant_role_membership (store, "inherited-auditor",
+        "site.audit-reader", "__wr_default") != WYRELOG_E_OK
+        || wyl_policy_store_upsert_role (store, "site.privilege-base",
+        "custom incompatible authority") != WYRELOG_E_OK
+        || wyl_policy_store_grant_role_permission (store,
+        "site.privilege-base", incompatible_permissions[i])
+        != WYRELOG_E_OK
+        || wyl_policy_store_upsert_role (store, "site.inherited-privilege",
+        "inherited incompatible authority") != WYRELOG_E_OK
+        || wyl_policy_store_grant_role_inheritance (store,
+        "site.inherited-privilege", "site.privilege-base")
+        != WYRELOG_E_OK
+        || wyl_policy_store_grant_role_membership (store, "inherited-auditor",
+        "site.inherited-privilege", "tenant-b") != WYRELOG_E_OK
+        || wyl_policy_store_validate_snapshot (store) != WYRELOG_E_POLICY)
+      return 9417;
+  }
+  return 0;
+}
+
 int
 main (void)
 {
@@ -7006,6 +7144,10 @@ main (void)
   if ((rc = check_bootstrap_admin_legacy_skip_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_bootstrap_admin_allow_skip_mfa_flag ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_audit_scope_rejects_cross_scope_privilege ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_audit_so_d_permission_taxonomy ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
 }

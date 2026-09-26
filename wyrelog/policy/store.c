@@ -33173,6 +33173,89 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (found)
     return WYRELOG_E_POLICY;
 
+  /* The audit route returns the profile-wide stream. A default-scope audit
+   * reader therefore cannot hold any control or mutation permission at any
+   * scope. Keep the permission taxonomy in one shared list so tests exercise
+   * precisely the policy enforced here. */
+  static const gchar *const audit_incompatible_permissions[] = {
+    WYL_AUDIT_INCOMPATIBLE_PERMISSION_IDS
+  };
+  static const gchar *const audit_read_permissions[] = {
+    WYL_PROFILE_WIDE_AUDIT_PERMISSION_IDS
+  };
+  static const gchar *const audit_incompatible_roles[] = {
+    WYL_AUDIT_INCOMPATIBLE_ROLE_IDS
+  };
+  GString *global_audit_sod_sql = g_string_new (
+    "WITH RECURSIVE role_closure(subject_id, scope, effective_role_id) AS ("
+    "  SELECT subject_id, scope, role_id FROM role_memberships "
+    "  UNION "
+    "  SELECT role_closure.subject_id, role_closure.scope, "
+    "         ri.parent_role_id FROM role_closure "
+    "  JOIN role_inheritances ri "
+    "    ON ri.child_role_id = role_closure.effective_role_id"
+    "), audit_reader(subject_id) AS ("
+    "  SELECT subject_id FROM role_closure "
+    "  WHERE scope = '__wr_default' AND effective_role_id = 'wr.auditor' "
+    "  UNION "
+    "  SELECT subject_id FROM direct_permissions "
+    "  WHERE scope = '__wr_default' AND perm_id IN (");
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_read_permissions); i++) {
+    if (i > 0)
+      g_string_append (global_audit_sod_sql, ", ");
+    g_string_append_printf (global_audit_sod_sql, "'%s'",
+        audit_read_permissions[i]);
+  }
+  g_string_append (global_audit_sod_sql,
+      ") UNION SELECT role_closure.subject_id FROM role_closure "
+      "  JOIN role_permissions rp "
+      "    ON rp.role_id = role_closure.effective_role_id "
+      "  WHERE role_closure.scope = '__wr_default' AND rp.perm_id IN (");
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_read_permissions); i++) {
+    if (i > 0)
+      g_string_append (global_audit_sod_sql, ", ");
+    g_string_append_printf (global_audit_sod_sql, "'%s'",
+        audit_read_permissions[i]);
+  }
+  g_string_append (global_audit_sod_sql,
+      ")), privileged(subject_id) AS ("
+      "  SELECT subject_id FROM role_closure "
+      "  WHERE effective_role_id IN (");
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_incompatible_roles); i++) {
+    if (i > 0)
+      g_string_append (global_audit_sod_sql, ", ");
+    g_string_append_printf (global_audit_sod_sql, "'%s'",
+        audit_incompatible_roles[i]);
+  }
+  g_string_append (global_audit_sod_sql,
+      ") UNION SELECT subject_id FROM direct_permissions WHERE perm_id IN (");
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_incompatible_permissions); i++) {
+    if (i > 0)
+      g_string_append (global_audit_sod_sql, ", ");
+    g_string_append_printf (global_audit_sod_sql, "'%s'",
+        audit_incompatible_permissions[i]);
+  }
+  g_string_append (global_audit_sod_sql,
+      ") UNION SELECT role_closure.subject_id FROM role_closure "
+      "  JOIN role_permissions rp "
+      "    ON rp.role_id = role_closure.effective_role_id "
+      "  WHERE rp.perm_id IN (");
+  for (gsize i = 0; i < G_N_ELEMENTS (audit_incompatible_permissions); i++) {
+    if (i > 0)
+      g_string_append (global_audit_sod_sql, ", ");
+    g_string_append_printf (global_audit_sod_sql, "'%s'",
+        audit_incompatible_permissions[i]);
+  }
+  g_string_append (global_audit_sod_sql,
+      ")) SELECT 1 FROM audit_reader JOIN privileged USING (subject_id) "
+      "LIMIT 1;");
+  rc = query_has_rows (store->db, global_audit_sod_sql->str, &found);
+  g_string_free (global_audit_sod_sql, TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   return WYRELOG_E_OK;
 }
 
