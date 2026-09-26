@@ -6368,6 +6368,22 @@ test_fact_backup_snapshot_schema_digest (void)
   g_assert_nonnull (graph);
   g_assert_cmpstr (graph->active_schema_digest, ==,
       "sha256:aa6a70e4a3ad66e830a339e1b0dfdac12d76dcce721c53aa2b7dedd30ec09210");
+  g_autofree gchar *snapshot_digest = NULL;
+  g_assert_cmpint
+    (wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
+        (store, "tenant-backup", "graph-a", &snapshot_digest), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (snapshot_digest);
+  g_assert_cmpint (wyl_policy_store_fact_replay_snapshot_begin (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
+        (store, "tenant-backup", "graph-a", &snapshot_digest), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (snapshot_digest, ==, graph->active_schema_digest);
+  g_assert_cmpint (wyl_policy_store_fact_replay_snapshot_end (store), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&snapshot_digest, g_free);
   wyl_policy_fact_backup_snapshot_free (snapshot);
 
   insert_backup_schema (db, "graph-a", FALSE);

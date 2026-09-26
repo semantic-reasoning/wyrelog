@@ -2866,6 +2866,13 @@ wyrelog_error_t wyl_policy_store_fact_replay_snapshot_end
   (wyl_policy_store_t *store);
 gboolean wyl_policy_store_fact_replay_snapshot_is_current
   (wyl_policy_store_t *store);
+/* Compute the active-schema digest using the caller's currently held replay
+ * snapshot. This does not begin or end a transaction; callers must keep the
+ * snapshot open until all related policy evidence has been copied. */
+wyrelog_error_t
+wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    gchar **out_digest);
 wyrelog_error_t wyl_policy_store_load_fact_relation_query
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * query_name,
