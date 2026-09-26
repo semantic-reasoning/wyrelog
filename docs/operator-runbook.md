@@ -1210,6 +1210,20 @@ recording secret material:
   JWT, `Authorization` body, session id, or `jti` is present in any audit row,
   log, error, CLI output, or recovery journal. This is proven end to end by
   `service-credential-leak-scan-e2e` (Linux packaged runtime).
+- **Human session ids are shown as handles.** That guarantee is about
+  service credentials. A human login's session id is also its
+  `session_token`, which `?session_token=` accepts on every guarded route,
+  and the stored audit rows do record it: as the subject of `session_state`
+  and `session_fired_delta_*` rows, and in any column of a row written for a
+  session-scoped request. `/audit/events` and `wyctl audit query` therefore
+  show `session#` followed by 16 hex digits in its place. A handle is stable
+  for the life of one daemon process, so a session's rows still correlate,
+  but it is not a credential and does not match as a filter value. The
+  subject of those two row kinds is always replaced; in every other column
+  only the id of a session still live when the log is read is, and the id of
+  a session that has ended, which no longer authenticates, appears as
+  stored. The raw ids remain in the on-disk policy and audit stores, which
+  the file permissions of those stores protect.
 
 ## Datalog Product Flow
 

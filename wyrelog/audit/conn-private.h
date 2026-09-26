@@ -222,4 +222,26 @@ wyrelog_error_t wyl_audit_conn_verify_chain (wyl_audit_conn_t * conn,
 wyrelog_error_t wyl_audit_conn_query_events_json (wyl_audit_conn_t * conn,
     const gchar * filter, gchar ** out_json);
 
+/*
+ * Consulted for every non-NULL string column of every row, in column order
+ * id, subject_id, action, resource_id, deny_reason, deny_origin,
+ * request_id.  @row_action is the row's stored action.  Setting
+ * *@out_replacement (newly allocated) serialises it in place of @value;
+ * leaving it NULL keeps @value.  The id is offered only so the callback
+ * can refuse the row: replacing it fails with WYRELOG_E_INTERNAL, because
+ * clients parse it as a wyrelog id.  Any return other than WYRELOG_E_OK
+ * aborts the query with that code and no output.
+ */
+typedef wyrelog_error_t (*WylAuditEventRedactor) (const gchar * column,
+    const gchar * row_action, const gchar * value, gchar ** out_replacement,
+    gpointer user_data);
+
+/*
+ * wyl_audit_conn_query_events_json() with each string value passed through
+ * @redactor first.  A NULL @redactor produces identical output.
+ */
+wyrelog_error_t wyl_audit_conn_query_events_json_redacted (wyl_audit_conn_t *
+    conn, const gchar * filter, WylAuditEventRedactor redactor,
+    gpointer user_data, gchar ** out_json);
+
 G_END_DECLS;

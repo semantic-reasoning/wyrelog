@@ -2362,9 +2362,45 @@ parse_audit_filter (const gchar *filter, const gchar **out_column,
   return FALSE;
 }
 
+static wyrelog_error_t
+append_json_member_redacted (GString *json, const gchar *name,
+    duckdb_result *result, idx_t col, idx_t row, const gchar *row_action,
+    WylAuditEventRedactor redactor, gpointer user_data)
+{
+  if (redactor == NULL || duckdb_value_is_null (result, col, row)) {
+    append_json_member_string (json, name, result, col, row);
+    return WYRELOG_E_OK;
+  }
+
+  gchar *value = duckdb_value_varchar (result, col, row);
+  g_autofree gchar *replacement = NULL;
+  wyrelog_error_t rc = redactor (name, row_action, value, &replacement,
+          user_data);
+  if (rc == WYRELOG_E_OK && replacement != NULL
+      && g_strcmp0 (name, "id") == 0)
+    rc = WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK) {
+    g_string_append_c (json, '"');
+    g_string_append (json, name);
+    g_string_append (json, "\":");
+    append_json_string (json, replacement != NULL ? replacement : value);
+  }
+  duckdb_free (value);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
     const gchar *filter, gchar **out_json)
+{
+  return wyl_audit_conn_query_events_json_redacted (conn, filter, NULL, NULL,
+             out_json);
+}
+
+wyrelog_error_t
+wyl_audit_conn_query_events_json_redacted (wyl_audit_conn_t *conn,
+    const gchar *filter, WylAuditEventRedactor redactor, gpointer user_data,
+    gchar **out_json)
 {
   const gchar *column;
   g_autofree gchar *string_value = NULL;
@@ -2419,34 +2455,51 @@ wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
     return WYRELOG_E_IO;
   }
 
+  static const struct
+  {
+    const gchar *name;
+    idx_t col;
+  } string_members[] = {
+    {"subject_id", 2},
+    {"action", 3},
+    {"resource_id", 4},
+    {"deny_reason", 5},
+    {"deny_origin", 6},
+    {"request_id", 7},
+  };
   g_autoptr (GString) json = g_string_new ("[");
+  wyrelog_error_t redact_rc = WYRELOG_E_OK;
   idx_t rows = duckdb_row_count (&result);
-  for (idx_t row = 0; row < rows; row++) {
+  for (idx_t row = 0; row < rows && redact_rc == WYRELOG_E_OK; row++) {
     if (row > 0)
       g_string_append_c (json, ',');
 
+    gchar *row_action = redactor != NULL
+        && !duckdb_value_is_null (&result, 3, row)
+        ? duckdb_value_varchar (&result, 3, row) : NULL;
     g_string_append_c (json, '{');
-    append_json_member_string (json, "id", &result, 0, row);
-    g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT,
-        duckdb_value_int64 (&result, 1, row));
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "subject_id", &result, 2, row);
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "action", &result, 3, row);
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "resource_id", &result, 4, row);
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "deny_reason", &result, 5, row);
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "deny_origin", &result, 6, row);
-    g_string_append_c (json, ',');
-    append_json_member_string (json, "request_id", &result, 7, row);
-    g_string_append_printf (json, ",\"decision\":%" G_GINT16_FORMAT "}",
-        (gint16) duckdb_value_int64 (&result, 8, row));
+    redact_rc = append_json_member_redacted (json, "id", &result, 0, row,
+            row_action, redactor, user_data);
+    if (redact_rc == WYRELOG_E_OK)
+      g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT,
+          duckdb_value_int64 (&result, 1, row));
+    for (gsize i = 0; i < G_N_ELEMENTS (string_members)
+        && redact_rc == WYRELOG_E_OK; i++) {
+      g_string_append_c (json, ',');
+      redact_rc = append_json_member_redacted (json, string_members[i].name,
+              &result, string_members[i].col, row, row_action, redactor,
+              user_data);
+    }
+    if (redact_rc == WYRELOG_E_OK)
+      g_string_append_printf (json, ",\"decision\":%" G_GINT16_FORMAT "}",
+          (gint16) duckdb_value_int64 (&result, 8, row));
+    duckdb_free (row_action);
   }
   g_string_append_c (json, ']');
 
   duckdb_destroy_result (&result);
+  if (redact_rc != WYRELOG_E_OK)
+    return redact_rc;
   *out_json = g_string_free (g_steal_pointer (&json), FALSE);
   return WYRELOG_E_OK;
 }

@@ -13840,6 +13840,323 @@ check_audit_query_session_token_fallback (WylHandle *handle,
   return 0;
 }
 
+/*
+ * The session id /auth/login returns is the session token ?session_token=
+ * accepts, and the audit log records it: as the subject of session_state and
+ * session_fired_delta_* rows, and in any column of a row written for a
+ * session-scoped request.  /audit/events must show a handle in its place, or
+ * reading the log hands the reader every live session.
+ *
+ * Absence is only ever asserted on a response already shown to contain the
+ * victim's rows: the route returns the newest 100 rows, so an unfiltered
+ * miss would prove nothing.
+ */
+static GPtrArray *
+audit_json_string_values (const gchar *body, const gchar *column)
+{
+  GPtrArray *values = g_ptr_array_new_with_free_func (g_free);
+  g_autofree gchar *prefix = g_strdup_printf ("\"%s\":\"", column);
+  const gchar *cursor = body;
+  while (cursor != NULL && (cursor = strstr (cursor, prefix)) != NULL) {
+    cursor += strlen (prefix);
+    const gchar *end = strchr (cursor, '"');
+    if (end == NULL)
+      break;
+    g_ptr_array_add (values, g_strndup (cursor, (gsize) (end - cursor)));
+    cursor = end;
+  }
+  return values;
+}
+
+static gboolean
+audit_value_is_session_handle (const gchar *value)
+{
+  if (value == NULL || !g_str_has_prefix (value, "session#")
+      || strlen (value) != strlen ("session#") + 16)
+    return FALSE;
+  for (const gchar *p = value + strlen ("session#"); *p != '\0'; p++)
+    if (!g_ascii_isxdigit (*p) || g_ascii_isupper (*p))
+      return FALSE;
+  return TRUE;
+}
+
+static gint
+audit_redaction_query (SoupSession *session, const gchar *base_url,
+    const gchar *access_token, const gchar *filter, gchar **out_body)
+{
+  g_autofree gchar *escaped = g_uri_escape_string (filter, NULL, TRUE);
+  g_autofree gchar *query = g_strdup_printf ("filter=%s&guard_timestamp=123"
+          "&guard_loc_class=public&guard_risk=69", escaped);
+  guint status = 0;
+  if (send_raw_audit_bearer (session, base_url, query, access_token, &status,
+      out_body) != 0 || status != 200 || *out_body == NULL
+      || (*out_body)[0] != '[') {
+    g_printerr ("audit redaction query %s: %u %s\n", filter, status,
+        *out_body != NULL ? *out_body : "(null)");
+    return 1;
+  }
+  return 0;
+}
+
+/* Every value a row could expose, replayed as ?session_token=, must fail
+ * authentication: none of them is a live session. */
+static gint
+audit_redaction_replay (SoupSession *session, const gchar *base_url,
+    const gchar *body)
+{
+  static const gchar *const columns[] = {
+    "subject_id", "resource_id", "deny_reason", "deny_origin", "request_id",
+  };
+  for (gsize c = 0; c < G_N_ELEMENTS (columns); c++) {
+    g_autoptr (GPtrArray) values = audit_json_string_values (body,
+            columns[c]);
+    for (guint i = 0; i < values->len; i++) {
+      g_autofree gchar *escaped = g_uri_escape_string (values->pdata[i],
+              NULL, TRUE);
+      g_autofree gchar *query = g_strdup_printf ("session_token=%s"
+              "&guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+              escaped);
+      guint status = 0;
+      g_autofree gchar *reply = NULL;
+      if (send_raw_audit (session, base_url, query, &status, &reply) != 0
+          || status != 401
+          || strstr (reply, "\"audit_auth_required\"") == NULL) {
+        g_printerr ("audit value %s=%s replayed: %u %s\n", columns[c],
+            (const gchar *) values->pdata[i], status,
+            reply != NULL ? reply : "(null)");
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+static gint64
+audit_first_created_at_us (const gchar *body)
+{
+  const gchar *field = strstr (body, "\"created_at_us\":");
+  if (field == NULL)
+    return -1;
+  return g_ascii_strtoll (field + strlen ("\"created_at_us\":"), NULL, 10);
+}
+
+static gint
+enroll_audit_redaction_victim (WylHandle *handle, const gchar *subject)
+{
+  WylTotpEnrollment enrollment = { 0 };
+  enrollment.subject_id = g_strdup (subject);
+  memcpy (enrollment.secret, AUDIT_SESSION_TEST_TOTP_SEED,
+      sizeof enrollment.secret);
+  enrollment.last_verified_step = G_MININT64;
+  enrollment.enrolled_at = 1700000000;
+  wyrelog_error_t rc = wyl_policy_store_totp_enrollment_insert
+        (wyl_handle_get_policy_store (handle), &enrollment);
+  wyl_totp_enrollment_clear (&enrollment);
+  return rc == WYRELOG_E_OK ? 0 : 1;
+}
+
+static gint
+check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
+    const gchar *base_url, const gchar *reader_token,
+    const gchar *reader_session_token)
+{
+  wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
+  if (enroll_audit_redaction_victim (handle, "audit-leak-victim") != 0
+      || enroll_audit_redaction_victim (handle, "audit-leak-pending") != 0)
+    return 12601;
+
+  g_autoptr (SoupSession) http = soup_session_new ();
+  gint64 t0 = g_get_real_time ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *victim_rid = NULL;
+  g_autofree gchar *pending_rid = NULL;
+  if (send_raw_login_full (http, "POST", base_url,
+      "username=audit-leak-victim", &status, &body, &victim_rid) != 0
+      || status != 200 || victim_rid == NULL)
+    return 12602;
+  g_autofree gchar *victim = extract_json_string (body, "session_token");
+  if (send_raw_login_full (http, "POST", base_url,
+      "username=audit-leak-pending", &status, &body, &pending_rid) != 0
+      || status != 200 || pending_rid == NULL)
+    return 12603;
+  g_autofree gchar *pending = extract_json_string (body, "session_token");
+  if (victim == NULL || pending == NULL)
+    return 12604;
+
+  guint64 step = (guint64) (g_get_real_time () / G_USEC_PER_SEC)
+      / WYL_TOTP_STEP_SECONDS;
+  guint code = 0;
+  if (wyl_totp_code_at_step (AUDIT_SESSION_TEST_TOTP_SEED,
+      sizeof AUDIT_SESSION_TEST_TOTP_SEED, step, &code, NULL) != WYRELOG_E_OK)
+    return 12605;
+  g_autofree gchar *verify_body = g_strdup_printf
+        ("{\"session_token\":\"%s\",\"code\":\"%06u\"}", victim, code);
+  if (send_raw_path_probe (http, "POST", base_url, "/auth/mfa/verify", NULL,
+      verify_body, &status, &body) != 0 || status != 200)
+    return 12606;
+
+  /* Both are live: the verified session authenticates (and is refused only
+   * for lacking the permission), the pending one is registered and becomes
+   * a credential the moment its owner verifies. */
+  g_autofree gchar *liveness = g_strdup_printf ("session_token=%s"
+          "&guard_timestamp=123&guard_loc_class=public&guard_risk=69", victim);
+  if (send_raw_audit (http, base_url, liveness, &status, &body) != 0
+      || status != 403 || strstr (body, "\"audit_denied\"") == NULL)
+    return 12607;
+  g_autoptr (WylSession) pending_session = wyl_daemon_http_ref_session (server,
+          pending);
+  if (pending_session == NULL)
+    return 12608;
+  /* The victims' logins drop the reader's engine-seam grant; re-seed it. */
+  if (grant_audit_read (handle, "http-audit-user", reader_session_token)
+      != WYRELOG_E_OK)
+    return 12631;
+
+  const gchar *const secrets[] = { victim, pending, reader_session_token };
+
+  /* session_state rows, found by the login's own request id. */
+  const gchar *const login_rids[] = { victim_rid, pending_rid };
+  for (gsize i = 0; i < G_N_ELEMENTS (login_rids); i++) {
+    g_autofree gchar *filter = g_strdup_printf ("request_id(\"%s\")",
+            login_rids[i]);
+    g_autofree gchar *rows = NULL;
+    if (audit_redaction_query (http, base_url, reader_token, filter, &rows)
+        != 0)
+      return 12609;
+    if (strstr (rows, "\"action\":\"session_state\"") == NULL)
+      return 12610;
+    g_autoptr (GPtrArray) subjects = audit_json_string_values (rows,
+            "subject_id");
+    gboolean handled = FALSE;
+    for (guint s = 0; s < subjects->len; s++)
+      handled |= audit_value_is_session_handle (subjects->pdata[s]);
+    if (!handled)
+      return 12611;
+    for (gsize s = 0; s < G_N_ELEMENTS (secrets); s++)
+      if (strstr (rows, secrets[s]) != NULL)
+        return 12612;
+    if (audit_redaction_replay (http, base_url, rows) != 0)
+      return 12613;
+  }
+
+  /* session_fired_delta_* rows carry no request id; the newest must be one
+   * of these logins, or the delta runtime wrote nothing to check. */
+  g_autofree gchar *fired = NULL;
+  if (audit_redaction_query (http, base_url, reader_token,
+      "action(\"session_fired_delta_insert\")", &fired) != 0)
+    return 12614;
+  if (audit_first_created_at_us (fired) < t0)
+    return 12615;
+  g_autoptr (GPtrArray) fired_subjects = audit_json_string_values (fired,
+          "subject_id");
+  if (fired_subjects->len == 0)
+    return 12616;
+  for (guint s = 0; s < fired_subjects->len; s++)
+    if (!audit_value_is_session_handle (fired_subjects->pdata[s]))
+      return 12617;
+  for (gsize s = 0; s < G_N_ELEMENTS (secrets); s++)
+    if (strstr (fired, secrets[s]) != NULL)
+      return 12618;
+  if (audit_redaction_replay (http, base_url, fired) != 0)
+    return 12619;
+
+  /* The reader's own decisions: until audit reads decide at the system
+   * tenant their resource is the reader's session. */
+  g_autofree gchar *decisions = NULL;
+  if (audit_redaction_query (http, base_url, reader_token,
+      "action(\"wr.audit.read\")", &decisions) != 0)
+    return 12620;
+  if (audit_first_created_at_us (decisions) < t0)
+    return 12621;
+  g_autoptr (GPtrArray) resources = audit_json_string_values (decisions,
+          "resource_id");
+  if (resources->len == 0
+      || !audit_value_is_session_handle (resources->pdata[0]))
+    return 12622;
+  for (gsize s = 0; s < G_N_ELEMENTS (secrets); s++)
+    if (strstr (decisions, secrets[s]) != NULL)
+      return 12623;
+  if (audit_redaction_replay (http, base_url, decisions) != 0)
+    return 12624;
+
+  /* Any column equal to a live session id, whatever wrote it. */
+  g_autoptr (WylAuditEvent) probe = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (probe, victim);
+  wyl_audit_event_set_action (probe, "leak_probe");
+  wyl_audit_event_set_resource_id (probe, victim);
+  wyl_audit_event_set_deny_reason (probe, victim);
+  wyl_audit_event_set_deny_origin (probe, victim);
+  wyl_audit_event_set_request_id (probe, victim);
+  wyl_audit_event_set_decision (probe, WYL_DECISION_ALLOW);
+  if (wyl_audit_emit (handle, probe) != WYRELOG_E_OK)
+    return 12625;
+  g_autofree gchar *probed = NULL;
+  if (audit_redaction_query (http, base_url, reader_token,
+      "action(\"leak_probe\")", &probed) != 0)
+    return 12626;
+  g_autofree gchar *victim_handle = extract_json_string (probed,
+          "subject_id");
+  if (!audit_value_is_session_handle (victim_handle))
+    return 12627;
+  static const gchar *const probe_columns[] = {
+    "resource_id", "deny_reason", "deny_origin", "request_id",
+  };
+  for (gsize c = 0; c < G_N_ELEMENTS (probe_columns); c++) {
+    g_autofree gchar *member = g_strdup_printf ("\"%s\":\"%s\"",
+            probe_columns[c], victim_handle);
+    if (strstr (probed, member) == NULL)
+      return 12628;
+  }
+  if (strstr (probed, victim) != NULL)
+    return 12629;
+  if (audit_redaction_replay (http, base_url, probed) != 0)
+    return 12630;
+
+  /* Once the victim logs out its id matches no registration, so only the
+   * structural rule still hides it -- as it must during login, before the
+   * registration exists.  The handle is the one shown while it was live. */
+  g_autofree gchar *logout_path = g_strdup_printf
+        ("/auth/logout?session_token=%s", victim);
+  if (send_raw_path (http, "POST", base_url, logout_path, &status, &body) != 0
+      || status != 200)
+    return 12632;
+  g_autoptr (WylSession) gone = wyl_daemon_http_ref_session (server, victim);
+  if (gone != NULL)
+    return 12633;
+  if (grant_audit_read (handle, "http-audit-user", reader_session_token)
+      != WYRELOG_E_OK)
+    return 12639;
+  g_autofree gchar *victim_filter = g_strdup_printf ("request_id(\"%s\")",
+          victim_rid);
+  g_autofree gchar *after_logout = NULL;
+  if (audit_redaction_query (http, base_url, reader_token, victim_filter,
+      &after_logout) != 0)
+    return 12634;
+  g_autofree gchar *state_member = g_strdup_printf
+        ("\"subject_id\":\"%s\",\"action\":\"session_state\"",
+          victim_handle);
+  if (strstr (after_logout, state_member) == NULL
+      || strstr (after_logout, victim) != NULL)
+    return 12635;
+  g_autofree gchar *fired_after = NULL;
+  if (audit_redaction_query (http, base_url, reader_token,
+      "action(\"session_fired_delta_insert\")", &fired_after) != 0)
+    return 12636;
+  g_autoptr (GPtrArray) fired_after_subjects = audit_json_string_values
+        (fired_after, "subject_id");
+  gboolean victim_fired = FALSE;
+  for (guint s = 0; s < fired_after_subjects->len; s++) {
+    if (!audit_value_is_session_handle (fired_after_subjects->pdata[s]))
+      return 12637;
+    victim_fired |= g_strcmp0 (fired_after_subjects->pdata[s],
+            victim_handle) == 0;
+  }
+  if (!victim_fired || strstr (fired_after, victim) != NULL)
+    return 12638;
+  return 0;
+}
+
 #endif /* WYL_HAS_AUDIT */
 
 #ifdef WYL_HAS_FACT_STORE
@@ -25012,6 +25329,12 @@ audit_variant_checks (void)
   audit_rc = check_audit_event_present (client, "action(\"role_revoke\")",
           "http-policy-admin", "role_revoke", "tenant-b",
           WYL_DECISION_ALLOW, NULL, "site.reader");
+  if (audit_rc != 0)
+    return audit_rc;
+  g_autofree gchar *reader_token = wyl_client_dup_access_token (client);
+  g_autofree gchar *reader_session = wyl_client_dup_session_token (client);
+  audit_rc = check_audit_redacts_live_session_ids (handle, http.server,
+          base_url, reader_token, reader_session);
   if (audit_rc != 0)
     return audit_rc;
   audit_rc = check_audit_query_session_token_fallback (handle, base_url);
