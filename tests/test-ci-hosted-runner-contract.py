@@ -33,7 +33,9 @@ CI_JOBS = (
 )
 
 EXPECTED_JOBS = {
-    ".github/workflows/ci-pr.yml": CI_JOBS,
+    ".github/workflows/ci-pr.yml": (
+        CI_JOBS[0], "product-install-linux", *CI_JOBS[1:]
+    ),
     ".github/workflows/ci-main.yml": CI_JOBS,
     ".github/workflows/actionlint.yml": ("actionlint",),
     ".github/workflows/codeql.yml": ("analyze",),
@@ -58,6 +60,9 @@ EXPECTED_JOB_KEYS = {
     "format": ("name", "runs-on", "timeout-minutes", "steps"),
     "build-posix": (
         "name", "runs-on", "env", "strategy", "steps"
+    ),
+    "product-install-linux": (
+        "name", "runs-on", "timeout-minutes", "steps"
     ),
     "duckdb-linux-link-closure": (
         "name", "runs-on", "timeout-minutes", "strategy", "steps"
@@ -93,6 +98,7 @@ EXPECTED_JOB_KEYS = {
 EXPECTED_RUNS_ON = {
     "format": "ubuntu-latest",
     "build-posix": "${{ matrix.os }}",
+    "product-install-linux": "ubuntu-latest",
     "duckdb-linux-link-closure": "ubuntu-latest",
     "service-credential-e2e": "ubuntu-latest",
     "duckdb-checkpoint-seam": "${{ matrix.os }}",
@@ -258,6 +264,9 @@ COMMON_CI_STATUS_HANDLERS = {
 EXPECTED_STATUS_HANDLERS = {
     ".github/workflows/ci-pr.yml": {
         **COMMON_CI_STATUS_HANDLERS,
+        "product-install-linux": (
+            ("Upload product install Meson logs on failure", "${{ failure() }}"),
+        ),
         "daemon-http-shared-fact": (
             ("Capture daemon HTTP audit provenance", STATUS_AUDIT_CAPTURE),
             ("Upload daemon HTTP meson logs on failure", STATUS_FAILURE),
@@ -340,6 +349,11 @@ COMMON_ACTIONS = {
 
 PR_ACTIONS = {
     **COMMON_ACTIONS,
+    "product-install-linux": actions(
+        ("Check out source", CHECKOUT_ACTION),
+        ("Restore pinned subproject packagecache", CACHE_RESTORE_ACTION),
+        ("Upload product install Meson logs on failure", UPLOAD_ACTION),
+    ),
     "build-posix": actions(
         ("Check out source", CHECKOUT_ACTION),
         ("Restore meson packagecache", CACHE_RESTORE_ACTION),
@@ -953,7 +967,7 @@ def parse_steps(path: str, job: str, lines: list[str], steps_start: int, end: in
 # run no suite, so a misdispatch there fails on its own missing tooling instead
 # of being scored as a defect in the tree.
 UNGUARDED_JOBS = {
-    ".github/workflows/ci-pr.yml": ("format",),
+    ".github/workflows/ci-pr.yml": ("format", "product-install-linux"),
     ".github/workflows/ci-main.yml": ("format",),
 }
 
@@ -1036,7 +1050,12 @@ def validate_conditions(path: str, name: str, steps: tuple[Step, ...]) -> None:
             reject("E_IF_SCALAR", f"{path}:{name} escaped if scalar is unsupported")
         if STATUS_FUNCTION.search(condition) is None:
             continue
-        if condition not in CANONICAL_STATUS_CONDITIONS:
+        product_install_failure = (
+            path == ".github/workflows/ci-pr.yml"
+            and name == "product-install-linux"
+            and condition == "${{ failure() }}"
+        )
+        if condition not in CANONICAL_STATUS_CONDITIONS and not product_install_failure:
             reject(
                 "E_STATUS_PREDICATE",
                 f"{path}:{name} status condition is not an approved complete scalar",

@@ -99,6 +99,13 @@ option('duckdb_source',
               + 'amalgamation on every push.'
 )
 
+option('product_install',
+  type : 'boolean',
+  value : false,
+  description : 'Force pinned Linux runtime dependency providers for the '
+              + 'product-package staging profile.'
+)
+
 option('enable_secure_duckdb_bridge',
   type : 'feature',
   value : 'disabled',

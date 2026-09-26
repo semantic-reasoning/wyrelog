@@ -1328,7 +1328,7 @@ def require_repository_meson_profile(
             raise AssertionError(f"Meson override is outside inventory: {sorted(unknown)}")
     nested = raw["meson/wirelog-dependency/meson.build"]
     if hashlib.sha256(nested.encode("utf-8")).hexdigest() != (
-        "737f8e0481782bce9cef7f2b2c658d7cfbfb4051767da807cb152c151b1e7376"
+        "b5077ce8cfc9f1f21845bc6c0be05b0af9119c65353b305199175b614aab44eb"
     ):
         raise AssertionError("wirelog dependency Meson profile drift")
     if meson_function_calls(raw["meson.build"], "subdir") != [

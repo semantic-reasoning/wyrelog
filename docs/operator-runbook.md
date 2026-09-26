@@ -48,6 +48,39 @@ early HTTP response should use `Expect: 100-continue` and wait before uploading.
   `-Dwyrelog_log_max_level=warn`; packaged runtime defaults set
   `WYL_LOG=warn`
 
+## Linux Runtime Dependencies and Product Install
+
+The Linux release package profile is verified by
+`tools/stage-product-install.py` against a fresh `DESTDIR`. Configure it with
+`-Dproduct_install=true` and force the pinned Wirelog and libchronoid
+fallbacks. The staging helper runs `meson install` and prunes only the
+developer artifacts listed in `packaging/linux-product-install.json`, then
+checks the final tree and ELF runtime closure. This preserves the runtime
+shared libraries while omitting subproject headers, static archives,
+pkg-config files, man pages, and developer CLIs. Do not use
+`--skip-subprojects`: the product uses the installed Wirelog, nanoarrow,
+xxhash, and libchronoid shared libraries at runtime.
+
+Packagers must also provide the external DuckDB runtime library
+`libduckdb.so` at exactly version 1.5.5. The Meson prebuilt dependency is pinned
+to the upstream v1.5.5 Linux archive; the installed product does not vendor
+DuckDB. The libchronoid 1.2.0 shared library is installed from the pinned
+fallback. Standard system runtime dependencies include GLib/GIO, libsoup 3,
+libsodium, SQLite, the C runtime, and (when TPM is enabled) tss2-esys. Package
+metadata must declare these runtime requirements; a successful build or an
+`ldd` resolution against the build host is not evidence that the package is
+self-contained.
+
+CI configures the canonical product profile with every release-sensitive
+option explicit, builds the daemon and CLI, installs into an empty staging
+directory with the staging helper, and checks every staged ELF
+dependency against the staged library set or the explicit external/system
+allowlists. For external DuckDB, it checks the version reported by the exact
+pinned build artifact as well as the subproject version and wrap hash; it does
+not treat runner-wide library resolution as proof of package runtime closure.
+The check also verifies the product path manifest, required template/service
+assets, and symlink containment.
+
 ## Profiles
 
 Wyrelog ships two daemon profiles:

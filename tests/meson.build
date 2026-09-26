@@ -34,6 +34,11 @@ endif
 
 meson_exe = find_program('meson')
 
+test('product-install-tree-checker-self-test', python3,
+  args : [files('../tools/check-product-install-tree.py'), '--self-test'])
+test('product-install-tree-stager-self-test', python3,
+  args : [files('../tools/stage-product-install.py'), '--self-test'])
+
 test('wyctl-private-tmpdir-runner-self-test', python3,
   args : [files('test-wyctl-private-tmpdir-runner.py'),
     files('run-wyctl-with-private-tmpdir.py')])
