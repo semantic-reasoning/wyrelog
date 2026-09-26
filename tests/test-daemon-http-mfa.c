@@ -500,6 +500,14 @@ check_authenticated_principal_reauth (SoupServer *server, WylHandle *handle,
   g_autofree gchar *session_token = NULL;
   if (do_login (session, base_url, "mfa.reauth", &session_token) != 0)
     return 612;
+  /* #1232: the attached session is live but pending re-authentication, so
+   * its session token authenticates nothing until the proof below. */
+  g_autofree gchar *status_path = g_strdup_printf
+        ("/facts/status?session_token=%s", session_token);
+  if (send_raw (session, "GET", base_url, status_path, &status, &body) != 0
+      || status != 401
+      || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 617;
   gchar proof[8];
   if (compute_current_code (proof) != 0)
     return 613;
@@ -510,9 +518,67 @@ check_authenticated_principal_reauth (SoupServer *server, WylHandle *handle,
   if (status != 200 || strstr (body, "\"principal_state\":\"authenticated\"")
       == NULL || strstr (body, "\"access_token\":\"") == NULL)
     return 615;
+  if (send_raw (session, "GET", base_url, status_path, &status, &body) != 0
+      || status != 200)
+    return 618;
   /* Reauthentication preserves the subject-global state and does not append
    * a synthetic MFA_OK edge. */
   return count_mfa_ok_events (handle, "mfa.reauth") == 0 ? 0 : 616;
+}
+
+/*
+ * #1232: a session opened while the principal still owes its MFA proof is
+ * bound to no authentication at all.  When another session of the same
+ * subject completes the proof, principal_state turns authenticated for the
+ * subject, not the session, so the idle one must not ride on it.  The
+ * session that proved is the positive control on the same route.
+ */
+static gint
+check_unproven_session_not_authenticated_by_peer (SoupServer *server,
+    WylHandle *handle, const gchar *base_url)
+{
+  (void) server;
+  const gchar *subject = "mfa.peer";
+  g_autoptr (SoupSession) session = soup_session_new ();
+  if (seed_enrollment (handle, subject) != 0)
+    return 619;
+  g_autofree gchar *idle_token = NULL;
+  g_autofree gchar *proving_token = NULL;
+  if (do_login (session, base_url, subject, &idle_token) != 0
+      || do_login (session, base_url, subject, &proving_token) != 0)
+    return 620;
+  /* Before any session has established an authenticated epoch, the durable
+   * watermark is absent (not epoch zero). Neither initial session may use a
+   * guarded route merely because its local epoch is also zero. */
+  g_autofree gchar *idle_path = g_strdup_printf
+        ("/facts/status?session_token=%s", idle_token);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw (session, "GET", base_url, idle_path, &status, &body) != 0
+      || status != 401
+      || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 625;
+  gchar proof[8];
+  if (compute_current_code (proof) != 0)
+    return 621;
+  g_autofree gchar *verify_path = g_strdup_printf
+        ("/auth/mfa/verify?session_token=%s&code=%s", proving_token, proof);
+  if (send_raw (session, "POST", base_url, verify_path, &status, &body) != 0
+      || status != 200
+      || strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 622;
+
+  g_autofree gchar *proving_path = g_strdup_printf
+        ("/facts/status?session_token=%s", proving_token);
+  if (send_raw (session, "GET", base_url, proving_path, &status, &body) != 0
+      || status != 200)
+    return 623;
+  g_clear_pointer (&body, g_free);
+  if (send_raw (session, "GET", base_url, idle_path, &status, &body) != 0
+      || status != 401
+      || strstr (body, "\"fact_status_auth_required\"") == NULL)
+    return 624;
+  return 0;
 }
 
 static gint
@@ -921,6 +987,9 @@ main (void)
     goto out;
   if ((rc = check_authenticated_principal_reauth (http.server, handle,
       base_url)) != 0)
+    goto out;
+  if ((rc = check_unproven_session_not_authenticated_by_peer (http.server,
+      handle, base_url)) != 0)
     goto out;
   if ((rc = check_happy_path (http.server, handle, base_url)) != 0)
     goto out;
