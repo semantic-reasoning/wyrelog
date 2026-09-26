@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "compound-private.h"
 #include "replay-scheduler-private.h"
+#include "replay-store-private.h"
 
 #define WYL_FACT_STORE_CONNECTION_ROLE 1
 #include "store-connection-private.h"
@@ -480,143 +481,140 @@ compound_replay_cache_key (const gchar *namespace_id, gint64 compound_ref)
   return g_strdup_printf ("%s:%" G_GINT64_FORMAT, namespace_id, compound_ref);
 }
 
-static wyrelog_error_t
-load_term_unlocked (duckdb_connection conn, const gchar *tenant_id,
-    const gchar *graph_id, const gchar *namespace_id, gint64 compound_ref,
-    WylFactReplayJobContext *job_context, loaded_term_t *out_term)
+typedef struct
 {
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
-  memset (out_term, 0, sizeof (*out_term));
-  if (duckdb_prepare (conn,
-      "SELECT functor, arity, content_hash FROM compound_terms "
-      "WHERE tenant_id = ? "
-      "AND graph_id = ? AND namespace_id = ? AND compound_ref = ?;",
-      &stmt) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  duckdb_state ok = duckdb_bind_varchar (stmt, 1, tenant_id)
-      | duckdb_bind_varchar (stmt, 2, graph_id)
-      | duckdb_bind_varchar (stmt, 3, namespace_id)
-      | duckdb_bind_int64 (stmt, 4, compound_ref);
-  if (ok != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  if (job_context != NULL) {
-    wyrelog_error_t rc = wyl_fact_replay_job_context_checkpoint (job_context);
-    if (rc != WYRELOG_E_OK) {
-      duckdb_destroy_prepare (&stmt);
-      return rc;
-    }
-  }
-  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
-    wyrelog_error_t rc = job_context == NULL ? WYRELOG_E_IO
-        : wyl_fact_replay_job_context_checkpoint (job_context);
-    duckdb_destroy_prepare (&stmt);
-    duckdb_destroy_result (&result);
-    return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
-  }
-  duckdb_destroy_prepare (&stmt);
-  if (duckdb_row_count (&result) != 1) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_NOT_FOUND;
-  }
-  gchar *functor = duckdb_value_varchar (&result, 0, 0);
-  out_term->functor = g_strdup (functor);
-  duckdb_free (functor);
-  out_term->arity = duckdb_value_int64 (&result, 1, 0);
-  gchar *content_hash = duckdb_value_varchar (&result, 2, 0);
-  out_term->content_hash = g_strdup (content_hash);
-  duckdb_free (content_hash);
-  duckdb_destroy_result (&result);
-  if (out_term->functor == NULL || out_term->functor[0] == '\0'
-      || out_term->content_hash == NULL || out_term->content_hash[0] == '\0'
-      || out_term->arity <= 0 || out_term->arity > G_MAXUINT32) {
-    loaded_term_clear (out_term);
+  loaded_term_t *term;
+  gboolean found;
+} LoadTermCtx;
+
+static wyrelog_error_t
+load_term_row (const WylFactReplayCell *cells, gsize n_cells,
+    gpointer user_data)
+{
+  LoadTermCtx *ctx = user_data;
+  if (ctx->found || cells == NULL || n_cells != 3
+      || cells[0].type != WYL_FACT_REPLAY_CELL_TEXT
+      || cells[1].type != WYL_FACT_REPLAY_CELL_INT64
+      || cells[2].type != WYL_FACT_REPLAY_CELL_TEXT
+      || cells[0].value.text == NULL || cells[2].value.text == NULL)
     return WYRELOG_E_POLICY;
-  }
+  ctx->term->functor = g_strdup (cells[0].value.text);
+  ctx->term->arity = cells[1].value.int64_value;
+  ctx->term->content_hash = g_strdup (cells[2].value.text);
+  ctx->found = TRUE;
+  if (ctx->term->functor == NULL || ctx->term->content_hash == NULL)
+    return WYRELOG_E_NOMEM;
+  if (ctx->term->functor[0] == '\0' || ctx->term->content_hash[0] == '\0'
+      || ctx->term->arity <= 0 || ctx->term->arity > G_MAXUINT32)
+    return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t replay_unlocked (duckdb_connection conn,
+static wyrelog_error_t
+load_term_from_store (WylFactReplayStore *store, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *namespace_id, gint64 compound_ref,
+    WylFactReplayJobContext *job_context, loaded_term_t *out_term)
+{
+  memset (out_term, 0, sizeof (*out_term));
+  WylFactReplayStoreRequest request = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = namespace_id,
+    .compound_ref = compound_ref,
+  };
+  LoadTermCtx ctx = { .term = out_term };
+  wyrelog_error_t rc = wyl_fact_replay_store_execute (store,
+          WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM, &request, job_context,
+          load_term_row, &ctx);
+  if (rc == WYRELOG_E_OK && !ctx.found)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc != WYRELOG_E_OK)
+    loaded_term_clear (out_term);
+  return rc;
+}
+
+static wyrelog_error_t replay_unlocked (WylFactReplayStore *store,
     WylEngine * engine, const gchar * tenant_id, const gchar * graph_id,
     const gchar * namespace_id, gint64 compound_ref, guint depth,
     GHashTable * seen, GHashTable * handles,
     WylFactReplayJobContext *job_context, gint64 * out_handle);
 
-static wyrelog_error_t
-load_logical_arg_unlocked (idx_t row, duckdb_result *result,
-    wyl_fact_compound_arg_t *out_arg)
+typedef struct
 {
-  if (duckdb_value_int64 (result, 0, row) != (gint64) row)
-    return WYRELOG_E_POLICY;
-  gchar *type_text = duckdb_value_varchar (result, 1, row);
-  wyl_fact_compound_arg_type_t type = 0;
-  gboolean type_ok = arg_type_from_name (type_text, &type);
-  duckdb_free (type_text);
-  if (!type_ok)
-    return WYRELOG_E_POLICY;
+  wyl_fact_compound_arg_t *args;
+  gsize expected;
+  gsize seen;
+} LoadArgsCtx;
 
+static gboolean
+cell_is_null (const WylFactReplayCell *cell)
+{
+  return cell->type == WYL_FACT_REPLAY_CELL_NULL;
+}
+
+static wyrelog_error_t
+load_logical_arg_row (const WylFactReplayCell *cells, gsize n_cells,
+    gpointer user_data)
+{
+  LoadArgsCtx *ctx = user_data;
+  if (cells == NULL || n_cells != 7 || ctx->seen >= ctx->expected
+      || cells[0].type != WYL_FACT_REPLAY_CELL_INT64
+      || cells[0].value.int64_value != (gint64) ctx->seen
+      || cells[1].type != WYL_FACT_REPLAY_CELL_TEXT
+      || cells[1].value.text == NULL)
+    return WYRELOG_E_POLICY;
+  wyl_fact_compound_arg_t *out_arg = &ctx->args[ctx->seen];
+  wyl_fact_compound_arg_type_t type = 0;
+  if (!arg_type_from_name (cells[1].value.text, &type))
+    return WYRELOG_E_POLICY;
   switch (type) {
     case WYL_FACT_COMPOUND_ARG_SYMBOL:
     case WYL_FACT_COMPOUND_ARG_STRING:
     {
-      idx_t col = type == WYL_FACT_COMPOUND_ARG_SYMBOL ? 2 : 3;
-      if (duckdb_value_is_null (result, col, row)
-          || !duckdb_value_is_null (result, 4, row)
-          || !duckdb_value_is_null (result, 5, row)
-          || !duckdb_value_is_null (result, 6, row)
-          || (col == 2 && !duckdb_value_is_null (result, 3, row))
-          || (col == 3 && !duckdb_value_is_null (result, 2, row)))
+      gsize text_col = type == WYL_FACT_COMPOUND_ARG_SYMBOL ? 2 : 3;
+      if (cells[text_col].type != WYL_FACT_REPLAY_CELL_TEXT
+          || cells[text_col].value.text == NULL)
         return WYRELOG_E_POLICY;
-      gchar *text = duckdb_value_varchar (result, col, row);
-      if (text == NULL)
-        return WYRELOG_E_POLICY;
+      for (gsize i = 2; i < 7; i++)
+        if (i != text_col && !cell_is_null (&cells[i]))
+          return WYRELOG_E_POLICY;
       out_arg->type = type;
-      out_arg->as.text = g_strdup (text);
-      duckdb_free (text);
-      return out_arg->as.text != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+      out_arg->as.text = g_strdup (cells[text_col].value.text);
+      if (out_arg->as.text == NULL)
+        return WYRELOG_E_NOMEM;
+      break;
     }
     case WYL_FACT_COMPOUND_ARG_INT64:
-      if (!duckdb_value_is_null (result, 2, row)
-          || !duckdb_value_is_null (result, 3, row)
-          || duckdb_value_is_null (result, 4, row)
-          || !duckdb_value_is_null (result, 5, row)
-          || !duckdb_value_is_null (result, 6, row))
+      if (!cell_is_null (&cells[2]) || !cell_is_null (&cells[3])
+          || cells[4].type != WYL_FACT_REPLAY_CELL_INT64
+          || !cell_is_null (&cells[5]) || !cell_is_null (&cells[6]))
         return WYRELOG_E_POLICY;
-      out_arg->type = WYL_FACT_COMPOUND_ARG_INT64;
-      out_arg->as.int64_value = duckdb_value_int64 (result, 4, row);
-      return WYRELOG_E_OK;
+      out_arg->type = type;
+      out_arg->as.int64_value = cells[4].value.int64_value;
+      break;
     case WYL_FACT_COMPOUND_ARG_BOOL:
-      if (!duckdb_value_is_null (result, 2, row)
-          || !duckdb_value_is_null (result, 3, row)
-          || !duckdb_value_is_null (result, 4, row)
-          || duckdb_value_is_null (result, 5, row)
-          || !duckdb_value_is_null (result, 6, row))
+      if (!cell_is_null (&cells[2]) || !cell_is_null (&cells[3])
+          || !cell_is_null (&cells[4])
+          || cells[5].type != WYL_FACT_REPLAY_CELL_BOOL
+          || !cell_is_null (&cells[6]))
         return WYRELOG_E_POLICY;
-      out_arg->type = WYL_FACT_COMPOUND_ARG_BOOL;
-      out_arg->as.bool_value = duckdb_value_boolean (result, 5, row);
-      return WYRELOG_E_OK;
+      out_arg->type = type;
+      out_arg->as.bool_value = cells[5].value.bool_value;
+      break;
     case WYL_FACT_COMPOUND_ARG_COMPOUND_REF:
-    {
-      if (!duckdb_value_is_null (result, 2, row)
-          || !duckdb_value_is_null (result, 3, row)
-          || !duckdb_value_is_null (result, 4, row)
-          || !duckdb_value_is_null (result, 5, row)
-          || duckdb_value_is_null (result, 6, row))
+      if (!cell_is_null (&cells[2]) || !cell_is_null (&cells[3])
+          || !cell_is_null (&cells[4]) || !cell_is_null (&cells[5])
+          || cells[6].type != WYL_FACT_REPLAY_CELL_INT64
+          || cells[6].value.int64_value <= 0)
         return WYRELOG_E_POLICY;
-      gint64 child_ref = duckdb_value_int64 (result, 6, row);
-      if (child_ref <= 0)
-        return WYRELOG_E_POLICY;
-      out_arg->type = WYL_FACT_COMPOUND_ARG_COMPOUND_REF;
-      out_arg->as.compound_ref = child_ref;
-      return WYRELOG_E_OK;
-    }
+      out_arg->type = type;
+      out_arg->as.compound_ref = cells[6].value.int64_value;
+      break;
     default:
       return WYRELOG_E_POLICY;
   }
+  ctx->seen++;
+  return WYRELOG_E_OK;
 }
 
 static void
@@ -631,8 +629,14 @@ clear_logical_args (wyl_fact_compound_arg_t *args, gsize n_args)
   }
 }
 
+static wyrelog_error_t replay_unlocked (WylFactReplayStore *store,
+    WylEngine *engine, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *namespace_id, gint64 compound_ref, guint depth,
+    GHashTable *seen, GHashTable *handles,
+    WylFactReplayJobContext *job_context, gint64 *out_handle);
+
 static wyrelog_error_t
-materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
+materialize_arg_unlocked (WylFactReplayStore *store, WylEngine *engine,
     const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
     guint depth, GHashTable *seen, const wyl_fact_compound_arg_t *logical_arg,
     GHashTable *handles, WylFactReplayJobContext *job_context,
@@ -662,7 +666,7 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
     case WYL_FACT_COMPOUND_ARG_COMPOUND_REF:
     {
       gint64 child_handle = 0;
-      wyrelog_error_t rc = replay_unlocked (conn, engine, tenant_id, graph_id,
+      wyrelog_error_t rc = replay_unlocked (store, engine, tenant_id, graph_id,
               namespace_id, logical_arg->as.compound_ref, depth + 1, seen,
               handles, job_context, &child_handle);
       if (rc != WYRELOG_E_OK)
@@ -677,7 +681,7 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
 }
 
 static wyrelog_error_t
-replay_unlocked (duckdb_connection conn, WylEngine *engine,
+replay_unlocked (WylFactReplayStore *store, WylEngine *engine,
     const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
     gint64 compound_ref, guint depth, GHashTable *seen, GHashTable *handles,
     WylFactReplayJobContext *job_context, gint64 *out_handle)
@@ -706,58 +710,30 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
   g_hash_table_add (seen, seen_key);
 
   loaded_term_t term = { 0 };
-  wyrelog_error_t rc = load_term_unlocked (conn, tenant_id, graph_id,
+  wyrelog_error_t rc = load_term_from_store (store, tenant_id, graph_id,
           namespace_id, compound_ref, job_context, &term);
   if (rc != WYRELOG_E_OK) {
     g_hash_table_remove (seen, &compound_ref);
     return rc;
   }
 
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
-  if (duckdb_prepare (conn,
-      "SELECT arg_index, arg_type, symbol_value, string_value, "
-      "int64_value, bool_value, child_compound_ref FROM compound_args "
-      "WHERE compound_ref = ? ORDER BY arg_index;", &stmt)
-      != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    loaded_term_clear (&term);
-    g_hash_table_remove (seen, &compound_ref);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_bind_int64 (stmt, 1, compound_ref) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    loaded_term_clear (&term);
-    g_hash_table_remove (seen, &compound_ref);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
-    rc = job_context == NULL ? WYRELOG_E_IO
-        : wyl_fact_replay_job_context_checkpoint (job_context);
-    duckdb_destroy_prepare (&stmt);
-    duckdb_destroy_result (&result);
-    loaded_term_clear (&term);
-    g_hash_table_remove (seen, &compound_ref);
-    return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
-  }
-  duckdb_destroy_prepare (&stmt);
-  if (duckdb_row_count (&result) != (idx_t) term.arity) {
-    duckdb_destroy_result (&result);
-    loaded_term_clear (&term);
-    g_hash_table_remove (seen, &compound_ref);
-    return WYRELOG_E_POLICY;
-  }
-
   g_autofree wyl_fact_compound_arg_t *logical_args =
       g_new0 (wyl_fact_compound_arg_t, (gsize) term.arity);
-  for (idx_t i = 0; rc == WYRELOG_E_OK && i < duckdb_row_count (&result);
-      i++) {
-    if (job_context != NULL)
-      rc = wyl_fact_replay_job_context_checkpoint (job_context);
-    if (rc == WYRELOG_E_OK)
-      rc = load_logical_arg_unlocked (i, &result, &logical_args[i]);
-  }
-  duckdb_destroy_result (&result);
+  LoadArgsCtx args_ctx = {
+    .args = logical_args,
+    .expected = (gsize) term.arity,
+  };
+  WylFactReplayStoreRequest args_request = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = namespace_id,
+    .compound_ref = compound_ref,
+  };
+  rc = wyl_fact_replay_store_execute (store,
+          WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS, &args_request, job_context,
+          load_logical_arg_row, &args_ctx);
+  if (rc == WYRELOG_E_OK && args_ctx.seen != args_ctx.expected)
+    rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
     const wyl_fact_compound_value_t loaded_value = {
       .tenant_id = tenant_id,
@@ -776,7 +752,7 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
   g_autofree wirelog_compound_arg_t *args = g_new0 (wirelog_compound_arg_t,
           (gsize) term.arity);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < (gsize) term.arity; i++)
-    rc = materialize_arg_unlocked (conn, engine, tenant_id, graph_id,
+    rc = materialize_arg_unlocked (store, engine, tenant_id, graph_id,
             namespace_id, depth, seen, &logical_args[i], handles, job_context,
             &args[i]);
   if (rc == WYRELOG_E_OK)
@@ -796,6 +772,29 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
 }
 
 wyrelog_error_t
+wyl_fact_compound_replay_cached_from_replay_store (WylFactReplayStore *store,
+    WylEngine *engine, const gchar *tenant_id, const gchar *graph_id,
+    const gchar *namespace_id, gint64 compound_ref, GHashTable *handles,
+    WylFactReplayJobContext *job_context, gint64 *out_handle)
+{
+  if (out_handle != NULL)
+    *out_handle = 0;
+  if (store == NULL || engine == NULL || tenant_id == NULL || graph_id == NULL
+      || namespace_id == NULL || namespace_id[0] == '\0' || compound_ref <= 0
+      || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = job_context == NULL ? WYRELOG_E_OK
+      : wyl_fact_replay_job_context_checkpoint (job_context);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
+          g_int64_equal, g_free, NULL);
+  rc = replay_unlocked (store, engine, tenant_id, graph_id, namespace_id,
+          compound_ref, 0, seen, handles, job_context, out_handle);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_compound_replay (wyl_fact_store_t *store, WylEngine *engine,
     const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
     gint64 compound_ref, gint64 *out_handle)
@@ -805,20 +804,21 @@ wyl_fact_compound_replay (wyl_fact_store_t *store, WylEngine *engine,
   if (store == NULL || engine == NULL || tenant_id == NULL || graph_id == NULL
       || namespace_id == NULL || compound_ref <= 0 || out_handle == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
-          g_int64_equal, g_free, NULL);
-  WylFactStoreConnectionSession session = { 0 };
-  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
-          &session);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
-  rc = validate_scope_unlocked (conn, tenant_id, graph_id,
-          FALSE);
+  wyrelog_error_t rc = wyl_fact_store_validate_scope (store, tenant_id,
+          graph_id);
+  g_autoptr (WylFactReplayStore) replay_store = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-            compound_ref, 0, seen, NULL, NULL, out_handle);
-  wyl_fact_store_connection_session_end (&session);
+    rc = wyl_fact_replay_store_new_c_store (store, NULL, &replay_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_compound_replay_cached_from_replay_store (replay_store,
+            engine, tenant_id, graph_id, namespace_id, compound_ref, NULL,
+            NULL, out_handle);
+  if (replay_store != NULL) {
+    wyrelog_error_t close_rc = wyl_fact_replay_store_close_checked
+          (replay_store);
+    if (rc == WYRELOG_E_OK)
+      rc = close_rc;
+  }
   return rc;
 }
 
@@ -833,28 +833,22 @@ wyl_fact_compound_replay_cached (wyl_fact_store_t *store, WylEngine *engine,
       || namespace_id == NULL || compound_ref <= 0 || handles == NULL
       || out_handle == NULL)
     return WYRELOG_E_INVALID;
-  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
-          g_int64_equal, g_free, NULL);
-  WylFactStoreConnectionSession session = { 0 };
-  wyrelog_error_t rc = wyl_fact_store_connection_session_begin (store,
-          &session);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
-  rc = validate_scope_unlocked (conn, tenant_id, graph_id,
-          FALSE);
+  wyrelog_error_t rc = wyl_fact_store_validate_scope (store, tenant_id,
+          graph_id);
+  g_autoptr (WylFactReplayStore) replay_store = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-            compound_ref, 0, seen, handles, NULL, out_handle);
-  wyl_fact_store_connection_session_end (&session);
+    rc = wyl_fact_replay_store_new_c_store (store, NULL, &replay_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_compound_replay_cached_from_replay_store (replay_store,
+            engine, tenant_id, graph_id, namespace_id, compound_ref, handles,
+            NULL, out_handle);
+  if (replay_store != NULL) {
+    wyrelog_error_t close_rc = wyl_fact_replay_store_close_checked
+          (replay_store);
+    if (rc == WYRELOG_E_OK)
+      rc = close_rc;
+  }
   return rc;
-}
-
-static void
-compound_interrupt_cancelled (GCancellable *cancellable, gpointer user_data)
-{
-  (void) cancellable;
-  duckdb_interrupt ((duckdb_connection) user_data);
 }
 
 wyrelog_error_t
@@ -872,32 +866,20 @@ wyl_fact_compound_replay_cached_bounded (wyl_fact_store_t *store,
   wyrelog_error_t rc = wyl_fact_replay_job_context_checkpoint (job_context);
   if (rc != WYRELOG_E_OK)
     return rc;
-  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
-          g_int64_equal, g_free, NULL);
-  WylFactStoreConnectionSession session = { 0 };
-  rc = wyl_fact_store_connection_session_begin (store, &session);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  duckdb_connection conn = wyl_fact_store_connection_session_get (&session);
-  GCancellable *cancellable =
-      wyl_fact_replay_job_context_get_cancellable (job_context);
-  gulong handler = g_cancellable_connect (cancellable,
-          G_CALLBACK (compound_interrupt_cancelled), conn, NULL);
-  rc = wyl_fact_replay_job_context_checkpoint (job_context);
-  if (rc == WYRELOG_E_OK) {
-    rc = validate_scope_unlocked (conn, tenant_id, graph_id, FALSE);
-    if (rc != WYRELOG_E_OK) {
-      wyrelog_error_t outcome =
-          wyl_fact_replay_job_context_checkpoint (job_context);
-      if (outcome != WYRELOG_E_OK)
-        rc = outcome;
-    }
-  }
+  rc = wyl_fact_store_validate_scope (store, tenant_id, graph_id);
+  g_autoptr (WylFactReplayStore) replay_store = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-            compound_ref, 0, seen, handles, job_context, out_handle);
-  if (handler != 0)
-    g_cancellable_disconnect (cancellable, handler);
-  wyl_fact_store_connection_session_end (&session);
+    rc = wyl_fact_replay_store_new_c_store (store, job_context,
+            &replay_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_compound_replay_cached_from_replay_store (replay_store,
+            engine, tenant_id, graph_id, namespace_id, compound_ref, handles,
+            job_context, out_handle);
+  if (replay_store != NULL) {
+    wyrelog_error_t close_rc = wyl_fact_replay_store_close_checked
+          (replay_store);
+    if (rc == WYRELOG_E_OK)
+      rc = close_rc;
+  }
   return rc;
 }
