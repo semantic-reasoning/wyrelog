@@ -58,6 +58,7 @@ typedef struct
   const gchar *c;
   gboolean insert;
   const WylAuditEvent *audit_event;
+  wyl_policy_store_t *store;
 } WylPermissionPublication;
 
 typedef struct
@@ -79,7 +80,7 @@ verify_symbol_row (WylEngineVerification *verification, const gchar *relation,
     return WYRELOG_E_INVALID;
   for (guint i = 0; i < ncols; i++) {
     wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
-        symbols[i], &row[i]);
+            symbols[i], &row[i]);
     if (rc == WYRELOG_E_NOT_FOUND)
       return expected ? WYRELOG_E_POLICY : WYRELOG_E_OK;
     if (rc != WYRELOG_E_OK)
@@ -87,10 +88,52 @@ verify_symbol_row (WylEngineVerification *verification, const gchar *relation,
   }
   gboolean found = FALSE;
   wyrelog_error_t rc = wyl_engine_verification_contains (verification,
-      relation, row, ncols, &found);
+          relation, row, ncols, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   return found == expected ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_accepted_input_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, gsize ncols,
+    gboolean expected)
+{
+  g_autofree gint64 *row = g_new0 (gint64, ncols);
+  for (gsize i = 0; i < ncols; i++) {
+    wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
+            symbols[i], &row[i]);
+    if (rc == WYRELOG_E_NOT_FOUND && !expected)
+      return WYRELOG_E_OK;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  gboolean exact = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_has_exact_input_row
+        (verification, relation, row, ncols, expected, &exact);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+verify_permission_audit_event (WylEngineVerification *verification,
+    const WylAuditEvent *event)
+{
+  if (event == NULL)
+    return WYRELOG_E_OK;
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+  gint64 created_at_us = wyl_audit_event_get_created_at_us (event);
+  if (id == NULL || created_at_us <= 0)
+    return WYRELOG_E_INTERNAL;
+  return wyl_engine_verification_verify_audit_event (verification, id,
+             created_at_us, wyl_audit_event_get_decision (event) == WYL_DECISION_ALLOW,
+             wyl_audit_event_get_subject_id (event),
+             wyl_audit_event_get_action (event),
+             wyl_audit_event_get_resource_id (event),
+             wyl_audit_event_get_deny_reason (event),
+             wyl_audit_event_get_deny_origin (event),
+             wyl_audit_event_get_request_id (event));
 }
 
 wyl_login_req_t *
@@ -563,20 +606,21 @@ append_permission_audit_body (wyl_policy_store_t *store,
     return WYRELOG_E_INTERNAL;
   gboolean inserted = FALSE;
   return wyl_policy_store_append_audit_event_full (store, audit_id,
-      wyl_audit_event_get_created_at_us (audit_event),
-      wyl_audit_event_get_subject_id (audit_event),
-      wyl_audit_event_get_action (audit_event),
-      wyl_audit_event_get_resource_id (audit_event),
-      wyl_audit_event_get_deny_reason (audit_event),
-      wyl_audit_event_get_deny_origin (audit_event),
-      wyl_audit_event_get_request_id (audit_event),
-      wyl_audit_event_get_decision (audit_event), &inserted);
+             wyl_audit_event_get_created_at_us (audit_event),
+             wyl_audit_event_get_subject_id (audit_event),
+             wyl_audit_event_get_action (audit_event),
+             wyl_audit_event_get_resource_id (audit_event),
+             wyl_audit_event_get_deny_reason (audit_event),
+             wyl_audit_event_get_deny_origin (audit_event),
+             wyl_audit_event_get_request_id (audit_event),
+             wyl_audit_event_get_decision (audit_event), &inserted);
 }
 
 static wyrelog_error_t
 mutate_direct_permission (wyl_policy_store_t *store, gpointer data)
 {
   WylPermissionPublication *ctx = data;
+  ctx->store = store;
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (ctx->insert) {
     gboolean exists = FALSE;
@@ -586,12 +630,12 @@ mutate_direct_permission (wyl_policy_store_t *store, gpointer data)
   }
   if (rc == WYRELOG_E_OK)
     rc = ctx->insert ? wyl_policy_store_grant_direct_permission (store,
-        ctx->a, ctx->b, ctx->c) :
+            ctx->a, ctx->b, ctx->c) :
         wyl_policy_store_revoke_direct_permission (store, ctx->a, ctx->b,
-        ctx->c);
+            ctx->c);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_direct_permission_event (store, ctx->a,
-        ctx->b, ctx->c, ctx->insert ? "grant" : "revoke");
+            ctx->b, ctx->c, ctx->insert ? "grant" : "revoke");
   if (rc == WYRELOG_E_OK)
     rc = append_permission_audit_body (store, ctx->audit_event);
   return rc;
@@ -602,20 +646,51 @@ verify_direct_permission (WylEngineVerification *verification, gpointer data)
 {
   WylPermissionPublication *ctx = data;
   const gchar *symbols[] = { ctx->a, ctx->b, ctx->c };
+  if (ctx->store == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  /* direct_permission is an engine input rather than a snapshot output. Check
+   * the exact committed source row in the pinned store; has_permission alone
+   * can be satisfied by an independent role path. */
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_direct_permission_exists (ctx->store,
+          ctx->a, ctx->b, ctx->c, &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (exists != ctx->insert)
+    return WYRELOG_E_POLICY;
+  rc = verify_accepted_input_row (verification, "direct_permission",
+          symbols, G_N_ELEMENTS (symbols), ctx->insert);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = verify_permission_audit_event (verification, ctx->audit_event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!ctx->insert)
+    return WYRELOG_E_OK;
+
+  gboolean permission_exists = FALSE;
+  rc = wyl_policy_store_permission_exists (ctx->store, ctx->b,
+          &permission_exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!permission_exists)
+    return WYRELOG_E_POLICY;
   return verify_symbol_row (verification, "has_permission", symbols,
-      G_N_ELEMENTS (symbols), ctx->insert);
+             G_N_ELEMENTS (symbols), TRUE);
 }
 
 static wyrelog_error_t
 mutate_role_membership (wyl_policy_store_t *store, gpointer data)
 {
   WylPermissionPublication *ctx = data;
+  ctx->store = store;
   wyrelog_error_t rc = ctx->insert ?
       wyl_policy_store_grant_role_membership (store, ctx->a, ctx->b, ctx->c) :
       wyl_policy_store_revoke_role_membership (store, ctx->a, ctx->b, ctx->c);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_role_membership_event (store, ctx->a,
-        ctx->b, ctx->c, ctx->insert ? "grant" : "revoke");
+            ctx->b, ctx->c, ctx->insert ? "grant" : "revoke");
   if (rc == WYRELOG_E_OK)
     rc = append_permission_audit_body (store, ctx->audit_event);
   return rc;
@@ -625,9 +700,39 @@ static wyrelog_error_t
 verify_role_membership (WylEngineVerification *verification, gpointer data)
 {
   WylPermissionPublication *ctx = data;
+  if (ctx->store == NULL)
+    return WYRELOG_E_INTERNAL;
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_role_membership_exists (ctx->store,
+          ctx->a, ctx->b, ctx->c, &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (exists != ctx->insert)
+    return WYRELOG_E_POLICY;
+  const gchar *membership[] = { ctx->a, ctx->b, ctx->c };
+  rc = verify_accepted_input_row (verification, "member_of", membership,
+          G_N_ELEMENTS (membership), ctx->insert);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = verify_permission_audit_event (verification, ctx->audit_event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* The source membership must publish into effective_member unless the
+   * policy intentionally disables this role (e.g. expired break-glass). */
+  gint64 role = 0;
+  rc = wyl_engine_verification_lookup_symbol (verification, ctx->b, &role);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return ctx->insert ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean disabled = FALSE;
+  rc = wyl_engine_verification_contains (verification, "disabled_role",
+          &role, 1, &disabled);
+  if (rc != WYRELOG_E_OK || disabled)
+    return rc;
   const gchar *symbols[] = { ctx->a, ctx->b, ctx->c };
   return verify_symbol_row (verification, "effective_member", symbols,
-      G_N_ELEMENTS (symbols), ctx->insert);
+             G_N_ELEMENTS (symbols), ctx->insert);
 }
 
 static wyrelog_error_t
@@ -639,7 +744,7 @@ publish_permission_mutation (WylPermissionPublication *ctx,
   if (session == NULL)
     return WYRELOG_E_BUSY;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
-      mutate, ctx, verify, ctx, NULL, NULL, NULL);
+          mutate, ctx, verify, ctx, NULL, NULL, NULL);
   g_clear_pointer (&session, wyl_engine_session_release);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK && ctx->audit_event != NULL)
@@ -656,16 +761,16 @@ mutate_permission_transition (wyl_policy_store_t *store, gpointer data)
   g_clear_pointer (&ctx->to_state, g_free);
   ctx->event_id = -1;
   wyrelog_error_t rc = wyl_policy_store_get_permission_state_for_publication
-      (store,
-      ctx->publication.a, ctx->publication.b, ctx->publication.c,
-      &ctx->from_state);
+        (store,
+          ctx->publication.a, ctx->publication.b, ctx->publication.c,
+          &ctx->from_state);
   if (rc == WYRELOG_E_OK && ctx->from_state == NULL)
     ctx->from_state = g_strdup (wyl_perm_state_name (WYL_PERM_STATE_DORMANT));
   wyl_perm_state_t from = wyl_perm_state_from_name (ctx->from_state);
   wyl_perm_event_t event = wyl_perm_event_from_name (ctx->event);
   wyl_perm_state_t to = WYL_PERM_STATE_LAST_;
   if (rc == WYRELOG_E_OK && (from == WYL_PERM_STATE_LAST_
-          || event == WYL_PERM_EVENT_LAST_))
+      || event == WYL_PERM_EVENT_LAST_))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fsm_permission_scope_step (from, event, &to);
@@ -678,11 +783,11 @@ mutate_permission_transition (wyl_policy_store_t *store, gpointer data)
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_set_permission_state (store, ctx->publication.a,
-        ctx->publication.b, ctx->publication.c, ctx->to_state);
+            ctx->publication.b, ctx->publication.c, ctx->to_state);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_permission_state_event (store,
-        ctx->publication.a, ctx->publication.b, ctx->publication.c,
-        ctx->event, ctx->from_state, ctx->to_state, &ctx->event_id);
+            ctx->publication.a, ctx->publication.b, ctx->publication.c,
+            ctx->event, ctx->from_state, ctx->to_state, &ctx->event_id);
   if (rc == WYRELOG_E_OK)
     rc = append_permission_audit_body (store, ctx->publication.audit_event);
   return rc;
@@ -695,29 +800,51 @@ verify_permission_transition (WylEngineVerification *verification,
   WylPermissionTransitionPublication *ctx = data;
   if (ctx->from_state == NULL || ctx->to_state == NULL || ctx->event_id <= 0)
     return WYRELOG_E_POLICY;
-  const gchar *symbols[] = { ctx->publication.a, ctx->publication.b,
-    ctx->publication.c, ctx->to_state
-  };
-  wyrelog_error_t rc = verify_symbol_row (verification, "perm_state", symbols,
-      G_N_ELEMENTS (symbols), TRUE);
+  gboolean state_is_expected = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_permission_state_is
+        (wyl_handle_get_policy_store (ctx->publication.handle),
+          ctx->publication.a, ctx->publication.b, ctx->publication.c,
+          ctx->to_state, &state_is_expected);
   if (rc != WYRELOG_E_OK)
     return rc;
-  gint64 event_row[7] = { ctx->event_id, 0, 0, 0, 0, 0, 0 };
-  const gchar *event_symbols[] = { ctx->publication.a, ctx->publication.b,
-    ctx->publication.c, ctx->from_state, ctx->event, ctx->to_state
+  if (!state_is_expected)
+    return WYRELOG_E_POLICY;
+  const gchar *state_symbols[] = {
+    ctx->publication.a, ctx->publication.b, ctx->publication.c, ctx->to_state,
   };
+  rc = verify_accepted_input_row (verification, "perm_state", state_symbols,
+          G_N_ELEMENTS (state_symbols), TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gint64 fired_row[7] = { ctx->event_id, 0, 0, 0, 0, 0, 0 };
+  const gchar *event_symbols[] = { ctx->publication.a, ctx->publication.b,
+                                   ctx->publication.c, ctx->from_state, ctx->event, ctx->to_state};
   for (guint i = 0; i < G_N_ELEMENTS (event_symbols); i++) {
     rc = wyl_engine_verification_lookup_symbol (verification,
-        event_symbols[i], &event_row[i + 1]);
+            event_symbols[i], &fired_row[i + 1]);
     if (rc != WYRELOG_E_OK)
       return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
   }
-  gboolean found = FALSE;
-  rc = wyl_engine_verification_contains (verification, "perm_state_fired",
-      event_row, G_N_ELEMENTS (event_row), &found);
+  gboolean exact = FALSE;
+  rc = wyl_engine_verification_has_exact_keyed_row (verification,
+          "perm_state_fired", fired_row[0], fired_row,
+          G_N_ELEMENTS (fired_row), &exact);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (!exact)
+    return WYRELOG_E_POLICY;
+  gint64 source_event_row[] = { fired_row[0], fired_row[1], fired_row[2],
+                                fired_row[3], fired_row[5], fired_row[4],
+                                fired_row[6] };
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          "perm_state_event", source_event_row,
+          G_N_ELEMENTS (source_event_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exact)
+    return WYRELOG_E_POLICY;
+  return verify_permission_audit_event (verification,
+             ctx->publication.audit_event);
 }
 
 wyrelog_error_t
@@ -748,8 +875,8 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
   WylCommittedPublicationStage stage =
       WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
   wyrelog_error_t rc = wyl_engine_session_run_committed_publication (session,
-      mutate_permission_transition, &transition, verify_permission_transition,
-      &transition, NULL, NULL, &stage);
+          mutate_permission_transition, &transition, verify_permission_transition,
+          &transition, NULL, NULL, &stage);
   if (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
       && out_event_id != NULL)
     *out_event_id = transition.event_id;
@@ -796,12 +923,16 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
   WylAuditEvent *ev = NULL;
 #endif
 
-  WylPermissionPublication publication = { handle,
-    wyl_grant_req_get_subject_id (req), wyl_grant_req_get_action (req),
-    wyl_grant_req_get_resource_id (req), TRUE, ev
+  WylPermissionPublication publication = {
+    .handle = handle,
+    .a = wyl_grant_req_get_subject_id (req),
+    .b = wyl_grant_req_get_action (req),
+    .c = wyl_grant_req_get_resource_id (req),
+    .insert = TRUE,
+    .audit_event = ev,
   };
   return publish_permission_mutation (&publication, mutate_direct_permission,
-      verify_direct_permission);
+             verify_direct_permission);
 }
 
 wyrelog_error_t
@@ -831,12 +962,16 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
   WylAuditEvent *ev = NULL;
 #endif
 
-  WylPermissionPublication publication = { handle,
-    wyl_revoke_req_get_subject_id (req), wyl_revoke_req_get_action (req),
-    wyl_revoke_req_get_resource_id (req), FALSE, ev
+  WylPermissionPublication publication = {
+    .handle = handle,
+    .a = wyl_revoke_req_get_subject_id (req),
+    .b = wyl_revoke_req_get_action (req),
+    .c = wyl_revoke_req_get_resource_id (req),
+    .insert = FALSE,
+    .audit_event = ev,
   };
   return publish_permission_mutation (&publication, mutate_direct_permission,
-      verify_direct_permission);
+             verify_direct_permission);
 }
 
 wyrelog_error_t
@@ -866,13 +1001,16 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
   WylAuditEvent *ev = NULL;
 #endif
 
-  WylPermissionPublication publication = { handle,
-    wyl_role_grant_req_get_subject_id (req),
-    wyl_role_grant_req_get_role_id (req), wyl_role_grant_req_get_scope (req),
-    TRUE, ev
+  WylPermissionPublication publication = {
+    .handle = handle,
+    .a = wyl_role_grant_req_get_subject_id (req),
+    .b = wyl_role_grant_req_get_role_id (req),
+    .c = wyl_role_grant_req_get_scope (req),
+    .insert = TRUE,
+    .audit_event = ev,
   };
   return publish_permission_mutation (&publication, mutate_role_membership,
-      verify_role_membership);
+             verify_role_membership);
 }
 
 wyrelog_error_t
@@ -902,11 +1040,14 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
   WylAuditEvent *ev = NULL;
 #endif
 
-  WylPermissionPublication publication = { handle,
-    wyl_role_revoke_req_get_subject_id (req),
-    wyl_role_revoke_req_get_role_id (req),
-    wyl_role_revoke_req_get_scope (req), FALSE, ev
+  WylPermissionPublication publication = {
+    .handle = handle,
+    .a = wyl_role_revoke_req_get_subject_id (req),
+    .b = wyl_role_revoke_req_get_role_id (req),
+    .c = wyl_role_revoke_req_get_scope (req),
+    .insert = FALSE,
+    .audit_event = ev,
   };
   return publish_permission_mutation (&publication, mutate_role_membership,
-      verify_role_membership);
+             verify_role_membership);
 }

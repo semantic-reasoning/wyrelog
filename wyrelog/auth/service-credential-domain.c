@@ -144,25 +144,24 @@ typedef struct
 } TenantScopePublication;
 
 static wyrelog_error_t
-verify_engine_symbol_row (WylEngineVerification *verification,
-    const gchar *relation, const gchar *const *symbols, gsize ncols,
-    gboolean expected)
+verify_engine_keyed_row (WylEngineVerification *verification,
+    const gchar *relation, const gchar *const *symbols, gsize ncols)
 {
+  if (symbols == NULL || ncols == 0)
+    return WYRELOG_E_INVALID;
   g_autofree gint64 *row = g_new0 (gint64, ncols);
   for (gsize i = 0; i < ncols; i++) {
     wyrelog_error_t rc = wyl_engine_verification_lookup_symbol (verification,
             symbols[i], &row[i]);
-    if (rc == WYRELOG_E_NOT_FOUND && !expected)
-      return WYRELOG_E_OK;
     if (rc != WYRELOG_E_OK)
       return rc;
   }
-  gboolean found = FALSE;
-  wyrelog_error_t rc = wyl_engine_verification_contains (verification,
-          relation, row, ncols, &found);
+  gboolean exact = FALSE;
+  wyrelog_error_t rc = wyl_engine_verification_has_exact_keyed_row
+        (verification, relation, row[0], row, ncols, &exact);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return found == expected ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
@@ -197,14 +196,21 @@ verify_service_retirement_audit (WylEngineVerification *verification,
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_verification_lookup_symbol (verification, "allow",
             &event[2]);
-  gboolean found = FALSE;
+  gboolean exact_event = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_engine_verification_contains (verification, "audit_event",
-            event, G_N_ELEMENTS (event), &found);
+    rc = wyl_engine_verification_has_exact_keyed_row (verification,
+            "audit_event", event[0], event, G_N_ELEMENTS (event),
+            &exact_event);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (!found)
+  if (!exact_event)
     return WYRELOG_E_POLICY;
+  rc = wyl_engine_verification_verify_audit_event (verification,
+          retirement->audit_id, retirement->created_at_us, TRUE,
+          publication->actor_subject_id, "tenant_seal", publication->tenant_id,
+          NULL, NULL, publication->request_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   const gchar *relations[] = {
     "audit_event_subject",
     "audit_event_action",
@@ -219,10 +225,21 @@ verify_service_retirement_audit (WylEngineVerification *verification,
   };
   for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
     const gchar *row[] = { retirement->audit_id, values[i] };
-    rc = verify_engine_symbol_row (verification, relations[i], row,
-            G_N_ELEMENTS (row), TRUE);
+    rc = verify_engine_keyed_row (verification, relations[i], row,
+            G_N_ELEMENTS (row));
     if (rc != WYRELOG_E_OK)
       return rc;
+  }
+  const gchar *optional_relations[] = {
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (optional_relations); i++) {
+    gboolean absent = FALSE;
+    rc = wyl_engine_verification_has_no_keyed_row (verification,
+            optional_relations[i], event[0], &absent);
+    if (rc != WYRELOG_E_OK || !absent)
+      return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
   }
   return WYRELOG_E_OK;
 }

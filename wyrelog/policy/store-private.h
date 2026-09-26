@@ -3243,7 +3243,8 @@ wyrelog_error_t wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_apply_bootstrap_admin_body
   (wyl_policy_store_t * store, const gchar * subject_id,
     gboolean allow_login_skip_mfa, gboolean * out_applied,
-    gchar ** out_existing_subject);
+    gchar ** out_existing_subject, gint64 * out_session_event_id,
+    gint64 * out_permission_state_event_id);
 
 /*
  * TOTP enrollment fact schema (issue #331).

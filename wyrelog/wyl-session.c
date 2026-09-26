@@ -253,7 +253,14 @@ verify_session_symbol_row (WylEngineVerification *verification,
           relation, row, ncols, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (!found)
+    return WYRELOG_E_POLICY;
+  gboolean exact_input = FALSE;
+  rc = wyl_engine_verification_has_exact_input_row (verification, relation,
+          row, ncols, TRUE, &exact_input);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return exact_input ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
@@ -286,13 +293,44 @@ verify_session_event_row (WylEngineVerification *verification,
           entity, event, old_state, new_state, row);
   if (rc != WYRELOG_E_OK)
     return rc;
-  gboolean found = FALSE;
-  rc = wyl_engine_verification_contains (verification,
-          relation, row, G_N_ELEMENTS (row), &found);
+  gboolean exact = FALSE;
+  rc = wyl_engine_verification_has_exact_keyed_row (verification,
+          relation, event_id, row, G_N_ELEMENTS (row), &exact);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return found ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (!exact)
+    return WYRELOG_E_POLICY;
+  gint64 input_row[5] = { event_id, row[1], row[3], row[2], row[4] };
+  const gchar *input_relation = g_strcmp0 (relation, "principal_fired") == 0 ?
+      "principal_event" : "session_event";
+  rc = wyl_engine_verification_has_exact_input_row (verification,
+          input_relation, input_row, G_N_ELEMENTS (input_row), TRUE, &exact);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
+
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t
+verify_session_audit_event (WylEngineVerification *verification,
+    const WylAuditEvent *event)
+{
+  if (event == NULL)
+    return WYRELOG_E_OK;
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+  if (id == NULL)
+    return WYRELOG_E_INTERNAL;
+  return wyl_engine_verification_verify_audit_event (verification, id,
+             wyl_audit_event_get_created_at_us (event),
+             wyl_audit_event_get_decision (event) == WYL_DECISION_ALLOW,
+             wyl_audit_event_get_subject_id (event),
+             wyl_audit_event_get_action (event),
+             wyl_audit_event_get_resource_id (event),
+             wyl_audit_event_get_deny_reason (event),
+             wyl_audit_event_get_deny_origin (event),
+             wyl_audit_event_get_request_id (event));
+}
+#endif
 
 static wyrelog_error_t
 enqueue_session_event_delta (WylEngineVerification *verification,
@@ -369,6 +407,11 @@ verify_principal_publication (WylEngineVerification *verification,
           "principal_state", state_row, G_N_ELEMENTS (state_row));
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_HAS_AUDIT
+  rc = verify_session_audit_event (verification, ctx->audit_event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
   return verify_session_event_row (verification, "principal_fired",
              ctx->event_id, ctx->username, event, old_state, new_state);
 }
@@ -609,6 +652,7 @@ wyl_session_totp_commit_mfa_ok (WylHandle *handle, WylSession *session,
 
 typedef struct
 {
+  WylHandle *handle;
   const gchar *username;
   gint64 expected_epoch;
   gint64 matched_step;
@@ -654,7 +698,41 @@ static wyrelog_error_t
 verify_totp_reauth (WylEngineVerification *verification, gpointer data)
 {
   (void) verification;
-  (void) data;
+  WylTotpReauthPublication *ctx = data;
+  if (ctx == NULL || !WYL_IS_HANDLE (ctx->handle) || ctx->username == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  WylTotpEnrollment enrollment = { 0 };
+  gboolean enrollment_found = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_totp_enrollment_lookup (store,
+          ctx->username, &enrollment, &enrollment_found);
+  if (rc == WYRELOG_E_OK
+      && (!enrollment_found
+      || enrollment.last_verified_step != ctx->matched_step))
+    rc = WYRELOG_E_INTERNAL;
+  wyl_totp_enrollment_clear (&enrollment);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_POLICY ? WYRELOG_E_INTERNAL : rc;
+
+  g_autofree gchar *state = NULL;
+  gint64 failed_count = 0;
+  gint64 locked_at = 0;
+  gboolean principal_found = FALSE;
+  rc = wyl_policy_store_get_principal_lock_info (store, ctx->username,
+          &state, &failed_count, &locked_at, &principal_found);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_POLICY ? WYRELOG_E_INTERNAL : rc;
+  gint64 epoch = 0;
+  gboolean epoch_found = FALSE;
+  rc = wyl_policy_store_get_principal_authn_epoch (store, ctx->username,
+          &epoch, &epoch_found);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_POLICY ? WYRELOG_E_INTERNAL : rc;
+  if (!principal_found || g_strcmp0 (state, "authenticated") != 0
+      || failed_count != 0 || locked_at != G_MININT64 || !epoch_found
+      || epoch != ctx->expected_epoch)
+    return WYRELOG_E_INTERNAL;
   return WYRELOG_E_OK;
 }
 
@@ -678,6 +756,7 @@ wyl_session_totp_reauthenticate (WylHandle *handle, WylSession *session,
   }
 
   WylTotpReauthPublication publication = {
+    handle,
     session->username,
     wyl_session_reauth_expected_epoch_private (session),
     matched_step,
@@ -824,8 +903,13 @@ verify_session_publication (WylEngineVerification *verification, gpointer data)
             wyl_principal_state_name (ctx->principal_new_state));
   if (rc != WYRELOG_E_OK)
     return rc;
-  return verify_session_event_row (verification, "session_fired",
-             ctx->event_id, ctx->session_id, event, old_state, new_state);
+  rc = verify_session_event_row (verification, "session_fired",
+          ctx->event_id, ctx->session_id, event, old_state, new_state);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK)
+    rc = verify_session_audit_event (verification, ctx->audit_event);
+#endif
+  return rc;
 }
 
 static wyrelog_error_t
@@ -1035,6 +1119,15 @@ verify_login_publication (WylEngineVerification *verification, gpointer data)
     rc = verify_session_event_row (verification, "session_fired",
             ctx->session_event_id, ctx->session_id, session_event, session_from,
             session_to);
+#ifdef WYL_HAS_AUDIT
+  for (gint i = 0; rc == WYRELOG_E_OK && i < ctx->principal_event_count; i++)
+    rc = verify_session_audit_event (verification,
+            ctx->principal_audit_events[i]);
+  if (rc == WYRELOG_E_OK)
+    rc = verify_session_audit_event (verification, ctx->skip_mfa_audit_event);
+  if (rc == WYRELOG_E_OK)
+    rc = verify_session_audit_event (verification, ctx->session_audit_event);
+#endif
   return rc;
 }
 

@@ -185,6 +185,7 @@ wyrelog/audit/iter-private.h
 wyrelog/auth/jwt-private.h
 wyrelog/auth/jwt.c
 wyrelog/auth/mfa-enrollment-private.h
+wyrelog/auth/mfa-enrollment.c
 wyrelog/auth/mfa-validator.c
 wyrelog/auth/mfa-validator.h
 wyrelog/auth/service-auth-coordination.c
@@ -204,6 +205,7 @@ wyrelog/auth/service-session-private.c
 wyrelog/auth/totp.h
 wyrelog/break-glass.h
 wyrelog/client.h
+wyrelog/daemon/checks.c
 wyrelog/daemon/delta.c
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c
@@ -344,6 +346,7 @@ wyrelog/wyl-common-private.h
 wyrelog/wyl-decide-private.h
 wyrelog/wyl-decide.c
 wyrelog/wyl-dl-static-private.h
+wyrelog/wyl-engine-private.h
 wyrelog/wyl-engine.c
 wyrelog/wyl-error.c
 wyrelog/wyl-events-private.h
@@ -358,6 +361,7 @@ wyrelog/wyl-handle.c
 wyrelog/wyl-id-private.h
 wyrelog/wyl-keyprovider-dev-private.h
 wyrelog/wyl-keyprovider-dev.c
+wyrelog/wyl-perm.c
 wyrelog/wyl-posix-errno-private.h
 wyrelog/wyl-request-id-private.h
 wyrelog/wyl-request-id.c

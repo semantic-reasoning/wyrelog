@@ -393,8 +393,10 @@ test_exact_verifier_rejects_extra_and_wrong_rows (void)
     WylCommittedPublicationStage stage =
         WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
     gboolean verify_exact = TRUE;
+    /* Once committed, a verifier mismatch is a publication failure, not a
+     * policy refusal: the mutation is already durable. */
     g_assert_cmpint (wyl_daemon_check_policy_audit_facts_ready_for_test (handle,
-        &id, &created_at_us, &stage, &verify_exact), ==, WYRELOG_E_POLICY);
+        &id, &created_at_us, &stage, &verify_exact), ==, WYRELOG_E_INTERNAL);
     g_assert_false (verify_exact);
     g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED);
     assert_exact_durable_bundle (handle, id, created_at_us, TRUE);
