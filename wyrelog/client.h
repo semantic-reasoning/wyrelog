@@ -720,6 +720,9 @@ wyrelog_error_t wyl_client_datalog_query_json (WylClient * client,
     gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk, gchar ** out_json);
 void wyl_client_fact_append_result_free (WylClientFactAppendResult * result);
+/* TRUE means a new batch was recorded; FALSE means an idempotent replay. This
+ * reports batch state, not whether the fact relation changed. A retract is a
+ * blind tombstone append, so its result cannot say whether any row matched. */
 gboolean wyl_client_fact_append_result_get_inserted
   (const WylClientFactAppendResult * result);
 const gchar *wyl_client_fact_append_result_get_batch_id

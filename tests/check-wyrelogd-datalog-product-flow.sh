@@ -293,7 +293,8 @@ create_graph_schema_and_facts() {
     --guard-timestamp 123 \
     --guard-loc-class trusted \
     --guard-risk 29)
-  if [ "$result" != "inserted" ]; then
+  expected="action=put batch_id=$graph-batch-1 operation_id=$graph-key-1 replay=false mutation_class=committed_ready effect=unknown"
+  if [ "$result" != "$expected" ]; then
     echo "unexpected fact put result for $graph: $result" >&2
     exit 1
   fi
@@ -322,10 +323,10 @@ retract_fact() {
     --guard-timestamp 123 \
     --guard-loc-class trusted \
     --guard-risk 29)
-  # `inserted` means a tombstone batch was committed and not replayed; it is
-  # never evidence that a row matched (#1027).  assert_query_absent below is
-  # the postcondition that proves the removal.
-  if [ "$result" != "inserted" ]; then
+  expected="action=retract batch_id=$batch_id operation_id=$idempotency_key replay=false mutation_class=committed_ready effect=unknown"
+  # The receipt identifies a committed batch, not rows removed. The query
+  # below remains the postcondition that proves the requested row disappeared.
+  if [ "$result" != "$expected" ]; then
     echo "unexpected fact retract result for $graph: $result" >&2
     exit 1
   fi

@@ -869,7 +869,9 @@ main (void)
     "--guard-risk", "29",
     NULL,
   };
-  assert_wyctl_stdout (fact_put_argv, "inserted\n");
+  assert_wyctl_stdout (fact_put_argv,
+      "action=put batch_id=batch-1 operation_id=key-1 replay=false "
+      "mutation_class=committed_ready effect=unknown\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
     return wyl_test_normalize_exit_status (104);
   /* One committed row priced at its schema values: "o-1" is 3 logical
@@ -893,7 +895,9 @@ main (void)
   };
   assert_wyctl_stdout_contains (datalog_query_argv,
       "\"rows\":[{\"O\":\"o-1\",\"A\":42}]");
-  assert_wyctl_stdout (fact_put_argv, "duplicate\n");
+  assert_wyctl_stdout (fact_put_argv,
+      "action=put batch_id=batch-1 operation_id=key-1 replay=true "
+      "mutation_class=committed_ready effect=unknown\n");
   if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
     return wyl_test_normalize_exit_status (105);
   /* A replayed batch reports the stored cost and is not charged again. */
@@ -997,9 +1001,62 @@ main (void)
     "--guard-risk", "29",
     NULL,
   };
-  assert_wyctl_stdout (fact_retract_argv, "inserted\n");
+  assert_wyctl_stdout (fact_retract_argv,
+      "action=retract batch_id=retract-1 operation_id=retract-key-1 "
+      "replay=false mutation_class=committed_ready effect=unknown\n");
   assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
-  assert_wyctl_stdout (fact_retract_argv, "duplicate\n");
+  assert_wyctl_stdout (fact_retract_argv,
+      "action=retract batch_id=retract-1 operation_id=retract-key-1 "
+      "replay=true mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=2 committed_bytes=22 pending_rows=0 pending_bytes=0\n");
+
+  /* A same-size blind retract of a tuple that was never present has the same
+   * receipt and logical quota cost as the matching retract above. */
+  gchar *missing_input_path = NULL;
+  gint missing_fd = g_file_open_tmp ("wyctl-facts-missing-XXXXXX",
+          &missing_input_path, &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (missing_fd, >=, 0);
+  g_assert_true (g_close (missing_fd, NULL));
+  g_assert_true (g_file_set_contents (missing_input_path,
+      "order_id,amount\no-2,42\n", -1, &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *missing_input_path_autofree = missing_input_path;
+  gchar *fact_retract_missing_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "retract",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "retract-missing-1",
+    "--idempotency-key", "retract-missing-key-1",
+    "--format", "csv",
+    "--input", missing_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  const gchar *missing_retract_receipt =
+      "action=retract batch_id=retract-missing-1 "
+      "operation_id=retract-missing-key-1 replay=false "
+      "mutation_class=committed_ready effect=unknown\n";
+  assert_wyctl_stdout (fact_retract_missing_argv,
+      missing_retract_receipt);
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=3 committed_bytes=33 pending_rows=0 pending_bytes=0\n");
+  assert_wyctl_stdout (fact_retract_missing_argv,
+      "action=retract batch_id=retract-missing-1 "
+      "operation_id=retract-missing-key-1 replay=true "
+      "mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=3 committed_bytes=33 pending_rows=0 pending_bytes=0\n");
 
   /* #553: a committed-but-reconciling mutation prints the payload digest
    * that completes its operation identity, for put and retract alike. The
@@ -1080,6 +1137,7 @@ main (void)
   };
   assert_wyctl_stdout (fact_seam_status_argv,
       "tenant=__wr_default graph=orders batch_id=seam-1 operation_id=seam-key-1 state=settled replay=false requested_rows=1 requested_bytes=11 applied_rows=0 applied_bytes=0\n");
+  g_unlink (missing_input_path);
   g_unlink (seam_input_path);
   g_unlink (input_path);
 #endif

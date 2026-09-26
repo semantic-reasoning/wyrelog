@@ -1362,10 +1362,22 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
-The retract command prints `inserted` for a new tombstone batch and `duplicate`
-when the same batch and idempotency key are replayed. The final query must no
-longer contain `o-1, 42`; query results are the proof that the row was removed,
-rather than the HTTP status alone.
+Both commands print a key/value batch receipt. For example:
+
+```text
+action=put batch_id=orders-1 operation_id=orders-1 replay=false mutation_class=committed_ready effect=unknown
+action=retract batch_id=orders-retract operation_id=orders-retract replay=false mutation_class=committed_ready effect=unknown
+```
+
+`replay=false` means this idempotency key recorded a new batch;
+`replay=true` means the previously recorded batch was replayed. The output
+format replaces the old single-word `inserted`/`duplicate` output, so scripts
+that parse the old text must be updated. The `effect=unknown` field is
+deliberate: batch acceptance does not report whether the fact relation changed.
+A retract is a blind tombstone write, so a no-match retract has the same receipt
+as one that matched. The final query must no longer contain `o-1, 42`; query
+results are the proof that the row was removed, rather than the batch receipt
+or HTTP status alone.
 
 Public schema registration is currently a one-time operation for each
 tenant/graph/namespace/relation. The positive `--schema-version` identifies
@@ -1581,12 +1593,12 @@ priced at all. The tuple format cannot represent one, so the daemon refuses any
 batch containing a NULL -- even in a column registered `nullable` -- with
 `400 invalid_fact_payload`, before the request reaches the code that prices it.
 
-**Blind retract is intended, and the response carries nothing you can use to
-detect it.** A retract is an append of a tombstone: the write path records the
-batch and never reads the relation, so it does not know whether the value
-shadowed a live row. Do not read `"inserted":true` or a positive
-`committed_row_delta` as "a row was removed" -- both mean "a tombstone was
-written". `"committed":true` carries even less: it is a constant on this path,
+**Blind retract is intended, and no receipt reports matched rows.** A retract
+is an append of a tombstone: the write path records the batch and never reads
+the relation, so it does not know whether the value shadowed a live row. Do not
+read `effect=unknown`, `"inserted":true` or a positive
+`committed_row_delta` as "a row was removed" -- they report no matching-row
+count. `"committed":true` carries even less: it is a constant on this path,
 not a result.
 
 That is also why nothing matching raises no error and returns no matched-row
