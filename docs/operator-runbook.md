@@ -173,7 +173,7 @@ subject fails closed.
 The flags are:
 
 - `--bootstrap-admin-subject=SUBJECT` records `SUBJECT` as the initial
-  `wr.system_admin` role member on the default tenant.
+  `wr.system_admin` role member on tenant `__wr_default`.
 - `--bootstrap-admin-allow-skip-mfa` (optional) grants the same subject
   the `wr.login.skip_mfa` direct permission on the synthetic `login`
   scope so it can mint a first bearer token through `/auth/login` before an
@@ -211,9 +211,6 @@ Apply and verify:
 systemctl daemon-reload
 systemctl restart wyrelog-system.service
 journalctl -u wyrelog-system.service -n 50
-wyctl --daemon-url http://127.0.0.1:8765 audit query \
-  --filter 'action=bootstrap_admin_apply' \
-  --access-token-file /run/wyrelog/operator.token
 ```
 
 Once `alice` has rotated to an IdP-issued bearer, drop the
@@ -223,6 +220,43 @@ The marker and the existing role membership remain in place. The
 persisted `wr.login.skip_mfa` direct-permission grant is **not**
 removed by dropping the flag and must be revoked explicitly as
 described under "Revoking bootstrap MFA bypass" below.
+
+### Obtain the bootstrap token
+
+The bootstrap flags grant the role; they do not create an access-token file.
+For the built-in first-install path, `--bootstrap-admin-allow-skip-mfa` lets
+the bootstrap subject obtain a temporary bearer before TOTP enrollment. After
+the service is running, create the token file with restrictive permissions:
+
+```sh
+umask 077
+python3 - /run/wyrelog/bootstrap.token <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+token_path = sys.argv[1]
+url = ("http://127.0.0.1:8765/auth/login?username=alice"
+       "&tenant=__wr_default&skip_mfa=true")
+request = urllib.request.Request(url, method="POST")
+with urllib.request.urlopen(request) as response:
+    token = json.load(response)["access_token"]
+fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as output:
+    output.write(token + "\n")
+PY
+```
+
+Use this temporary token only to enroll the bootstrap administrator's TOTP
+factor. Successful enrollment revokes the skip-MFA permission. Then perform a
+fresh normal login, verify the TOTP code, and replace the token file with the
+new MFA-assured access token before arming permissions or running guarded
+operator commands. The [Datalog product flow](#datalog-product-flow) contains
+the complete login, verification, and token-file replacement example. The
+actual default tenant identifier is `__wr_default` (not `default`). Verify
+the bootstrap audit record only after replacing the temporary token with the
+MFA-assured token.
 
 ### Windows / Service
 
@@ -235,12 +269,30 @@ sc.exe stop wyrelog
 sc.exe start wyrelog
 ```
 
+After the daemon starts, obtain the temporary bootstrap token and protect its
+file before writing the secret:
+
+```powershell
+$loginUrl = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default&skip_mfa=true"
+$login = Invoke-RestMethod -Method Post -Uri $loginUrl
+$tokenPath = "C:\ProgramData\Wyrelog\bootstrap.token"
+New-Item -ItemType File -Path $tokenPath | Out-Null
+icacls $tokenPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" "SYSTEM:(F)"
+[IO.File]::WriteAllText($tokenPath, $login.access_token + "`n", [Text.Encoding]::ASCII)
+```
+
+Use this token only to enroll TOTP. Then repeat the normal `/auth/login` and
+`/auth/mfa/verify` flow and replace the file with the newly issued
+MFA-assured access token before guarded permission transitions.
+
 Verify through `wyctl.exe`:
 
 ```powershell
 wyctl.exe --daemon-url http://127.0.0.1:8765 audit query ^
   --filter "action=bootstrap_admin_apply" ^
-  --access-token-file C:\ProgramData\Wyrelog\operator.token
+  --access-token-file C:\ProgramData\Wyrelog\bootstrap.token ^
+  --guard-timestamp 1780000000 ^
+  --guard-loc-class internal_network --guard-risk 10
 ```
 
 ### Operational Notes
@@ -280,9 +332,9 @@ wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
     --perm wr.login.skip_mfa \
     --scope login \
     --access-token-file /run/wyrelog/operator.token \
-    --guard-timestamp $(date +%s) \
+    --guard-timestamp "$(date +%s)" \
     --guard-loc-class internal_network \
-    --guard-risk low
+    --guard-risk 10
 ```
 
 Verify the revoke landed by inspecting the audit trail or the
@@ -291,7 +343,9 @@ decision-trace tool:
 ```sh
 wyctl --daemon-url http://127.0.0.1:8765 audit query \
   --filter 'action=permission_revoke' --limit 10 \
-  --access-token-file /run/wyrelog/operator.token
+  --access-token-file /run/wyrelog/operator.token \
+  --guard-timestamp "$(date +%s)" \
+  --guard-loc-class internal_network --guard-risk 10
 ```
 
 ## TOTP Multi-Factor Authentication (MFA)
@@ -1177,8 +1231,10 @@ url = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default&skip_
 req = urllib.request.Request(url, method="POST")
 with urllib.request.urlopen(req) as response:
     token = json.load(response)["access_token"]
-open("/run/wyrelog/operator.token", "w", encoding="utf-8").write(token + "\n")
-os.chmod("/run/wyrelog/operator.token", 0o600)
+token_path = "/run/wyrelog/operator.token"
+fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as output:
+    output.write(token + "\n")
 PY
 
 wyctl --daemon-url "$BASE_URL" mfa enroll \
@@ -1213,6 +1269,12 @@ with open(token_path, "w", encoding="utf-8") as output:
     output.write(verified["access_token"] + "\n")
 os.chmod(token_path, 0o600)
 PY
+
+wyctl --daemon-url "$BASE_URL" audit query \
+  --filter 'action=bootstrap_admin_apply' --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp "$(date +%s)" \
+  --guard-loc-class trusted --guard-risk 29
 
 for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
   curl -fsS -X POST \
@@ -1885,11 +1947,31 @@ The daemon's error code is printed on stderr for every remote failure.
 
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-grant \
-    --subject alice --permission site.policy.read --scope tenant-a \
-    --access-token-file /run/wyrelog/operator.token
+    --subject alice --perm site.policy.read --scope tenant-a \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
-    --subject alice --permission site.policy.read --scope tenant-a \
-    --access-token-file /run/wyrelog/operator.token
+    --subject alice --perm site.policy.read --scope tenant-a \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
+  ```
+
+- Grant a role or list service principals. Both operations require a live
+  MFA-assured operator token and guard context:
+
+  ```sh
+  wyctl --daemon-url http://127.0.0.1:8765 policy role-grant \
+    --subject alice --role wr.system_admin --scope __wr_default \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
+  wyctl --daemon-url http://127.0.0.1:8765 service-principal list \
+    --tenant __wr_default \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
   ```
 
 - Audit query:
@@ -1897,7 +1979,9 @@ The daemon's error code is printed on stderr for every remote failure.
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 audit query \
     --filter 'decision=deny' --limit 50 \
-    --access-token-file /run/wyrelog/operator.token
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
   ```
 
 - Restart:
