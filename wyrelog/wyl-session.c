@@ -1229,11 +1229,23 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
      * reauth_pending below remains the only route to an assured session, and
      * the epoch is published not by that bit's release but by
      * wyl_handle_register_session below, which is what makes the session
-     * reachable by any other thread at all. */
+     * reachable by any other thread at all.
+     *
+     * Issue #1232: an authorized skip-MFA login presents the same authority
+     * the winning skip-MFA login did (login_skip_mfa_allowed admitted it
+     * above), and the daemon mints it a bearer at this epoch.  It is bound as
+     * established, not pending, so its session token and its bearer answer
+     * alike.  It also gives up the TOTP upgrade to mfa_assured, which only a
+     * pending session can take; an operator who needs an assured session
+     * logs in without skip-MFA and verifies.  A login that presented nothing
+     * stays pending, and the session-token resolver refuses it until it
+     * proves. */
     if (publication.principal_outcome ==
         WYL_PRINCIPAL_LOGIN_ALREADY_AUTHENTICATED) {
       session_store_authn_epoch (session, publication.principal_authn_epoch);
-      session_store_reauth_pending (session, publication.principal_authn_epoch);
+      if (!skip_mfa)
+        session_store_reauth_pending (session,
+            publication.principal_authn_epoch);
     }
     wyl_session_state_store_private (session, WYL_SESSION_STATE_ACTIVE);
     rc = wyl_handle_register_session (handle, session, &session->sid);

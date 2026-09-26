@@ -21,6 +21,7 @@
 #include "daemon/auth-registry-private.h"
 #include "daemon/http.h"
 #include "wyrelog/auth/jwt-private.h"
+#include "wyrelog/auth/mfa-validator.h"
 #include "wyrelog/auth/totp.h"
 #include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/auth/service-credential-private.h"
@@ -4762,6 +4763,20 @@ check_service_resolver_writer_preference (SoupServer *server,
   return ok;
 }
 
+static gboolean
+human_resolver_current_authn_epoch (SoupServer *server, const gchar *subject,
+    gint64 *out_epoch)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  wyl_policy_store_t *store = handle != NULL
+      ? wyl_handle_get_policy_store (handle) : NULL;
+  gboolean found = FALSE;
+  return store != NULL
+         && wyl_policy_store_get_principal_authn_epoch (store, subject,
+             out_epoch, &found) == WYRELOG_E_OK
+         && found && *out_epoch > 0;
+}
+
 static gchar *
 human_resolver_sign_variant (SoupServer *server, const gchar *sid,
     const gchar *jti, gint64 now, guint field)
@@ -4773,6 +4788,12 @@ human_resolver_sign_variant (SoupServer *server, const gchar *sid,
   if (field == 5)
     memset (secret, 0xa5, sizeof secret);
   g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  gint64 authn_epoch = 0;
+  if (!human_resolver_current_authn_epoch (server, "human-resolver",
+      &authn_epoch)) {
+    sodium_memzero (secret, sizeof secret);
+    return NULL;
+  }
   wyl_jwt_issue_input_t input = {
     .key_id = field == 1 ? "wrong-key" : key_id,.jti = jti,
     .subject = "human-resolver",
@@ -4780,7 +4801,7 @@ human_resolver_sign_variant (SoupServer *server, const gchar *sid,
     .audience = field == 3 ? "wrong-audience" : "wyrelog-client",
     .tenant = "__wr_default",.principal_state_at_issue = "authenticated",
     .session_id = sid,.issued_at = field == 4 ? now - 301 : now,
-    .ttl_seconds = 300,
+    .ttl_seconds = 300,.authn_epoch = authn_epoch,
   };
   gchar *token = NULL;
   if (wyl_jwt_sign_hs256 (&input, secret, sizeof secret, &token)
@@ -4809,12 +4830,18 @@ check_human_resolver_while_write_held (SoupServer *server)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
       sizeof secret) != WYRELOG_E_OK)
     return FALSE;
+  gint64 authn_epoch = 0;
+  if (!human_resolver_current_authn_epoch (server, "human-resolver",
+      &authn_epoch)) {
+    sodium_memzero (secret, sizeof secret);
+    return FALSE;
+  }
   wyl_jwt_issue_input_t input = {
     .key_id = key_id,.jti = jti,.subject = "human-resolver",
     .issuer = "wyrelogd",.audience = "wyrelog-client",
     .tenant = "__wr_default",
     .principal_state_at_issue = "authenticated",.session_id = sid,
-    .issued_at = now,.ttl_seconds = 300,
+    .issued_at = now,.ttl_seconds = 300,.authn_epoch = authn_epoch,
   };
   g_autofree gchar *token = NULL;
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
@@ -4907,12 +4934,18 @@ check_service_resolver_prelatched_unavailable (void)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
       sizeof secret) != WYRELOG_E_OK)
     return FALSE;
+  gint64 authn_epoch = 0;
+  if (!human_resolver_current_authn_epoch (server, "human-after-latch",
+      &authn_epoch)) {
+    sodium_memzero (secret, sizeof secret);
+    return FALSE;
+  }
   wyl_jwt_issue_input_t input = {
     .key_id = key_id,.jti = jti,.subject = "human-after-latch",
     .issuer = "wyrelogd",.audience = "wyrelog-client",
     .tenant = "__wr_default",
     .principal_state_at_issue = "authenticated",.session_id = sid,
-    .issued_at = now,.ttl_seconds = 300,
+    .issued_at = now,.ttl_seconds = 300,.authn_epoch = authn_epoch,
   };
   g_autofree gchar *human_token = NULL;
   wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
@@ -6092,6 +6125,18 @@ sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
     memset (secret, 0, sizeof secret);
     return WYRELOG_E_INTERNAL;
   }
+  gint64 authn_epoch = 0;
+  gboolean authn_epoch_found = FALSE;
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  wyl_policy_store_t *store = handle != NULL
+      ? wyl_handle_get_policy_store (handle) : NULL;
+  if (store == NULL || wyl_policy_store_get_principal_authn_epoch (store,
+      subject, &authn_epoch, &authn_epoch_found) != WYRELOG_E_OK) {
+    memset (secret, 0, sizeof secret);
+    return WYRELOG_E_INTERNAL;
+  }
+  if (!authn_epoch_found)
+    authn_epoch = 0;
 
   wyl_jwt_issue_input_t input = {
     .key_id = key_id,
@@ -6102,6 +6147,7 @@ sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
     .tenant = "__wr_default",
     .principal_state_at_issue = principal_state,
     .session_id = session_id,
+    .authn_epoch = authn_epoch,
     .issued_at = issued_at,
     .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
   };
@@ -13636,6 +13682,90 @@ check_audit_event_present (WylClient *client, const gchar *filter,
         g_strcmp0 (wyl_audit_event_get_deny_origin (event), deny_origin) == 0)
       return 0;
   }
+}
+
+static const guint8 AUDIT_SESSION_TEST_TOTP_SEED[WYL_TOTP_SEED_BYTES] = {
+  0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+  0x39, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
+  0x37, 0x38, 0x39, 0x30,
+};
+
+static gint
+check_audit_query_session_token_fallback (WylHandle *handle,
+    const gchar *base_url)
+{
+  const gchar *subject = "http-audit-session-only";
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylTotpEnrollment enrollment = { 0 };
+  enrollment.subject_id = g_strdup (subject);
+  memcpy (enrollment.secret, AUDIT_SESSION_TEST_TOTP_SEED,
+      sizeof enrollment.secret);
+  enrollment.last_verified_step = G_MININT64;
+  enrollment.enrolled_at = 1700000000;
+  if (store == NULL || wyl_policy_store_totp_enrollment_insert (store,
+      &enrollment) != WYRELOG_E_OK) {
+    wyl_totp_enrollment_clear (&enrollment);
+    return 2831;
+  }
+  wyl_totp_enrollment_clear (&enrollment);
+  wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
+
+  g_autoptr (WylClient) winner = NULL;
+  g_autoptr (WylClient) session_only = NULL;
+  if (wyl_client_new (base_url, &winner) != WYRELOG_E_OK
+      || wyl_client_new (base_url, &session_only) != WYRELOG_E_OK)
+    return 2832;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyrelog_error_t login_rc = wyl_client_login_skip_mfa (winner, subject);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (login_rc != WYRELOG_E_OK
+      || wyl_client_login (session_only, subject, "") != WYRELOG_E_OK)
+    return 2833;
+
+  g_autofree gchar *session_token =
+      wyl_client_dup_session_token (session_only);
+  g_autofree gchar *access_token =
+      wyl_client_dup_access_token (session_only);
+  if (session_token == NULL || session_token[0] == '\0'
+      || access_token != NULL)
+    return 2834;
+
+  guint64 step = (guint64) (g_get_real_time () / G_USEC_PER_SEC)
+      / WYL_TOTP_STEP_SECONDS;
+  guint code = 0;
+  if (wyl_totp_code_at_step (AUDIT_SESSION_TEST_TOTP_SEED,
+      sizeof AUDIT_SESSION_TEST_TOTP_SEED, step, &code, NULL) != WYRELOG_E_OK)
+    return 2835;
+  g_autofree gchar *verify_path = g_strdup_printf
+        ("/auth/mfa/verify?session_token=%s&code=%06u", session_token, code);
+  g_autoptr (SoupSession) http = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_path (http, "POST", base_url, verify_path, &status, &body) != 0
+      || status != 200)
+    return 2836;
+
+  /* The raw proof advanced the live server-side session, but did not update
+   * this client's login state. The iterator must therefore use session-token
+   * auth, not a bearer credential. */
+  g_clear_pointer (&access_token, g_free);
+  access_token = wyl_client_dup_access_token (session_only);
+  if (access_token != NULL
+      || grant_audit_read (handle, subject, session_token) != WYRELOG_E_OK)
+    return 2837;
+  g_autoptr (WylAuditIter) iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (session_only,
+      "action(\"http.not_armed\")", 123, "public", 69, &iter)
+      != WYRELOG_E_OK)
+    return 2838;
+  gboolean has_next = FALSE;
+  if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK || !has_next)
+    return 2839;
+  g_autoptr (WylAuditEvent) event = wyl_audit_iter_ref_event (iter);
+  if (event == NULL || g_strcmp0 (wyl_audit_event_get_action (event),
+      "http.not_armed") != 0)
+    return 2840;
+  return 0;
 }
 
 #endif /* WYL_HAS_AUDIT */
@@ -22699,6 +22829,264 @@ check_relogin_binds_current_authn_epoch (WylHandle *handle,
   return 0;
 }
 
+/*
+ * #1232: a session token authenticates only a session that established the
+ * principal's current authentication.  principal_state is subject-global, so
+ * a login that proved nothing still leaves a live session a guarded route
+ * would otherwise authorize: the attached session a proof-free login gets
+ * while the principal is authenticated, and a session whose epoch a later
+ * authenticating transition retired.  Each refusal is paired with a positive
+ * control on the same route and authority, so a refusal cannot pass because
+ * the fixture lacks the permission.  /tenants/create is the route: it
+ * decides at the default tenant and its effect is a durable row.
+ */
+static gint
+check_session_token_authn_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 23201;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 23202;
+  }
+  GThread *thread = g_thread_new ("session-token-authn",
+          test_http_server_thread_ctx, &http);
+  gint result = 0;
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *winner_session = NULL;
+  g_autofree gchar *attached_session = NULL;
+  g_autofree gchar *skip_attach_session = NULL;
+  g_autofree gchar *skip_attach_token = NULL;
+  g_autofree gchar *superseded_session = NULL;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready
+      && !g_cond_wait_until (&barrier.changed, &barrier.mutex,
+      g_get_monotonic_time () + 5 * G_USEC_PER_SEC))
+    result = 23203;
+  g_mutex_unlock (&barrier.mutex);
+  if (result != 0)
+    goto cleanup;
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    result = 23204;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+#define ST_CREATE(sess, name) \
+  g_strdup_printf ("name=%s&tenant=%s&session_token=%s" \
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49", \
+      (name), WYL_TENANT_DEFAULT, (sess))
+
+  /* The winning skip-MFA login: it drives the principal to authenticated,
+   * so its session is bound to the epoch it won. */
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint rc = send_raw_login (session, "POST", base_url,
+          "username=st-admin&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc == 0 && status == 200)
+    winner_session = extract_json_string (body, "session_token");
+  if (winner_session == NULL
+      || grant_tenant_manage_authority (handle, "st-admin") != WYRELOG_E_OK) {
+    result = 23205;
+    goto cleanup;
+  }
+  gint64 won_epoch = 0;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch (store, "st-admin",
+      &won_epoch, &found) != WYRELOG_E_OK || !found || won_epoch <= 0) {
+    result = 23206;
+    goto cleanup;
+  }
+
+  /* P1, the positive control: the session that won the epoch creates. */
+  {
+    g_autofree gchar *query = ST_CREATE (winner_session, "st-p1");
+    if (send_raw_policy_mutation (session, "POST", base_url,
+        "/tenants/create", query, &status, &body) != 0 || status != 200
+        || !tenant_state_matches (store, "st-p1", TRUE, TRUE)) {
+      g_printerr ("P1: %u %s\n", status, body != NULL ? body : "(null)");
+      result = 23207;
+      goto cleanup;
+    }
+  }
+
+  /* R1: a login without proof while the principal is authenticated attaches
+   * a live session that is pending re-authentication and holds no bearer. */
+  rc = send_raw_login (session, "POST", base_url, "username=st-admin",
+          &status, &body);
+  if (rc == 0 && status == 200 && strstr (body, "\"access_token\"") == NULL)
+    attached_session = extract_json_string (body, "session_token");
+  if (attached_session == NULL) {
+    result = 23208;
+    goto cleanup;
+  }
+  {
+    g_autoptr (WylSession) attached = wyl_daemon_http_ref_session (http.server,
+            attached_session);
+    if (attached == NULL || !wyl_session_reauth_pending_private (attached)) {
+      result = 23209;
+      goto cleanup;
+    }
+  }
+  {
+    g_autofree gchar *query = ST_CREATE (attached_session, "st-r1");
+    if (send_raw_policy_mutation (session, "POST", base_url,
+        "/tenants/create", query, &status, &body) != 0 || status != 401
+        || strstr (body, "\"tenant_auth_required\"") == NULL
+        || !tenant_state_matches (store, "st-r1", FALSE, FALSE)) {
+      g_printerr ("R1: %u %s\n", status, body != NULL ? body : "(null)");
+      result = 23210;
+      goto cleanup;
+    }
+  }
+
+  /* R5: an authorized skip-MFA login onto the authenticated principal also
+   * attaches, and is minted a bearer.  Its session token and its bearer must
+   * answer alike: both establish the principal's current authentication. */
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = send_raw_login (session, "POST", base_url,
+          "username=st-admin&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc == 0 && status == 200) {
+    skip_attach_session = extract_json_string (body, "session_token");
+    skip_attach_token = extract_json_string (body, "access_token");
+  }
+  if (skip_attach_session == NULL || skip_attach_token == NULL) {
+    result = 23211;
+    goto cleanup;
+  }
+  {
+    g_autoptr (WylSession) skip_attach = wyl_daemon_http_ref_session
+          (http.server, skip_attach_session);
+    if (skip_attach == NULL || wyl_session_reauth_pending_private (skip_attach)
+        || wyl_session_authn_epoch_load_private (skip_attach) != won_epoch
+        || wyl_session_is_mfa_assured_private (skip_attach)) {
+      result = 23212;
+      goto cleanup;
+    }
+  }
+  {
+    g_autofree gchar *verify_path = g_strdup_printf
+          ("/auth/mfa/verify?session_token=%s&code=000000",
+            skip_attach_session);
+    if (send_raw_path (session, "POST", base_url, verify_path, &status,
+        &body) != 0 || status != 401
+        || strstr (body, "\"mfa_auth_required\"") == NULL) {
+      result = 23219;
+      goto cleanup;
+    }
+  }
+  {
+    g_autofree gchar *query = ST_CREATE (skip_attach_session, "st-r5a");
+    if (send_raw_policy_mutation (session, "POST", base_url,
+        "/tenants/create", query, &status, &body) != 0 || status != 200
+        || !tenant_state_matches (store, "st-r5a", TRUE, TRUE)) {
+      g_printerr ("R5 session: %u %s\n", status, body != NULL ? body : "");
+      result = 23213;
+      goto cleanup;
+    }
+    g_autofree gchar *bearer_query = g_strdup_printf ("name=st-r5b&tenant=%s"
+            "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+            WYL_TENANT_DEFAULT);
+    if (send_raw_policy_mutation_bearer (session, "POST", base_url,
+        "/tenants/create", bearer_query, skip_attach_token, &status,
+        &body) != 0 || status != 200
+        || !tenant_state_matches (store, "st-r5b", TRUE, TRUE)) {
+      g_printerr ("R5 bearer: %u %s\n", status, body != NULL ? body : "");
+      result = 23214;
+      goto cleanup;
+    }
+  }
+
+  /* R3: a session that won an epoch a later authenticating transition
+   * retired.  It creates while current, and is refused once superseded, as
+   * its bearer already is (#752). */
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = send_raw_login (session, "POST", base_url,
+          "username=st-erin&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc == 0 && status == 200)
+    superseded_session = extract_json_string (body, "session_token");
+  if (superseded_session == NULL
+      || grant_tenant_manage_authority (handle, "st-erin") != WYRELOG_E_OK) {
+    result = 23215;
+    goto cleanup;
+  }
+  {
+    g_autofree gchar *query = ST_CREATE (superseded_session, "st-r3ok");
+    if (send_raw_policy_mutation (session, "POST", base_url,
+        "/tenants/create", query, &status, &body) != 0 || status != 200
+        || !tenant_state_matches (store, "st-r3ok", TRUE, TRUE)) {
+      g_printerr ("R3 control: %u %s\n", status, body != NULL ? body : "");
+      result = 23216;
+      goto cleanup;
+    }
+  }
+  {
+    wyl_principal_state_t to = WYL_PRINCIPAL_STATE_LAST_;
+    gboolean moved = FALSE;
+    gint64 event_id = -1;
+    gint64 now_secs = g_get_real_time () / G_USEC_PER_SEC;
+    if (wyl_policy_store_apply_principal_transition (store, "st-erin",
+        WYL_PRINCIPAL_EVENT_LOGOUT, 0, now_secs, NULL, &to, &moved,
+        &event_id) != WYRELOG_E_OK || !moved
+        || wyl_policy_store_apply_principal_transition (store, "st-erin",
+        WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA, 0, now_secs, NULL, &to, &moved,
+        &event_id) != WYRELOG_E_OK || !moved
+        || to != WYL_PRINCIPAL_STATE_AUTHENTICATED
+        || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+      result = 23217;
+      goto cleanup;
+    }
+  }
+  {
+    g_autofree gchar *query = ST_CREATE (superseded_session, "st-r3");
+    if (send_raw_policy_mutation (session, "POST", base_url,
+        "/tenants/create", query, &status, &body) != 0 || status != 401
+        || strstr (body, "\"tenant_auth_required\"") == NULL
+        || !tenant_state_matches (store, "st-r3", FALSE, FALSE)) {
+      g_printerr ("R3: %u %s\n", status, body != NULL ? body : "(null)");
+      result = 23218;
+      goto cleanup;
+    }
+  }
+#undef ST_CREATE
+
+cleanup:
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+  return result;
+}
+
 #ifdef WYL_HAS_AUDIT
 static gint
 check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
@@ -23841,6 +24229,10 @@ default_variant_checks (void)
           base_url);
   if (relogin_epoch_rc != 0)
     return relogin_epoch_rc;
+
+  gint session_token_authn_rc = check_session_token_authn_contract ();
+  if (session_token_authn_rc != 0)
+    return session_token_authn_rc;
 #if defined(WYL_HAS_AUDIT) && defined(WYL_TEST_VARIANT_AUDIT)
   gint skip_mfa_audit_paths_rc = check_skip_mfa_zero_event_audit_paths
         (handle, base_url);
@@ -24548,6 +24940,9 @@ audit_variant_checks (void)
   audit_rc = check_audit_event_present (client, "action(\"role_revoke\")",
           "http-policy-admin", "role_revoke", "tenant-b",
           WYL_DECISION_ALLOW, NULL, "site.reader");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_query_session_token_fallback (handle, base_url);
   if (audit_rc != 0)
     return audit_rc;
 

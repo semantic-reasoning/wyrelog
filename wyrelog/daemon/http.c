@@ -3129,10 +3129,28 @@ wyl_daemon_http_seed_human_session_with_state_for_test (SoupServer *server,
   if (ctx == NULL || wyl_id_parse (session_id, &id) != WYRELOG_E_OK
       || subject == NULL || tenant == NULL)
     return FALSE;
+  /* A seeded session models one that won the subject's current
+   * authentication. Give otherwise-empty test subjects a synthetic positive
+   * auth event so fixtures exercise the same nonzero-watermark contract as a
+   * production session (#1232). */
+  gint64 epoch = 0;
+  gboolean epoch_found = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  if (store == NULL || wyl_policy_store_get_principal_authn_epoch
+        (store, subject, &epoch, &epoch_found) != WYRELOG_E_OK)
+    return FALSE;
+  if (!epoch_found || epoch <= 0) {
+    if (wyl_policy_store_append_principal_event (store, subject,
+        "login_skip_mfa", "unverified", "authenticated", &epoch)
+        != WYRELOG_E_OK || epoch <= 0)
+      return FALSE;
+    epoch_found = TRUE;
+  }
   g_autoptr (WylSession) session = g_object_new (WYL_TYPE_SESSION, NULL);
   session->id = id;
   session->username = g_strdup (subject);
   session->tenant = g_strdup (tenant);
+  session->authn_epoch = epoch_found ? epoch : 0;
   wyl_session_state_store_private (session, state);
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   return wyl_daemon_http_replace_session_for_test (server, session_id, session);
@@ -6576,6 +6594,35 @@ resolve_session_token_auth (SoupServer *server, WylDaemonHttpContext *ctx,
           WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID;
     return WYRELOG_E_POLICY;
   }
+
+  /*
+   * Issue #1232: a live session is not an authenticated one.
+   * principal_state is subject-global, so a login that proved nothing still
+   * leaves a session every guarded decision would accept.  Admit only a
+   * session that established the principal's current authentication, the
+   * property the bearer path gets from its mint and the #752 gate:
+   *
+   *   - an attached session pending re-authentication presented no proof;
+   *     /auth/mfa/verify clears the flag when it does;
+   *   - a session whose epoch is not the durable watermark either never won
+   *     one (a login opened while the principal owed its proof) or won one a
+   *     later authenticating transition retired.
+   *
+   * A durable read fault, a subject with no established authentication
+   * watermark, or a non-current session epoch all fail closed.
+   * As with the bearer gate, the read is not one transaction with the
+   * decision, so a supersession landing in between admits that one request.
+   */
+  if (wyl_session_reauth_pending_private (session))
+    return WYRELOG_E_POLICY;
+  gint64 current_epoch = 0;
+  gboolean epoch_found = FALSE;
+  if (wyl_policy_store_get_principal_authn_epoch
+        (wyl_handle_get_policy_store (ctx->handle), username,
+      &current_epoch, &epoch_found) != WYRELOG_E_OK
+      || !epoch_found || current_epoch <= 0
+      || wyl_session_authn_epoch_load_private (session) != current_epoch)
+    return WYRELOG_E_POLICY;
 
   out_auth->session_id = g_strdup (session_token);
   out_auth->actor = g_steal_pointer (&username);
