@@ -127,6 +127,15 @@ def control_validation_error(
     return mutation_validation_error(delta)
 
 
+def replay_session_mutation_source(files: dict[str, str]) -> str:
+    source = files["wyrelog/fact/replay-store-private.c"]
+    marker = "  CStoreReplayProvider *c_store = provider;\n"
+    alias = marker + "  wyl_fact_store_t *store = c_store->store;\n"
+    if marker not in source:
+        raise AssertionError("replay-store mutation target drifted")
+    return source.replace(marker, alias, 1)
+
+
 def source_key(root: PurePath, path: PurePath) -> str:
     return path.relative_to(root).as_posix()
 
@@ -217,8 +226,8 @@ def self_test(files: dict[str, str]) -> None:
         validation_controls.append(control)
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
-    replay_marker = "static wyrelog_error_t\nlist_replay_relations"
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
+    replay_marker = "static wyrelog_error_t\nc_store_execute"
     safe_collision = (
         "static wyrelog_error_t\n"
         "reject_audit_database_unlocked (wyl_fact_store_t *store)\n"
@@ -228,21 +237,21 @@ def self_test(files: dict[str, str]) -> None:
         "{\n  return reject_audit_database_unlocked (store);\n}\n\n"
     )
     replay_admission = (
-        "    WylFactStoreConnectionSession session = { 0 };\n"
-        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "  WylFactStoreConnectionSession session = { 0 };\n"
+        "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);"
     )
-    control["wyrelog/fact/replay.c"] = replay_source.replace(
+    control["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, safe_collision + replay_marker, 1
     ).replace(
         replay_admission,
-        "  (void) boundary_safe_collision_wrapper (store);\n"
+        "  (void) boundary_safe_collision_wrapper (c_store->store);\n"
         + replay_admission,
         1,
     )
     validation_controls.append(control)
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     local_alias_target = (
         "static void\n"
         "boundary_safe_session_alias_target (void)\n"
@@ -255,7 +264,7 @@ def self_test(files: dict[str, str]) -> None:
         "    wyl_fact_store_close ();\n"
         "  }\n"
     )
-    control["wyrelog/fact/replay.c"] = replay_source.replace(
+    control["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, local_alias_target + replay_marker, 1
     ).replace(
         replay_admission, local_safe_alias + replay_admission, 1
@@ -263,13 +272,13 @@ def self_test(files: dict[str, str]) -> None:
     validation_controls.append(control)
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     safe_for_alias = (
         "  for (void (*wyl_fact_store_close) (void) = "
         "boundary_safe_session_alias_target; FALSE;)\n"
         "    wyl_fact_store_close ();\n"
     )
-    control["wyrelog/fact/replay.c"] = replay_source.replace(
+    control["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, local_alias_target + replay_marker, 1
     ).replace(
         replay_admission, safe_for_alias + replay_admission, 1
@@ -277,18 +286,18 @@ def self_test(files: dict[str, str]) -> None:
     validation_controls.append(control)
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     safe_assignment_target = (
         "static void\n"
         "boundary_safe_assignment_target (wyl_fact_store_t *store)\n"
         "{\n  (void) store;\n}\n\n"
     )
-    control["wyrelog/fact/replay.c"] = replay_source.replace(
+    control["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, safe_assignment_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "  wyl_fact_store_connection_session_end (&session);\n"
-        "  boundary_safe_assignment_target (store);\n",
+        "  boundary_safe_assignment_target (c_store->store);\n",
         1,
     )
     validation_controls.append(control)
@@ -321,12 +330,11 @@ def self_test(files: dict[str, str]) -> None:
     control["wyrelog/fact/session-stringify-boundary.h"] = (
         "#define WYL_SESSION_STRINGIFY(value) #value\n"
     )
-    replay_source = control["wyrelog/fact/replay.c"]
-    relation_at = replay_source.index("list_replay_relations")
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     session_at = replay_source.index(
-        "WylFactStoreConnectionSession session = { 0 };", relation_at
+        "WylFactStoreConnectionSession session = { 0 };"
     )
-    control["wyrelog/fact/replay.c"] = (
+    control["wyrelog/fact/replay-store-private.c"] = (
         '#include "session-stringify-boundary.h"\n'
         + replay_source[:session_at]
         + "const char *boundary_text = "
@@ -370,12 +378,11 @@ def self_test(files: dict[str, str]) -> None:
     validation_controls.append(control)
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
-    relation_at = replay_source.index("list_replay_relations")
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     session_at = replay_source.index(
-        "WylFactStoreConnectionSession session = { 0 };", relation_at
+        "WylFactStoreConnectionSession session = { 0 };"
     )
-    control["wyrelog/fact/replay.c"] = (
+    control["wyrelog/fact/replay-store-private.c"] = (
         replay_source[:session_at]
         + 'const gchar *boundary_text = "} store->conn";\n  '
         + "(void) boundary_text;\n  " + replay_source[session_at:]
@@ -383,8 +390,8 @@ def self_test(files: dict[str, str]) -> None:
     validation_controls.append(control)
 
     control = dict(files)
-    control["wyrelog/fact/replay.c"] = control[
-        "wyrelog/fact/replay.c"
+    control["wyrelog/fact/replay-store-private.c"] = control[
+        "wyrelog/fact/replay-store-private.c"
     ].replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "boundary_cleanup:\n"
@@ -398,11 +405,101 @@ def self_test(files: dict[str, str]) -> None:
     ) -> None:
         critical_mutations.append((label, expected, mutation))
 
-    source = files["wyrelog/fact/store.c"]
+    changed = dict(files)
+    provider_source = changed["wyrelog/fact/replay-store-private.c"]
+    cleanup_order = (
+        "  duckdb_destroy_prepare (&stmt);\n"
+        "  duckdb_destroy_result (&result);\n"
+        "  if (interrupt_handler != 0)\n"
+        "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
+        "  wyl_fact_store_connection_session_end (&session);\n"
+    )
+    cleanup_after_release = (
+        "  duckdb_destroy_prepare (&stmt);\n"
+        "  if (interrupt_handler != 0)\n"
+        "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
+        "  wyl_fact_store_connection_session_end (&session);\n"
+        "  duckdb_destroy_result (&result);\n"
+    )
+    changed["wyrelog/fact/replay-store-private.c"] = provider_source.replace(
+        cleanup_order, cleanup_after_release, 1
+    )
+    mutations.append(changed)
+    require_boundary_rejection(
+        "duckdb-result-destroy-after-session-release",
+        "stale DuckDB authority used after session end",
+        changed,
+    )
+
+    changed = dict(files)
+    provider_source = changed["wyrelog/fact/replay-store-private.c"]
+    disconnect_after_release = (
+        "  duckdb_destroy_prepare (&stmt);\n"
+        "  duckdb_destroy_result (&result);\n"
+        "  wyl_fact_store_connection_session_end (&session);\n"
+        "  if (interrupt_handler != 0)\n"
+        "    g_cancellable_disconnect (cancellable, interrupt_handler);\n"
+    )
+    changed["wyrelog/fact/replay-store-private.c"] = provider_source.replace(
+        cleanup_order, disconnect_after_release, 1
+    )
+    mutations.append(changed)
+    require_boundary_rejection(
+        "replay-cancellation-disconnect-after-session-release",
+        "replay provider releases authority before cleanup completes",
+        changed,
+    )
+
+    changed = dict(files)
+    provider_source = changed["wyrelog/fact/replay-store-private.c"]
+    callback_and_free = (
+        "  wyrelog_error_t rc = row_func (cells, n_cells, row_data);\n"
+        "  for (gsize i = 0; i < n_cells; i++)\n"
+        "    if (cells[i].type == WYL_FACT_REPLAY_CELL_TEXT)\n"
+        "      duckdb_free ((void *) cells[i].value.text);\n"
+        "  return rc;\n"
+    )
+    free_before_callback = (
+        "  for (gsize i = 0; i < n_cells; i++)\n"
+        "    if (cells[i].type == WYL_FACT_REPLAY_CELL_TEXT)\n"
+        "      duckdb_free ((void *) cells[i].value.text);\n"
+        "  wyrelog_error_t rc = row_func (cells, n_cells, row_data);\n"
+        "  return rc;\n"
+    )
+    changed["wyrelog/fact/replay-store-private.c"] = provider_source.replace(
+        callback_and_free, free_before_callback, 1
+    )
+    mutations.append(changed)
+    require_boundary_rejection(
+        "replay-row-text-freed-before-callback",
+        "replay row text is freed before callback copies it",
+        changed,
+    )
 
     changed = dict(files)
     replay_source = changed["wyrelog/fact/replay.c"]
-    replay_marker = "static wyrelog_error_t\nlist_replay_relations"
+    projection_read = (
+        "  rc = wyl_fact_replay_store_execute (store,\n"
+        "          WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS"
+    )
+    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        projection_read,
+        "  rc = materialize_owned_cell (&mat, NULL, NULL, NULL);\n"
+        + projection_read,
+        1,
+    )
+    mutations.append(changed)
+    require_boundary_rejection(
+        "replay-materialization-before-store-read",
+        "engine materialization occurs before store read",
+        changed,
+    )
+
+    source = files["wyrelog/fact/store.c"]
+
+    changed = dict(files)
+    replay_source = replay_session_mutation_source(changed)
+    replay_marker = "static wyrelog_error_t\nc_store_execute"
     for label, declarations, call in (
         (
             "copied-alias-retains-raw-authority",
@@ -448,10 +545,10 @@ def self_test(files: dict[str, str]) -> None:
         "}\n\n"
     )
     replay_admission = (
-        "    WylFactStoreConnectionSession session = { 0 };\n"
-        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "  WylFactStoreConnectionSession session = { 0 };\n"
+        "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, local_alias_shadow + replay_marker, 1
     ).replace(
         replay_admission,
@@ -466,7 +563,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     expired_alias_wrapper = (
         "static void\n"
         "boundary_expired_alias_target (void)\n"
@@ -482,7 +579,7 @@ def self_test(files: dict[str, str]) -> None:
         "  wyl_fact_store_close (store);\n"
         "}\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, expired_alias_wrapper + replay_marker, 1
     ).replace(
         replay_admission,
@@ -569,7 +666,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         for_alias_wrapper = (
             "static void\n"
             "boundary_safe_for_target (void)\n"
@@ -581,7 +678,7 @@ def self_test(files: dict[str, str]) -> None:
             + "  wyl_fact_store_close (store);\n"
             "}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, for_alias_wrapper + replay_marker, 1
         ).replace(
             replay_admission,
@@ -596,9 +693,8 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = changed[
-        "wyrelog/fact/replay.c"
-    ].replace(
+    replay_source = replay_session_mutation_source(changed)
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "  void (*boundary_close_alias) (wyl_fact_store_t *) = "
         "wyl_fact_store_close;\n"
@@ -640,13 +736,13 @@ def self_test(files: dict[str, str]) -> None:
                     "(wyl_fact_store_t *) = boundary_safe_designator_target;\n"
                     "  boundary_designator_alias = " + designator + ";\n"
                 )
-            replay_source = changed["wyrelog/fact/replay.c"]
+            replay_source = replay_session_mutation_source(changed)
             safe_designator_target = (
                 "static void\n"
                 "boundary_safe_designator_target (wyl_fact_store_t *store)\n"
                 "{\n  (void) store;\n}\n\n"
             )
-            changed["wyrelog/fact/replay.c"] = replay_source.replace(
+            changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
                 replay_marker, safe_designator_target + replay_marker, 1
             ).replace(
                 "  wyl_fact_store_connection_session_end (&session);\n",
@@ -663,13 +759,13 @@ def self_test(files: dict[str, str]) -> None:
             )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     typedef_shadow_target = (
         "static void\n"
         "boundary_safe_typedef_shadow_target (wyl_fact_store_t *store)\n"
         "{\n  (void) store;\n}\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, typedef_shadow_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -692,8 +788,8 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    replay_source = replay_session_mutation_source(changed)
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, typedef_shadow_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -717,8 +813,8 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    replay_source = replay_session_mutation_source(changed)
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, typedef_shadow_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -757,14 +853,14 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         safe_multi_target = (
             "typedef void (*BoundaryAlias) (wyl_fact_store_t *);\n"
             "static void\n"
             "boundary_safe_multi_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, safe_multi_target + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -781,8 +877,8 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    replay_source = replay_session_mutation_source(changed)
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker,
         "typedef void (*BoundaryArrayAlias) (wyl_fact_store_t *);\n\n"
         + replay_marker,
@@ -815,7 +911,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         array_support = (
             "typedef void (*BoundaryNestedArrayAlias) "
             "(wyl_fact_store_t *);\n"
@@ -824,7 +920,7 @@ def self_test(files: dict[str, str]) -> None:
             "{\n  (void) store;\n}\n\n"
         )
         dimensions = "[][2]" if label.startswith("nested") else "[]"
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, array_support + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -842,13 +938,13 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     dispatch_type = (
         "typedef struct\n"
         "{\n  void (*call) (wyl_fact_store_t *);\n}\n"
         "BoundaryDispatch;\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, dispatch_type + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -888,14 +984,14 @@ def self_test(files: dict[str, str]) -> None:
             ("conditional", "if (store != NULL)\n    "),
         ):
             changed = dict(files)
-            replay_source = changed["wyrelog/fact/replay.c"]
+            replay_source = replay_session_mutation_source(changed)
             assignment_support = (
                 support
                 + "static void\n"
                 "boundary_safe_assigned_target (wyl_fact_store_t *store)\n"
                 "{\n  (void) store;\n}\n\n"
             )
-            changed["wyrelog/fact/replay.c"] = replay_source.replace(
+            changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
                 replay_marker, assignment_support + replay_marker, 1
             ).replace(
                 "  wyl_fact_store_connection_session_end (&session);\n",
@@ -936,14 +1032,14 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         lvalue_support = (
             "typedef void (*BoundaryLvalueAlias) (wyl_fact_store_t *);\n"
             "static void\n"
             "boundary_safe_lvalue_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, lvalue_support + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -961,14 +1057,14 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     chain_support = (
         "typedef void (*BoundaryChainAlias) (wyl_fact_store_t *);\n"
         "static void\n"
         "boundary_safe_chain_target (wyl_fact_store_t *store)\n"
         "{\n  (void) store;\n}\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, chain_support + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1051,7 +1147,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         pointer_support = (
             "typedef void (*BoundaryPointerAlias) (wyl_fact_store_t *);\n"
             "static void\n"
@@ -1068,7 +1164,7 @@ def self_test(files: dict[str, str]) -> None:
             "  wyl_fact_store_connection_session_end (&session);\n"
             "  boundary_pointer_alias (store);\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, pointer_support + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1083,7 +1179,7 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     control = dict(files)
-    replay_source = control["wyrelog/fact/replay.c"]
+    replay_source = control["wyrelog/fact/replay-store-private.c"]
     pointer_retarget_support = (
         "typedef void (*BoundaryPointerRetargetAlias) (wyl_fact_store_t *);\n"
         "static void\n"
@@ -1114,7 +1210,7 @@ def self_test(files: dict[str, str]) -> None:
         "  boundary_pointer_first (store);\n"
         "  wyl_fact_store_connection_session_end (&session);\n"
     )
-    control["wyrelog/fact/replay.c"] = replay_source.replace(
+    control["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, pointer_retarget_support + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1124,12 +1220,12 @@ def self_test(files: dict[str, str]) -> None:
     validation_controls.append(control)
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     pointer_declaration_support = (
         "typedef void (*BoundaryPointerDeclarationAlias) "
         "(wyl_fact_store_t *);\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, pointer_declaration_support + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1162,14 +1258,14 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         callee_support = (
             "typedef void (*BoundaryConditionalCallee) (wyl_fact_store_t *);\n"
             "static void\n"
             "boundary_safe_conditional_callee (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, callee_support + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1189,13 +1285,13 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     inner_assignment_target = (
         "static void\n"
         "boundary_safe_inner_assignment_target (wyl_fact_store_t *store)\n"
         "{\n  (void) store;\n}\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, inner_assignment_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1231,13 +1327,13 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         safe_conditional_target = (
             "static void\n"
             "boundary_safe_conditional_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, safe_conditional_target + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1268,13 +1364,13 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         safe_expression_target = (
             "static void\n"
             "boundary_safe_expression_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, safe_expression_target + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1297,13 +1393,13 @@ def self_test(files: dict[str, str]) -> None:
         ("runtime-conditional", "store == NULL"),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         safe_comma_target = (
             "static void\n"
             "boundary_safe_comma_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, safe_comma_target + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1350,13 +1446,13 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        replay_source = changed["wyrelog/fact/replay.c"]
+        replay_source = replay_session_mutation_source(changed)
         safe_branch_target = (
             "static void\n"
             "boundary_safe_branch_target (wyl_fact_store_t *store)\n"
             "{\n  (void) store;\n}\n\n"
         )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             replay_marker, safe_branch_target + replay_marker, 1
         ).replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
@@ -1375,13 +1471,13 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     safe_goto_target = (
         "static void\n"
         "boundary_safe_goto_target (wyl_fact_store_t *store)\n"
         "{\n  (void) store;\n}\n\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_marker, safe_goto_target + replay_marker, 1
     ).replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
@@ -2051,21 +2147,21 @@ def self_test(files: dict[str, str]) -> None:
 
     changed = dict(files)
     marker = "wyl_fact_store_connection_session_end (&session);"
-    changed["wyrelog/fact/replay.c"] = changed[
-        "wyrelog/fact/replay.c"
+    changed["wyrelog/fact/replay-store-private.c"] = changed[
+        "wyrelog/fact/replay-store-private.c"
     ].replace(marker, marker + "\n  duckdb_query (conn, \"SELECT 1\", NULL);", 1)
     mutations.append(changed)
 
     changed = dict(files)
     changed["wyrelog/fact/replay.c"] = changed[
         "wyrelog/fact/replay.c"
-    ].replace("owned->cells[c].text = g_strdup (value);",
-              "owned->cells[c].text = value;", 1)
+    ].replace("owned->cells[c].text = g_strdup (cells[c].value.text);",
+              "owned->cells[c].text = cells[c].value.text;", 1)
     mutations.append(changed)
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = changed[
-        "wyrelog/fact/replay.c"
+    changed["wyrelog/fact/replay-store-private.c"] = changed[
+        "wyrelog/fact/replay-store-private.c"
     ].replace("WylFactStoreConnectionSession session = { 0 };",
               "static\n  WylFactStoreConnectionSession session = { 0 };", 1)
     mutations.append(changed)
@@ -2126,8 +2222,8 @@ def self_test(files: dict[str, str]) -> None:
         mutations.append(changed)
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = changed[
-        "wyrelog/fact/replay.c"
+    changed["wyrelog/fact/replay-store-private.c"] = changed[
+        "wyrelog/fact/replay-store-private.c"
     ].replace("wyl_fact_store_connection_session_end (&session);", "", 1)
     mutations.append(changed)
 
@@ -3016,24 +3112,26 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    replay_source = changed["wyrelog/fact/replay.c"]
+    replay_source = replay_session_mutation_source(changed)
     admitted_region = (
-        "    rc = wyl_fact_store_connection_session_begin (store, &session);\n"
-        "    if (rc != WYRELOG_E_OK)\n"
-        "      return rc;\n"
-        "    duckdb_connection conn = "
-        "wyl_fact_store_connection_session_get (&session);\n"
+        "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    return rc;\n"
+        "  duckdb_connection connection = "
+        "wyl_fact_store_connection_session_get\n"
+        "        (&session);\n"
     )
     reordered_region = (
-        "    duckdb_connection conn = "
-        "wyl_fact_store_connection_session_get (&session);\n"
-        "    rc = wyl_fact_store_connection_session_begin (store, &session);\n"
-        "    if (rc != WYRELOG_E_OK)\n"
-        "      return rc;\n"
+        "  duckdb_connection connection = "
+        "wyl_fact_store_connection_session_get\n"
+        "        (&session);\n"
+        "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);\n"
+        "  if (rc != WYRELOG_E_OK)\n"
+        "    return rc;\n"
     )
     if admitted_region not in replay_source:
         raise AssertionError("session dominance mutation fixture drifted")
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region, reordered_region, 1
     )
     mutations.append(changed)
@@ -3044,14 +3142,18 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
-        "    (void) duckdb_query (NULL, \"SELECT 1;\", NULL);\n"
-        + admitted_region,
+        admitted_region.replace(
+            "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);\n",
+            "  (void) bind_request (NULL, operation, request);\n"
+            "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);\n",
+            1,
+        ),
         1,
     ).replace(
-        "    duckdb_free (namespace_id);\n",
-        "    (void) namespace_id;\n",
+        "  rc = bind_request (stmt, operation, request);\n",
+        "  rc = WYRELOG_E_OK;\n",
         1,
     )
     mutations.append(changed)
@@ -3248,12 +3350,11 @@ def self_test(files: dict[str, str]) -> None:
 
     changed = dict(files)
     replay_admission = (
-        "    WylFactStoreConnectionSession session = { 0 };\n"
-        "    rc = wyl_fact_store_connection_session_begin (store, &session);"
+        "  WylFactStoreConnectionSession session = { 0 };\n"
+        "  rc = wyl_fact_store_connection_session_begin (c_store->store, &session);"
     )
-    changed["wyrelog/fact/replay.c"] = changed[
-        "wyrelog/fact/replay.c"
-    ].replace(
+    replay_source = replay_session_mutation_source(changed)
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         replay_admission,
         "  wyl_fact_store_close (store);\n" + replay_admission,
         1,
@@ -3378,8 +3479,8 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
-        "wyl_fact_store_connection_session_get (&session)",
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
+        "wyl_fact_store_connection_session_get\n        (&session)",
         "/* wyl_fact_store_connection_session_get */ session.connection",
         1,
     )
@@ -3461,7 +3562,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             admitted_region, replacement, 1
         )
         mutations.append(changed)
@@ -3485,7 +3586,7 @@ def self_test(files: dict[str, str]) -> None:
         "  duckdb_connection conn = "
         "wyl_fact_store_connection_session_get (&session);\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region, source_order_replacement, 1
     )
     mutations.append(changed)
@@ -3499,7 +3600,7 @@ def self_test(files: dict[str, str]) -> None:
         "wyl_fact_store_connection_session_get(&(value))\n"
         + replay_source
     )
-    changed["wyrelog/fact/replay.c"] = file_macro_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = file_macro_source.replace(
         admitted_region,
         "  duckdb_connection conn = WYL_FILE_GET(session);\n"
         "  rc = wyl_fact_store_connection_session_begin (store, &session);\n"
@@ -3513,7 +3614,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] += (
+    changed["wyrelog/fact/replay-store-private.c"] += (
         "\nstatic gpointer boundary_session_get_escape(void)\n"
         "{\n"
         "  WylFactStoreConnectionSession stray = { 0 };\n"
@@ -3591,7 +3692,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             admitted_region, replacement, 1
         )
         mutations.append(changed)
@@ -3620,11 +3721,11 @@ def self_test(files: dict[str, str]) -> None:
     ):
         changed = dict(files)
         if replacement is not None:
-            changed["wyrelog/fact/replay.c"] = replay_source.replace(
+            changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
                 admitted_region, replacement, 1
             )
         else:
-            changed["wyrelog/fact/replay.c"] = replay_source.replace(
+            changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
                 "  wyl_fact_store_connection_session_end (&session);\n",
                 "#if WYL_SKIP_RELEASE\n"
                 "  (void) store;\n"
@@ -3641,7 +3742,7 @@ def self_test(files: dict[str, str]) -> None:
         "#define WYL_REVIEW_RETURN(condition, value) "
         "g_return_val_if_fail((condition), (value))\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         admitted_region
         + '#include "review-return-boundary.h"\n'
@@ -3672,22 +3773,24 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
+        if label == "profile-goto-skips-admission":
+            replay_source = "#define WYL_PROFILE_GOTO 1\n" + replay_source
         replacement = prefix + admitted_region
         if label == "profile-goto-skips-admission":
             replacement = replacement.replace(
-                "  duckdb_connection conn = ",
+                "  duckdb_connection connection = ",
                 "boundary_profile_after_begin:\n"
                 "  duckdb_connection conn = ",
                 1,
             )
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             admitted_region, replacement, 1
         )
         mutations.append(changed)
         require_boundary_rejection(label, expected, changed)
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         admitted_region
         + "#if WYL_PROFILE_RETURN\n"
@@ -3701,7 +3804,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         "#if WYL_ADMISSION_MODE == 2\n"
         "  rc = WYRELOG_E_OK;\n"
@@ -3722,7 +3825,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         "#if WYL_RELATIONAL_ADMISSION_MODE > 1\n"
         "  rc = WYRELOG_E_OK;\n"
@@ -3760,7 +3863,7 @@ def self_test(files: dict[str, str]) -> None:
          "WYL_OCTAL_ADMISSION_MODE == 010"),
     ):
         changed = dict(files)
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             admitted_region,
             f"#if {condition}\n"
             "  rc = WYRELOG_E_OK;\n"
@@ -3779,7 +3882,7 @@ def self_test(files: dict[str, str]) -> None:
         )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         "#define WYL_DERIVED_ADMISSION_TWO (1 << 1)\n"
         "#if WYL_DERIVED_ADMISSION_MODE & WYL_DERIVED_ADMISSION_TWO\n"
@@ -3801,7 +3904,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         "#define WYL_LARGE_DERIVED_TARGET (1 << 10)\n"
         "#if WYL_LARGE_DERIVED_MODE == WYL_LARGE_DERIVED_TARGET\n"
@@ -3827,7 +3930,7 @@ def self_test(files: dict[str, str]) -> None:
         "duckdb_connection boundary_included_early = session.connection;\n"
         "(void) boundary_included_early;\n"
     )
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         admitted_region,
         '#include "function-raw-boundary.h"\n' + admitted_region,
         1,
@@ -3840,7 +3943,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "  if (0)\n"
         "    wyl_fact_store_connection_session_end (&session);\n",
@@ -3852,7 +3955,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         "wyl_fact_store_connection_session_end (&session);",
         "if (FALSE) {\n"
         "      if (store != NULL) {\n"
@@ -3883,7 +3986,7 @@ def self_test(files: dict[str, str]) -> None:
         ),
     ):
         changed = dict(files)
-        changed["wyrelog/fact/replay.c"] = replay_source.replace(
+        changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
             "  wyl_fact_store_connection_session_end (&session);\n",
             replacement,
             1,
@@ -3892,7 +3995,7 @@ def self_test(files: dict[str, str]) -> None:
         require_boundary_rejection(label, "session owner lost release", changed)
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "  if (store != NULL)\n"
         "    goto boundary_after_release;\n"
@@ -3909,7 +4012,7 @@ def self_test(files: dict[str, str]) -> None:
     )
 
     changed = dict(files)
-    changed["wyrelog/fact/replay.c"] = replay_source.replace(
+    changed["wyrelog/fact/replay-store-private.c"] = replay_source.replace(
         "  wyl_fact_store_connection_session_end (&session);\n",
         "boundary_reenter_authority:\n"
         "  wyl_fact_store_connection_session_end (&session);\n"
