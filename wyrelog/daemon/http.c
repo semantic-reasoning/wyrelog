@@ -464,6 +464,9 @@ typedef struct _WylDaemonHttpContext
   guint8 service_token_limiter_key[crypto_generichash_KEYBYTES];
   gboolean service_token_limiter_key_ready;
   WylServiceExchangeLimiter *service_token_limiter;
+  /* Keys the session handles /audit/events shows in place of session ids;
+   * random per context, so a handle never outlives the ids it hides. */
+  guint8 audit_session_handle_key[crypto_generichash_KEYBYTES];
 #endif
   gboolean production_mode;
   WylDaemonProfile profile;
@@ -1967,6 +1970,8 @@ wyl_daemon_http_context_unref (gpointer data)
 #ifdef WYL_HAS_AUDIT
   sodium_memzero (ctx->service_token_limiter_key,
       sizeof ctx->service_token_limiter_key);
+  sodium_memzero (ctx->audit_session_handle_key,
+      sizeof ctx->audit_session_handle_key);
   g_clear_pointer (&ctx->service_token_limiter,
       wyl_service_exchange_limiter_free);
   g_clear_pointer (&ctx->service_exchange_limiter,
@@ -2375,6 +2380,16 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
     return NULL;
   }
 #ifdef WYL_HAS_AUDIT
+  /* Only fresh random bytes; unrelated to the service token limiter key. */
+  rc = derive_service_token_limiter_key (ctx->audit_session_handle_key);
+  if (rc != WYRELOG_E_OK) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+        "audit session handle key initialization failed: %s",
+        wyrelog_error_string (rc));
+    wyl_daemon_http_context_terminalize (ctx, TRUE);
+    wyl_daemon_http_context_unref (ctx);
+    return NULL;
+  }
   rc = wyl_service_exchange_limiter_new (ctx->access_token_secret,
           sizeof ctx->access_token_secret, 4096, service_exchange_limiter_now_us,
           NULL, &ctx->service_exchange_limiter);
@@ -10161,6 +10176,82 @@ reconcile_audit_query_projection (WylHandle *handle)
 }
 #endif
 
+#ifdef WYL_HAS_AUDIT
+/*
+ * A session id is the session token /auth/login hands out, and
+ * ?session_token= accepts it on every guarded route, so an audit row that
+ * carries a live one hands the reader that session.  The rows are
+ * hash-chained and cannot be rewritten; the read path replaces the ids
+ * instead, with a keyed handle that stays stable within one daemon context
+ * so a session's rows still correlate.
+ *
+ * Two rules, because neither suffices alone:
+ *
+ *   - structural: session_state and session_fired_delta_* rows carry the
+ *     session id as their subject.  wyl_session_login() commits both before
+ *     login_handler registers the session, so a read landing in between would
+ *     find nothing to match yet.
+ *   - value: any other column equal to a registered session id.  Every
+ *     other row that carries one -- a decision at a session resource, a
+ *     session-scoped arming -- is written by a request that authenticated
+ *     through that registration, before this query ran.
+ *
+ * The registry is snapshotted on the first value, after the query executed,
+ * so no row it returned can belong to a session registered later outside
+ * the structural rule.  Ids of sessions that are gone are not credentials
+ * and stay as stored.  The row id is never rewritten (clients parse it);
+ * one colliding with a live session id refuses the whole read.
+ */
+typedef struct
+{
+  WylDaemonHttpContext *ctx;
+  GHashTable *live_sessions;
+} AuditSessionRedactor;
+
+static gchar *
+audit_session_handle (WylDaemonHttpContext *ctx, const gchar *session_id)
+{
+  guint8 digest[8];
+  crypto_generichash (digest, sizeof digest, (const guint8 *) session_id,
+      strlen (session_id), ctx->audit_session_handle_key,
+      sizeof ctx->audit_session_handle_key);
+  GString *handle = g_string_new ("session#");
+  for (gsize i = 0; i < sizeof digest; i++)
+    g_string_append_printf (handle, "%02x", digest[i]);
+  return g_string_free (handle, FALSE);
+}
+
+static wyrelog_error_t
+audit_session_redact (const gchar *column, const gchar *row_action,
+    const gchar *value, gchar **out_replacement, gpointer user_data)
+{
+  AuditSessionRedactor *redactor = user_data;
+  if (redactor->live_sessions == NULL) {
+    WylDaemonHttpContext *ctx = redactor->ctx;
+    redactor->live_sessions = g_hash_table_new_full (g_str_hash, g_str_equal,
+            (GDestroyNotify) wyl_sensitive_string_free, NULL);
+    g_mutex_lock (&ctx->lock);
+    GHashTableIter iter;
+    gpointer key = NULL;
+    g_hash_table_iter_init (&iter, ctx->sessions_by_token);
+    while (g_hash_table_iter_next (&iter, &key, NULL))
+      g_hash_table_add (redactor->live_sessions, g_strdup (key));
+    g_mutex_unlock (&ctx->lock);
+  }
+
+  gboolean live = g_hash_table_contains (redactor->live_sessions, value);
+  if (g_strcmp0 (column, "id") == 0)
+    return live ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+  gboolean structural = g_strcmp0 (column, "subject_id") == 0
+      && (g_strcmp0 (row_action, "session_state") == 0
+      || g_str_has_prefix (row_action != NULL ? row_action : "",
+      "session_fired_delta_"));
+  if (structural || live)
+    *out_replacement = audit_session_handle (redactor->ctx, value);
+  return WYRELOG_E_OK;
+}
+#endif
+
 static void
 audit_events_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -10184,12 +10275,20 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylHandle *handle = ctx->handle;
   g_autofree gchar *body = NULL;
+  AuditSessionRedactor redactor = {.ctx = ctx };
   wyrelog_error_t rc = reconcile_audit_query_projection (handle);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-            filter, &body);
+    rc = wyl_audit_conn_query_events_json_redacted
+          (wyl_handle_get_audit_conn (handle), filter, audit_session_redact,
+            &redactor, &body);
+  g_clear_pointer (&redactor.live_sessions, g_hash_table_unref);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_filter");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    /* A row id equal to a live session id: refuse rather than drop it. */
+    set_json_error (msg, 500, "audit_query_failed");
     return;
   }
   if (rc != WYRELOG_E_OK) {

@@ -1401,6 +1401,140 @@ check_query_events_json_filters_rows (void)
   return 0;
 }
 
+typedef struct
+{
+  GPtrArray *columns;
+  gchar *last_row_action;
+  const gchar *secret;
+  const gchar *fail_column;
+  gboolean replace_id;
+} RedactorProbe;
+
+static wyrelog_error_t
+probe_redactor (const gchar *column, const gchar *row_action,
+    const gchar *value, gchar **out_replacement, gpointer user_data)
+{
+  RedactorProbe *probe = user_data;
+  g_ptr_array_add (probe->columns, g_strdup (column));
+  g_free (probe->last_row_action);
+  probe->last_row_action = g_strdup (row_action);
+  if (g_strcmp0 (column, probe->fail_column) == 0)
+    return WYRELOG_E_POLICY;
+  if (g_strcmp0 (column, "id") == 0) {
+    if (probe->replace_id)
+      *out_replacement = g_strdup ("rewritten-id");
+    return WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (column, "subject_id") == 0
+      && g_strcmp0 (row_action, "session_state") == 0)
+    *out_replacement = g_strdup ("structural");
+  else if (g_strcmp0 (value, probe->secret) == 0)
+    *out_replacement = g_strdup ("q\"b\\s");
+  return WYRELOG_E_OK;
+}
+
+/*
+ * The redacting serialiser offers every string column except created_at_us
+ * and decision to the callback, with the row's own action, escapes each
+ * replacement as JSON, never rewrites the id the client parses, and aborts
+ * without output when the callback refuses a value.
+ */
+static gint
+check_query_events_json_redactor_contract (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 1570;
+
+  static const gchar secret[] = "redactor-secret-token";
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (event, secret);
+  wyl_audit_event_set_action (event, "session_state");
+  wyl_audit_event_set_resource_id (event, secret);
+  wyl_audit_event_set_deny_reason (event, secret);
+  wyl_audit_event_set_deny_origin (event, secret);
+  wyl_audit_event_set_request_id (event, "req-redactor");
+  wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
+  if (wyl_audit_emit (handle, event) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 1571;
+  }
+
+  wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
+  const gchar *filter = "request_id(\"req-redactor\")";
+  g_autofree gchar *plain = NULL;
+  g_autofree gchar *unredacted = NULL;
+  if (wyl_audit_conn_query_events_json (conn, filter, &plain) != WYRELOG_E_OK
+      || wyl_audit_conn_query_events_json_redacted (conn, filter, NULL, NULL,
+      &unredacted) != WYRELOG_E_OK
+      || g_strcmp0 (plain, unredacted) != 0
+      || g_strstr_len (plain, -1, secret) == NULL) {
+    g_object_unref (handle);
+    return 1572;
+  }
+
+  RedactorProbe probe = {
+    .columns = g_ptr_array_new_with_free_func (g_free),
+    .secret = secret,
+  };
+  g_autofree gchar *redacted = NULL;
+  gint rc = 0;
+  if (wyl_audit_conn_query_events_json_redacted (conn, filter,
+      probe_redactor, &probe, &redacted) != WYRELOG_E_OK || redacted == NULL)
+    rc = 1573;
+  else if (g_strstr_len (redacted, -1, secret) != NULL)
+    rc = 1574;
+  else if (g_strstr_len (redacted, -1, "\"subject_id\":\"structural\"")
+      == NULL
+      || g_strstr_len (redacted, -1,
+      "\"resource_id\":\"q\\\"b\\\\s\"") == NULL
+      || g_strstr_len (redacted, -1,
+      "\"request_id\":\"req-redactor\"") == NULL)
+    rc = 1575;
+  else if (probe.columns->len != 7
+      || g_strcmp0 (probe.columns->pdata[0], "id") != 0
+      || g_strcmp0 (probe.columns->pdata[1], "subject_id") != 0
+      || g_strcmp0 (probe.columns->pdata[2], "action") != 0
+      || g_strcmp0 (probe.columns->pdata[3], "resource_id") != 0
+      || g_strcmp0 (probe.columns->pdata[4], "deny_reason") != 0
+      || g_strcmp0 (probe.columns->pdata[5], "deny_origin") != 0
+      || g_strcmp0 (probe.columns->pdata[6], "request_id") != 0
+      || g_strcmp0 (probe.last_row_action, "session_state") != 0)
+    rc = 1576;
+  else {
+    /* The id is the one member both outputs share verbatim. */
+    const gchar *id = g_strstr_len (plain, -1, "\"id\":\"");
+    const gchar *end = id != NULL ? strchr (id + 6, '"') : NULL;
+    g_autofree gchar *id_member = end != NULL
+        ? g_strndup (id, (gsize) (end - id + 1)) : NULL;
+    if (id_member == NULL || g_strstr_len (redacted, -1, id_member) == NULL)
+      rc = 1577;
+  }
+
+  if (rc == 0) {
+    g_autofree gchar *rewritten = NULL;
+    probe.replace_id = TRUE;
+    if (wyl_audit_conn_query_events_json_redacted (conn, filter,
+        probe_redactor, &probe, &rewritten) != WYRELOG_E_INTERNAL
+        || rewritten != NULL)
+      rc = 1578;
+    probe.replace_id = FALSE;
+  }
+  if (rc == 0) {
+    g_autofree gchar *refused = NULL;
+    probe.fail_column = "id";
+    if (wyl_audit_conn_query_events_json_redacted (conn, filter,
+        probe_redactor, &probe, &refused) != WYRELOG_E_POLICY
+        || refused != NULL)
+      rc = 1579;
+  }
+
+  g_ptr_array_unref (probe.columns);
+  g_free (probe.last_row_action);
+  g_object_unref (handle);
+  return rc;
+}
+
 static gint
 check_emit_mirrors_policy_store_row (void)
 {
@@ -3957,6 +4091,8 @@ main (void)
   if ((rc = check_emit_persists_event_fields ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_query_events_json_filters_rows ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_query_events_json_redactor_contract ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_emit_mirrors_policy_store_row ()) != 0)
     return wyl_test_normalize_exit_status (rc);
