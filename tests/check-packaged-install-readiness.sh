@@ -45,28 +45,74 @@ for path in \
   test -s "$path"
 done
 
-# Profile-unit ExecStart shape: post-issue-#335 the system/service units
-# load all settings from /etc/wyrelog/wyrelogd.conf via --config. The
-# operational source of truth for per-flag values now lives in the
-# example conf files installed under ${datadir}/wyrelog/examples/, so
-# the assertions for policy_keyprovider, profile, etc. were migrated
-# from inspecting the unit ExecStart to inspecting those examples.
+# Each installed profile must have its own config, credentials, and stores.
 SYSTEM_EXAMPLE="$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-system.conf.example"
 SERVICE_EXAMPLE="$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-service.conf.example"
-for unit in \
-    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service" \
-    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; do
-  if ! grep -q -- \
-      "^ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production$" \
-      "$unit"; then
-    echo "profile unit $unit does not invoke wyrelogd via --config" >&2
-    exit 1
-  fi
-  if ! grep -q -- "^ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf$" "$unit"; then
-    echo "profile unit $unit does not pin conf file read-only" >&2
-    exit 1
-  fi
-done
+"$PYTHON" - "$SOURCE_ROOT" <<'EOF_PROFILE_CONFIGS'
+import configparser
+from pathlib import Path
+import re
+import shlex
+import sys
+
+root = Path(sys.argv[1])
+
+def unit_values(name, key):
+    lines = (root / "packaging/systemd" / name).read_text().splitlines()
+    return [line.split("=", 1)[1] for line in lines if line.startswith(key + "=")]
+
+def unit_words(name, key):
+    return set(" ".join(unit_values(name, key)).split())
+
+configs = []
+for profile, port in (("system", "8765"), ("service", "8766")):
+    unit = f"wyrelog-{profile}.service"
+    config = f"/etc/wyrelog/{profile}.conf"
+    commands = unit_values(unit, "ExecStart")
+    assert len(commands) == 1, f"{unit}: expected one ExecStart"
+    args = shlex.split(commands[0])
+    assert args == ["/usr/bin/wyrelogd", "--config", config, "--production"], unit
+    configs.append(args[args.index("--config") + 1])
+    assert config in unit_words(unit, "ReadOnlyPaths"), unit
+    assert unit_words(unit, "Conflicts") == {"wyrelog.service"}, unit
+    assert "wyrelog.service" in unit_words(unit, "After"), unit
+    credential = f"wyrelog-{profile}-policy-key"
+    assert f"{credential}:/etc/wyrelog/{profile}/policy.key" in unit_values(unit, "LoadCredential"), unit
+    example = root / f"packaging/wyrelog/examples/wyrelogd-{profile}.conf.example"
+    content = example.read_text()
+    assert f"# Copy to {config} and edit values for your site." in content, example
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read_string(content)
+    values = parser["daemon"]
+    expected = {
+        "profile": profile,
+        "listen_port": port,
+        "policy_keyprovider": f"systemd-creds:{credential}",
+        "policy_db": f"/var/lib/wyrelog/{profile}/policy.sqlite",
+        "audit_db": f"/var/log/wyrelog/{profile}/audit.duckdb",
+    }
+    if profile == "service":
+        expected.update(system_url="http://127.0.0.1:8765",
+                        event_spool_dir="/var/lib/wyrelog/service/event-spool")
+    for key, value in expected.items():
+        assert values.get(key) == value, f"{example}: wrong {key}"
+assert len(set(configs)) == 2, "profile units share a config"
+assert unit_words("wyrelog.service", "Conflicts") == {
+    "wyrelog-system.service", "wyrelog-service.service"}, "legacy conflicts missing"
+assert "wyrelog-system.service" in unit_words("wyrelog-service.service", "After")
+assert "wyrelog-system.service" in unit_words("wyrelog-service.service", "Wants")
+
+runbook = (root / "docs/operator-runbook.md").read_text()
+for heading, terminator in (("## First Install", "\n## "),
+                            ("### Migration Recipe", "\n### ")):
+    section = runbook.split(heading, 1)[1].split(terminator, 1)[0]
+    for profile in ("system", "service"):
+        # Check the copy mapping, not the wording of surrounding prose.
+        mapping = rf"wyrelogd-{profile}\.conf\.example\s*\\\s*/etc/wyrelog/{profile}\.conf"
+        assert re.search(mapping, section), f"{heading}: missing {profile} install mapping"
+        assert f"--config /etc/wyrelog/{profile}.conf --production" in section
+    assert "systemctl disable --now wyrelog.service" in section, heading
+EOF_PROFILE_CONFIGS
 
 if ! grep -q -- "--production" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog.service"; then
@@ -149,8 +195,11 @@ fi
 
 SYSTEM_PROFILE_INFO="$TMPDIR/system-profile-info.out"
 SERVICE_PROFILE_INFO="$TMPDIR/service-profile-info.out"
-"$WYRELOGD" --profile=system --profile-info --production >"$SYSTEM_PROFILE_INFO"
-"$WYRELOGD" --profile=service --profile-info --production >"$SERVICE_PROFILE_INFO"
+cp "$SYSTEM_EXAMPLE" "$TMPDIR/system.conf"
+cp "$SERVICE_EXAMPLE" "$TMPDIR/service.conf"
+chmod 0640 "$TMPDIR/system.conf" "$TMPDIR/service.conf"
+"$WYRELOGD" --config "$TMPDIR/system.conf" --profile-info --production >"$SYSTEM_PROFILE_INFO"
+"$WYRELOGD" --config "$TMPDIR/service.conf" --profile-info --production >"$SERVICE_PROFILE_INFO"
 grep -q '^policy_db=/var/lib/wyrelog/system/policy.sqlite$' "$SYSTEM_PROFILE_INFO"
 grep -q '^audit_db=/var/log/wyrelog/system/audit.duckdb$' "$SYSTEM_PROFILE_INFO"
 grep -q '^policy_db=/var/lib/wyrelog/service/policy.sqlite$' "$SERVICE_PROFILE_INFO"

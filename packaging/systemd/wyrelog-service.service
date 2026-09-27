@@ -1,8 +1,9 @@
 [Unit]
 Description=Wyrelog service profile service
 Documentation=man:wyrelogd(1)
-After=network-online.target wyrelog-system.service
+After=wyrelog.service network-online.target wyrelog-system.service
 Wants=network-online.target wyrelog-system.service
+Conflicts=wyrelog.service
 
 [Service]
 Type=simple
@@ -11,7 +12,7 @@ Group=wyrelog
 Environment=WYL_LOG=warn
 EnvironmentFile=-/etc/wyrelog/service.env
 LoadCredential=wyrelog-service-policy-key:/etc/wyrelog/service/policy.key
-ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production
+ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/service.conf --production
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
@@ -23,7 +24,7 @@ ReadOnlyPaths=/etc/wyrelog /usr/share/wyrelog
 # pinning the conf file explicitly survives a future drop-in that
 # relaxes the directory rule. The daemon also gates on mode/owner at
 # open(2) (wyl_daemon_options_resolve in wyrelog/daemon/options.c).
-ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf
+ReadOnlyPaths=/etc/wyrelog/service.conf
 ReadWritePaths=/var/lib/wyrelog/service /var/log/wyrelog/service /run/wyrelog
 RuntimeDirectory=wyrelog
 RuntimeDirectoryMode=0750

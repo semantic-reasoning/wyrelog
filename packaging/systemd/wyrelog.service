@@ -3,6 +3,7 @@ Description=Wyrelog application service
 Documentation=man:wyrelogd(1)
 After=network-online.target
 Wants=network-online.target
+Conflicts=wyrelog-system.service wyrelog-service.service
 
 [Service]
 Type=simple

@@ -223,6 +223,7 @@ wyrelog/daemon/service-credential-handoff-private.c
 wyrelog/daemon/service-credential-handoff-private.h
 wyrelog/daemon/signals.c
 wyrelog/daemon/signals.h
+wyrelog/daemon/wyrelogd.c
 wyrelog/error.h
 wyrelog/events.h
 wyrelog/fact/artifact-io-session-posix-private.c

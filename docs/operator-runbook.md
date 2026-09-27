@@ -112,6 +112,9 @@ wyrelogd --profile=service --profile-info --production
 
 ## First Install
 
+Run these commands as root for a clean installation. For an existing deployment,
+use [Migration Recipe](#migration-recipe) and preserve existing keys and settings.
+
 1. Install the package and create managed users/directories:
 
    ```sh
@@ -119,42 +122,65 @@ wyrelogd --profile=service --profile-info --production
    systemd-tmpfiles --create /usr/lib/tmpfiles.d/wyrelog.conf
    ```
 
-2. Create the production KeyProvider root once. Packaged systemd units pass
-   this file through `LoadCredential=`, so `wyrelogd` reads it as
-   `systemd-creds:wyrelog-system-policy-key` rather than opening the
-   `/etc` file directly:
+2. Install a separate configuration for each profile, as `root:wyrelog 0640`:
 
    ```sh
-   install -m 0640 -o root -g wyrelog /dev/null /etc/wyrelog/system/policy.key
-   python3 - <<'PY'
-import os
-with open("/etc/wyrelog/system/policy.key", "wb") as f:
-    f.write(os.urandom(32))
-PY
-   chown root:wyrelog /etc/wyrelog/system/policy.key
-   chmod 0640 /etc/wyrelog/system/policy.key
+   test ! -e /etc/wyrelog/system.conf && \
+     install -m 0640 -o root -g wyrelog \
+       /usr/share/wyrelog/examples/wyrelogd-system.conf.example \
+       /etc/wyrelog/system.conf
+   test ! -e /etc/wyrelog/service.conf && \
+     install -m 0640 -o root -g wyrelog \
+       /usr/share/wyrelog/examples/wyrelogd-service.conf.example \
+       /etc/wyrelog/service.conf
    ```
 
-3. Validate package readiness before starting the daemon:
+   If either destination already exists, stop and follow the migration recipe.
+   Review both files before starting either unit. Keep their profiles, stores,
+   credentials, and listener ports separate: system uses port 8765 and service
+   uses port 8766.
+
+3. Create a distinct production KeyProvider root for each profile. This
+   refuses to replace an existing key. The units pass the files through
+   `LoadCredential=` as `wyrelog-system-policy-key` and
+   `wyrelog-service-policy-key`, respectively:
 
    ```sh
-   wyrelogd --production \
-     --profile system \
-     --template-dir /usr/share/wyrelog/access \
-     --policy-db /var/lib/wyrelog/system/policy.sqlite \
-     --policy-keyprovider file:/etc/wyrelog/system/policy.key \
-     --audit-db /var/log/wyrelog/system/audit.duckdb \
-     --fact-root /var/lib/wyrelog/system/facts \
-     --check
+   python3 - <<'PY_KEYS'
+import os
+for profile in ("system", "service"):
+    path = f"/etc/wyrelog/{profile}/policy.key"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+    with os.fdopen(fd, "wb") as key:
+        key.write(os.urandom(32))
+PY_KEYS
+   chown root:wyrelog /etc/wyrelog/system/policy.key /etc/wyrelog/service/policy.key
+   chmod 0640 /etc/wyrelog/system/policy.key /etc/wyrelog/service/policy.key
+   ```
+
+4. Validate both installed configurations before starting the daemons. Outside
+   systemd, override only the credential provider with the corresponding key
+   file because `LoadCredential=` has not populated a credentials directory:
+
+   ```sh
+   wyrelogd --config /etc/wyrelog/system.conf --production \
+     --policy-keyprovider file:/etc/wyrelog/system/policy.key --check
+   wyrelogd --config /etc/wyrelog/service.conf --production \
+     --policy-keyprovider file:/etc/wyrelog/service/policy.key --check
    wyrelogd --template-info --template-dir /usr/share/wyrelog/access
    wyctl key status --keyprovider /etc/wyrelog/system/policy.key
    ```
 
-4. Start and verify service readiness:
+   If you customized a key location, use that location for the check and the
+   unit's `LoadCredential=`. Stop and correct any failed check before continuing.
+
+5. Start and verify both profiles. The legacy `wyrelog.service` is mutually
+   exclusive with the profile units and must stay disabled:
 
    ```sh
-   systemctl enable --now wyrelog-system.service
-   systemctl enable --now wyrelog-service.service
+   systemctl daemon-reload
+   systemctl disable --now wyrelog.service
+   systemctl enable --now wyrelog-system.service wyrelog-service.service
    wyctl --daemon-url http://127.0.0.1:8765 status
    wyctl --daemon-url http://127.0.0.1:8765 status --readiness
    wyctl --daemon-url http://127.0.0.1:8766 status
@@ -2292,9 +2318,10 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
 
 4. Before restarting, run the production `--check` command for each enabled
    profile with its restored policy store, KeyProvider, audit store, and
-   explicit fact root. The system-profile command is shown in
-   [First Install](#first-install); use the corresponding service-profile
-   paths for `service`. This checks production startup/readiness requirements;
+   fact root. Verify that each profile config resolves to those restored paths;
+   set `fact_root` explicitly if it differs from the profile default. Both
+   profile check commands are shown in [First Install](#first-install).
+   This checks production startup/readiness requirements;
    it does not replace the post-start graph health checks below.
 
 5. Start the profile units and verify each profile's fact health. Query
@@ -2565,7 +2592,8 @@ in the config file and you also pass `--foo` on the command line,
 the CLI value is used as-is (the config-file value is not consulted
 even as a fallback for partial overrides).
 
-`/etc/wyrelog/wyrelogd.env` (the systemd `EnvironmentFile=`) carries
+`/etc/wyrelog/system.env` and `/etc/wyrelog/service.env` (the profile
+units' `EnvironmentFile=` entries) carry
 process-level environment variables (`WYL_LOG`, `WYL_CONFIG`, etc.),
 not daemon-config keys. The two are complementary, not redundant:
 the env file controls what the systemd-launched process sees in
@@ -2575,56 +2603,108 @@ parser inflates into `WylDaemonOptions`.
 ### systemd Wiring
 
 The packaged units (`wyrelog-system.service`, `wyrelog-service.service`)
-thread the config file through the daemon's `--config` flag and pin
-production gating with `--production`:
+thread separate profile configs through the daemon's `--config` flag and pin
+production gating with `--production`. The legacy `wyrelog.service` is
+mutually exclusive with both profile units; the system and service profile
+units are designed to run together:
 
 ```ini
 [Service]
 Environment=WYL_LOG=warn
 EnvironmentFile=-/etc/wyrelog/system.env
-ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production
+ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/system.conf --production
 ProtectSystem=strict
 ReadOnlyPaths=/etc/wyrelog /usr/share/wyrelog
-ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf
+ReadOnlyPaths=/etc/wyrelog/system.conf
 ```
 
-Operator customization should edit `wyrelogd.conf` rather than redefining
-the entire `ExecStart`. The `ProtectSystem=strict` and `ReadOnlyPaths=`
+For the service profile, use `/etc/wyrelog/service.conf` in both `ExecStart=`
+and `ReadOnlyPaths=`. Operator customization should edit the corresponding
+profile config rather than redefining the entire `ExecStart`. The
+`ProtectSystem=strict` and `ReadOnlyPaths=`
 lines are the parent-directory defense against attacker-controlled
 symlink swaps of `/etc/wyrelog/` itself — drop-ins that override
 `ExecStart=` must preserve them.
 
 ### Migration Recipe
 
-Example conf files ship under `${datadir}/wyrelog/examples/` (not in
-`/etc/`) so the operator must explicitly copy them into place. The
-canonical recipe for the system profile:
+The packaged units now read `/etc/wyrelog/system.conf` and
+`/etc/wyrelog/service.conf`. The old shared `/etc/wyrelog/wyrelogd.conf` is
+no longer read by either profile unit. Complete this migration before
+restarting upgraded units. Run the following commands as root.
 
-```sh
-sudo install -d -m 0750 -o root -g wyrelog /etc/wyrelog
-sudo cp /usr/share/wyrelog/examples/wyrelogd-system.conf.example \
-    /etc/wyrelog/wyrelogd.conf
-sudo chown root:wyrelog /etc/wyrelog/wyrelogd.conf
-sudo chmod 0640 /etc/wyrelog/wyrelogd.conf
-sudo systemctl restart wyrelog-system.service
-```
+1. Stop both profiles and disable the legacy unit before changing configuration:
 
-Same for the service profile:
+   ```sh
+   systemctl stop wyrelog-service.service wyrelog-system.service
+   systemctl disable --now wyrelog.service
+   ```
 
-```sh
-sudo install -d -m 0750 -o root -g wyrelog /etc/wyrelog
-sudo cp /usr/share/wyrelog/examples/wyrelogd-service.conf.example \
-    /etc/wyrelog/wyrelogd.conf
-sudo chown root:wyrelog /etc/wyrelog/wyrelogd.conf
-sudo chmod 0640 /etc/wyrelog/wyrelogd.conf
-sudo systemctl restart wyrelog-service.service
-```
+   The legacy unit remains installed for compatibility but is mutually exclusive
+   with both profile units. Conflicts and stop/start ordering prevent overlap
+   with the legacy daemon; the two profile units can run together.
 
-Create the conf file **before** restarting wyrelogd. The shipped
-`ExecStart=` passes `--config /etc/wyrelog/wyrelogd.conf`; the daemon
-exits nonzero when that path is missing, which then drives the
-systemd `Restart=` loop until the file appears. Operators who want a
-different path must override `ExecStart=` via a drop-in.
+2. Back up existing configuration and systemd drop-ins. If the shared
+   `/etc/wyrelog/wyrelogd.conf` exists, inspect `profile` in its `[daemon]`
+   section and preserve its contents. A missing, invalid, or ambiguous profile
+   requires manual resolution before proceeding. Transfer its site-specific
+   settings only to the matching profile; never copy it to both destinations.
+   Preserve the existing policy keys, databases, fact roots, and event spool.
+   Do not repeat the fresh-install key generation for an existing profile.
+
+3. Install examples only for missing destination files:
+
+   ```sh
+   install -d -m 0750 -o root -g wyrelog /etc/wyrelog
+   if [ ! -e /etc/wyrelog/system.conf ]; then
+     install -m 0640 -o root -g wyrelog \
+       /usr/share/wyrelog/examples/wyrelogd-system.conf.example \
+       /etc/wyrelog/system.conf
+   fi
+   if [ ! -e /etc/wyrelog/service.conf ]; then
+     install -m 0640 -o root -g wyrelog \
+       /usr/share/wyrelog/examples/wyrelogd-service.conf.example \
+       /etc/wyrelog/service.conf
+   fi
+   ```
+
+   Merge the saved settings into the matching destination manually, preserving
+   any existing destination customizations. Review both files: `profile=system`
+   and port 8765 belong in `system.conf`; `profile=service` and port 8766 belong
+   in `service.conf`. Keep policy, audit, fact, key, and spool paths separate.
+   If adding a previously unused profile, provision its own key and directories
+   using the corresponding steps in [First Install](#first-install).
+
+4. Review local systemd drop-ins that override `ExecStart=` or credentials.
+   Remove obsolete shared-config overrides or change them to the matching
+   profile path. Preserve `--production`, `ReadOnlyPaths=`, and the correct
+   `LoadCredential=`. Then set config permissions and check both configs:
+
+   ```sh
+   chown root:wyrelog /etc/wyrelog/system.conf /etc/wyrelog/service.conf
+   chmod 0640 /etc/wyrelog/system.conf /etc/wyrelog/service.conf
+   wyrelogd --config /etc/wyrelog/system.conf --production \
+     --policy-keyprovider file:/etc/wyrelog/system/policy.key --check
+   wyrelogd --config /etc/wyrelog/service.conf --production \
+     --policy-keyprovider file:/etc/wyrelog/service/policy.key --check
+   ```
+
+   Substitute existing site-specific key paths when needed. Resolve any failed
+   check before continuing. These commands use the installed configs, with a
+   file KeyProvider override because they run outside systemd credentials.
+
+5. Only after both configs and keys are ready, reload and start the pair:
+
+   ```sh
+   systemctl daemon-reload
+   systemctl enable --now wyrelog-system.service wyrelog-service.service
+   ```
+
+   Verify both listeners using the status commands in
+   [First Install](#first-install). Retain the old shared config backup until
+   migration succeeds. A missing config makes the daemon exit and systemd
+   retry it; create both files before enabling either unit. For a custom config
+   path, update both `ExecStart=` and its `ReadOnlyPaths=` pin.
 
 ### Conf File Permission Gate
 
@@ -2738,14 +2818,14 @@ shapes depending on which bootstrap keys are present:
 When only `bootstrap_admin_subject` is set in the conf:
 
 ```
-... (remove bootstrap_admin_subject from /etc/wyrelog/wyrelogd.conf and restart)
+... (remove bootstrap_admin_subject from the active profile config and restart)
 ```
 
 When both `bootstrap_admin_subject` and
 `bootstrap_admin_allow_skip_mfa` are set:
 
 ```
-... (remove bootstrap_admin_subject and bootstrap_admin_allow_skip_mfa from /etc/wyrelog/wyrelogd.conf and restart)
+... (remove bootstrap_admin_subject and bootstrap_admin_allow_skip_mfa from the active profile config and restart)
 ```
 
 And:
@@ -2766,10 +2846,10 @@ conf file is exactly the write surface an attacker would use to plant
 ANSI/CSI/OSC escape sequences; piping it verbatim through stderr at
 onboarding time would let the attacker spoof terminal output.
 
-Migration practice: delete the `bootstrap_admin_*` keys from
-`/etc/wyrelog/wyrelogd.conf` after first successful boot. The
-shipped example confs leave both keys commented out for exactly this
-reason.
+Migration practice: delete the `bootstrap_admin_*` keys from the active
+profile config (`/etc/wyrelog/system.conf` or `/etc/wyrelog/service.conf`)
+after first successful boot. The shipped example confs leave both keys
+commented out for exactly this reason.
 
 The stable greppable token discipline (anchor scripts on
 `wyrelogd: bootstrap_admin: stale-key subject=` rather than on the
@@ -2848,8 +2928,8 @@ the opposite constraints:
   for daemon startup would let a compromised operator session pivot
   to changing daemon behaviour on the next restart.
 
-These trade-offs make GKeyFile + `/etc/wyrelog/wyrelogd.conf` the
-right surface for `wyrelogd`. The wyctl GSettings layer below is
+These trade-offs make GKeyFile + profile-specific `/etc/wyrelog/*.conf` files
+the right surface for `wyrelogd`. The wyctl GSettings layer below is
 deliberately *not* shared with the daemon — the audit trail and the
 threat model both prefer the explicit separation.
 
@@ -2867,8 +2947,9 @@ the policy-store path, and `default-keyprovider` records the KeyProvider
 `systemd-creds:wyrelog-policy`). The KeyProvider key material, the TOTP
 seed bytes, and the policy-store contents never live in GSettings.
 
-Daemon defaults live in `/etc/wyrelog/wyrelogd.conf` (see the previous
-section) — wyctl and wyrelogd intentionally do **not** share a single
+Packaged daemon profiles read `/etc/wyrelog/system.conf` and
+`/etc/wyrelog/service.conf` (see the previous section); custom deployments
+may pass another path with `--config`. wyctl and wyrelogd intentionally do **not** share a single
 GSettings tree. The same value (e.g. `tenant`) lives in two places by
 design because each surface answers a different question: the daemon
 config decides what tenants the daemon will service, the wyctl
