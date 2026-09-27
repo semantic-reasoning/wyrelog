@@ -699,6 +699,285 @@ use_thread (gpointer user_data)
 
 typedef struct
 {
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  WylFactGraphQuiescenceToken *token;
+  wyrelog_error_t result;
+} QuiesceThread;
+
+static WylFactGraphAdmission admission_via_get
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key);
+
+static gpointer
+quiesce_thread (gpointer user_data)
+{
+  QuiesceThread *thread = user_data;
+  thread->result = wyl_fact_graph_runtime_manager_quiesce (thread->manager,
+          thread->key, -1, &thread->token);
+  return NULL;
+}
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  wyrelog_error_t result;
+} QuiesceFromCallback;
+
+static wyrelog_error_t
+quiesce_from_snapshot_callback (WylEngine *engine, gpointer user_data)
+{
+  QuiesceFromCallback *call = user_data;
+  WylFactGraphQuiescenceToken *token = NULL;
+  (void) engine;
+  call->result = wyl_fact_graph_runtime_manager_quiesce (call->manager,
+          call->key, -1, &token);
+  g_assert_null (token);
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  WylFactGraphRuntimeManager *manager;
+  const WylFactGraphKey *key;
+  BuildSpec *spec;
+  wyrelog_error_t result;
+} PublishOpenThread;
+
+static gpointer
+publish_open_thread (gpointer user_data)
+{
+  PublishOpenThread *thread = user_data;
+  thread->result = wyl_fact_graph_runtime_manager_publish_closed_and_open
+        (thread->manager, thread->key, build_marker_engine, thread->spec, NULL);
+  return NULL;
+}
+
+static void
+test_quiescence_waits_for_callbacks_but_not_snapshot_handles (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "quiet"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec spec = {.marker = 71 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &key, &snapshot), ==, WYRELOG_E_OK);
+
+  QuiesceFromCallback reentrant = { manager, &key, WYRELOG_E_INTERNAL };
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot,
+      quiesce_from_snapshot_callback, &reentrant), ==, WYRELOG_E_OK);
+  g_assert_cmpint (reentrant.result, ==, WYRELOG_E_INVALID);
+
+  /* An idle pinned handle is possession, not an active callback. */
+  WylFactGraphQuiescenceToken *idle_token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &idle_token), ==, WYRELOG_E_OK);
+  g_assert_nonnull (idle_token);
+  MarkerProbe denied_probe = { 0 };
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot, read_marker,
+      &denied_probe), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_quiescence_token_release (idle_token);
+  g_assert_cmpint (snapshot_marker (snapshot), ==, 71);
+
+  UseGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.changed);
+  UseThread use = { snapshot, &gate, WYRELOG_E_INTERNAL };
+  GThread *reader = g_thread_new ("quiescence-reader", use_thread, &use);
+  use_gate_wait_entered (&gate);
+  WylFactGraphQuiescenceToken *timed_out_token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &timed_out_token), ==, WYRELOG_E_BUSY);
+  g_assert_null (timed_out_token);
+  g_assert_cmpint (admission_via_get (manager, &key), ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+  UseGate queued_gate = { 0 };
+  g_mutex_init (&queued_gate.mutex);
+  g_cond_init (&queued_gate.changed);
+  UseThread queued_use = { snapshot, &queued_gate, WYRELOG_E_INTERNAL };
+  GThread *queued_reader = g_thread_new ("quiescence-queued-reader",
+          use_thread, &queued_use);
+  g_mutex_lock (&queued_gate.mutex);
+  while (!queued_gate.started)
+    g_cond_wait (&queued_gate.changed, &queued_gate.mutex);
+  g_mutex_unlock (&queued_gate.mutex);
+  WylFactGraphRuntimeStatus queued_status = { 0 };
+  do {
+    wyl_fact_graph_runtime_status_clear (&queued_status);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager,
+        &key, &queued_status), ==, WYRELOG_E_OK);
+    if (queued_status.waiting_engine_calls == 0)
+      g_thread_yield ();
+  } while (queued_status.waiting_engine_calls == 0);
+  wyl_fact_graph_runtime_status_clear (&queued_status);
+  QuiesceThread quiesce = { manager, &key, NULL, WYRELOG_E_INTERNAL };
+  GThread *closer = g_thread_new ("quiescence-closer", quiesce_thread,
+          &quiesce);
+
+  WylFactGraphRuntimeStatus status = { 0 };
+  do {
+    wyl_fact_graph_runtime_status_clear (&status);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager,
+        &key, &status), ==, WYRELOG_E_OK);
+    if (status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED)
+      g_thread_yield ();
+  } while (status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_null (quiesce.token);
+  use_gate_release (&gate);
+  g_thread_join (reader);
+  use_gate_wait_entered (&queued_gate);
+  g_assert_null (quiesce.token);
+  use_gate_release (&queued_gate);
+  g_thread_join (queued_reader);
+  g_thread_join (closer);
+  g_assert_cmpint (use.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (queued_use.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (quiesce.result, ==, WYRELOG_E_OK);
+  g_assert_nonnull (quiesce.token);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_BUSY);
+  BuildSpec refused_build = {.marker = 73 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager,
+      &key, build_marker_engine, &refused_build, NULL), ==, WYRELOG_E_BUSY);
+  WylFactGraphLockSet *locks = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_ordered_locks
+        (manager, &key, 1, NULL, &locks), ==, WYRELOG_E_BUSY);
+  g_assert_null (locks);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &key, &evicted), ==, WYRELOG_E_BUSY);
+  g_assert_false (evicted);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
+      NULL, 0), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot, read_marker,
+      &denied_probe), ==, WYRELOG_E_BUSY);
+  wyl_fact_graph_quiescence_token_release (quiesce.token);
+  g_assert_cmpint (snapshot_marker (snapshot), ==, 71);
+
+  /* A graph that was already closed stays closed after the token is released. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  WylFactGraphQuiescenceToken *closed_token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &closed_token), ==, WYRELOG_E_OK);
+  wyl_fact_graph_quiescence_token_release (closed_token);
+  g_assert_cmpint (admission_via_get (manager, &key), ==,
+      WYL_FACT_GRAPH_ADMISSION_CLOSED);
+
+  WylFactGraphQuiescenceToken *shutdown_token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &shutdown_token), ==, WYRELOG_E_OK);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  wyl_fact_graph_quiescence_token_release (shutdown_token);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_BUSY);
+
+  g_cond_clear (&gate.changed);
+  g_mutex_clear (&gate.mutex);
+  g_cond_clear (&queued_gate.changed);
+  g_mutex_clear (&queued_gate.mutex);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_quiescence_shutdown_wakes_waiter (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "quiet-shutdown"),
+      ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeManager *manager = new_manager ();
+  BuildSpec spec = {.marker = 72 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+      &key, &snapshot), ==, WYRELOG_E_OK);
+  UseGate gate = { 0 };
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.changed);
+  UseThread use = { snapshot, &gate, WYRELOG_E_INTERNAL };
+  GThread *reader = g_thread_new ("quiescence-shutdown-reader", use_thread,
+          &use);
+  use_gate_wait_entered (&gate);
+  QuiesceThread quiesce = { manager, &key, NULL, WYRELOG_E_INTERNAL };
+  GThread *closer = g_thread_new ("quiescence-shutdown-closer",
+          quiesce_thread, &quiesce);
+  WylFactGraphRuntimeStatus status = { 0 };
+  do {
+    wyl_fact_graph_runtime_status_clear (&status);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager,
+        &key, &status), ==, WYRELOG_E_OK);
+    if (status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED)
+      g_thread_yield ();
+  } while (status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_thread_join (closer);
+  g_assert_cmpint (quiesce.result, ==, WYRELOG_E_BUSY);
+  g_assert_null (quiesce.token);
+  use_gate_release (&gate);
+  g_thread_join (reader);
+  g_assert_cmpint (use.result, ==, WYRELOG_E_OK);
+  wyl_fact_graph_snapshot_unref (snapshot);
+  g_cond_clear (&gate.changed);
+  g_mutex_clear (&gate.mutex);
+  wyl_fact_graph_runtime_manager_unref (manager);
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+test_quiescence_refuses_inflight_publication (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "quiet-publish"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec initial = {.marker = 81 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+      build_marker_engine, &initial, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  Gate gate = { 0 };
+  gate_init (&gate);
+  BuildSpec replacement = {.marker = 82,.gate = &gate };
+  PublishOpenThread publish = { manager, &key, &replacement,
+                                WYRELOG_E_INTERNAL };
+  GThread *publisher = g_thread_new ("publish-open-before-quiescence",
+          publish_open_thread, &publish);
+  gate_wait_entered (&gate);
+
+  WylFactGraphQuiescenceToken *token = NULL;
+  /* Publication retains its writer-held lifecycle handoff after refresh; the
+   * token refuses that interval rather than racing its final open/abort. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  gate_release (&gate);
+  g_thread_join (publisher);
+  g_assert_cmpint (publish.result, ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce (manager, &key, 0,
+      &token), ==, WYRELOG_E_OK);
+  wyl_fact_graph_quiescence_token_release (token);
+  g_assert_cmpint (admission_via_get (manager, &key), ==,
+      WYL_FACT_GRAPH_ADMISSION_OPEN);
+  gate_clear (&gate);
+  wyl_fact_graph_key_clear (&key);
+}
+
+typedef struct
+{
   WylFactGraphSnapshot *snapshot;
   wyrelog_error_t nested;
 } RecursiveUse;
@@ -3134,6 +3413,12 @@ main (int argc, char **argv)
       test_admission_close_does_not_disturb_admitted_work);
   g_test_add_func ("/fact-runtime/admission-precedence-and-shutdown",
       test_admission_precedence_and_shutdown);
+  g_test_add_func ("/fact-runtime/quiescence-waits-for-callbacks",
+      test_quiescence_waits_for_callbacks_but_not_snapshot_handles);
+  g_test_add_func ("/fact-runtime/quiescence-shutdown-wakes-waiter",
+      test_quiescence_shutdown_wakes_waiter);
+  g_test_add_func ("/fact-runtime/quiescence-refuses-inflight-publication",
+      test_quiescence_refuses_inflight_publication);
   g_test_add_func ("/fact-runtime/drain-waits-for-admitted-engine-call",
       test_drain_waits_for_admitted_engine_call);
   g_test_add_func ("/fact-runtime/drain-refusals-and-shutdown-wake",
