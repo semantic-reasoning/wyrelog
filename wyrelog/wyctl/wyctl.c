@@ -69,6 +69,7 @@ typedef struct
   gchar *subject;
   gchar *perm;
   gchar *scope;
+  gchar *event;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
   gchar *guard_loc_class;
@@ -291,6 +292,7 @@ wyctl_policy_permission_options_clear (WyctlPolicyPermissionOptions *opts)
   g_clear_pointer (&opts->subject, g_free);
   g_clear_pointer (&opts->perm, g_free);
   g_clear_pointer (&opts->scope, g_free);
+  g_clear_pointer (&opts->event, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
   g_clear_pointer (&opts->guard_timestamp_arg, g_free);
   g_clear_pointer (&opts->guard_loc_class, g_free);
@@ -1481,10 +1483,34 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
      "Guard risk score", "N"},
     {NULL}
   };
+  /* Only a transition names an event, so grant and revoke reject --event. */
+  GOptionEntry transition_entries[] = {
+    {"event", 0, 0, G_OPTION_ARG_STRING, &opts.event,
+     "Permission state event: grant, revoke, trigger, complete, reset, or "
+     "expire", "EVENT"},
+    {NULL}
+  };
+  gboolean transition = g_strcmp0 (command, "permission-transition") == 0;
   g_autoptr (GError) error = NULL;
   g_autofree gchar *summary = g_strdup_printf ("- wyrelog policy %s", command);
   g_autoptr (GOptionContext) context = g_option_context_new (summary);
   g_option_context_add_main_entries (context, entries, NULL);
+  if (transition)
+    g_option_context_add_main_entries (context, transition_entries, NULL);
+  /* #1237: a direct grant records the permission but leaves it dormant; a
+   * guarded route only honours it once armed. */
+  if (g_strcmp0 (command, "permission-grant") == 0)
+    g_option_context_set_description (context,
+        "A granted permission stays dormant until it is armed:\n"
+        "  wyctl policy permission-transition --event grant ...\n"
+        "`wyctl policy explain` reports reason=not_armed until then.");
+  else if (transition)
+    g_option_context_set_description (context,
+        "Moves the permission's state for SUBJECT at SCOPE through its state\n"
+        "machine.  --event grant arms a granted permission.  grant and reset,\n"
+        "the events that arm, require an MFA-verified session (exit 4).  A\n"
+        "transition the state machine refuses, such as a second grant of an\n"
+        "armed permission, exits 3; `wyctl policy explain` shows the state.");
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -1505,6 +1531,10 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   }
   if (opts.scope == NULL || opts.scope[0] == '\0') {
     g_printerr ("wyctl: missing --scope\n");
+    return 2;
+  }
+  if (transition && (opts.event == NULL || opts.event[0] == '\0')) {
+    g_printerr ("wyctl: missing --event\n");
     return 2;
   }
 
@@ -1574,6 +1604,10 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   } else if (g_strcmp0 (command, "permission-revoke") == 0) {
     rc = wyl_client_policy_permission_revoke (client, opts.subject, opts.perm,
             opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+  } else if (transition) {
+    rc = wyl_client_policy_permission_transition (client, opts.subject,
+            opts.perm, opts.scope, opts.event, guard_timestamp,
+            opts.guard_loc_class, guard_risk);
   } else {
     g_printerr ("wyctl: policy %s is not implemented\n", command);
     return 3;
@@ -1751,7 +1785,8 @@ run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_policy_decision_command (global_opts, argv[1], argc - 1,
                argv + 1);
   if (g_strcmp0 (argv[1], "permission-grant") == 0 ||
-      g_strcmp0 (argv[1], "permission-revoke") == 0)
+      g_strcmp0 (argv[1], "permission-revoke") == 0 ||
+      g_strcmp0 (argv[1], "permission-transition") == 0)
     return run_policy_permission_mutation_command (global_opts, argv[1],
                argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "role-grant") == 0 ||

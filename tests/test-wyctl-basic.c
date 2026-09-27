@@ -1857,6 +1857,7 @@ test_policy_permission_help (void)
 static void
 run_policy_permission_success_case (const gchar *command, const gchar *path)
 {
+  gboolean transition = g_strcmp0 (command, "permission-transition") == 0;
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
@@ -1901,6 +1902,8 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
     "public",
     "--guard-risk",
     "69",
+    transition ? "--event" : NULL,
+    transition ? "grant" : NULL,
     NULL,
   };
   g_autofree gchar *stdout_buf = NULL;
@@ -1924,6 +1927,10 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
   g_assert_nonnull (g_strstr_len (server.request, -1,
       "guard_loc_class=public"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
+  if (transition)
+    g_assert_nonnull (g_strstr_len (server.request, -1, "event=grant"));
+  else
+    g_assert_null (g_strstr_len (server.request, -1, "event="));
   g_assert_null (g_strstr_len (server.request, -1, "session_token="));
   g_assert_nonnull (g_strstr_len (server.request, -1,
       "Authorization: Bearer token-1"));
@@ -1950,6 +1957,7 @@ static void
 run_policy_permission_status_case (const gchar *command, guint status,
     gint expected_exit, const gchar *expected_stderr_marker)
 {
+  gboolean transition = g_strcmp0 (command, "permission-transition") == 0;
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
   gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
@@ -1994,6 +2002,8 @@ run_policy_permission_status_case (const gchar *command, guint status,
     "public",
     "--guard-risk",
     "69",
+    transition ? "--event" : NULL,
+    transition ? "grant" : NULL,
     NULL,
   };
   g_autofree gchar *stdout_buf = NULL;
@@ -2036,6 +2046,110 @@ test_policy_permission_revoke_status_errors (void)
       "wyctl: policy permission-revoke failed: policy_mutation_denied");
   run_policy_permission_status_case ("permission-revoke", 500, 5,
       "wyctl: policy permission-revoke failed: policy_mutation_failed");
+}
+
+static void
+test_policy_permission_transition_success (void)
+{
+  run_policy_permission_success_case ("permission-transition",
+      "/policy/permissions/transition");
+}
+
+static void
+test_policy_permission_transition_status_errors (void)
+{
+  run_policy_permission_status_case ("permission-transition", 400, 3,
+      "wyctl: policy permission-transition failed: invalid_policy_mutation");
+  run_policy_permission_status_case ("permission-transition", 401, 6,
+      "wyctl: policy permission-transition failed: policy_auth_required");
+  run_policy_permission_status_case ("permission-transition", 403, 4,
+      "wyctl: policy permission-transition failed: policy_mutation_denied");
+  run_policy_permission_status_case ("permission-transition", 500, 5,
+      "wyctl: policy permission-transition failed: policy_mutation_failed");
+}
+
+/*
+ * #1237: a grant alone leaves the permission dormant, so the grant help says
+ * how to arm it, and only the transition command takes an --event.
+ */
+static void
+test_policy_permission_transition_help (void)
+{
+  gchar *transition_argv[] = {
+    WYL_TEST_WYCTL_PATH, "policy", "permission-transition", "--help", NULL,
+  };
+  gchar *grant_argv[] = {
+    WYL_TEST_WYCTL_PATH, "policy", "permission-grant", "--help", NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (transition_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--subject"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--perm"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--scope"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--event=EVENT"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-risk"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (grant_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  /* The description names the transition command; the grant takes no
+   * --event option of its own. */
+  g_assert_null (g_strstr_len (stdout_buf, -1, "--event=EVENT"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "wyctl policy permission-transition"));
+}
+
+static void
+test_policy_permission_transition_validation (void)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
+          &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
+
+  gchar *missing_event_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1", "policy",
+    "permission-transition", "--subject", "alice", "--perm", "wr.audit.read",
+    "--scope", "tenant/a", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "public",
+    "--guard-risk", "69", NULL,
+  };
+  gchar *grant_with_event_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1", "policy",
+    "permission-grant", "--subject", "alice", "--perm", "wr.audit.read",
+    "--scope", "tenant/a", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "public",
+    "--guard-risk", "69", "--event", "grant", NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (missing_event_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --event"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (grant_with_event_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "--event"));
+  g_unlink (token_path);
 }
 
 static void
@@ -3321,6 +3435,14 @@ main (int argc, char **argv)
       test_policy_permission_grant_status_errors);
   g_test_add_func ("/wyctl/policy-permission-revoke-status-errors",
       test_policy_permission_revoke_status_errors);
+  g_test_add_func ("/wyctl/policy-permission-transition-success",
+      test_policy_permission_transition_success);
+  g_test_add_func ("/wyctl/policy-permission-transition-status-errors",
+      test_policy_permission_transition_status_errors);
+  g_test_add_func ("/wyctl/policy-permission-transition-help",
+      test_policy_permission_transition_help);
+  g_test_add_func ("/wyctl/policy-permission-transition-validation",
+      test_policy_permission_transition_validation);
   g_test_add_func ("/wyctl/policy-role-help", test_policy_role_help);
   g_test_add_func ("/wyctl/policy-role-validation",
       test_policy_role_validation);

@@ -19,7 +19,7 @@ EXPECTED_FIELDS = {
         ("filter", "limit_arg", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
     "WyctlPolicyPermissionOptions":
-        ("subject", "perm", "scope", "access_token_file",
+        ("subject", "perm", "scope", "event", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlPolicyRoleOptions":
         ("subject", "role", "scope", "access_token_file",
@@ -105,7 +105,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 183
+EXPECTED_STRING_DESTINATIONS = 184
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

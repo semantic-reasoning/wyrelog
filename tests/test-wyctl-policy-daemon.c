@@ -686,6 +686,46 @@ main (void)
       "site.wyctl.read", "tenant-x", &exists) != WYRELOG_E_OK || !exists)
     return wyl_test_normalize_exit_status (12);
 
+  /* #1237: arming is a wyctl command.  It needs an MFA-assured session, so
+   * this skip-MFA operator is refused and the grant stays dormant. */
+  gchar *permission_transition_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "policy", "permission-transition",
+    "--subject", "wyctl-target",
+    "--perm", "site.wyctl.read",
+    "--scope", "tenant-x",
+    "--event", "grant",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "29",
+    NULL,
+  };
+  {
+    g_autofree gchar *transition_stdout = NULL;
+    g_autofree gchar *transition_stderr = NULL;
+    gint transition_status = 0;
+    run_wyctl (permission_transition_argv, &transition_stdout,
+        &transition_stderr, &transition_status);
+    if (!WIFEXITED (transition_status)
+        || WEXITSTATUS (transition_status) != 4
+        || g_strcmp0 (transition_stdout, "") != 0
+        || g_strcmp0 (transition_stderr, "wyctl: policy permission-transition "
+        "failed: policy_mutation_denied\n") != 0) {
+      g_printerr ("skip-MFA permission-transition: status %d\n"
+          "stdout: %s\nstderr: %s\n", transition_status,
+          transition_stdout ? transition_stdout : "(null)",
+          transition_stderr ? transition_stderr : "(null)");
+      return wyl_test_normalize_exit_status (16);
+    }
+    g_autofree gchar *state = NULL;
+    if (wyl_policy_store_get_permission_state_for_publication (store,
+        "wyctl-target", "site.wyctl.read", "tenant-x", &state)
+        != WYRELOG_E_OK || g_strcmp0 (state, "armed") == 0)
+      return wyl_test_normalize_exit_status (17);
+  }
+
   gchar *permission_revoke_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,

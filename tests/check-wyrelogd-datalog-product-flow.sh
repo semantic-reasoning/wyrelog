@@ -226,32 +226,34 @@ os.chmod(step_path, 0o600)
 PY
 }
 
-http_post_with_token() {
+# #1237: arming is a wyctl command.  A grant alone leaves the permission
+# dormant, so `policy explain` must move from not_armed to allow.
+explain_permission() {
   token_file=$1
-  path=$2
-  "$PYTHON" - "$BASE_URL" "$token_file" "$path" <<'PY'
-import sys
-import urllib.error
-import urllib.request
-base, token_file, path = sys.argv[1:]
-token = open(token_file, encoding="utf-8").read().strip()
-req = urllib.request.Request(base + path, method="POST")
-req.add_header("Authorization", f"Bearer {token}")
-try:
-    with urllib.request.urlopen(req, timeout=3) as response:
-        response.read()
-except urllib.error.HTTPError as exc:
-    sys.stderr.write(f"POST {path} failed: HTTP {exc.code}\n")
-    sys.stderr.write(exc.read().decode("utf-8", "replace"))
-    sys.stderr.write("\n")
-    raise SystemExit(1)
-PY
+  perm=$2
+  "$WYCTL" --daemon-url "$BASE_URL" policy explain \
+    --user admin1 \
+    --permission "$perm" \
+    --resource __wr_default \
+    --access-token-file "$token_file"
 }
 
 arm_permission() {
   token_file=$1
   perm=$2
-  http_post_with_token "$token_file" "/policy/permissions/transition?subject=admin1&perm=$perm&scope=__wr_default&event=grant&guard_timestamp=123&guard_loc_class=trusted&guard_risk=29"
+  result=$("$WYCTL" --daemon-url "$BASE_URL" policy permission-transition \
+    --subject admin1 \
+    --perm "$perm" \
+    --scope __wr_default \
+    --event grant \
+    --access-token-file "$token_file" \
+    --guard-timestamp 123 \
+    --guard-loc-class trusted \
+    --guard-risk 29)
+  if [ "$result" != "ok" ]; then
+    echo "unexpected permission-transition result for $perm: $result" >&2
+    exit 1
+  fi
 }
 
 create_graph_schema_and_facts() {
@@ -493,9 +495,42 @@ else:
     raise SystemExit("bootstrap skip-MFA remained active after enrollment")
 PY
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
+# Arming needs an MFA-verified session; the bootstrap token has none.
+if bootstrap_arm=$("$WYCTL" --daemon-url "$BASE_URL" \
+    policy permission-transition \
+    --subject admin1 --perm wr.graph.manage --scope __wr_default \
+    --event grant --access-token-file "$BOOTSTRAP_TOKEN_FILE" \
+    --guard-timestamp 123 --guard-loc-class trusted --guard-risk 29 \
+    2>&1); then
+  echo "bootstrap token armed a permission: $bootstrap_arm" >&2
+  exit 1
+else
+  bootstrap_status=$?
+fi
+case "$bootstrap_arm" in
+  *"wyctl: policy permission-transition failed: policy_mutation_denied"*) ;;
+  *) bootstrap_status=unexpected ;;
+esac
+if [ "$bootstrap_status" != 4 ]; then
+  echo "bootstrap arm refusal: $bootstrap_status $bootstrap_arm" >&2
+  exit 1
+fi
+before=$(explain_permission "$TOKEN_FILE" wr.graph.manage | tr '\n' ' ')
+case "$before" in
+  "deny reason=not_armed "*) ;;
+  *)
+    echo "wr.graph.manage before arming: $before" >&2
+    exit 1
+    ;;
+esac
 for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
   arm_permission "$TOKEN_FILE" "$perm"
 done
+after=$(explain_permission "$TOKEN_FILE" wr.graph.manage)
+if [ "$after" != "allow" ]; then
+  echo "wr.graph.manage after arming: $after" >&2
+  exit 1
+fi
 create_graph_schema_and_facts "$TOKEN_FILE" orders-a order-a 42
 create_graph_schema_and_facts "$TOKEN_FILE" orders-b order-b 7
 assert_query_row "$TOKEN_FILE" orders-a order-a 42
