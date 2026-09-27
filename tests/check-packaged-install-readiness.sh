@@ -58,7 +58,7 @@ import sys
 root = Path(sys.argv[1])
 
 def unit_values(name, key):
-    lines = (root / "packaging/systemd" / name).read_text().splitlines()
+    lines = (root / "packaging/systemd" / name).read_text(encoding="utf-8").splitlines()
     return [line.split("=", 1)[1] for line in lines if line.startswith(key + "=")]
 
 def unit_words(name, key):
@@ -79,7 +79,7 @@ for profile, port in (("system", "8765"), ("service", "8766")):
     credential = f"wyrelog-{profile}-policy-key"
     assert f"{credential}:/etc/wyrelog/{profile}/policy.key" in unit_values(unit, "LoadCredential"), unit
     example = root / f"packaging/wyrelog/examples/wyrelogd-{profile}.conf.example"
-    content = example.read_text()
+    content = example.read_text(encoding="utf-8")
     assert f"# Copy to {config} and edit values for your site." in content, example
     parser = configparser.ConfigParser(interpolation=None)
     parser.read_string(content)
@@ -102,7 +102,7 @@ assert unit_words("wyrelog.service", "Conflicts") == {
 assert "wyrelog-system.service" in unit_words("wyrelog-service.service", "After")
 assert "wyrelog-system.service" in unit_words("wyrelog-service.service", "Wants")
 
-runbook = (root / "docs/operator-runbook.md").read_text()
+runbook = (root / "docs/operator-runbook.md").read_text(encoding="utf-8")
 for heading, terminator in (("## First Install", "\n## "),
                             ("### Migration Recipe", "\n### ")):
     section = runbook.split(heading, 1)[1].split(terminator, 1)[0]
