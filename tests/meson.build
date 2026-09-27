@@ -2266,6 +2266,30 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     test_fact_offline_restore_stage_metadata,
     timeout : 120,
   )
+  test_fact_offline_restore_stage_replay = executable(
+    'test-fact-offline-restore-stage-replay',
+    'test-fact-offline-restore-stage-replay.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
+  )
+  test('fact-offline-restore-stage-replay',
+    test_fact_offline_restore_stage_replay,
+    timeout : 120,
+  )
+  test_fact_restore_replay_provider_parity = executable(
+    'test-fact-restore-replay-provider-parity',
+    'test-fact-restore-replay-provider-parity.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep] + fact_test_support_deps,
+  )
+  test('fact-restore-replay-provider-parity',
+    test_fact_restore_replay_provider_parity,
+    timeout : 120,
+  )
   test_secure_duckdb_recording_filesystem = executable(
     'test-secure-duckdb-recording-filesystem',
     'test-secure-duckdb-recording-filesystem.cc',

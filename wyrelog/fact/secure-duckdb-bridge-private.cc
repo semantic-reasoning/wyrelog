@@ -3,6 +3,8 @@
 #include "fact/secure-duckdb-filesystem-contract-private.h"
 #include "fact/secure-duckdb-filesystem-private.hpp"
 #include "fact/store-identity-private.h"
+#include "fact/replay-store-private.h"
+#include "fact/replay-scheduler-private.h"
 
 #include <algorithm>
 #include <atomic>
@@ -21,6 +23,8 @@
 extern "C" G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
   (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
+extern "C" gchar *wyl_fact_store_projection_table_name
+  (const wyl_policy_fact_relation_schema_options_t *);
 
 static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
     "secure DuckDB bridge requires DuckDB v1.5.5 headers");
@@ -1069,6 +1073,272 @@ private:
     }
   }
 
+  struct RestoreReplayProvider
+  {
+    WylSecureDuckdbBridge bridge;
+    WylFactOfflineRestoreStageReader *reader = nullptr;
+    WylFactReplayJobContext *context = nullptr;
+    guint64 bytes = 0;
+    std::string checksum, tenant, graph;
+    GCancellable *cancellable = nullptr;
+    gulong interrupt_handler = 0;
+    bool opened = false;
+    bool closed = false;
+  };
+
+  void restore_replay_interrupt (GCancellable *, gpointer data)
+  {
+    try {
+      static_cast<duckdb::Connection *> (data)->Interrupt ();
+    } catch (...) {
+      /* Cancellation callbacks must never unwind into GLib. */
+    }
+  }
+
+  wyrelog_error_t restore_replay_close (gpointer data)
+  {
+    auto &p = *static_cast<RestoreReplayProvider *> (data);
+    if (p.closed)
+      return WYRELOG_E_OK;
+    p.closed = true;
+    wyrelog_error_t rc = WYRELOG_E_OK;
+    try {
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_REPLAY_CLOSE);
+    } catch (...) {
+      rc = current_exception_error ();
+    }
+    if (p.interrupt_handler != 0) {
+      g_cancellable_disconnect (p.cancellable, p.interrupt_handler);
+      p.interrupt_handler = 0;
+    }
+    try {
+      auto health = bridge_finalize_storage (&p.bridge, false);
+      if (health != WYRELOG_E_OK)
+        rc = health;
+    } catch (...) {
+      rc = current_exception_error ();
+    }
+    try {
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_CLOSE);
+    } catch (...) {
+      if (rc == WYRELOG_E_OK) rc = current_exception_error ();
+    }
+    const auto authority = wyl_fact_offline_restore_stage_reader_revalidate (p.reader);
+    const auto content = wyl_fact_offline_restore_stage_reader_verify_content
+          (p.reader, p.bytes, p.checksum.c_str ());
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_replay_job_context_checkpoint (p.context);
+    return authority != WYRELOG_E_OK ? authority
+        : content != WYRELOG_E_OK ? content : rc;
+  }
+
+  void restore_replay_destroy (gpointer data)
+  {
+    std::unique_ptr<RestoreReplayProvider> p
+      (static_cast<RestoreReplayProvider *> (data));
+    if (!p->closed && p->opened)
+      (void) restore_replay_close (p.get ());
+    try {
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_REPLAY_DESTROY);
+    } catch (...) { /* No exceptions cross provider destruction. */
+    }
+  }
+
+  std::string replay_quote_identifier (const char *identifier)
+  {
+    std::string quoted = "\"";
+    for (const char *c = identifier; *c; ++c) {
+      if (*c == '"') quoted += '"';
+      quoted += *c;
+    }
+    return quoted + '"';
+  }
+
+  WylFactReplayCellType replay_column_type (const char *type)
+  {
+    if (g_strcmp0 (type, "symbol") == 0 || g_strcmp0 (type, "string") == 0)
+      return WYL_FACT_REPLAY_CELL_TEXT;
+    if (g_strcmp0 (type, "int64") == 0 || g_strcmp0 (type, "compound_ref") == 0)
+      return WYL_FACT_REPLAY_CELL_INT64;
+    if (g_strcmp0 (type, "bool") == 0)
+      return WYL_FACT_REPLAY_CELL_BOOL;
+    return WYL_FACT_REPLAY_CELL_NULL;
+  }
+
+  /* The deprecated C adapter defaults failed conversions to zero/false/null
+   * text. Its unsupported zero-size types have a false null mask, including
+   * null values of those types. VARCHAR observes C-string termination. */
+  WylFactReplayCell replay_cell (duckdb::Value value,
+      WylFactReplayCellType type, std::string &text)
+  {
+    WylFactReplayCell cell {};
+    using ID = duckdb::LogicalTypeId;
+    switch (value.type ().id ()) {
+      case ID::BOOLEAN: case ID::TINYINT: case ID::SMALLINT:
+      case ID::INTEGER: case ID::BIGINT: case ID::UTINYINT:
+      case ID::USMALLINT: case ID::UINTEGER: case ID::UBIGINT:
+      case ID::FLOAT: case ID::DOUBLE: case ID::DATE: case ID::TIME:
+      case ID::TIME_NS: case ID::TIMESTAMP: case ID::HUGEINT:
+      case ID::UHUGEINT: case ID::DECIMAL: case ID::INTERVAL:
+      case ID::VARCHAR: case ID::BLOB: break;
+      case ID::TIMESTAMP_TZ: case ID::TIMESTAMP_SEC:
+      case ID::TIMESTAMP_MS: case ID::TIMESTAMP_NS:
+        if (!value.IsNull ()) cell.type = type;
+        return cell;
+      default:
+        cell.type = type;
+        return cell;
+    }
+    if (value.IsNull ()) return cell;
+    cell.type = type;
+    try {
+      const auto source = value.type ().id ();
+      if (source == ID::VARCHAR)
+        value = duckdb::Value (duckdb::StringValue::Get (value).c_str ());
+      if (source == ID::BLOB && type != WYL_FACT_REPLAY_CELL_TEXT)
+        return cell;
+      if (type == WYL_FACT_REPLAY_CELL_TEXT) {
+        if (value.DefaultTryCastAs (duckdb::LogicalType::VARCHAR)) {
+          text = duckdb::StringValue::Get (value);
+          cell.value.text = text.c_str ();
+        }
+      } else {
+        if (type == WYL_FACT_REPLAY_CELL_INT64
+            && value.DefaultTryCastAs (duckdb::LogicalType::BIGINT))
+          cell.value.int64_value = value.GetValue<int64_t> ();
+        else if (type == WYL_FACT_REPLAY_CELL_BOOL
+            && value.DefaultTryCastAs (duckdb::LogicalType::BOOLEAN))
+          cell.value.bool_value = value.GetValue<bool> ();
+      }
+    } catch (...) { /* Match C adapter conversion-failure defaults. */
+    }
+    return cell;
+  }
+
+  wyrelog_error_t restore_replay_execute (gpointer data,
+      WylFactReplayStoreOperation operation,
+      const WylFactReplayStoreRequest *request,
+      WylFactReplayJobContext *context,
+      WylFactReplayStoreRowFunc row_func, gpointer row_data)
+  {
+    auto *p = static_cast<RestoreReplayProvider *> (data);
+    if (!p || p->closed || !request || !row_func || context != p->context
+        || !context || !request->tenant_id || !request->graph_id
+        || !*request->tenant_id || !*request->graph_id)
+      return WYRELOG_E_INVALID;
+    if (p->tenant != request->tenant_id || p->graph != request->graph_id)
+      return WYRELOG_E_POLICY;
+    try {
+      std::string sql;
+      std::vector<WylFactReplayCellType> types;
+      duckdb::vector<duckdb::Value> params
+      { duckdb::Value (p->tenant), duckdb::Value (p->graph) };
+      const auto text = WYL_FACT_REPLAY_CELL_TEXT;
+      const auto integer = WYL_FACT_REPLAY_CELL_INT64;
+      const auto boolean = WYL_FACT_REPLAY_CELL_BOOL;
+      switch (operation) {
+        case WYL_FACT_REPLAY_STORE_LIST_DURABLE_BATCH_KEYS:
+          sql = "SELECT DISTINCT namespace_id, relation_name, schema_version "
+              "FROM fact_batches WHERE tenant_id = ? AND graph_id = ? "
+              "ORDER BY namespace_id, relation_name, schema_version;";
+          types = {text, text, integer};
+          break;
+        case WYL_FACT_REPLAY_STORE_READ_PROJECTION_ROWS: {
+          const auto *s = request->projection_schema;
+          if (!s || g_strcmp0 (s->tenant_id, request->tenant_id) != 0
+              || g_strcmp0 (s->graph_id, request->graph_id) != 0)
+            return WYRELOG_E_POLICY;
+          if (!s->namespace_id || !s->relation_name || !s->schema_version
+              || !s->columns || !s->n_columns)
+            return WYRELOG_E_INVALID;
+          if (request->namespace_id
+              && g_strcmp0 (s->namespace_id, request->namespace_id) != 0)
+            return WYRELOG_E_POLICY;
+          sql = "SELECT ";
+          for (gsize i = 0; i < s->n_columns; ++i) {
+            auto type = replay_column_type (s->columns[i].column_type);
+            if (!s->columns[i].column_name || type == WYL_FACT_REPLAY_CELL_NULL)
+              return WYRELOG_E_POLICY;
+            if (i) sql += ", ";
+            sql += replay_quote_identifier (s->columns[i].column_name);
+            types.push_back (type);
+          }
+          g_autofree gchar *table = wyl_fact_store_projection_table_name (s);
+          if (!table) return WYRELOG_E_NOMEM;
+          sql += ", __wyl_valid FROM " + replay_quote_identifier (table)
+              + " WHERE __wyl_tenant_id = ? AND __wyl_graph_id = ? "
+              "ORDER BY __wyl_seq, __wyl_row_index;";
+          types.push_back (boolean);
+          break;
+        }
+        case WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM:
+        case WYL_FACT_REPLAY_STORE_READ_COMPOUND_ARGS:
+          if (!request->namespace_id || !*request->namespace_id
+              || request->compound_ref <= 0)
+            return WYRELOG_E_INVALID;
+          params.emplace_back (request->namespace_id);
+          params.emplace_back (int64_t (request->compound_ref));
+          if (operation == WYL_FACT_REPLAY_STORE_READ_COMPOUND_TERM) {
+            sql = "SELECT functor, arity, content_hash FROM compound_terms "
+                "WHERE tenant_id = ? AND graph_id = ? AND namespace_id = ? "
+                "AND compound_ref = ?;";
+            types = {text, integer, text};
+          } else {
+            sql = "SELECT a.arg_index, a.arg_type, a.symbol_value, "
+                "a.string_value, a.int64_value, a.bool_value, "
+                "a.child_compound_ref FROM compound_args AS a "
+                "JOIN compound_terms AS t ON t.compound_ref = a.compound_ref "
+                "WHERE t.tenant_id = ? AND t.graph_id = ? "
+                "AND t.namespace_id = ? AND t.compound_ref = ? "
+                "ORDER BY a.arg_index;";
+            types = {integer, text, text, text, integer, boolean, integer};
+          }
+          break;
+        default: return WYRELOG_E_INVALID;
+      }
+      auto rc = wyl_fact_replay_job_context_checkpoint (context);
+      if (rc != WYRELOG_E_OK) return rc;
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_REPLAY_QUERY);
+      rc = wyl_fact_replay_job_context_checkpoint (context);
+      if (rc != WYRELOG_E_OK) return rc;
+      auto statement = p->bridge.connection->Prepare (sql);
+      if (!statement || statement->HasError ()) {
+        rc = wyl_fact_replay_job_context_checkpoint (context);
+        return rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
+      }
+      auto query = statement->Execute (params, false);
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_REPLAY_QUERY);
+      rc = wyl_fact_replay_job_context_checkpoint (context);
+      if (rc != WYRELOG_E_OK) return rc;
+      if (!query || query->HasError ()
+          || query->type != duckdb::QueryResultType::MATERIALIZED_RESULT
+          || query->ColumnCount () != types.size ())
+        return WYRELOG_E_IO;
+      auto &result = query->Cast<duckdb::MaterializedQueryResult> ();
+      for (duckdb::idx_t row = 0; row < result.RowCount (); ++row) {
+        restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_REPLAY_ROW);
+        rc = wyl_fact_replay_job_context_checkpoint (context);
+        if (rc != WYRELOG_E_OK) return rc;
+        std::vector<WylFactReplayCell> cells (types.size ());
+        std::vector<std::string> strings (types.size ());
+        for (gsize col = 0; col < types.size (); ++col)
+          cells[col] = replay_cell (result.GetValue (col, row), types[col], strings[col]);
+        rc = row_func (cells.data (), cells.size (), row_data);
+        if (rc != WYRELOG_E_OK) return rc;
+        rc = wyl_fact_replay_job_context_checkpoint (context);
+        if (rc != WYRELOG_E_OK) return rc;
+      }
+      return WYRELOG_E_OK;
+    } catch (...) {
+      auto rc = wyl_fact_replay_job_context_checkpoint (context);
+      return rc == WYRELOG_E_OK ? current_exception_error () : rc;
+    }
+  }
+
+  const WylFactReplayStoreProvider restore_replay_ops = {
+    restore_replay_execute, restore_replay_close, restore_replay_destroy
+  };
+
   wyrelog_error_t
   validate_restore_stage_identity_once
     (WylFactOfflineRestoreStageReader *reader,
@@ -1280,6 +1550,100 @@ wyl_secure_duckdb_bridge_validate_restore_stage_identity
   if (content != WYRELOG_E_OK)
     return content;
   *out_result = identity_result;
+  return rc;
+#endif
+}
+
+extern "C" wyrelog_error_t
+wyl_secure_duckdb_bridge_open_restore_stage_replay_store
+  (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
+    const gchar *expected_checksum, const WylFactStoreIdentity *identity,
+    WylFactReplayJobContext *job_context, WylFactReplayStore **out_store)
+{
+  if (out_store) *out_store = nullptr;
+  if (!reader || !expected_bytes || !expected_checksum || !identity
+      || !job_context || !out_store
+      || !wyl_fact_store_identity_input_is_valid (identity))
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  return WYRELOG_E_POLICY;
+#else
+  std::unique_ptr<RestoreReplayProvider> p;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  try {
+    rc = wyl_fact_replay_job_context_checkpoint (job_context);
+    if (rc != WYRELOG_E_OK) return rc;
+    rc = wyl_fact_offline_restore_stage_reader_verify_content
+          (reader, expected_bytes, expected_checksum);
+    if (rc != WYRELOG_E_OK) return rc;
+    p = std::make_unique<RestoreReplayProvider> ();
+    p->reader = reader;
+    p->context = job_context;
+    p->bytes = expected_bytes;
+    p->checksum = expected_checksum;
+    p->tenant = identity->tenant_id;
+    p->graph = identity->graph_id;
+    p->bridge.mode = WYL_SECURE_DUCKDB_VALIDATE_ONLY;
+    p->bridge.health = std::make_shared<WylSecureDuckdbHealth> ();
+    duckdb::DBConfig config;
+    config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+    config.options.load_extensions = false;
+    config.options.use_temporary_directory = false;
+    config.options.maximum_threads = 1;
+    config.options.checkpoint_on_shutdown = false;
+    config.SetOptionByName ("enable_external_access", duckdb::Value (false));
+    config.SetOptionByName ("allow_community_extensions", duckdb::Value (false));
+    config.SetOptionByName ("autoinstall_known_extensions", duckdb::Value (false));
+    config.SetOptionByName ("autoload_known_extensions", duckdb::Value (false));
+    config.file_system = duckdb::make_uniq<RestoreStageReaderFileSystem>
+        (reader, p->bridge.health);
+    /* Even a throwing database constructor may have read storage. */
+    p->opened = true;
+    p->bridge.database = std::make_unique<duckdb::DuckDB>
+        (restore_stage_main_name, &config);
+    p->bridge.connection = std::make_unique<duckdb::Connection>
+        (*p->bridge.database);
+    p->cancellable = wyl_fact_replay_job_context_get_cancellable (job_context);
+    if (p->cancellable)
+      p->interrupt_handler = g_cancellable_connect (p->cancellable,
+              G_CALLBACK (restore_replay_interrupt), p->bridge.connection.get (), nullptr);
+    rc = wyl_fact_replay_job_context_checkpoint (job_context);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_stage_reader_revalidate (reader);
+    if (rc == WYRELOG_E_OK) {
+      wyl_fact_store_identity_process_guard_lock ();
+      struct ProcessGuard
+      {
+        ~ProcessGuard () {
+          wyl_fact_store_identity_process_guard_unlock ();
+        }
+      } guard;
+      WylFactStoreIdentityExecutor executor = {
+        p->bridge.connection.get (), cpp_identity_execute, nullptr
+      };
+      WylFactStoreIdentityResult result = WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+      rc = wyl_fact_store_identity_execute (&executor, identity,
+              WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &result);
+    }
+    if (rc == WYRELOG_E_OK)
+      restore_stage_test_fire (WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_IDENTITY);
+    const auto checkpoint = wyl_fact_replay_job_context_checkpoint (job_context);
+    if (checkpoint != WYRELOG_E_OK) rc = checkpoint;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_replay_store_new (&restore_replay_ops, p.get (), out_store);
+    if (rc == WYRELOG_E_OK) {
+      p.release ();
+      return rc;
+    }
+  } catch (...) {
+    rc = current_exception_error ();
+  }
+  if (p && p->opened) {
+    const auto close = restore_replay_close (p.get ());
+    if (close != WYRELOG_E_OK) rc = close;
+  }
+  if (p)
+    restore_replay_destroy (p.release ());
   return rc;
 #endif
 }

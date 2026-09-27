@@ -20,6 +20,8 @@
 G_BEGIN_DECLS;
 
 typedef struct WylSecureDuckdbBridge WylSecureDuckdbBridge;
+typedef struct WylFactReplayStore WylFactReplayStore;
+typedef struct _WylFactReplayJobContext WylFactReplayJobContext;
 typedef enum
 { WYL_SECURE_DUCKDB_INIT_EMPTY = 0,
   WYL_SECURE_DUCKDB_VALIDATE_ONLY = 1} WylSecureDuckdbMode;
@@ -76,11 +78,31 @@ wyrelog_error_t wyl_secure_duckdb_bridge_validate_restore_stage_identity
     const WylFactStoreIdentity * expected_identity,
     WylFactStoreIdentityResult * out_result);
 
+/* Fixed-operation, read-only replay of the supplied main-file bytes. The
+ * provider owns storage and copies expectations; reader and its resolver,
+ * directory and root lease, and the nonnull job_context are borrowed through
+ * checked close/destruction on the same worker. Execution requires that exact
+ * context. Supplied projection schemas are structurally checked, not policy
+ * authenticated. This acquires no lifecycle/publication authority and does
+ * not establish complete stage-directory validity or permission to advance a
+ * journal. Reader checks reject known operation sidecars, but downstream
+ * publication still requires complete inventory and fresh authority checks. */
+wyrelog_error_t wyl_secure_duckdb_bridge_open_restore_stage_replay_store
+  (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
+    const gchar *expected_checksum,
+    const WylFactStoreIdentity *expected_identity,
+    WylFactReplayJobContext *job_context, WylFactReplayStore **out_store);
+
 typedef enum
 {
   WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_IDENTITY = 1,
   WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_CLOSE,
   WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_FIRST_READ,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_REPLAY_QUERY,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_AFTER_REPLAY_QUERY,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_BEFORE_REPLAY_ROW,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_REPLAY_CLOSE,
+  WYL_SECURE_DUCKDB_RESTORE_STAGE_TEST_REPLAY_DESTROY,
 } WylSecureDuckdbRestoreStageTestPoint;
 typedef void (*WylSecureDuckdbRestoreStageTestHook)
   (WylSecureDuckdbRestoreStageTestPoint point, gpointer user_data);
