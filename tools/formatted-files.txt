@@ -184,6 +184,7 @@ wyrelog/audit/conn-private.h
 wyrelog/audit/conn.c
 wyrelog/audit/event-private.h
 wyrelog/audit/iter-private.h
+wyrelog/audit/iter.c
 wyrelog/auth/jwt-private.h
 wyrelog/auth/jwt.c
 wyrelog/auth/mfa-enrollment-private.h

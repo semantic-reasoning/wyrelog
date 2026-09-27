@@ -3267,3 +3267,18 @@ wyctl status
 # Remove the env var so the token is no longer in memory.
 Remove-Item Env:WYRELOG_TOKEN
 ```
+
+### CLI daemon error diagnostics
+
+When a daemon request fails, `wyctl` includes the daemon's bounded JSON
+`error` code in stderr, for example `decide_denied`, `audit_denied`, or
+`service_token_denied`. Malformed error envelopes use a command-specific
+fallback. Response bodies and credentials are not printed.
+
+`policy check`, `policy explain`, `audit query`, and `auth service-token`
+use exit 2 for local invalid input, 3 for daemon-invalid input or malformed
+success responses, 4 for policy refusal, 5 for transport/server failures,
+and 6 for authentication failures. A successful policy check whose decision
+is `deny` still prints `deny` and exits 1; `policy explain` exits 0 for a
+successfully retrieved decision. Human login, refresh, logout, and status
+retain their existing exit codes and include the daemon error code when present.

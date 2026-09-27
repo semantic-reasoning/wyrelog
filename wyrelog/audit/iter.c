@@ -63,6 +63,8 @@ wyrelog_error_t
 wyl_client_audit_query (WylClient *client, const gchar *query_filter,
     WylAuditIter **out_iter)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (out_iter == NULL)
     return WYRELOG_E_INVALID;
   *out_iter = NULL;
@@ -81,6 +83,8 @@ wyl_client_audit_query_with_guard_context (WylClient *client,
     const gchar *query_filter, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk, WylAuditIter **out_iter)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (out_iter == NULL)
     return WYRELOG_E_INVALID;
   *out_iter = NULL;
@@ -176,7 +180,7 @@ wyl_audit_iter_new_request_message (WylAuditIter *iter)
   SoupMessage *message = soup_message_new ("GET", request_uri);
   if (message != NULL && iter->access_token != NULL) {
     g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
-        iter->access_token);
+            iter->access_token);
     soup_message_headers_replace (soup_message_get_request_headers (message),
         "Authorization", authorization);
   }
@@ -429,8 +433,8 @@ parse_audit_event_object (JsonCursor *cursor, WylAuditEvent **out_event)
     return WYRELOG_E_IO;
 
   return wyl_audit_event_new_from_fields (id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, request_id,
-      (wyl_decision_t) decision_raw, out_event);
+             action, resource_id, deny_reason, deny_origin, request_id,
+             (wyl_decision_t) decision_raw, out_event);
 }
 
 static wyrelog_error_t

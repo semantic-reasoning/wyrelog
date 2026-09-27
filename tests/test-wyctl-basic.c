@@ -758,6 +758,8 @@ run_status_readiness_case (guint status, const gchar *body,
 static void
 test_status_readiness (void)
 {
+  run_status_readiness_case (403, "{\"error\":\"status_denied\"}", "",
+      FALSE, "status_denied");
   run_status_readiness_case (200, "{\"status\":\"ready\"}", "status=ready\n",
       TRUE, NULL);
   run_status_readiness_case (503,
@@ -850,6 +852,10 @@ test_policy_help (void)
   run_child (check_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_true (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--permission"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "1: policy check returned deny"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "4: the daemon denied the request by policy"));
   g_assert_cmpstr (stderr_buf, ==, "");
 
   g_clear_pointer (&stdout_buf, g_free);
@@ -857,6 +863,8 @@ test_policy_help (void)
   run_child (explain_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_true (wait_status_is_success (wait_status));
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--resource"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "explain may report a valid deny"));
   g_assert_cmpstr (stderr_buf, ==, "");
 }
 
@@ -880,6 +888,30 @@ test_audit_help (void)
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-timestamp"));
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-loc-class"));
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-risk"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "4: the daemon denied"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+test_service_token_help (void)
+{
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "auth",
+    "service-token",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--credential-file"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "6: authentication failed or is required"));
   g_assert_cmpstr (stderr_buf, ==, "");
 }
 
@@ -1471,7 +1503,9 @@ typedef struct
   GSocketListener *listener;
   GCancellable *cancel;
   const gchar *response_body;
+  guint response_status;
   guint delay_us;
+  gboolean stall_body;
   gchar *request;
 } PolicyCheckServer;
 
@@ -1515,15 +1549,29 @@ policy_check_server_thread (gpointer data)
   }
   buffer[filled] = '\0';
   server->request = g_strdup (buffer);
-  if (server->delay_us > 0)
+  if (server->delay_us > 0 && !server->stall_body)
     g_usleep (server->delay_us);
 
+  guint status = server->response_status != 0 ? server->response_status : 200;
+  const gchar *reason = status == 400 ? "Bad Request" :
+      status == 401 ? "Unauthorized" : status == 403 ? "Forbidden" :
+      status == 302 ? "Found" :
+      status == 503 ? "Service Unavailable" : "OK";
   g_autofree gchar *response =
-      g_strdup_printf ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+      g_strdup_printf ("HTTP/1.1 %u %s\r\nContent-Type: application/json\r\n"
           "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+          status, reason,
           strlen (server->response_body), server->response_body);
-  (void) g_output_stream_write (output, response, strlen (response), NULL,
-      NULL);
+  if (server->stall_body) {
+    gsize header_len = (gsize) (strstr (response, "\r\n\r\n") + 4 - response);
+    (void) g_output_stream_write_all (output, response, header_len, NULL,
+        NULL, NULL);
+    (void) g_output_stream_flush (output, NULL, NULL);
+    g_usleep (server->delay_us);
+  } else {
+    (void) g_output_stream_write_all (output, response, strlen (response),
+        NULL, NULL, NULL);
+  }
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
   return NULL;
 }
@@ -1552,9 +1600,10 @@ listen_url_for_policy_server (GSocketListener **out_listener)
 }
 
 static void
-run_policy_decision_case (const gchar *command, const gchar *response_body,
-    const gchar *expected_output, gboolean expect_success, guint delay_us,
-    const gchar *timeout_ms)
+run_policy_decision_response_case (const gchar *command, const gchar *response_body,
+    guint response_status, const gchar *expected_output,
+    gint expected_exit_status, const gchar *expected_stderr, guint delay_us,
+    const gchar *timeout_ms, gboolean stall_body)
 {
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
@@ -1573,7 +1622,9 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
     .listener = listener,
     .cancel = accept_cancel,
     .response_body = response_body,
+    .response_status = response_status,
     .delay_us = delay_us,
+    .stall_body = stall_body,
   };
   GThread *server_thread = g_thread_new ("policy-check",
           policy_check_server_thread, &server);
@@ -1602,15 +1653,10 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
   stop_test_server (server_thread, accept_cancel);
 
-  g_assert_cmpint (wait_status_is_success (wait_status), ==, expect_success);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit_status);
   g_assert_cmpstr (stdout_buf, ==, expected_output);
-  if (expected_output[0] != '\0')
-    g_assert_cmpstr (stderr_buf, ==, "");
-  else {
-    g_autofree gchar *failure = g_strdup_printf ("wyctl: policy %s failed",
-            command);
-    g_assert_nonnull (g_strstr_len (stderr_buf, -1, failure));
-  }
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
   g_assert_nonnull (server.request);
   g_assert_nonnull (g_strstr_len (server.request, -1, "POST /decide?"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "user=alice"));
@@ -1626,14 +1672,28 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
 }
 
 static void
+run_policy_decision_case (const gchar *command, const gchar *response_body,
+    guint status, const gchar *out, gint exit_status, const gchar *err,
+    guint delay_us, const gchar *timeout_ms)
+{
+  run_policy_decision_response_case (command, response_body, status, out,
+      exit_status, err, delay_us, timeout_ms, FALSE);
+}
+
+static void
 test_policy_check (void)
 {
+  run_policy_decision_response_case ("check",
+      "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
+      200, "", 5, "wyctl: policy check failed: decision_request_failed\n",
+      1500 * 1000, "1000", TRUE);
   run_policy_decision_case
     ("check", "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
-      "allow\n", TRUE, 0, "1000");
+      200, "allow\n", 0, "", 0, "1000");
   run_policy_decision_case ("check",
       "{\"decision\":0,\"deny_reason\":\"missing_grant\","
-      "\"deny_origin\":\"policy\"}", "deny\n", FALSE, 0, "1000");
+      "\"deny_origin\":\"policy\"}", 200, "deny\n", 1, "", 0,
+      "1000");
   /* This case asserts that the server recorded the request, so the child
    * needs a budget to connect and send on a contended runner: the client's
    * deadline starts before it connects and cancels the whole request, so a
@@ -1642,17 +1702,108 @@ test_policy_check (void)
    * the slow side: it records the request first and only then delays past
    * that deadline. */
   run_policy_decision_case ("check",
-      "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "", FALSE,
+      "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
+      200, "", 5, "wyctl: policy check failed: decision_request_failed\n",
       1500 * 1000, "1000");
   run_policy_decision_case ("explain",
       "{\"decision\":0,\"deny_reason\":\"missing_grant\","
-      "\"deny_origin\":\"policy\"}",
-      "deny\nreason=missing_grant\norigin=policy\n", TRUE, 0, "1000");
+      "\"deny_origin\":\"policy\"}", 200,
+      "deny\nreason=missing_grant\norigin=policy\n", 0, "", 0, "1000");
+  run_policy_decision_case ("check", " { \"error\" : \"decide_denied\" } ",
+      403, "", 4, "wyctl: policy check failed: decide_denied\n", 0,
+      "1000");
+  run_policy_decision_case ("check",
+      "{\"er\\u0072or\":\"decide_denied\"}", 403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("explain", "{\"error\":\"decide_denied\"}",
+      403, "", 4, "wyctl: policy explain failed: decide_denied\n", 0,
+      "1000");
+  run_policy_decision_case ("check", "{}", 200, "", 3,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"details\":{\"error\":\"nested_denial\"},"
+      "\"metadata\":[true,7.5,null,{\"source\":\"policy\"}],"
+      "\"error\":\"decide_denied\"}", 403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"details\":{\"error\":\"nested_denial\"}}", 403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"error\":\"decide_denied\",\"error\":\"other_denial\"}",
+      403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"error\":\"decide_denied\",\"er\\u0072or\":\"other_denial\"}",
+      403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"metadata\":\"\\uD800\",\"error\":\"decide_denied\"}",
+      403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"error\"\v:\"decide_denied\"}", 403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"metadata\":\"value\"\f,\"error\":\"decide_denied\"}",
+      403, "", 4,
+      "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
 }
 
 static void
-run_audit_query_case (const gchar *response_body, const gchar *expected_output,
-    guint delay_us, const gchar *timeout_ms, const gchar *limit)
+test_policy_check_connection_failure (void)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-token-XXXXXX", &token_path,
+          &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_socket_listener_close (listener);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    "1000",
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    token_path,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 5);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==,
+      "wyctl: policy check failed: decision_request_failed\n");
+  g_unlink (token_path);
+}
+
+static void
+run_audit_query_case (const gchar *response_body, guint response_status,
+    const gchar *expected_output, gint expected_exit_status,
+    const gchar *expected_stderr, guint delay_us, const gchar *timeout_ms,
+    const gchar *limit)
 {
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
@@ -1671,6 +1822,7 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
     .listener = listener,
     .cancel = accept_cancel,
     .response_body = response_body,
+    .response_status = response_status,
     .delay_us = delay_us,
   };
   GThread *server_thread = g_thread_new ("audit-query",
@@ -1704,14 +1856,10 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
   stop_test_server (server_thread, accept_cancel);
 
-  g_assert_cmpint (wait_status_is_success (wait_status),
-      ==, expected_output[0] != '\0');
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit_status);
   g_assert_cmpstr (stdout_buf, ==, expected_output);
-  if (expected_output[0] != '\0')
-    g_assert_cmpstr (stderr_buf, ==, "");
-  else
-    g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-        "wyctl: audit query failed"));
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
   g_assert_nonnull (server.request);
   g_assert_nonnull (g_strstr_len (server.request, -1, "GET /audit/events?"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
@@ -1750,7 +1898,7 @@ test_audit_query (void)
       "\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\","
       "\"request_id\":\"req-audit\","
-      "\"decision\":0}]",
+      "\"decision\":0}]", 200,
       "[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
       "\"created_at_us\":1234567,"
       "\"subject_id\":\"ali\\nce\","
@@ -1758,11 +1906,18 @@ test_audit_query (void)
       "\"resource_id\":\"doc/42\","
       "\"deny_reason\":null,"
       "\"deny_origin\":null,"
-      "\"request_id\":null," "\"decision\":1}]\n", 0, "1000", "1");
-  run_audit_query_case ("[]", "[]\n", 0, "1000", "100");
+      "\"request_id\":null," "\"decision\":1}]\n", 0, "", 0,
+      "1000", "1");
+  run_audit_query_case ("[]", 200, "[]\n", 0, "", 0, "1000", "100");
   /* Same budget rule as the policy-check timeout case: the server records
    * the request, then delays past the client's 1000 ms deadline. */
-  run_audit_query_case ("[]", "", 1500 * 1000, "1000", "100");
+  run_audit_query_case ("[]", 200, "", 5,
+      "wyctl: audit query failed: audit_query_failed\n", 1500 * 1000,
+      "1000", "100");
+  run_audit_query_case ("{\"error\":\"audit_denied\"}", 403, "", 4,
+      "wyctl: audit query failed: audit_denied\n", 0, "1000", "100");
+  run_audit_query_case ("{}", 302, "", 5,
+      "wyctl: audit query failed: audit_query_failed\n", 0, "1000", "100");
 }
 
 typedef struct
@@ -3381,10 +3536,140 @@ test_service_token_preflight_and_malformed_input (void)
   g_unlink (credential_path);
 }
 
+static void
+run_service_token_response_case (guint response_status,
+    const gchar *response_body, gint expected_exit_status,
+    const gchar *expected_error)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-service-token-remote-XXXXXX",
+          &error);
+  g_assert_no_error (error);
+  g_autofree gchar *credential_path = g_build_filename (dir,
+          "credential.json", NULL);
+  g_autofree gchar *output_path = g_build_filename (dir, "access.token",
+          NULL);
+  const gchar *credential_secret =
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  g_autofree gchar *credential_doc = g_strdup_printf (
+    "{\"version\":1,\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+    "\"credential_secret\":\"%s\"}\n", credential_secret);
+  g_assert_true (g_file_set_contents (credential_path, credential_doc, -1,
+      &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (credential_path, 0600), ==, 0);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) accept_cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener,
+    .cancel = accept_cancel,
+    .response_body = response_body,
+    .response_status = response_status,
+  };
+  GThread *server_thread = g_thread_new ("service-token-error",
+          policy_check_server_thread, &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    "1000",
+    "auth",
+    "service-token",
+    "--credential-file",
+    credential_path,
+    "--token-output",
+    output_path,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  stop_test_server (server_thread, accept_cancel);
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit_status);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_autofree gchar *expected_stderr = g_strdup_printf (
+    "wyctl: auth service-token failed: %s\n", expected_error);
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
+  g_assert_false (g_file_test (output_path, G_FILE_TEST_EXISTS));
+  g_assert_nonnull (server.request);
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+      "POST /auth/service-token HTTP/1.1"));
+  g_assert_null (g_strstr_len (stdout_buf, -1, credential_secret));
+  g_assert_null (g_strstr_len (stderr_buf, -1, credential_secret));
+
+  g_free (server.request);
+  remove_dir_recursive (dir);
+}
+
+static void
+test_service_token_reports_remote_error (void)
+{
+  run_service_token_response_case (403,
+      "{\"error\":\"service_token_auth_required\"}", 6,
+      "service_token_auth_required");
+  run_service_token_response_case (403,
+      "{\"error\":\"service_token_denied\"}", 4,
+      "service_token_denied");
+  run_service_token_response_case (403,
+      "{\"error\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}", 6,
+      "service_token_exchange_failed");
+  run_service_token_response_case (403,
+      "{\"error\":\"a\\u0061a\"}", 6,
+      "service_token_exchange_failed");
+  run_service_token_response_case (200, "{}", 3,
+      "service_token_exchange_failed");
+  run_service_token_response_case (302, "{\"error\":\"redirected\"}", 5,
+      "redirected");
+}
+
+static void
+test_login_reports_remote_error (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-login-error-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel, .response_status = 403,
+    .response_body = "{\"error\":\"login_denied\"}",
+  };
+  GThread *thread = g_thread_new ("login-error", policy_check_server_thread,
+          &server);
+  gchar *argv[] = {WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url,
+                   "auth", "login", "--subject", "alice", "--skip-mfa",
+                   "--tenant", "__wr_default", "--token-output", access_path,
+                   "--refresh-token-output", refresh_path, NULL};
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (argv, &out, &err, &status);
+  stop_test_server (thread, cancel);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 1);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: login failed: login_denied\n");
+  g_free (server.request);
+  g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+  remove_dir_recursive (dir);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/wyctl/login-remote-error", test_login_reports_remote_error);
 
   static const gchar *settings_cases[] = {
     "missing", "missing-key", "wrong-type", "uint-missing", "uint-wrong",
@@ -3423,6 +3708,8 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/policy-help", test_policy_help);
   g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
   g_test_add_func ("/wyctl/policy-check", test_policy_check);
+  g_test_add_func ("/wyctl/policy-check-connection-failure",
+      test_policy_check_connection_failure);
   g_test_add_func ("/wyctl/policy-permission-help",
       test_policy_permission_help);
   g_test_add_func ("/wyctl/policy-permission-validation",
@@ -3480,6 +3767,9 @@ main (int argc, char **argv)
       test_audit_query_safety_reject_prevents_http);
   g_test_add_func ("/wyctl/service-token-preflight-and-malformed-input",
       test_service_token_preflight_and_malformed_input);
+  g_test_add_func ("/wyctl/service-token-help", test_service_token_help);
+  g_test_add_func ("/wyctl/service-token-reports-remote-error",
+      test_service_token_reports_remote_error);
 
   return wyl_test_normalize_exit_status (g_test_run ());
 }

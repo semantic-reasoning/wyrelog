@@ -457,7 +457,8 @@ test_wyctl_human_auth_flow (WylHandle *handle, const gchar *base_url)
   g_clear_pointer (&stderr_buf, g_free);
   run_wyctl (old_bearer_check_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_true (WIFEXITED (wait_status));
-  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 3);
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 6);
+  g_assert_nonnull (strstr (stderr_buf, "wyctl: policy check failed:"));
   g_assert_null (strstr (stderr_buf, old_access));
 
   g_unlink (old_access_path);
