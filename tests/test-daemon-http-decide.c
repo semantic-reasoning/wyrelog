@@ -20655,6 +20655,122 @@ check_service_management_self_arm_bundle_rearm_distinct_audit (void)
   return 0;
 }
 
+/*
+ * #1259: an operator can enroll MFA for any human principal the policy store
+ * already authorizes.  A user whose only grants are direct permissions used
+ * to be "not found", so the grants could never be used with MFA.  A service
+ * principal never logs in as a human, so its direct data-plane grants still
+ * do not make it enrollable.
+ */
+static gint
+check_mfa_enroll_start_subject_identity (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  wyl_policy_store_t *store = rc == 0
+      ? wyl_handle_get_policy_store (env.handle) : NULL;
+  /* The enrolling operator: an armed wr.policy.write at the system tenant,
+   * which is what /auth/mfa/enroll/* authorizes against. */
+  if (rc == 0
+      && (wyl_policy_store_grant_direct_permission (store,
+      "human-principal-admin", "wr.policy.write", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+      "human-principal-admin", "wr.policy.write", WYL_TENANT_DEFAULT,
+      "armed") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+      "active") != WYRELOG_E_OK))
+    rc = 2950;
+  wyl_service_principal_t principal = { 0 };
+  if (rc == 0
+      && (wyl_policy_store_grant_direct_permission (store,
+      "direct-grant-user", "wr.graph.manage", "tenant-direct")
+      != WYRELOG_E_OK
+      || wyl_service_principal_create (env.handle, "svc:mfa:worker",
+      "mfa worker", "admin", "mfa-enroll-svc", &principal)
+      != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+      "svc:mfa:worker", "wr.svc.read_decision", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK))
+    rc = 2951;
+  wyl_service_principal_clear (&principal);
+
+  static const struct
+  {
+    const gchar *subject;
+    guint status;
+    const gchar *marker;
+  } cases[] = {
+    {"direct-grant-user", 200, "\"challenge\":\""},
+    {"no-grants-at-all", 404, "\"mfa_enroll_subject_not_found\""},
+    {"svc:mfa:worker", 404, "\"mfa_enroll_subject_not_found\""},
+  };
+  const gchar *guard = "tenant=__wr_default&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0";
+  g_autofree gchar *direct_start = NULL;
+  for (gsize i = 0; rc == 0 && i < G_N_ELEMENTS (cases); i++) {
+    g_autofree gchar *request = g_strdup_printf ("{\"subject\":\"%s\"}",
+            cases[i].subject);
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+        "/auth/mfa/enroll/start", guard, env.access_token, request, &status,
+        &body) != 0 || status != cases[i].status
+        || strstr (body, cases[i].marker) == NULL) {
+      g_printerr ("mfa enroll start %s: %u %s\n", cases[i].subject, status,
+          body != NULL ? body : "(null)");
+      rc = 2952 + (gint) i;
+    } else if (i == 0) {
+      direct_start = g_steal_pointer (&body);
+    }
+  }
+
+  /* The confirm step applies the same identity rule; only a completed
+   * enrollment makes the grants usable with MFA. */
+  if (rc == 0) {
+    g_autofree gchar *challenge = extract_json_string (direct_start,
+            "challenge");
+    g_autofree gchar *base32 = extract_json_string (direct_start,
+            "secret_base32");
+    guint8 *seed = NULL;
+    gsize seed_len = 0;
+    guint code = 0;
+    if (challenge == NULL || base32 == NULL
+        || wyl_totp_base32_decode (base32, &seed, &seed_len, NULL)
+        != WYRELOG_E_OK || seed_len != WYL_TOTP_SEED_BYTES
+        || wyl_totp_code_at_step (seed, seed_len,
+        (guint64) (g_get_real_time () / G_USEC_PER_SEC
+        / WYL_TOTP_STEP_SECONDS), &code, NULL) != WYRELOG_E_OK)
+      rc = 2955;
+    if (seed != NULL) {
+      sodium_memzero (seed, seed_len);
+      g_free (seed);
+    }
+    g_autofree gchar *confirm_body = rc == 0 ? g_strdup_printf
+          ("{\"challenge\":\"%s\",\"code\":\"%06u\"}", challenge, code) : NULL;
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (rc == 0 && (send_raw_service_principal_bearer (env.session, "POST",
+        env.base_url, "/auth/mfa/enroll/confirm", guard,
+        env.access_token, confirm_body, &status, &body) != 0
+        || status != 200)) {
+      g_printerr ("mfa enroll confirm direct-grant-user: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2956;
+    }
+    WylTotpEnrollment enrollment = { 0 };
+    gboolean enrolled = FALSE;
+    if (rc == 0 && (wyl_policy_store_totp_enrollment_lookup (store,
+        "direct-grant-user", &enrollment, &enrolled) != WYRELOG_E_OK
+        || !enrolled))
+      rc = 2957;
+    wyl_totp_enrollment_clear (&enrollment);
+  }
+  service_denial_env_clear (&env);
+  return rc;
+}
+
 /* #729: the self-arm route (POST /service-management-authority/arm) lets a
  * live MFA SYSTEM admin arm the two service-management permissions at ITS OWN
  * session, with no store-seam pre-arming. Covers the happy path (self-arm ->
@@ -25008,6 +25124,11 @@ service_variant_checks (int argc, char **argv)
   gint self_arm_e2e_rc = check_service_management_self_arm_end_to_end ();
   if (self_arm_e2e_rc != 0) {
     result = self_arm_e2e_rc;
+    goto cleanup;
+  }
+  gint mfa_identity_rc = check_mfa_enroll_start_subject_identity ();
+  if (mfa_identity_rc != 0) {
+    result = mfa_identity_rc;
     goto cleanup;
   }
   gint self_arm_reject_rc = check_service_management_self_arm_rejections ();

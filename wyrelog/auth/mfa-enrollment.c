@@ -6,39 +6,16 @@
 #define WYL_MFA_SKIP_PERMISSION "wr.login.skip_mfa"
 #define WYL_MFA_SKIP_SCOPE "login"
 
-typedef struct
-{
-  const gchar *subject;
-  gboolean found;
-} WylMfaSubjectLookup;
-
-static wyrelog_error_t
-find_enrollment_subject_membership (const gchar *subject, const gchar *role,
-    const gchar *scope, gpointer data)
-{
-  (void) role;
-  (void) scope;
-  WylMfaSubjectLookup *lookup = data;
-  if (g_strcmp0 (subject, lookup->subject) == 0)
-    lookup->found = TRUE;
-  return WYRELOG_E_OK;
-}
-
+/* One identity rule for enrollment start and confirm (#1259). */
 static wyrelog_error_t
 require_enrollment_subject (wyl_policy_store_t *store, const gchar *subject)
 {
   gboolean found = FALSE;
-  g_autofree gchar *state = NULL;
-  wyrelog_error_t rc = wyl_policy_store_get_principal_state (store, subject,
-          &state, &found);
-  if (rc != WYRELOG_E_OK || found)
-    return rc;
-  WylMfaSubjectLookup lookup = {.subject = subject };
-  rc = wyl_policy_store_foreach_role_membership (store,
-          find_enrollment_subject_membership, &lookup);
+  wyrelog_error_t rc = wyl_policy_store_subject_has_human_identity (store,
+          subject, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return lookup.found ? WYRELOG_E_OK : WYRELOG_E_NOT_FOUND;
+  return found ? WYRELOG_E_OK : WYRELOG_E_NOT_FOUND;
 }
 
 static wyrelog_error_t

@@ -6950,6 +6950,54 @@ check_audit_so_d_permission_taxonomy (void)
   return 0;
 }
 
+/*
+ * #1259: MFA enrollment accepts any human principal the store knows -- a
+ * principal state, a role membership or a direct permission -- and never a
+ * service principal, whatever it holds.
+ */
+static gint
+check_store_subject_has_human_identity (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9501;
+  if (wyl_policy_store_set_principal_state (store, "id-state",
+      "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "id-role",
+      "wr.viewer", "tenant-y") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store, "id-direct",
+      "wr.graph.manage", "tenant-y") != WYRELOG_E_OK)
+    return 9502;
+
+  static const struct
+  {
+    const gchar *subject;
+    gboolean expected;
+  } cases[] = {
+    {"id-state", TRUE},
+    {"id-role", TRUE},
+    {"id-direct", TRUE},
+    {"id-none", FALSE},
+    {"svc:id:worker", FALSE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gboolean found = !cases[i].expected;
+    if (wyl_policy_store_subject_has_human_identity (store, cases[i].subject,
+        &found) != WYRELOG_E_OK || found != cases[i].expected) {
+      g_printerr ("human identity for %s: %d\n", cases[i].subject, found);
+      return 9503;
+    }
+  }
+  gboolean ignored = FALSE;
+  if (wyl_policy_store_subject_has_human_identity (store, NULL, &ignored)
+      != WYRELOG_E_INVALID
+      || wyl_policy_store_subject_has_human_identity (store, "id-state", NULL)
+      != WYRELOG_E_INVALID)
+    return 9504;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -7148,6 +7196,8 @@ main (void)
   if ((rc = check_audit_scope_rejects_cross_scope_privilege ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_audit_so_d_permission_taxonomy ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_store_subject_has_human_identity ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
 }

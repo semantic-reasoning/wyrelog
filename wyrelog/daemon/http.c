@@ -14926,24 +14926,6 @@ mfa_enroll_build_otpauth_uri (const gchar *subject, const gchar *secret)
              "wyrelog&algorithm=SHA1&digits=6&period=30", subject_encoded, secret);
 }
 
-typedef struct
-{
-  const gchar *subject;
-  gboolean found;
-} MfaEnrollSubjectLookup;
-
-static wyrelog_error_t
-mfa_enroll_find_subject (const gchar *subject, const gchar *role,
-    const gchar *scope, gpointer user_data)
-{
-  (void) role;
-  (void) scope;
-  MfaEnrollSubjectLookup *lookup = user_data;
-  if (g_strcmp0 (subject, lookup->subject) == 0)
-    lookup->found = TRUE;
-  return WYRELOG_E_OK;
-}
-
 static gboolean
 mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx,
@@ -14973,21 +14955,17 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
   return TRUE;
 }
 
+/* The same identity rule the confirm step applies (#1259): a principal
+ * state, a role membership or a direct permission, never a service
+ * principal. */
 static gboolean
 mfa_enroll_subject_exists (wyl_policy_store_t *store, const gchar *subject)
 {
   gboolean found = FALSE;
-  g_autofree gchar *state = NULL;
   if (subject == NULL || subject[0] == '\0' || strlen (subject) > 256)
     return FALSE;
-  if (wyl_policy_store_get_principal_state (store, subject, &state,
-      &found) != WYRELOG_E_OK)
-    return FALSE;
-  if (found)
-    return TRUE;
-  MfaEnrollSubjectLookup lookup = {.subject = subject };
-  return wyl_policy_store_foreach_role_membership (store,
-             mfa_enroll_find_subject, &lookup) == WYRELOG_E_OK && lookup.found;
+  return wyl_policy_store_subject_has_human_identity (store, subject, &found)
+         == WYRELOG_E_OK && found;
 }
 
 static wyrelog_error_t
