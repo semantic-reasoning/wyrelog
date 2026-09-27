@@ -1296,11 +1296,22 @@ wyctl --daemon-url "$BASE_URL" audit query \
   --guard-loc-class trusted --guard-risk 29
 
 for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
-  curl -fsS -X POST \
-    -H "Authorization: Bearer $(cat "$TOKEN")" \
-    "$BASE_URL/policy/permissions/transition?subject=alice&perm=$perm&scope=$TENANT&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+  wyctl --daemon-url "$BASE_URL" policy permission-transition \
+    --subject alice --perm "$perm" --scope "$TENANT" --event grant \
+    --access-token-file "$TOKEN" \
+    --guard-timestamp "$(date +%s)" --guard-loc-class trusted --guard-risk 29
 done
 ```
+
+A granted permission is dormant until it is armed. Before the loop above,
+`wyctl --daemon-url "$BASE_URL" policy explain --user alice --permission
+wr.graph.manage --resource "$TENANT" --access-token-file "$TOKEN"` prints
+`deny` with `reason=not_armed`; afterwards it prints `allow`. The arming
+events, `grant` and `reset`, need the MFA-assured token: the bootstrap token
+is refused with exit 4 and `policy_mutation_denied`. A transition the state
+machine refuses, such as arming an already armed permission when the loop is
+re-run, exits 3 with `invalid_policy_mutation`; `policy explain` shows the
+current state.
 
 Graph-count admission can be bounded independently of fact bytes and rows. Only
 a principal holding the `wr.sys.admin` permission on the tenant (the packaged
@@ -1974,11 +1985,20 @@ The daemon's error code is printed on stderr for every remote failure.
     --audit-db /var/log/wyrelog/system/audit.duckdb --check
   ```
 
-- Policy grant/revoke:
+- Policy grant, arm and revoke. A grant alone leaves the permission dormant
+  (`policy explain` reports `reason=not_armed`); arm it with
+  `permission-transition --event grant` from an MFA-assured session. `grant`
+  and `reset` both arm and both need MFA; a transition the state machine
+  refuses exits 3:
 
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-grant \
     --subject alice --perm site.policy.read --scope tenant-a \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class internal_network --guard-risk 10
+  wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
+    --subject alice --perm site.policy.read --scope tenant-a --event grant \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
     --guard-loc-class internal_network --guard-risk 10
