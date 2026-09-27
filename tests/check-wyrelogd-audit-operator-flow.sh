@@ -83,14 +83,18 @@ def guard():
 def fail(message):
     raise SystemExit(message)
 
-def request(method, path, params=None, token=None):
+def request(method, path, params=None, token=None, json_body=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
     headers = {}
     if token:
         headers["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(url, headers=headers, method=method)
+    data = None
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(json_body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             return response.status, response.read().decode("utf-8")
@@ -157,8 +161,8 @@ def login_mfa(subject, secret, enrolled_step):
     if challenge.get("principal_state") != "mfa_required":
         fail(f"{subject}: expected MFA challenge: {body}")
     code, _ = totp(secret)
-    status, body = request("POST", "/auth/mfa/verify",
-        {"session_token": challenge["session_token"], "code": code})
+    status, body = request("POST", "/auth/mfa/verify", json_body={
+        "session_token": challenge["session_token"], "code": code})
     if status != 200:
         fail(f"{subject}: MFA verification failed: {status} {body}")
     return json.loads(body)["access_token"]

@@ -2071,9 +2071,9 @@ The daemon's error code is printed on stderr for every remote failure.
   endpoint, using the MFA-authenticated operator token:
 
   ```sh
-  curl -fsS -X POST \
-    -H "Authorization: Bearer $(cat /run/wyrelog/operator.token)" \
-    "http://127.0.0.1:8765/policy/permissions/transition?subject=auditor&perm=wr.audit.read&scope=__wr_default&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+  { printf 'Authorization: Bearer '; cat /run/wyrelog/operator.token; printf '\n'; } \
+    | curl -fsS -X POST -H @- \
+      "http://127.0.0.1:8765/policy/permissions/transition?subject=auditor&perm=wr.audit.read&scope=__wr_default&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
   ```
 
   Then use the auditor's MFA-issued token, not the operator token:
