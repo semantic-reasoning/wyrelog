@@ -211,6 +211,81 @@ test_post_create_failure_leaves_unrecoverable_orphan (void)
   remove_tree (root);
 }
 
+#ifndef G_OS_WIN32
+typedef struct
+{
+  const gchar *sidecar_path;
+  gboolean injected;
+} RestoreStageSidecarInjection;
+
+static wyrelog_error_t
+inject_restore_stage_wal_after_create (const gchar *point, gpointer user_data)
+{
+  RestoreStageSidecarInjection *injection = user_data;
+  if (!injection->injected
+      && g_strcmp0 (point, "restore-stage-created") == 0) {
+    injection->injected = g_file_set_contents (injection->sidecar_path,
+            "wal", 3, NULL);
+    return injection->injected ? WYRELOG_E_OK : WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_sidecar_appearing_during_create_is_rejected (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-offline-restore-stage-sidecar-race-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (root);
+
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactRootWriterLease *lease = NULL;
+  WylFactOfflineRestoreStage *stage = NULL;
+  RestoreStageSidecarInjection injection = { 0 };
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant-a", "alpha"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_resolver_set_checkpoint_for_test (&resolver,
+      inject_restore_stage_wal_after_create, &injection);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+      &locator, TRUE, &directory), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
+      WYRELOG_E_OK);
+
+  wyl_id_t operation_id;
+  gchar operation_uuid[WYL_ID_STRING_BUF] = { 0 };
+  g_assert_cmpint (wyl_id_new (&operation_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&operation_id, operation_uuid,
+      sizeof operation_uuid), ==, WYRELOG_E_OK);
+  g_autofree gchar *basename = g_strdup_printf ("restore-%s.duckdb",
+          operation_uuid);
+  g_autofree gchar *stage_path = wyl_fact_graph_directory_descriptive_file
+        (&directory, basename);
+  g_autofree gchar *sidecar_path = g_strconcat (stage_path, ".wal", NULL);
+  injection.sidecar_path = sidecar_path;
+
+  g_assert_cmpint (wyl_fact_offline_restore_stage_new (&resolver, &directory,
+      lease, operation_uuid, 15, PAYLOAD_CHECKSUM, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (injection.injected);
+  g_assert_null (stage);
+  g_assert_true (g_file_test (stage_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_true (g_file_test (sidecar_path, G_FILE_TEST_IS_REGULAR));
+
+  g_assert_cmpint (g_remove (sidecar_path), ==, 0);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_root_writer_lease_release (lease);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+#endif
+
 static void
 test_stage_substitution_rejects_write_and_finalize (void)
 {
@@ -678,6 +753,67 @@ test_same_size_corruption_cannot_finalize (void)
 }
 
 static void
+test_restore_stage_rejects_duckdb_sidecars (void)
+{
+#ifdef G_OS_WIN32
+  /* Restore-stage readers are intentionally unsupported on Windows today. */
+  return;
+#else
+  static const gchar *const suffixes[] = {
+    ".wal", ".wal.checkpoint", ".wal.recovery",
+  };
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+
+  g_autofree gchar *sidecar = g_strconcat (fixture.path, suffixes[0], NULL);
+  g_assert_true (g_file_set_contents (sidecar, "x", 1, NULL));
+  WylFactOfflineRestoreStage *stage = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_new (&fixture.resolver,
+      &fixture.directory, fixture.lease, fixture.operation_uuid,
+      15, PAYLOAD_CHECKSUM, &stage), ==, WYRELOG_E_POLICY);
+  g_assert_null (stage);
+  g_assert_cmpint (g_remove (sidecar), ==, 0);
+
+  g_assert_cmpint (wyl_fact_offline_restore_stage_new (&fixture.resolver,
+      &fixture.directory, fixture.lease, fixture.operation_uuid,
+      15, PAYLOAD_CHECKSUM, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_stage_write (stage, 0,
+      (const guint8 *) "restore payload", 15), ==, WYRELOG_E_OK);
+  guint64 bytes = 0;
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_stage_finalize (stage, &bytes,
+      &identity), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (bytes, ==, 15);
+  wyl_fact_offline_restore_stage_free (stage);
+
+  for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++) {
+    g_free (sidecar);
+    sidecar = g_strconcat (fixture.path, suffixes[i], NULL);
+    g_assert_true (g_file_set_contents (sidecar, "x", 1, NULL));
+    WylFactOfflineRestoreStageReader *reader = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+          (&fixture.resolver, &fixture.directory, fixture.lease,
+        fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_POLICY);
+    g_assert_null (reader);
+    g_assert_cmpint (g_remove (sidecar), ==, 0);
+  }
+
+  WylFactOfflineRestoreStageReader *reader = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
+        (&fixture.resolver, &fixture.directory, fixture.lease,
+      fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_OK);
+  g_free (sidecar);
+  sidecar = g_strconcat (fixture.path, suffixes[2], NULL);
+  g_assert_true (g_file_set_contents (sidecar, "x", 1, NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_revalidate (reader),
+      ==, WYRELOG_E_POLICY);
+  wyl_fact_offline_restore_stage_reader_free (reader);
+  g_assert_cmpint (g_remove (sidecar), ==, 0);
+  copy_fixture_clear (&fixture);
+#endif
+}
+
+static void
 assert_zero_identity (const WylFactArtifactInventoryIdentity *identity)
 {
   WylFactArtifactInventoryIdentity zero = { 0 };
@@ -950,6 +1086,10 @@ main (int argc, char **argv)
       test_restore_stage_reader_verify_content);
   g_test_add_func ("/fact-offline-restore-stage/post-create-orphan",
       test_post_create_failure_leaves_unrecoverable_orphan);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/fact-offline-restore-stage/sidecar-create-race",
+      test_sidecar_appearing_during_create_is_rejected);
+#endif
   g_test_add_func ("/fact-offline-restore-stage/substitute-fails-closed",
       test_stage_substitution_rejects_write_and_finalize);
   g_test_add_func ("/fact-offline-restore-stage/no-generic-transition",
@@ -960,6 +1100,8 @@ main (int argc, char **argv)
       test_external_truncation_cannot_finalize);
   g_test_add_func ("/fact-offline-restore-stage/same-size-corruption",
       test_same_size_corruption_cannot_finalize);
+  g_test_add_func ("/fact-offline-restore-stage/duckdb-sidecars",
+      test_restore_stage_rejects_duckdb_sidecars);
   g_test_add_func ("/fact-offline-restore-stage/binary-stream-owned-checksum",
       test_binary_stream_and_owned_checksum);
   g_test_add_func ("/fact-offline-restore-stage/malformed-checksum",

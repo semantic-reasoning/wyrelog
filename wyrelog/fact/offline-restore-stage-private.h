@@ -23,8 +23,10 @@ typedef struct WylFactOfflineRestoreStageReader
  * It validates stage identity, path binding, security metadata, and stable
  * size, but does not prove content integrity or immutability against external
  * same-size writes. Callers must validate the bytes they consume (including
- * any required digest/schema checks). Calls are single-threaded and
- * non-reentrant. */
+ * any required digest/schema checks). On POSIX/macOS each open/revalidation
+ * also refuses operation-derived WAL, WAL-checkpoint, and WAL-recovery
+ * sidecars; this is a point-in-time check, not a lock against external writers.
+ * Calls are single-threaded and non-reentrant. */
 wyrelog_error_t wyl_fact_offline_restore_stage_reader_open
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *writer_lease, const gchar *operation_uuid,
