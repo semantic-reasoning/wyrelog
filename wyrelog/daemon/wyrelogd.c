@@ -119,10 +119,10 @@ policy_store_probe_subjects (const gchar *policy_db, gchar **out_reason)
 
   sqlite3 *db = NULL;
   if (sqlite3_open_v2 (policy_db, &db,
-          SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
+      SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
     if (out_reason != NULL) {
       *out_reason = g_strdup_printf ("sqlite3_open_v2 failed: %s",
-          db != NULL ? sqlite3_errmsg (db) : "(no handle)");
+              db != NULL ? sqlite3_errmsg (db) : "(no handle)");
     }
     if (db != NULL)
       sqlite3_close (db);
@@ -134,12 +134,12 @@ policy_store_probe_subjects (const gchar *policy_db, gchar **out_reason)
    * INDETERMINATE so the caller emits the "indeterminate" WARN. */
   sqlite3_stmt *probe = NULL;
   if (sqlite3_prepare_v2 (db,
-          "SELECT name FROM sqlite_master "
-          "WHERE type='table' AND name='principal_states' LIMIT 1;",
-          -1, &probe, NULL) != SQLITE_OK) {
+      "SELECT name FROM sqlite_master "
+      "WHERE type='table' AND name='principal_states' LIMIT 1;",
+      -1, &probe, NULL) != SQLITE_OK) {
     if (out_reason != NULL) {
       *out_reason = g_strdup_printf ("schema probe failed: %s",
-          sqlite3_errmsg (db));
+              sqlite3_errmsg (db));
     }
     sqlite3_close (db);
     return WYL_PROBE_INDETERMINATE;
@@ -158,11 +158,11 @@ policy_store_probe_subjects (const gchar *policy_db, gchar **out_reason)
 
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (db,
-          "SELECT 1 FROM principal_states LIMIT 1;", -1, &stmt,
-          NULL) != SQLITE_OK) {
+      "SELECT 1 FROM principal_states LIMIT 1;", -1, &stmt,
+      NULL) != SQLITE_OK) {
     if (out_reason != NULL) {
       *out_reason = g_strdup_printf ("subject probe prepare failed: %s",
-          sqlite3_errmsg (db));
+              sqlite3_errmsg (db));
     }
     sqlite3_close (db);
     return WYL_PROBE_INDETERMINATE;
@@ -178,7 +178,7 @@ policy_store_probe_subjects (const gchar *policy_db, gchar **out_reason)
 
   if (out_reason != NULL)
     *out_reason = g_strdup_printf ("subject probe step failed: sqlite rc=%d",
-        rc);
+            rc);
   return WYL_PROBE_INDETERMINATE;
 }
 
@@ -209,7 +209,7 @@ maybe_warn_stale_bootstrap_key (const WylDaemonOptions *opts)
 
   g_autofree gchar *safe_subject =
       sanitize_subject_for_stderr (subject_set ?
-      opts->bootstrap_admin_subject : "");
+          opts->bootstrap_admin_subject : "");
 
   if (res == WYL_PROBE_NONEMPTY) {
     /* Stable greppable line for operators and packagers. The subject
@@ -218,7 +218,7 @@ maybe_warn_stale_bootstrap_key (const WylDaemonOptions *opts)
     g_printerr ("wyrelogd: bootstrap_admin: stale-key "
         "subject=%s allow_skip_mfa=%s "
         "(remove bootstrap_admin_subject%s "
-        "from /etc/wyrelog/wyrelogd.conf and restart)\n",
+        "from the active profile config and restart)\n",
         safe_subject,
         opts->bootstrap_admin_allow_skip_mfa ? "true" : "false",
         opts->bootstrap_admin_allow_skip_mfa ?
@@ -271,7 +271,7 @@ main (int argc, char **argv)
     guint32 template_version = 0;
     if (rc == WYRELOG_E_OK) {
       rc = wyl_engine_verify_template_manifest (opts.template_dir, dl_src,
-          dl_src_len, TRUE, &template_version);
+              dl_src_len, TRUE, &template_version);
     }
     if (dl_src != NULL) {
       memset (dl_src, 0, dl_src_len);
@@ -294,7 +294,7 @@ main (int argc, char **argv)
     WylTemplateArtifactInfo info = { 0 };
     if (rc == WYRELOG_E_OK) {
       rc = wyl_engine_inspect_template_artifact (opts.template_dir, dl_src,
-          dl_src_len, TRUE, &info);
+              dl_src_len, TRUE, &info);
     }
     if (dl_src != NULL) {
       memset (dl_src, 0, dl_src_len);
@@ -306,7 +306,7 @@ main (int argc, char **argv)
       return 3;
     }
     g_print
-        ("version=%u\nsha256=%s\nmigrations=%u\nlatest_migration_version=%u\n",
+      ("version=%u\nsha256=%s\nmigrations=%u\nlatest_migration_version=%u\n",
         info.version, info.sha256_hex, info.migration_count,
         info.latest_migration_version);
     return 0;
@@ -325,7 +325,7 @@ main (int argc, char **argv)
     g_print ("fact_root=%s\n", opts.fact_root != NULL ? opts.fact_root : "");
     g_print ("fact_store_mode=%s\n",
         (opts.fact_root != NULL && opts.fact_root[0] != '\0' &&
-            opts.fact_store_mode != NULL) ? opts.fact_store_mode : "");
+        opts.fact_store_mode != NULL) ? opts.fact_store_mode : "");
     g_print ("listen_port=%d\n", opts.listen_port);
     g_print ("system_url=%s\n", opts.system_url != NULL ? opts.system_url : "");
     g_print ("event_spool_dir=%s\n",

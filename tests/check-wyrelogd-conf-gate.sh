@@ -221,6 +221,11 @@ if ! grep -q "wyrelogd: bootstrap_admin: stale-key" "$TMPDIR/case5.err"; then
   cat "$TMPDIR/case5.err" >&2
   exit 1
 fi
+if ! grep -q "from the active profile config and restart" "$TMPDIR/case5.err"; then
+  echo "case 5: stale-key WARN points to an obsolete shared config path" >&2
+  cat "$TMPDIR/case5.err" >&2
+  exit 1
+fi
 if ! grep -q "subject=foo" "$TMPDIR/case5.err"; then
   echo "case 5: stale-key WARN missing subject=foo" >&2
   cat "$TMPDIR/case5.err" >&2

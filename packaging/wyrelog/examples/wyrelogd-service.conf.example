@@ -3,11 +3,9 @@
 # This file MUST be installed as root:wyrelog 0640.
 # Looser permissions cause `wyrelogd --production` to refuse to start.
 #
-# Copy to /etc/wyrelog/wyrelogd.conf and edit values for your site.
-# The keys below mirror the flags currently carried by
-# packaging/systemd/wyrelog-service.service ExecStart byte-for-byte; once
-# the unit's ExecStart flips to `--config /etc/wyrelog/wyrelogd.conf`,
-# this file IS the operational source of truth.
+# Copy to /etc/wyrelog/service.conf and edit values for your site.
+# The packaged wyrelog-service.service reads this configuration with
+# --config /etc/wyrelog/service.conf. Edit this file for site settings.
 #
 # Reference: docs/operator-runbook.md "Why No GSettings on the Daemon"
 
@@ -24,7 +22,7 @@ listen_port=8766
 
 # DELETE AFTER FIRST SUCCESSFUL BOOT.
 # wyrelogd will WARN on every --profile-info while either of these
-# keys is present in /etc/wyrelog/wyrelogd.conf.
+# keys is present in /etc/wyrelog/service.conf.
 #
 # bootstrap_admin_subject=
 # bootstrap_admin_allow_skip_mfa=false
