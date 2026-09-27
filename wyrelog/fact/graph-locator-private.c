@@ -10,6 +10,7 @@
 #include "fact/graph-artifact-transition-names-private.h"
 #ifndef G_OS_WIN32
 #include "fact/graph-provisioned-pair-internal.h"
+#include "fact/root-writer-lease-private.h"
 #endif
 #include "wyl-id-private.h"
 
@@ -21,6 +22,7 @@
 
 #ifndef G_OS_WIN32
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1183,6 +1185,265 @@ restore_reader_stat_matches (const struct stat *st,
          && identity->domain == (guint64) st->st_dev
          && identity->object == (guint64) st->st_ino
          && memcmp (identity->object_bytes, (guint8[16]) { 0 }, 16) == 0;
+}
+
+/* Explicit serialization avoids struct padding and ignores access times:
+ * observing a directory may itself update atime. Keep nanosecond mutation
+ * timestamps, ownership, mode, links, allocation and size in the comparison. */
+static void
+restore_inventory_stat_digest (const struct stat *st, guint8 digest[32])
+{
+#ifdef __APPLE__
+  const struct timespec mt = st->st_mtimespec, ct = st->st_ctimespec;
+#else
+  const struct timespec mt = st->st_mtim, ct = st->st_ctim;
+#endif
+  guint64 fields[] = {
+    st->st_dev, st->st_ino, st->st_mode, st->st_uid, st->st_gid,
+    st->st_nlink, st->st_size, st->st_blocks, st->st_blksize,
+    mt.tv_sec, mt.tv_nsec, ct.tv_sec, ct.tv_nsec,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    fields[i] = GUINT64_TO_BE (fields[i]);
+  GChecksum *sum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (sum, (const guint8 *) fields, sizeof fields);
+  gsize length = 32;
+  g_checksum_get_digest (sum, digest, &length);
+  g_checksum_free (sum);
+}
+
+static gboolean
+restore_inventory_same_stat (const struct stat *a, const struct stat *b)
+{
+  guint8 first[32], second[32];
+  restore_inventory_stat_digest (a, first);
+  restore_inventory_stat_digest (b, second);
+  return memcmp (first, second, sizeof first) == 0;
+}
+
+static gboolean
+restore_inventory_identity_valid
+  (const WylFactArtifactInventoryIdentity *identity)
+{
+  return identity->object_width == 0
+         && memcmp (identity->object_bytes, (guint8[16]) { 0 }, 16) == 0;
+}
+
+static wyrelog_error_t
+restore_inventory_authority (WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactInventoryIdentity *main)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (lease, resolver);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (directory->root_device != resolver->device
+      || directory->root_inode != resolver->inode)
+    return WYRELOG_E_POLICY;
+  rc = directory_revalidate (directory);
+  if (rc != WYRELOG_E_OK || pair == NULL)
+    return rc;
+  if (pair->directory.root_device != directory->root_device
+      || pair->directory.root_inode != directory->root_inode
+      || pair->directory.tenant_device != directory->tenant_device
+      || pair->directory.tenant_inode != directory->tenant_inode
+      || pair->directory.graph_device != directory->graph_device
+      || pair->directory.graph_inode != directory->graph_inode
+      || pair->expected_device != main->domain
+      || pair->expected_inode != main->object)
+    return WYRELOG_E_POLICY;
+  return wyl_fact_graph_provisioned_pair_revalidate (pair);
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphRestoreInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || operation_uuid == NULL || expected_stage == NULL
+      || expected_main == NULL || out_inventory == NULL)
+    return WYRELOG_E_INVALID;
+  if (!restore_inventory_identity_valid (expected_stage)
+      || !restore_inventory_identity_valid (expected_main)
+      || expected_stage->object == 0)
+    return WYRELOG_E_INVALID;
+  gboolean present = expected_main->domain != 0 || expected_main->object != 0;
+  if (present != (pair != NULL))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_inventory_authority (resolver, directory, lease, pair,
+            expected_main);
+
+  /* Fixed slots bound memory, descriptors and enumeration to four accepted
+   * entries plus dot entries. Never derive or adopt a foreign companion. */
+  const gchar *allowed[4] = { names.stage, present ? "facts.duckdb" : NULL,
+                              NULL, "facts.duckdb.lock" };
+#ifndef __APPLE__
+  if (pair != NULL)
+    allowed[2] = pair->stage_basename;
+#endif
+  gint pins[4] = { -1, -1, -1, -1 };
+  struct stat stats[4] = { 0 }, before = { 0 }, after;
+  gint scan_fd = -1;
+  DIR *scan = NULL;
+  if (rc == WYRELOG_E_OK) {
+    scan_fd = openat (directory->graph_fd, ".",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (scan_fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK && fstat (scan_fd, &before) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && !stat_matches (&before, directory->graph_device,
+      directory->graph_inode, TRUE, 0700))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    scan = fdopendir (scan_fd);
+    if (scan == NULL)
+      rc = errno_to_resolver_error (errno);
+    else
+      scan_fd = -1;
+  }
+  guint count = 0;
+  while (rc == WYRELOG_E_OK) {
+    errno = 0;
+    struct dirent *entry = readdir (scan);
+    if (entry == NULL) {
+      if (errno != 0)
+        rc = errno_to_resolver_error (errno);
+      break;
+    }
+    if (++count > 6) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    if (strcmp (entry->d_name, ".") == 0
+        || strcmp (entry->d_name, "..") == 0)
+      continue;
+    guint slot = 0;
+    while (slot < 4 && (allowed[slot] == NULL
+        || strcmp (entry->d_name, allowed[slot]) != 0))
+      slot++;
+    if (slot == 4 || pins[slot] >= 0) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    struct stat named;
+    if (fstatat (directory->graph_fd, allowed[slot], &named,
+        AT_SYMLINK_NOFOLLOW) != 0) {
+      rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
+      break;
+    }
+    guint links = 1;
+#ifndef __APPLE__
+    if (slot == 1 || slot == 2)
+      links = 2;
+#endif
+    const WylFactArtifactInventoryIdentity *expected = slot == 0
+        ? expected_stage : (slot == 1 || slot == 2) ? expected_main : NULL;
+    if (!S_ISREG (named.st_mode) || named.st_nlink != links
+        || named.st_size < 0
+        || !wyl_fact_graph_owner_mode_is_secure_for_test (named.st_mode,
+        named.st_uid, geteuid (), 0600)
+        || (expected != NULL && (expected->domain != (guint64) named.st_dev
+        || expected->object != (guint64) named.st_ino))) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    pins[slot] = openat (directory->graph_fd, allowed[slot],
+            O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (pins[slot] < 0)
+      rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
+    else if (fstat (pins[slot], &stats[slot]) != 0)
+      rc = WYRELOG_E_IO;
+    else if (!restore_inventory_same_stat (&named, &stats[slot]))
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK
+      && (pins[0] < 0 || (present && pins[1] < 0)
+      || (allowed[2] != NULL && pins[2] < 0)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-inventory-enumerated",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_inventory_authority (resolver, directory, lease, pair,
+            expected_main);
+  for (guint i = 0; i < 4 && rc == WYRELOG_E_OK; i++) {
+    if (pins[i] < 0)
+      continue;
+    if (fstat (pins[i], &after) != 0)
+      rc = WYRELOG_E_IO;
+    else if (!restore_inventory_same_stat (&stats[i], &after))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK
+        && fstatat (directory->graph_fd, allowed[i], &after,
+        AT_SYMLINK_NOFOLLOW) != 0)
+      rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
+    if (rc == WYRELOG_E_OK
+        && !restore_inventory_same_stat (&stats[i], &after))
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK && fstat (directory->graph_fd, &after) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && !restore_inventory_same_stat (&before, &after))
+    rc = WYRELOG_E_POLICY;
+
+  WylFactGraphRestoreInventory result = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    GChecksum *sum = g_checksum_new (G_CHECKSUM_SHA256);
+    guint8 digest[32];
+    restore_inventory_stat_digest (&before, digest);
+    g_checksum_update (sum, digest, sizeof digest);
+    for (guint i = 0; i < 4; i++) {
+      guint8 marker[2] = { i, pins[i] >= 0 };
+      g_checksum_update (sum, marker, sizeof marker);
+      if (pins[i] >= 0) {
+        g_checksum_update (sum, (const guint8 *) allowed[i],
+            strlen (allowed[i]) + 1);
+        restore_inventory_stat_digest (&stats[i], digest);
+        g_checksum_update (sum, digest, sizeof digest);
+      }
+    }
+    gsize length = sizeof digest;
+    g_checksum_get_digest (sum, digest, &length);
+    g_checksum_free (sum);
+    for (guint i = 0; i < 8; i++)
+      result.observation.entry_fingerprint =
+          (result.observation.entry_fingerprint << 8) | digest[i];
+    result.observation.directory_identity = (WylFactArtifactInventoryIdentity)
+    { .domain = directory->graph_device, .object = directory->graph_inode };
+    result.observation.guard_identity = (WylFactArtifactInventoryIdentity)
+    { .domain = resolver->device, .object = resolver->inode };
+    result.stage_identity = *expected_stage;
+    result.stage_bytes = stats[0].st_size;
+    result.main_identity = *expected_main;
+    result.main_present = present;
+  }
+  for (guint i = 0; i < 4; i++)
+    if (pins[i] >= 0 && close (pins[i]) != 0 && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+  if (scan != NULL && closedir (scan) != 0 && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (scan_fd >= 0 && close (scan_fd) != 0 && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  wyl_fact_artifact_transition_names_clear (&names);
+  if (rc == WYRELOG_E_OK)
+    *out_inventory = result;
+  return rc;
 }
 
 static wyrelog_error_t

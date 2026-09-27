@@ -288,6 +288,8 @@ wyrelog/fact/offline-restore-stage-replay-private.c
 wyrelog/fact/offline-restore-stage-replay-private.h
 wyrelog/fact/offline-restore-validation-private.c
 wyrelog/fact/offline-restore-validation-private.h
+wyrelog/fact/offline-restore-validation-session-private.c
+wyrelog/fact/offline-restore-validation-session-private.h
 wyrelog/fact/open-reservation-private.c
 wyrelog/fact/open-reservation-private.h
 wyrelog/fact/provisioning-construct-private.c

@@ -1074,10 +1074,316 @@ test_readback_fault (gconstpointer data)
   copy_fixture_clear (&fixture);
 }
 
+#ifndef G_OS_WIN32
+static void
+test_restore_inventory (void)
+{
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (stage.fd, "payload", 7), ==, 7);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = stage.device, .object = stage.inode,
+  };
+  WylFactArtifactInventoryIdentity absent = { 0 };
+  WylFactGraphRestoreInventory first, second;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &first), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (first.stage_bytes, ==, 7);
+  g_assert_false (first.main_present);
+  g_assert_cmpuint (first.observation.guard_identity.object, ==,
+      fixture.resolver.inode);
+  guint8 readback[7];
+  g_assert_cmpint (pread (stage.fd, readback, sizeof readback, 0), ==, 7);
+  g_assert_cmpmem (readback, sizeof readback, "payload", 7);
+  /* Reader access may change atime, but must not invalidate an observation. */
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (first.observation.entry_fingerprint, ==,
+      second.observation.entry_fingerprint);
+  g_autofree gchar *lock = wyl_fact_graph_directory_descriptive_file
+        (&fixture.directory, "facts.duckdb.lock");
+  g_assert_false (g_file_test (lock, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_set_contents (lock, "", 0, NULL));
+  g_assert_cmpint (g_chmod (lock, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (first.observation.entry_fingerprint, !=,
+      second.observation.entry_fingerprint);
+  wyl_fact_graph_stage_clear (&stage);
+  copy_fixture_clear (&fixture);
+}
+
+static void
+test_restore_inventory_rejects (gconstpointer data)
+{
+  const gchar *kind = data;
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = stage.device, .object = stage.inode,
+  };
+  WylFactArtifactInventoryIdentity absent = { 0 };
+  g_autofree gchar *extra = NULL;
+  if (g_str_equal (kind, "identity"))
+    identity.object++;
+  else if (g_str_equal (kind, "mode"))
+    g_assert_cmpint (fchmod (stage.fd, 0640), ==, 0);
+  else if (g_str_equal (kind, "symlink")) {
+    g_assert_cmpint (g_remove (fixture.path), ==, 0);
+    g_assert_cmpint (symlink ("missing", fixture.path), ==, 0);
+  } else if (g_str_equal (kind, "fifo")) {
+    g_assert_cmpint (g_remove (fixture.path), ==, 0);
+    g_assert_cmpint (mkfifo (fixture.path, 0600), ==, 0);
+  }else if (g_str_equal (kind, "directory")) {
+    g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path
+          (&fixture.directory);
+    extra = g_strconcat (path, "-old", NULL);
+    g_assert_cmpint (g_rename (path, extra), ==, 0);
+    g_assert_cmpint (g_mkdir (path, 0700), ==, 0);
+  } else if (g_str_equal (kind, "links")) {
+    extra = g_build_filename (fixture.root, "alias", NULL);
+    g_assert_cmpint (link (fixture.path, extra), ==, 0);
+  } else if (g_str_equal (kind, "bound")) {
+    for (guint i = 0; i < 128; i++) {
+      g_autofree gchar *name = g_strdup_printf ("unknown-%u", i);
+      g_autofree gchar *path = wyl_fact_graph_directory_descriptive_file
+            (&fixture.directory, name);
+      g_assert_true (g_file_set_contents (path, "", 0, NULL));
+    }
+  } else {
+    extra = g_str_equal (kind, "sidecar")
+        ? g_strconcat (fixture.path, ".wal", NULL)
+        : wyl_fact_graph_directory_descriptive_file (&fixture.directory, kind);
+    g_assert_true (g_file_set_contents (extra, "", 0, NULL));
+    g_assert_cmpint (g_chmod (extra, 0600), ==, 0);
+    if (g_str_equal (kind, "facts.duckdb.lock"))
+      g_assert_cmpint (g_chmod (extra, 0644), ==, 0);
+  }
+  WylFactGraphRestoreInventory inventory, zero = { 0 };
+  memset (&inventory, 0xff, sizeof inventory);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  wyl_fact_graph_stage_clear (&stage);
+  copy_fixture_clear (&fixture);
+}
+
+#ifndef __APPLE__
+static void
+test_restore_inventory_pair (void)
+{
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = stage.device, .object = stage.inode,
+  };
+  WylFactGraphStage provision = WYL_FACT_GRAPH_STAGE_INIT;
+  const gchar *operation = "01900000-0000-7000-8000-000000000001";
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact
+        (&fixture.directory, operation, &provision), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity main = {
+    .domain = provision.device, .object = provision.inode,
+  }, absent = { 0 };
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&fixture.directory,
+      &provision), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&fixture.directory, operation, &pair), ==, WYRELOG_E_OK);
+  WylFactGraphRestoreInventory inventory, zero = { 0 };
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, pair,
+      fixture.operation_uuid, &identity, &main, &inventory), ==, WYRELOG_E_OK);
+  g_assert_true (inventory.main_present);
+  g_assert_cmpuint (inventory.main_identity.object, ==, main.object);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &main, &inventory), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, pair,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_INVALID);
+  main.object++;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, pair,
+      fixture.operation_uuid, &identity, &main, &inventory), ==,
+      WYRELOG_E_POLICY);
+  main.object--;
+  /* Another syntactically valid, secure provision companion is foreign even
+   * when it has its own valid two-link provenance shape. */
+  g_autofree gchar *foreign = wyl_fact_graph_directory_descriptive_file
+        (&fixture.directory,
+          "provision-01900000-0000-7000-8000-000000000002.sqlite");
+  g_autofree gchar *alias = g_build_filename (fixture.root, "foreign", NULL);
+  g_assert_true (g_file_set_contents (foreign, "", 0, NULL));
+  g_assert_cmpint (g_chmod (foreign, 0600), ==, 0);
+  g_assert_cmpint (link (foreign, alias), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, pair,
+      fixture.operation_uuid, &identity, &main, &inventory), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_stage_clear (&provision);
+  wyl_fact_graph_stage_clear (&stage);
+  copy_fixture_clear (&fixture);
+}
+#endif
+
+static void
+test_restore_inventory_authority (void)
+{
+  CopyFixture fixture, other;
+  copy_fixture_init (&fixture);
+  copy_fixture_init (&other);
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = stage.device, .object = stage.inode,
+  }, absent = { 0 };
+  WylFactGraphRestoreInventory inventory, zero = { 0 };
+  memset (&inventory, 0xff, sizeof inventory);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&other.resolver, &fixture.directory, other.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, other.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  absent.object_bytes[15] = 1;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  wyl_fact_graph_stage_clear (&stage);
+  copy_fixture_clear (&other);
+  copy_fixture_clear (&fixture);
+}
+
+typedef struct
+{
+  CopyFixture *fixture;
+  const gchar *action;
+  gboolean fired;
+} InventoryRace;
+
+static wyrelog_error_t
+inventory_race (const gchar *point, gpointer data)
+{
+  InventoryRace *race = data;
+  if (strcmp (point, "restore-inventory-enumerated") != 0)
+    return WYRELOG_E_OK;
+  race->fired = TRUE;
+  if (strcmp (race->action, "io") == 0)
+    return WYRELOG_E_IO;
+  if (strcmp (race->action, "metadata") == 0) {
+    g_assert_cmpint (g_chmod (race->fixture->path, 0640), ==, 0);
+  } else if (strcmp (race->action, "content") == 0) {
+    corrupt_first_byte (race->fixture->path);
+  } else if (strcmp (race->action, "directory") == 0) {
+    g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path
+          (&race->fixture->directory);
+    g_autofree gchar *old = g_strconcat (path, "-old", NULL);
+    g_assert_cmpint (g_rename (path, old), ==, 0);
+    g_assert_cmpint (g_mkdir (path, 0700), ==, 0);
+  } else {
+    g_autofree gchar *path = wyl_fact_graph_directory_descriptive_file
+          (&race->fixture->directory, "facts.duckdb.lock");
+    g_assert_true (g_file_set_contents (path, "changed", 7, NULL));
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_restore_inventory_race (gconstpointer data)
+{
+  CopyFixture fixture;
+  copy_fixture_init (&fixture);
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (stage.fd, "payload", 7), ==, 7);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = stage.device, .object = stage.inode,
+  }, absent = { 0 };
+  InventoryRace race = { &fixture, data, FALSE };
+  fixture.directory.checkpoint = inventory_race;
+  fixture.directory.checkpoint_data = &race;
+  WylFactGraphRestoreInventory inventory, zero = { 0 };
+  memset (&inventory, 0xff, sizeof inventory);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
+      fixture.operation_uuid, &identity, &absent, &inventory), ==,
+      strcmp (data, "io") == 0 ? WYRELOG_E_IO : WYRELOG_E_POLICY);
+  g_assert_true (race.fired);
+  g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  fixture.directory.checkpoint = NULL;
+  wyl_fact_graph_stage_clear (&stage);
+  copy_fixture_clear (&fixture);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/fact-offline-restore-stage/inventory/success",
+      test_restore_inventory);
+  g_test_add_func ("/fact-offline-restore-stage/inventory/authority",
+      test_restore_inventory_authority);
+#ifndef __APPLE__
+  g_test_add_func ("/fact-offline-restore-stage/inventory/pair",
+      test_restore_inventory_pair);
+#endif
+  static const gchar *inventory_cases[] = {
+    "unknown", "restore-01900000-0000-7000-8000-000000000001.duckdb",
+    "provision-01900000-0000-7000-8000-000000000001.sqlite",
+    "sidecar", "facts.duckdb.wal", "facts.duckdb.lock", "facts.duckdb",
+    "identity", "mode", "links", "symlink", "fifo", "directory", "bound",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (inventory_cases); i++) {
+    g_autofree gchar *name = g_strconcat
+          ("/fact-offline-restore-stage/inventory/reject-", inventory_cases[i],
+            NULL);
+    g_test_add_data_func (name, inventory_cases[i],
+        test_restore_inventory_rejects);
+  }
+  static const gchar *inventory_races[] = {
+    "metadata", "content", "directory", "lock", "io",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (inventory_races); i++) {
+    g_autofree gchar *name = g_strconcat
+          ("/fact-offline-restore-stage/inventory/race-", inventory_races[i],
+            NULL);
+    g_test_add_data_func (name, inventory_races[i], test_restore_inventory_race);
+  }
+#endif
   g_test_add_func ("/fact-offline-restore-stage/create-write-finalize-collision",
       test_create_write_finalize_and_collision);
   g_test_add_func ("/fact-offline-restore-stage/reopen-read-only",
