@@ -157,6 +157,7 @@ typedef struct
 
 typedef struct _WylFactGraphRuntimeManager WylFactGraphRuntimeManager;
 typedef struct _WylFactGraphSnapshot WylFactGraphSnapshot;
+typedef struct _WylFactGraphQuiescenceToken WylFactGraphQuiescenceToken;
 typedef struct _WylFactGraphLockSet WylFactGraphLockSet;
 
 typedef wyrelog_error_t (*WylFactGraphBuildFunc) (const WylFactGraphKey * key,
@@ -382,6 +383,20 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_close_admission_with_previous
     guint64 *out_admission_generation);
 wyrelog_error_t wyl_fact_graph_runtime_manager_open_admission
   (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key);
+
+/* Temporarily closes one graph and waits for admitted builds and snapshot
+ * callbacks to finish. It returns BUSY if a publication handoff or ordered
+ * lock set is active. Idle pinned snapshots do not prevent acquisition; while
+ * held, their use callbacks return BUSY. Release restores prior admission
+ * unless shutdown has begun. Runtime publication, lock sets, eviction, and
+ * retirement are excluded while held; status reads and forget-state
+ * bookkeeping remain available and are not frozen. timeout_us < 0 waits
+ * indefinitely, 0 polls, and > 0 bounds the wait using a monotonic deadline. */
+wyrelog_error_t wyl_fact_graph_runtime_manager_quiesce
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    gint64 timeout_us, WylFactGraphQuiescenceToken **out_token);
+void wyl_fact_graph_quiescence_token_release
+  (WylFactGraphQuiescenceToken *token);
 
 /*
  * Drain contract
