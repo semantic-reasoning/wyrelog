@@ -64,6 +64,7 @@ tests/test-fact-offline-backup-source.c
 tests/test-fact-offline-restore-journal-stage.c
 tests/test-fact-offline-restore-journal-store.c
 tests/test-fact-offline-restore-journal.c
+tests/test-fact-offline-restore-stage-replay.c
 tests/test-fact-offline-restore-stage.c
 tests/test-fact-offline-restore-validation.c
 tests/test-fact-open-concurrent-process.c
@@ -75,6 +76,7 @@ tests/test-fact-reconcile-move.c
 tests/test-fact-reconcile.c
 tests/test-fact-replay-scheduler.c
 tests/test-fact-replay.c
+tests/test-fact-restore-replay-provider-parity.c
 tests/test-fact-root-writer-lease.c
 tests/test-fact-runtime.c
 tests/test-fact-schema.c
@@ -280,6 +282,8 @@ wyrelog/fact/offline-restore-journal-store-private.c
 wyrelog/fact/offline-restore-journal-store-private.h
 wyrelog/fact/offline-restore-stage-private.c
 wyrelog/fact/offline-restore-stage-private.h
+wyrelog/fact/offline-restore-stage-replay-private.c
+wyrelog/fact/offline-restore-stage-replay-private.h
 wyrelog/fact/offline-restore-validation-private.c
 wyrelog/fact/offline-restore-validation-private.h
 wyrelog/fact/open-reservation-private.c

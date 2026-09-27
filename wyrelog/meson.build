@@ -168,7 +168,8 @@ if get_option('enable_fact_store').allowed()
   wyrelog_c_args += '-DWYL_HAS_FACT_STORE'
 endif
 if get_option('enable_secure_duckdb_bridge').enabled()
-  wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc',
+  wyrelog_sources += files('fact/offline-restore-stage-replay-private.c',
+    'fact/secure-duckdb-bridge-private.cc',
     'fact/secure-duckdb-file-handle-private.cc',
     'fact/secure-duckdb-filesystem-private.cc',
     'fact/provisioning-construct-private.c',

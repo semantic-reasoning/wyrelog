@@ -2,7 +2,11 @@
 #pragma once
 
 #include <glib.h>
+#ifdef __cplusplus
+#include <duckdb.hpp>
+#else
 #include <duckdb.h>
+#endif
 
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/error.h"
