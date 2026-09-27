@@ -1120,7 +1120,12 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
         return 1;
       }
     }
-    g_printerr ("wyctl: daemon unavailable: %s\n", daemon_url);
+    g_autofree gchar *code = body != NULL
+        ? wyl_client_parse_remote_error_code (body, strlen (body)) : NULL;
+    if (code != NULL)
+      g_printerr ("wyctl: daemon unavailable: %s: %s\n", daemon_url, code);
+    else
+      g_printerr ("wyctl: daemon unavailable: %s\n", daemon_url);
     return 1;
   }
 
@@ -1205,6 +1210,9 @@ load_access_token_file (const gchar *path, gchar **out_access_token)
   return 0;
 }
 
+static int fact_remote_exit (WylClient *client, const gchar *command,
+    wyrelog_error_t rc, const gchar *fallback_code);
+
 static int
 run_auth_service_token (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -1220,6 +1228,15 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   g_autoptr (GOptionContext) context = g_option_context_new ("service-token");
   g_autoptr (GError) error = NULL;
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Exit codes:\n"
+      "  0: token exchange and protected token publication succeeded.\n"
+      "  1: proxy, client setup, or token publication failed.\n"
+      "  2: local arguments or credential document are invalid.\n"
+      "  3: the daemon returned an invalid request or response.\n"
+      "  4: the daemon denied the operation by policy.\n"
+      "  5: transport or internal failure.\n"
+      "  6: authentication failed or is required.");
   g_option_context_set_strict_posix (context, TRUE);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -1288,10 +1305,9 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   wyrelog_error_t rc = wyl_client_service_token_exchange (client, &request,
           &result);
   wyctl_sensitive_text_clear (&credential_secret);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: service token exchange failed\n");
-    return 1;
-  }
+  if (rc != WYRELOG_E_OK)
+    return fact_remote_exit (client, "auth service-token", rc,
+               "service_token_exchange_failed");
   WyctlTokenFileStatus output_status = wyctl_token_file_write_protected
         (opts.token_output, result.access_token.text, result.access_token.len);
   if (output_status != WYCTL_TOKEN_FILE_OK) {
@@ -1349,8 +1365,9 @@ run_policy_decide_request (const WyctlOptions *global_opts,
   wyrelog_error_t rc = wyl_client_decide_ex (client, policy_opts->user,
           policy_opts->permission, policy_opts->resource, &result);
   if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: policy %s failed\n", command);
-    return 3;
+    g_autofree gchar *command_name = g_strdup_printf ("policy %s", command);
+    return fact_remote_exit (client, command_name, rc,
+               "decision_request_failed");
   }
 
   *out_result = g_steal_pointer (&result);
@@ -1422,6 +1439,15 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   g_autofree gchar *summary = g_strdup_printf ("- wyrelog policy %s", command);
   g_autoptr (GOptionContext) context = g_option_context_new (summary);
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Exit codes:\n"
+      "  0: request succeeded (explain may report a valid deny).\n"
+      "  1: policy check returned deny, or proxy setup failed.\n"
+      "  2: local arguments or credentials are invalid.\n"
+      "  3: the daemon returned an invalid request or response.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: transport or internal failure.\n"
+      "  6: authentication failed or is required.");
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -1904,8 +1930,24 @@ fact_remote_exit (WylClient *client, const gchar *command,
     shown = "failed";
   g_printerr ("wyctl: %s failed: %s\n", command, shown);
   guint status = client != NULL ? wyl_client_get_last_http_status (client) : 0;
+  /* The generic decision/audit sender preserves its IO return contract.
+   * Use its HTTP status while retaining explicit mappings from other APIs. */
+  if (rc == WYRELOG_E_IO) {
+    if (status == 400)
+      return 3;
+    if (status == 401)
+      return 6;
+    if (status == 403 || status == 409)
+      return 4;
+  }
+  if (rc == WYRELOG_E_AUTH && status == 403
+      && g_strcmp0 (code, "service_token_denied") == 0)
+    return 4;
   if (rc == WYRELOG_E_INVALID)
     return status == 0 ? 2 : 3;
+  if (rc == WYRELOG_E_IO && status >= 200 && status < 300
+      && wyl_client_last_response_is_complete (client))
+    return 3;
   if (rc == WYRELOG_E_AUTH)
     return 6;
   if (rc == WYRELOG_E_POLICY)
@@ -2909,6 +2951,15 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_autoptr (GOptionContext) context =
       g_option_context_new ("- wyrelog audit query");
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Exit codes:\n"
+      "  0: audit query succeeded.\n"
+      "  1: proxy setup failed.\n"
+      "  2: local arguments or credentials are invalid.\n"
+      "  3: the daemon returned an invalid request or response.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: transport or internal failure.\n"
+      "  6: authentication failed or is required.");
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -2986,20 +3037,18 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_autoptr (WylAuditIter) iter = NULL;
   wyrelog_error_t query_rc = wyl_client_audit_query_with_guard_context (client,
           opts.filter, guard_timestamp, opts.guard_loc_class, guard_risk, &iter);
-  if (query_rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: audit query failed\n");
-    return 3;
-  }
+  if (query_rc != WYRELOG_E_OK)
+    return fact_remote_exit (client, "audit query", query_rc,
+               "audit_query_failed");
 
   g_autoptr (GString) json = g_string_new ("[");
   guint emitted = 0;
   gboolean has_next = FALSE;
   while (emitted < limit) {
     wyrelog_error_t next_rc = wyl_audit_iter_next (iter, &has_next);
-    if (next_rc != WYRELOG_E_OK) {
-      g_printerr ("wyctl: audit query failed\n");
-      return 3;
-    }
+    if (next_rc != WYRELOG_E_OK)
+      return fact_remote_exit (client, "audit query", next_rc,
+                 "audit_query_failed");
     if (!has_next)
       break;
 
@@ -4126,7 +4175,8 @@ run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
       ? wyl_client_login_skip_mfa_for_tenant (client, opts.subject, opts.tenant)
       : wyl_client_login_for_tenant (client, opts.subject, opts.tenant);
   if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: login failed\n");
+    g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+    g_printerr ("wyctl: login failed: %s\n", code != NULL ? code : "login_failed");
     return 1;
   }
   g_autofree gchar *principal_state = wyl_client_dup_principal_state (client);
@@ -4139,7 +4189,9 @@ run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
     rc = wyl_client_mfa_verify (client, code);
     sodium_memzero (code, strlen (code));
     if (rc != WYRELOG_E_OK) {
-      g_printerr ("wyctl: MFA verification failed; retry login\n");
+      g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+      g_printerr ("wyctl: MFA verification failed: %s; retry login\n",
+          code != NULL ? code : "mfa_verify_failed");
       return 1;
     }
   }
@@ -4249,8 +4301,9 @@ run_auth_refresh (const WyctlOptions *global_opts, gint argc, gchar **argv)
     sodium_memzero (access, strlen (access));
   sodium_memzero (refresh, strlen (refresh));
   if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: refresh failed; do not retry automatically; login may "
-        "be required\n");
+    g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+    g_printerr ("wyctl: refresh failed: %s; do not retry automatically; login may "
+        "be required\n", code != NULL ? code : "refresh_failed");
     return 1;
   }
   g_autofree gchar *new_access = wyl_client_dup_access_token (client);
@@ -4348,7 +4401,9 @@ run_auth_logout (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   sodium_memzero (access, strlen (access));
   if (wyl_client_logout (client) != WYRELOG_E_OK) {
-    g_printerr ("wyctl: logout failed; local token files were retained\n");
+    g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+    g_printerr ("wyctl: logout failed: %s; local token files were retained\n",
+        code != NULL ? code : "logout_failed");
     return 1;
   }
   WyctlTokenFileStatus refresh_status = wyctl_token_file_remove_protected

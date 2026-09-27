@@ -2668,6 +2668,34 @@ main (void)
     return wyl_test_normalize_exit_status (185);
   g_clear_pointer (&decision_result, wyl_client_decision_free);
 
+  /* A rejected request keeps its daemon diagnostic without changing the
+   * library's established IO result. Reuse clears it on local validation,
+   * successful requests, and lazy audit iterator construction. */
+  http.status = 403;
+  http.body = "{\"error\":\"decide_denied\"}";
+  g_assert_cmpint (wyl_client_decide (local_client, "bob", "write", "doc/43",
+      &decision), ==, WYRELOG_E_IO);
+  g_assert_true (client_last_response_is (local_client, 403, "decide_denied"));
+  g_assert_cmpint (wyl_client_decide (local_client, NULL, "write", "doc/43",
+      &decision), ==, WYRELOG_E_INVALID);
+  g_assert_true (client_last_response_is (local_client, 0, NULL));
+  g_assert_cmpint (wyl_client_decide (local_client, "bob", "write", "doc/43",
+      &decision), ==, WYRELOG_E_IO);
+  g_autoptr (WylAuditIter) rejected_iter = NULL;
+  g_assert_cmpint (wyl_client_audit_query (local_client, NULL, &rejected_iter),
+      ==, WYRELOG_E_OK);
+  g_assert_true (client_last_response_is (local_client, 0, NULL));
+  http.body = "{\"error\":\"audit_denied\"}";
+  gboolean rejected_has_next = TRUE;
+  g_assert_cmpint (wyl_audit_iter_next (rejected_iter, &rejected_has_next),
+      ==, WYRELOG_E_IO);
+  g_assert_true (client_last_response_is (local_client, 403, "audit_denied"));
+  http.status = 200;
+  http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
+  g_assert_cmpint (wyl_client_decide (local_client, "bob", "write", "doc/43",
+      &decision), ==, WYRELOG_E_OK);
+  g_assert_true (client_last_response_is (local_client, 200, NULL));
+
   http.body = "not-json";
   if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)
       != WYRELOG_E_IO)

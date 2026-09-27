@@ -461,6 +461,12 @@ gchar *wyl_client_dup_username (const WylClient * client);
 gchar *wyl_client_dup_tenant (const WylClient * client);
 gchar *wyl_client_dup_principal_state (const WylClient * client);
 gchar *wyl_client_dup_session_state (const WylClient * client);
+/* Diagnostics belong to the most recent request on this client, including
+ * lazy audit fetches. A new affected operation clears previous diagnostics;
+ * local validation/pre-response transport failures leave status zero and no
+ * error code. A received HTTP status remains available if body reading fails.
+ * dup_last_error_code returns an owned copy of a bounded daemon error token.
+ * Iterators sharing a client also share this diagnostic state. */
 guint wyl_client_get_last_http_status (const WylClient * client);
 gchar *wyl_client_dup_last_error_code (const WylClient * client);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);
@@ -525,11 +531,8 @@ wyrelog_error_t wyl_client_audit_query_with_guard_context (WylClient * client,
  *
  * 403 and 409 both mean a terminal authority condition -- the caller lacks
  * the permission, or the tenant is sealed -- and neither should be retried.
- * These functions do not expose which one occurred: the last-error
- * accessors are not populated on this path, so
- * wyl_client_dup_last_error_code after one of these calls reflects an
- * earlier unrelated call, or nothing at all if there has been none -- never
- * this one.
+ * The last-error accessors expose the current HTTP status and a validated
+ * daemon error code, when the response supplies one.
  */
 wyrelog_error_t wyl_client_policy_permission_grant (WylClient * client,
     const gchar * subject,

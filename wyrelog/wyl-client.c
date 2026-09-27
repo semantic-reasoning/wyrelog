@@ -13,6 +13,9 @@
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
+static void client_store_remote_response (WylClient *client,
+    guint status, GBytes *body);
+
 struct _WylClient
 {
   GObject parent_instance;
@@ -27,6 +30,7 @@ struct _WylClient
   gchar *session_state;
   gchar *last_error_code;
   guint last_http_status;
+  gboolean last_response_complete;
   SoupSession *session;
   guint timeout_ms;
 };
@@ -304,6 +308,7 @@ client_send_message_collect (WylClient *client, SoupMessage *message,
     g_clear_pointer (out_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
     return WYRELOG_E_INVALID;
+  wyl_client_clear_last_http_error (client);
   if (out_status != NULL)
     *out_status = 0;
 
@@ -333,12 +338,12 @@ client_send_message_collect (WylClient *client, SoupMessage *message,
     g_mutex_clear (&timeout.mutex);
     g_cond_clear (&timeout.cond);
   }
-  if (body == NULL)
-    return WYRELOG_E_IO;
-
   guint status = soup_message_get_status (message);
+  client_store_remote_response (client, status, body);
   if (out_status != NULL)
     *out_status = status;
+  if (body == NULL)
+    return WYRELOG_E_IO;
   if (out_body != NULL)
     *out_body = body;
   else
@@ -355,6 +360,7 @@ client_send_message_collect_bounded (WylClient *client, SoupMessage *message,
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL
       || out_body == NULL || max_body_size == 0)
     return WYRELOG_E_INVALID;
+  wyl_client_clear_last_http_error (client);
   if (out_status != NULL)
     *out_status = 0;
 
@@ -378,6 +384,7 @@ client_send_message_collect_bounded (WylClient *client, SoupMessage *message,
           cancellable, &error);
   if (stream != NULL) {
     const guint status = soup_message_get_status (message);
+    client_store_remote_response (client, status, NULL);
     if (out_status != NULL)
       *out_status = status;
     if (status < 200 || status >= 300) {
@@ -473,6 +480,8 @@ static wyrelog_error_t
 client_login_internal (WylClient *client, const gchar *username,
     const gchar *password, gboolean skip_mfa, const gchar *requested_tenant)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (client == NULL || !WYL_IS_CLIENT (client) || username == NULL ||
       username[0] == '\0')
     return WYRELOG_E_INVALID;
@@ -623,6 +632,8 @@ client_secret_bytes_free (gpointer user_data)
 wyrelog_error_t
 wyl_client_token_refresh (WylClient *client)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (client == NULL || !WYL_IS_CLIENT (client))
     return WYRELOG_E_INVALID;
   if (client->refresh_token == NULL || client->refresh_token[0] == '\0')
@@ -718,6 +729,8 @@ wyl_client_token_refresh (WylClient *client)
 wyrelog_error_t
 wyl_client_mfa_verify (WylClient *client, const gchar *otp)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (client == NULL || !WYL_IS_CLIENT (client) || otp == NULL
       || strlen (otp) != 6 || strspn (otp, "0123456789") != 6
       || client->session_token == NULL || client->session_token[0] == '\0')
@@ -792,6 +805,8 @@ wyl_client_mfa_verify (WylClient *client, const gchar *otp)
 wyrelog_error_t
 wyl_client_logout (WylClient *client)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (client == NULL || !WYL_IS_CLIENT (client) || client->access_token == NULL
       || client->access_token[0] == '\0')
     return WYRELOG_E_INVALID;
@@ -822,6 +837,8 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
     const gchar *scope, const gchar *event, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (client == NULL || !WYL_IS_CLIENT (client) || path == NULL ||
       subject == NULL || subject[0] == '\0' || target_name == NULL ||
       target_value == NULL || target_value[0] == '\0' || scope == NULL ||
@@ -956,11 +973,19 @@ client_service_subject_is_valid (const gchar *subject)
          && wyl_policy_service_subject_is_valid (subject, strlen (subject));
 }
 
-static void
-client_clear_last_http_error (WylClient *client)
+void
+wyl_client_clear_last_http_error (WylClient *client)
 {
   client->last_http_status = 0;
+  client->last_response_complete = FALSE;
   g_clear_pointer (&client->last_error_code, g_free);
+}
+
+gboolean
+wyl_client_last_response_is_complete (WylClient *client)
+{
+  return client != NULL && WYL_IS_CLIENT (client)
+         && client->last_response_complete;
 }
 
 static gboolean
@@ -968,12 +993,12 @@ client_service_management_begin (WylClient *client)
 {
   if (client == NULL || !WYL_IS_CLIENT (client))
     return FALSE;
-  client_clear_last_http_error (client);
+  wyl_client_clear_last_http_error (client);
   return TRUE;
 }
 
-static gchar *
-parse_service_management_error_code (const gchar *data, gsize size)
+gchar *
+wyl_client_parse_remote_error_code (const gchar *data, gsize size)
 {
   if (data == NULL || size == 0
       || size > WYL_CLIENT_ERROR_RESPONSE_SCAN_MAX_LEN)
@@ -1029,16 +1054,24 @@ parse_service_management_error_code (const gchar *data, gsize size)
 }
 
 static void
-client_store_service_management_response (WylClient *client, guint status,
+client_store_remote_response (WylClient *client, guint status,
     GBytes *body)
 {
   client->last_http_status = status;
+  client->last_response_complete = body != NULL;
   g_clear_pointer (&client->last_error_code, g_free);
   if ((status >= 200 && status < 300) || body == NULL)
     return;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (body, &size);
-  client->last_error_code = parse_service_management_error_code (data, size);
+  client->last_error_code = wyl_client_parse_remote_error_code (data, size);
+  const gchar *secrets[] = {client->access_token, client->refresh_token,
+                            client->session_token};
+  for (guint i = 0; i < G_N_ELEMENTS (secrets); i++)
+    if (client->last_error_code != NULL && secrets[i] != NULL
+        && secrets[i][0] != '\0'
+        && strstr (client->last_error_code, secrets[i]) != NULL)
+      g_clear_pointer (&client->last_error_code, g_free);
 }
 
 static wyrelog_error_t
@@ -1057,7 +1090,7 @@ client_send_service_management_message (WylClient *client,
   guint status = soup_message_get_status (message);
   if (status == 0)
     status = collected_status;
-  client_store_service_management_response (client, status, body);
+  client_store_remote_response (client, status, body);
   if (out_status != NULL)
     *out_status = status;
   if (out_body != NULL)
@@ -1167,7 +1200,7 @@ client_service_management_request_for_tenant (WylClient *client,
       const gchar *data = response != NULL
           ? g_bytes_get_data (response, &size) : NULL;
       g_autofree gchar *code =
-          parse_service_management_error_code (data, size);
+          wyl_client_parse_remote_error_code (data, size);
       if (g_strcmp0 (code, "tenant_sealed") == 0)
         return WYRELOG_E_POLICY;
       return WYRELOG_E_CONFLICT;
@@ -1614,6 +1647,8 @@ wyl_client_service_token_exchange (WylClient *client,
     const WylClientServiceTokenRequest *request,
     WylClientServiceTokenResult *out_result)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   g_autofree gchar *base_url = NULL;
   g_autofree gchar *uri = NULL;
   g_autoptr (SoupMessage) message = NULL;
@@ -1694,6 +1729,18 @@ wyl_client_service_token_exchange (WylClient *client,
     return WYRELOG_E_IO;
   }
   client->last_http_status = status;
+  if (client->last_error_code != NULL) {
+    gsize code_len = strlen (client->last_error_code);
+    gsize secret_len = request->credential_secret->len;
+    /* SensitiveText is length-delimited and need not be NUL-terminated. */
+    for (gsize offset = 0; offset + secret_len <= code_len; offset++) {
+      if (memcmp (client->last_error_code + offset,
+          request->credential_secret->text, secret_len) == 0) {
+        g_clear_pointer (&client->last_error_code, g_free);
+        break;
+      }
+    }
+  }
   if (status < 200 || status >= 300) {
     if (status >= 300 && status < 400) {
       const gchar *location = soup_message_headers_get_one
@@ -1824,7 +1871,7 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
     g_clear_pointer (out_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
     return WYRELOG_E_INVALID;
-  client_clear_last_http_error (client);
+  wyl_client_clear_last_http_error (client);
 
   g_autoptr (GError) error = NULL;
   GBytes *body = soup_session_send_and_read (client->session, message, NULL,
@@ -2819,7 +2866,7 @@ client_fact_status_fetch (WylClient *client, const gchar *access_token,
   if (access_token != NULL)
     client_fact_attach_auth (message, access_token);
 
-  client_clear_last_http_error (client);
+  wyl_client_clear_last_http_error (client);
   GBytes *body = NULL;
   guint status = 0;
   wyrelog_error_t rc = client_send_message_collect_bounded (client, message,
@@ -4649,6 +4696,8 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     WylClientDecision **out_result)
 {
+  if (client != NULL && WYL_IS_CLIENT (client))
+    wyl_client_clear_last_http_error (client);
   if (out_result == NULL)
     return WYRELOG_E_INVALID;
   g_clear_pointer (out_result, wyl_client_decision_free);
