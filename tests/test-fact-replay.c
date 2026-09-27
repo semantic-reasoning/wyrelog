@@ -3189,6 +3189,7 @@ typedef struct
 {
   GCancellable *cancellable;
   GThread *cancel_thread;
+  gulong cancel_delay_us;
   gint execution_started;
   gint execution_finished;
   gint cancel_sent;
@@ -3202,7 +3203,7 @@ replay_store_cancel_during_execute (gpointer user_data)
   while (!g_atomic_int_get (&probe->execution_started)
       && !g_atomic_int_get (&probe->execution_finished))
     g_usleep (100);
-  g_usleep (10 * 1000);
+  g_usleep (probe->cancel_delay_us);
   if (!g_atomic_int_get (&probe->execution_finished)) {
     g_atomic_int_set (&probe->cancel_sent, TRUE);
     g_cancellable_cancel (probe->cancellable);
@@ -3433,25 +3434,42 @@ test_replay_store_c_adapter_fixed_operations (void)
   g_autoptr (WylFactReplayScheduler) scheduler = NULL;
   g_assert_cmpint (wyl_fact_replay_scheduler_new (&scheduler_config, NULL,
       &scheduler), ==, WYRELOG_E_OK);
-  ReplayStoreCancellationProbe cancellation_probe = { 0 };
-  ReplayStoreCancellationCall cancellation_call = {
-    .replay_store = replay_store,
-    .schema = &schema,
-    .probe = &cancellation_probe,
+  /* DuckDB clears a pending interrupt when a query starts, so the cancel
+   * has to land while the query is running.  A loaded runner can wake the
+   * cancel thread only after the query has finished; such an attempt proves
+   * nothing, so retry with a shorter delay until one interrupts the query. */
+  static const gulong cancel_delays_us[] = {
+    10 * 1000, 5 * 1000, 2 * 1000, 1000, 1000, 1000, 1000, 1000,
   };
-  wyl_fact_replay_store_set_before_execute_test_hook
-    (replay_store_cancellation_test_hook, &cancellation_probe);
-  g_autoptr (WylFactReplayFuture) future = NULL;
-  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
-      "shipments", NULL, replay_store_cancellation_job, &cancellation_call,
-      NULL, &future), ==, WYRELOG_E_OK);
-  wyrelog_error_t cancel_rc = wyl_fact_replay_future_wait (future);
-  wyl_fact_replay_store_set_before_execute_test_hook (NULL, NULL);
-  g_assert_cmpint (cancel_rc, ==, WYRELOG_E_CANCELLED);
-  g_assert_true (g_atomic_int_get (&cancellation_probe.cancel_sent));
-  g_assert_cmpint (g_atomic_int_get (&cancellation_probe.query_execute_state),
-      ==, DuckDBError);
-  g_assert_null (cancellation_probe.cancel_thread);
+  gboolean query_interrupted = FALSE;
+  for (gsize attempt = 0; attempt < G_N_ELEMENTS (cancel_delays_us)
+      && !query_interrupted; attempt++) {
+    ReplayStoreCancellationProbe cancellation_probe = {
+      .cancel_delay_us = cancel_delays_us[attempt],
+    };
+    ReplayStoreCancellationCall cancellation_call = {
+      .replay_store = replay_store,
+      .schema = &schema,
+      .probe = &cancellation_probe,
+    };
+    wyl_fact_replay_store_set_before_execute_test_hook
+      (replay_store_cancellation_test_hook, &cancellation_probe);
+    g_autoptr (WylFactReplayFuture) future = NULL;
+    g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+        "shipments", NULL, replay_store_cancellation_job, &cancellation_call,
+        NULL, &future), ==, WYRELOG_E_OK);
+    wyrelog_error_t cancel_rc = wyl_fact_replay_future_wait (future);
+    wyl_fact_replay_store_set_before_execute_test_hook (NULL, NULL);
+    g_assert_null (cancellation_probe.cancel_thread);
+    if (!g_atomic_int_get (&cancellation_probe.cancel_sent)) {
+      g_assert_cmpint (cancel_rc, ==, WYRELOG_E_OK);
+      continue;
+    }
+    g_assert_cmpint (cancel_rc, ==, WYRELOG_E_CANCELLED);
+    query_interrupted = g_atomic_int_get
+          (&cancellation_probe.query_execute_state) == DuckDBError;
+  }
+  g_assert_true (query_interrupted);
   probe = (ReplayStoreOperationProbe) { .expected_cells = 3 };
   request.projection_schema = NULL;
   g_assert_cmpint (wyl_fact_replay_store_execute (replay_store,
