@@ -13278,6 +13278,13 @@ grant_audit_read (WylHandle *handle, const gchar *subject_id,
   return insert_symbol_row1 (handle, "session_active", "active");
 }
 
+static wyrelog_error_t
+grant_profile_auditor (WylHandle *handle, const gchar *subject_id)
+{
+  return insert_symbol_row3 (handle, "member_of", subject_id,
+             "wr.auditor", WYL_TENANT_DEFAULT);
+}
+
 static gint send_raw_audit_bearer (SoupSession *session,
     const gchar *base_url, const gchar *query, const gchar *access_token,
     guint *out_status, gchar **out_body);
@@ -13858,7 +13865,8 @@ check_audit_query_session_token_fallback (WylHandle *handle,
   g_clear_pointer (&access_token, g_free);
   access_token = wyl_client_dup_access_token (session_only);
   if (access_token != NULL
-      || grant_audit_read (handle, subject, WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
+      || grant_audit_read (handle, subject, WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+      || grant_profile_auditor (handle, subject) != WYRELOG_E_OK)
     return 2837;
   g_autoptr (WylAuditIter) iter = NULL;
   if (wyl_client_audit_query_with_guard_context (session_only,
@@ -14045,6 +14053,7 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
     return 12608;
   /* The victims' logins drop the reader's engine-seam grant; re-seed it. */
   if (grant_audit_read (handle, "http-audit-user", reader_session_token)
+      != WYRELOG_E_OK || grant_profile_auditor (handle, "http-audit-user")
       != WYRELOG_E_OK)
     return 12631;
 
@@ -14096,8 +14105,8 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   if (audit_redaction_replay (http, base_url, fired) != 0)
     return 12619;
 
-  /* The reader's own decisions: until audit reads decide at the system
-   * tenant their resource is the reader's session. */
+  /* Audit reads authorize against the profile-wide system scope, so their
+   * decision resource is the reserved default tenant. */
   g_autofree gchar *decisions = NULL;
   if (audit_redaction_query (http, base_url, reader_token,
       "action(\"wr.audit.read\")", &decisions) != 0)
@@ -14107,7 +14116,7 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   g_autoptr (GPtrArray) resources = audit_json_string_values (decisions,
           "resource_id");
   if (resources->len == 0
-      || !audit_value_is_session_handle (resources->pdata[0]))
+      || g_strcmp0 (resources->pdata[0], WYL_TENANT_DEFAULT) != 0)
     return 12622;
   for (gsize s = 0; s < G_N_ELEMENTS (secrets); s++)
     if (strstr (decisions, secrets[s]) != NULL)
@@ -14160,6 +14169,7 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   if (gone != NULL)
     return 12633;
   if (grant_audit_read (handle, "http-audit-user", reader_session_token)
+      != WYRELOG_E_OK || grant_profile_auditor (handle, "http-audit-user")
       != WYRELOG_E_OK)
     return 12639;
   g_autofree gchar *victim_filter = g_strdup_printf ("request_id(\"%s\")",
@@ -25294,6 +25304,7 @@ audit_variant_checks (void)
   if (tenant_scope_rc != 0)
     return tenant_scope_rc;
   if (grant_audit_read (handle, "http-audit-user", WYL_TENANT_DEFAULT) !=
+      WYRELOG_E_OK || grant_profile_auditor (handle, "http-audit-user") !=
       WYRELOG_E_OK)
     return 86;
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
