@@ -2937,6 +2937,15 @@ wyl_policy_store_apply_role_membership_mutation_with_audit
 wyrelog_error_t wyl_policy_store_role_membership_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * role_id,
     const gchar * scope, gboolean * out_exists);
+/*
+ * Whether @subject_id is a human principal the store already knows: it has
+ * a principal state, a role membership, or a direct permission, at any
+ * scope.  A service principal (svc: prefix) never counts, whatever it holds.
+ * This is the identity MFA enrollment requires.
+ */
+wyrelog_error_t
+wyl_policy_store_subject_has_human_identity (wyl_policy_store_t * store,
+    const gchar * subject_id, gboolean * out_found);
 wyrelog_error_t wyl_policy_store_foreach_role_membership (wyl_policy_store_t *
     store, wyl_policy_role_membership_cb cb, gpointer user_data);
 wyrelog_error_t

@@ -35622,6 +35622,45 @@ wyl_policy_store_role_membership_exists (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_subject_has_human_identity (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean *out_found)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_found == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_found = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_OK;
+
+  static const gchar *sql =
+      "SELECT 1 FROM principal_states WHERE subject_id = ?1 "
+      "UNION ALL SELECT 1 FROM role_memberships WHERE subject_id = ?1 "
+      "UNION ALL SELECT 1 FROM direct_permissions WHERE subject_id = ?1 "
+      "LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_found = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_policy_store_foreach_role_membership (wyl_policy_store_t *store,
     wyl_policy_role_membership_cb cb, gpointer user_data)
 {

@@ -478,9 +478,12 @@ wyctl --daemon-url http://127.0.0.1:8765 mfa enroll \
   --access-token-file /run/wyrelog/admin.token
 ```
 
-The subject must already have an authoritative policy identity, typically a
-role membership created through `wyctl policy role-grant`. Enrollment does
-not grant roles or permissions; it only attaches a TOTP factor.
+The subject must already have an authoritative policy identity: a role
+membership created through `wyctl policy role-grant`, or a direct permission
+granted through `wyctl policy permission-grant`. A subject with neither is
+refused with `mfa_enroll_subject_not_found`, and service principals (`svc:`)
+are never enrollable. Enrollment does not grant roles or permissions; it only
+attaches a TOTP factor.
 
 ### Offline Maintenance Defaults via GSettings
 
