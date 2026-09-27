@@ -1236,6 +1236,7 @@ Replace `alice` and the paths for your deployment.
 ```sh
 BASE_URL=http://127.0.0.1:8765
 TOKEN=/run/wyrelog/operator.token
+REFRESH_TOKEN=/run/wyrelog/operator.refresh
 TENANT=__wr_default
 GRAPH=orders
 
@@ -1263,12 +1264,12 @@ completing the fresh login below.
 ```sh
 wyctl --daemon-url "$BASE_URL" auth login \
   --subject alice --tenant __wr_default --skip-mfa \
-  --token-output /run/wyrelog/operator.token \
-  --refresh-token-output /run/wyrelog/operator.refresh
+  --token-output /run/wyrelog/bootstrap.token \
+  --refresh-token-output /run/wyrelog/bootstrap.refresh
 
 wyctl --daemon-url "$BASE_URL" mfa enroll \
   --subject alice \
-  --access-token-file "$TOKEN"
+  --access-token-file /run/wyrelog/bootstrap.token
 
 wyctl --daemon-url "$BASE_URL" auth login \
   --subject alice --tenant __wr_default \
