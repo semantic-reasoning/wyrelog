@@ -18,6 +18,30 @@
 
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
 
+wyrelog_error_t
+wyl_fact_graph_directory_restore_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphRestoreInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || operation_uuid == NULL || expected_stage == NULL
+      || expected_main == NULL || out_inventory == NULL)
+    return WYRELOG_E_INVALID;
+  (void) pair;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (operation_uuid, &names);
+  wyl_fact_artifact_transition_names_clear (&names);
+  /* No filesystem access: durable Windows restore authority is unavailable. */
+  return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+}
+
 /* The restore journal does not yet persist the historical graph-directory
  * identity required to reconstruct WylFactGraphWinOperationEvidence after a
  * restart. Keep this lower-level operation fail-closed until that durable

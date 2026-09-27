@@ -169,6 +169,7 @@ if get_option('enable_fact_store').allowed()
 endif
 if get_option('enable_secure_duckdb_bridge').enabled()
   wyrelog_sources += files('fact/offline-restore-stage-replay-private.c',
+    'fact/offline-restore-validation-session-private.c',
     'fact/secure-duckdb-bridge-private.cc',
     'fact/secure-duckdb-file-handle-private.cc',
     'fact/secure-duckdb-filesystem-private.cc',

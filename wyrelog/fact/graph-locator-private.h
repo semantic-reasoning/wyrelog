@@ -111,6 +111,32 @@ typedef struct
  * Windows pair cannot survive a restart until #816 gives it a durable home. */
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 
+typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
+
+typedef struct
+{
+  WylFactArtifactInventoryObservation observation;
+  WylFactArtifactInventoryIdentity stage_identity;
+  guint64 stage_bytes;
+  WylFactArtifactInventoryIdentity main_identity;
+  gboolean main_present;
+} WylFactGraphRestoreInventory;
+
+/* Observational restore preflight under the session-owned root writer lease.
+ * The guard identity is the verified root directory (the actual flock
+ * object), NOT the generic artifact namespace guard. The caller supplies
+ * the unique ACTIVE pair authority; this provider neither discovers nor
+ * creates it. Zero expected_main requires NULL pair; otherwise pair is
+ * mandatory. No locks or namespaces are created. Output is zero on failure.
+ * This bounded observation does not exclude non-cooperating writers. */
+wyrelog_error_t wyl_fact_graph_directory_restore_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphRestoreInventory *out_inventory);
+
 typedef struct
 {
   gint fd;
