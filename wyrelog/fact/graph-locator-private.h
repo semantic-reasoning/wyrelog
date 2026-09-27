@@ -237,7 +237,10 @@ wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
 /* Create a private, operation-named offline-restore stage. The basename is
  * derived internally as restore-<canonical UUIDv7>.duckdb. This is separate
  * from the provisioning-stage namespace and does not authorize publication.
- * An existing entry is a collision and is never replaced. */
+ * An existing entry is a collision and is never replaced. POSIX creation,
+ * open, and revalidation refuse the stage's operation-derived WAL,
+ * WAL-checkpoint, and WAL-recovery sidecars when observed; checks are
+ * point-in-time and do not lock out external writers. */
 wyrelog_error_t wyl_fact_graph_directory_restore_stage_create_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);

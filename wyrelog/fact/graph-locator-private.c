@@ -1146,6 +1146,32 @@ struct WylFactGraphRestoreStageReader
   WylFactArtifactInventoryIdentity expected_identity;
 };
 
+/* Restore stages are a single-file snapshot copied from a source whose
+ * artifact inventory is main-only. The reader filesystem deliberately does
+ * not expose WAL/recovery files, so any operation-owned sidecar must make the
+ * stage unusable rather than silently omit durable data. This is an
+ * observation at each boundary, not an atomic lock against external writers. */
+static wyrelog_error_t
+restore_stage_sidecars_absent (WylFactGraphDirectory *directory,
+    const gchar *stage_basename)
+{
+  static const gchar *const suffixes[] = {
+    ".wal", ".wal.checkpoint", ".wal.recovery",
+  };
+
+  if (directory == NULL || stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++) {
+    g_autofree gchar *name = g_strconcat (stage_basename, suffixes[i], NULL);
+    struct stat sidecar;
+    if (fstatat (directory->graph_fd, name, &sidecar, AT_SYMLINK_NOFOLLOW) == 0)
+      return WYRELOG_E_POLICY;
+    if (errno != ENOENT)
+      return errno_to_resolver_error (errno);
+  }
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 restore_reader_stat_matches (const struct stat *st,
     const WylFactArtifactInventoryIdentity *identity)
@@ -1190,6 +1216,8 @@ wyl_fact_graph_directory_restore_stage_reader_open_exact
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
+  if (rc == WYRELOG_E_OK)
     rc = validate_name_length (directory->graph_fd, names.stage);
   if (rc == WYRELOG_E_OK)
     rc = restore_reader_check_name (directory, names.stage, expected_identity);
@@ -1230,6 +1258,8 @@ wyl_fact_graph_directory_restore_stage_reader_open_exact
             directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
   if (rc == WYRELOG_E_OK)
     rc = restore_reader_check_name (directory, names.stage, expected_identity);
 
@@ -1275,6 +1305,9 @@ wyl_fact_graph_restore_stage_reader_revalidate
       || reader->stage_basename == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = directory_revalidate (reader->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (reader->directory,
+            reader->stage_basename);
   struct stat held;
   if (rc == WYRELOG_E_OK && fstat (reader->fd, &held) != 0)
     rc = WYRELOG_E_IO;
@@ -1421,6 +1454,8 @@ wyl_fact_graph_directory_restore_stage_create_exact
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
+  if (rc == WYRELOG_E_OK)
     rc = validate_name_length (directory->graph_fd, names.stage);
   if (rc == WYRELOG_E_OK)
     rc = validate_name_length (directory->graph_fd, "facts.duckdb");
@@ -1448,6 +1483,8 @@ wyl_fact_graph_directory_restore_stage_create_exact
             directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
   if (rc != WYRELOG_E_OK) {
     /* The exact name may have been substituted after the create; close only. */
     if (out_stage->fd >= 0)
@@ -2019,6 +2056,8 @@ wyl_fact_graph_directory_restore_stage_revalidate
             &present, &exact);
   if (rc == WYRELOG_E_OK && (!present || !exact))
     rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, stage->stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   return rc;
