@@ -2174,6 +2174,43 @@ The daemon's error code is printed on stderr for every remote failure.
   and uses the configured event spool directory as the bounded recovery
   surface.
 
+## Routes Without a wyctl Command
+
+Almost every daemon route an operator uses has a `wyctl` command.
+The `check-wyctl-route-coverage` test fails the test suite when a route has
+neither a command nor a recorded reason. To print the routes below and any
+command still being added, run from the source tree:
+
+```sh
+python3 tools/check-wyctl-route-coverage.py . --list
+```
+
+These routes are reached only over HTTP:
+
+- `/facts/{tenant}/{graph}/{relation}:repair`: repairs rows left by an old
+  wrong-relation forget (see "Repairing rows left by an old wrong-relation
+  forget"). There is no `wyctl` command for it yet (#1280).
+- `/profile/events`: event forwarding from the service profile to the system
+  profile. It is traffic between the two daemons, not an operator action.
+- `/service-management-authority/arm`: arms the service-management authority
+  for the caller's session (see "Arming the service-management authority").
+  There is no `wyctl` command for it yet (#1269).
+- `/service-credential-operations/reconcile`: reconciles a stalled
+  service-credential operation. The client library exposes it; `wyctl` does
+  not yet (#1270).
+
+`/service-principals` and `/service-credentials` each serve several
+operations, chosen by method and path. The gate counts each of them as one
+route, covered by the `wyctl service-principal` and
+`wyctl service-credential` commands, so an operation added inside either one
+is not detected.
+
+### Unsupported by the daemon
+
+- `/tenants/delete`: the daemon answers every valid request with
+  `501 tenant_delete_unsupported`. Tenants cannot be deleted; retire one by
+  sealing it.
+
 ## Which Endpoint Reports What
 
 `/readyz` reports whether **this process** can serve a correct query. It does
