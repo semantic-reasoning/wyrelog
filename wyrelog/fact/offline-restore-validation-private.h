@@ -14,7 +14,9 @@ G_BEGIN_DECLS
  * root, lifecycle, and inventory authority while collecting and validating
  * these values.  DRY_RUN accepts only pristine revision 1 with no staged
  * identities.  STAGED accepts revision 1 + graph_count after every staged
- * identity is bound, with all verification flags still pristine.  Unit 3
+ * identity is bound, with all verification flags still pristine.
+ * STAGED_PROGRESS accepts any verified subset at revision 1 + graph_count
+ * + verified_count, but requires fresh evidence for every graph.  Unit 3
  * must copy, bind, replay, validate, freshly revalidate the authority epoch,
  * and durably CAS the journal from validated_revision before any mutation.
  */
@@ -23,6 +25,7 @@ typedef enum
   WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_INVALID = 0,
   WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_DRY_RUN,
   WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED,
+  WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS,
 } WylFactOfflineRestoreValidationMode;
 
 typedef enum
@@ -141,6 +144,12 @@ typedef struct
   guint64 validated_revision;
   guint pending_checks;
 } WylFactOfflineRestoreValidationResult;
+
+/* Pure phase predicate shared with the session. All staged identities must
+ * be bound; each graph's five verification flags must agree. Flags describe
+ * journal progress only and never substitute for fresh staged evidence. */
+gboolean wyl_fact_offline_restore_validation_progress_phase
+  (const WylFactOfflineRestoreJournal *journal);
 
 /* Validate only the immutable manifest/journal contract. This performs no
  * filesystem or journal mutation and is safe to call before stage creation. */

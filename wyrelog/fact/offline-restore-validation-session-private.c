@@ -31,8 +31,11 @@ struct WylFactOfflineRestoreValidationSession
   WylFactGraphResolver resolver;
   GPtrArray *graphs;
   gboolean terminal;
+  gboolean record_preflight;
   wyrelog_error_t (*checkpoint) (const gchar *, gpointer);
   gpointer checkpoint_data;
+  wyrelog_error_t (*record_checkpoint) (const gchar *, guint64, gboolean, gpointer);
+  gpointer record_checkpoint_data;
 };
 
 #ifndef G_OS_WIN32
@@ -83,6 +86,18 @@ wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
   if (session != NULL && !session->terminal) {
     session->checkpoint = checkpoint;
     session->checkpoint_data = data;
+  }
+}
+
+void
+wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
+  (WylFactOfflineRestoreValidationSession *session,
+    wyrelog_error_t (*checkpoint) (const gchar *, guint64, gboolean, gpointer),
+    gpointer data)
+{
+  if (session != NULL && !session->terminal) {
+    session->record_checkpoint = checkpoint;
+    session->record_checkpoint_data = data;
   }
 }
 
@@ -279,12 +294,13 @@ check_authority (WylFactOfflineRestoreValidationSession *session)
 }
 #endif
 
-wyrelog_error_t
-wyl_fact_offline_restore_validation_session_new
+static wyrelog_error_t
+session_new
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
     const gchar *operation_uuid, guint64 expected_revision,
-    gint64 drain_timeout_us, WylFactOfflineRestoreValidationSession **out_session)
+    gint64 drain_timeout_us, gboolean record_preflight,
+    WylFactOfflineRestoreValidationSession **out_session)
 {
   if (out_session != NULL)
     *out_session = NULL;
@@ -296,11 +312,13 @@ wyl_fact_offline_restore_validation_session_new
     return WYRELOG_E_INVALID;
 #ifdef G_OS_WIN32
   (void) drain_timeout_us;
+  (void) record_preflight;
   return WYRELOG_E_POLICY;
 #else
   WylFactOfflineRestoreValidationSession *session = g_new0 (WylFactOfflineRestoreValidationSession, 1);
   session->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   session->policy = policy;
+  session->record_preflight = record_preflight;
   session->runtime = wyl_fact_graph_runtime_manager_ref (runtime_manager);
   session->manifest = g_bytes_ref (canonical_manifest);
   session->graphs = g_ptr_array_new_with_free_func ((GDestroyNotify) validation_graph_free);
@@ -311,7 +329,12 @@ wyl_fact_offline_restore_validation_session_new
     rc = wyl_fact_offline_restore_journal_store_load (policy, operation_uuid, &session->journal);
   if (rc == WYRELOG_E_OK && session->journal.revision != expected_revision)
     rc = WYRELOG_E_BUSY;
-  if (rc == WYRELOG_E_OK && !staged_phase (&session->journal))
+  if (rc == WYRELOG_E_OK && (record_preflight
+      ? session->journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || session->journal.confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || session->journal.manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || !wyl_fact_offline_restore_validation_progress_phase (&session->journal)
+      : !staged_phase (&session->journal)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_offline_restore_manifest_preflight (canonical_manifest, &session->journal);
@@ -357,47 +380,34 @@ wyl_fact_offline_restore_validation_session_new
 }
 
 wyrelog_error_t
-wyl_fact_offline_restore_validation_session_run
-  (WylFactOfflineRestoreValidationSession *session,
+wyl_fact_offline_restore_validation_session_new
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreValidationSession **out_session)
+{
+  return session_new (policy, fact_root, runtime_manager, canonical_manifest,
+             operation_uuid, expected_revision, drain_timeout_us, FALSE, out_session);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_validation_session_new_for_preflight
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreValidationSession **out_session)
+{
+  return session_new (policy, fact_root, runtime_manager, canonical_manifest,
+             operation_uuid, expected_revision, drain_timeout_us, TRUE, out_session);
+}
+
+#ifndef G_OS_WIN32
+static wyrelog_error_t
+validate_current (WylFactOfflineRestoreValidationSession *session,
     WylFactReplayJobContext *job_context,
     WylFactOfflineRestoreValidationResult *out_result)
 {
-  if (out_result != NULL) {
-    memset (out_result, 0, sizeof *out_result);
-    out_result->graph_index = G_MAXUINT;
-  }
-  if (session == NULL)
-    return WYRELOG_E_INVALID;
-  wyrelog_error_t rc = WYRELOG_E_INVALID;
-  if (session->terminal || job_context == NULL || out_result == NULL)
-    goto fail;
-#ifdef G_OS_WIN32
-  rc = WYRELOG_E_POLICY;
-#else
-  rc = wyl_fact_replay_job_context_checkpoint (job_context);
-  if (rc == WYRELOG_E_OK)
-    rc = check_authority (session);
-  for (guint i = 0; rc == WYRELOG_E_OK && i < session->graphs->len; i++) {
-    ValidationGraph *graph = g_ptr_array_index (session->graphs, i);
-    const WylFactOfflineRestoreJournalGraph *expected = g_ptr_array_index (session->journal.graphs, i);
-    g_clear_pointer (&graph->replay_digest, g_free);
-    WylFactStoreIdentity identity = {
-      .tenant_id = session->journal.tenant_id, .graph_id = expected->graph_id,
-      .store_uuid = expected->store_uuid, .format_version = expected->format_version,
-      .path_encoding_version = expected->path_encoding_version,
-    };
-    /* A lookup selector: replay captures actual graph information itself. */
-    wyl_policy_fact_graph_info_t selector = {
-      .tenant_id = session->journal.tenant_id, .graph_id = expected->graph_id,
-    };
-    rc = wyl_fact_replay_job_context_checkpoint (job_context);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_offline_restore_stage_replay_validate (session->policy,
-              graph->reader, expected->logical_bytes, expected->checksum,
-              &identity, &selector, expected->schema_digest, job_context, &graph->replay_digest);
-    if (rc == WYRELOG_E_OK && session->checkpoint != NULL)
-      rc = session->checkpoint (expected->graph_id, session->checkpoint_data);
-  }
+  wyrelog_error_t rc = wyl_fact_replay_job_context_checkpoint (job_context);
   GPtrArray *admission_graphs = g_ptr_array_new_with_free_func (g_free);
   GPtrArray *observations = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; rc == WYRELOG_E_OK && i < session->graphs->len; i++) {
@@ -454,17 +464,143 @@ wyl_fact_offline_restore_validation_session_run
       .graphs = admission_graphs,
     };
     memcpy (admission.manifest_sha256, session->journal.manifest_sha256, sizeof admission.manifest_sha256);
-    if (wyl_fact_offline_restore_validate (WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED,
+    WylFactOfflineRestoreValidationMode mode = session->record_preflight
+        ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS
+        : WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED;
+    if (wyl_fact_offline_restore_validate (mode,
         session->manifest, &session->journal, &admission, observations, out_result)
         != WYL_FACT_OFFLINE_RESTORE_VALIDATION_STAGED_VALIDATED)
       rc = WYRELOG_E_POLICY;
   }
   g_ptr_array_unref (observations);
   g_ptr_array_unref (admission_graphs);
+  return rc;
+}
+#endif
+
+wyrelog_error_t
+wyl_fact_offline_restore_validation_session_run
+  (WylFactOfflineRestoreValidationSession *session,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestoreValidationResult *out_result)
+{
+  if (out_result != NULL) {
+    memset (out_result, 0, sizeof *out_result);
+    out_result->graph_index = G_MAXUINT;
+  }
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (session->terminal || job_context == NULL || out_result == NULL)
+    goto fail;
+#ifdef G_OS_WIN32
+  rc = WYRELOG_E_POLICY;
+#else
+  rc = wyl_fact_replay_job_context_checkpoint (job_context);
+  if (rc == WYRELOG_E_OK)
+    rc = check_authority (session);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < session->graphs->len; i++) {
+    ValidationGraph *graph = g_ptr_array_index (session->graphs, i);
+    const WylFactOfflineRestoreJournalGraph *expected = g_ptr_array_index (session->journal.graphs, i);
+    g_clear_pointer (&graph->replay_digest, g_free);
+    WylFactStoreIdentity identity = {
+      .tenant_id = session->journal.tenant_id, .graph_id = expected->graph_id,
+      .store_uuid = expected->store_uuid, .format_version = expected->format_version,
+      .path_encoding_version = expected->path_encoding_version,
+    };
+    wyl_policy_fact_graph_info_t selector = {
+      .tenant_id = session->journal.tenant_id, .graph_id = expected->graph_id,
+    };
+    rc = wyl_fact_replay_job_context_checkpoint (job_context);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_stage_replay_validate (session->policy,
+              graph->reader, expected->logical_bytes, expected->checksum,
+              &identity, &selector, expected->schema_digest, job_context, &graph->replay_digest);
+    if (rc == WYRELOG_E_OK && session->checkpoint != NULL)
+      rc = session->checkpoint (expected->graph_id, session->checkpoint_data);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = validate_current (session, job_context, out_result);
 #endif
   if (rc == WYRELOG_E_OK)
     return rc;
 fail:
+  session->terminal = TRUE;
+  release_authority (session);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_validation_session_run_and_record_preflight
+  (WylFactOfflineRestoreValidationSession *session,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    memset (out_committed, 0, sizeof *out_committed);
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (session->terminal || !session->record_preflight
+      || job_context == NULL || out_committed == NULL)
+    goto fail;
+#ifdef G_OS_WIN32
+  rc = WYRELOG_E_POLICY;
+#else
+  WylFactOfflineRestoreValidationResult validation = { 0 };
+  rc = wyl_fact_offline_restore_validation_session_run (session, job_context, &validation);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < session->journal.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (session->journal.graphs, i);
+    if (graph->copied)
+      continue;
+    /* Journal replacement below invalidates all journal-owned pointers. */
+    g_autofree gchar *graph_id = g_strdup (graph->graph_id);
+    if (session->record_checkpoint != NULL)
+      rc = session->record_checkpoint (graph_id, session->journal.revision, FALSE,
+              session->record_checkpoint_data);
+    if (rc == WYRELOG_E_OK)
+      rc = validate_current (session, job_context, &validation);
+    g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+    g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+    g_autoptr (GBytes) desired_bytes = NULL;
+    g_autoptr (GBytes) committed_bytes = NULL;
+    WylFactOfflineRestoreStoreResult result = WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_decode (session->encoded_journal, &desired);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_preflight (&desired, graph_id);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&desired, &desired_bytes);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_store_cas (session->policy,
+              session->journal.revision, &desired, &result, &committed);
+    if (rc == WYRELOG_E_OK && result != WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED)
+      rc = WYRELOG_E_BUSY;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&committed, &committed_bytes);
+    if (rc == WYRELOG_E_OK && !g_bytes_equal (desired_bytes, committed_bytes))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      wyl_fact_offline_restore_journal_clear (&session->journal);
+      session->journal = committed;
+      memset (&committed, 0, sizeof committed);
+      g_clear_pointer (&session->encoded_journal, g_bytes_unref);
+      session->encoded_journal = g_bytes_ref (committed_bytes);
+      if (session->record_checkpoint != NULL)
+        rc = session->record_checkpoint (graph_id, session->journal.revision, TRUE,
+                session->record_checkpoint_data);
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = validate_current (session, job_context, &validation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (session->encoded_journal, out_committed);
+#endif
+  if (rc == WYRELOG_E_OK)
+    return rc;
+fail:
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
   session->terminal = TRUE;
   release_authority (session);
   return rc;
