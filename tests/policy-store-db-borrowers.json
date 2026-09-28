@@ -36,7 +36,7 @@
     "tests/test-policy-store-service-cvk.c": 12,
     "tests/test-policy-store-service-schema.c": 43,
     "tests/test-policy-store-totp.c": 2,
-    "tests/test-policy-store.c": 47,
+    "tests/test-policy-store.c": 48,
     "tests/test-service-auth-coordination.c": 24,
     "tests/test-service-credential-domain.c": 1,
     "tests/test-service-credential-operation-coordinator-execute.c": 1,

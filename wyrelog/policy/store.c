@@ -33128,6 +33128,41 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (found)
     return WYRELOG_E_POLICY;
 
+  /* Built-in roles carry authority even when a snapshot has no materialized
+   * role_permissions rows. Keep mixed role/direct grants in the same scope. */
+  g_autofree gchar *mixed_direct_privileged =
+      audit_privileged_permission_predicate ("privileged.perm_id");
+  g_autofree gchar *mixed_permission_role_sod_sql = g_strdup_printf (
+    "WITH RECURSIVE role_closure(subject_id, scope, effective_role_id) AS ("
+    "  SELECT subject_id, scope, role_id FROM role_memberships "
+    "  UNION "
+    "  SELECT role_closure.subject_id, role_closure.scope, ri.parent_role_id "
+    "  FROM role_closure "
+    "  JOIN role_inheritances ri "
+    "    ON ri.child_role_id = role_closure.effective_role_id"
+    ") "
+    "SELECT 1 FROM direct_permissions audit "
+    "JOIN role_closure privileged "
+    "  ON privileged.subject_id = audit.subject_id "
+    " AND privileged.scope = audit.scope "
+    "WHERE audit.perm_id IN ("
+    "  'wr.audit.read', 'wr.audit.explain', 'wr.audit.write') "
+    "  AND privileged.effective_role_id IN ("
+    "    'wr.system_admin', 'wr.service_admin', 'wr.break_glass') "
+    "UNION ALL "
+    "SELECT 1 FROM role_closure auditor "
+    "JOIN direct_permissions privileged "
+    "  ON privileged.subject_id = auditor.subject_id "
+    " AND privileged.scope = auditor.scope "
+    "WHERE auditor.effective_role_id = 'wr.auditor' AND %s "
+    "LIMIT 1;",
+    mixed_direct_privileged);
+  rc = query_has_rows (store->db, mixed_permission_role_sod_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   /* One effective-permission relation covers direct, role, inherited-role,
    * and mixed grants in the same scope. Audit writing keeps its pre-existing
    * admin separation rule; it is privileged authority, not an audit reader.
