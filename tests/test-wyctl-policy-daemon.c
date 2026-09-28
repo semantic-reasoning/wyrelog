@@ -1364,6 +1364,158 @@ main (void)
   };
   assert_wyctl_stdout (fact_seam_status_argv,
       "tenant=__wr_default graph=orders batch_id=seam-1 operation_id=seam-key-1 state=settled replay=false requested_rows=1 requested_bytes=11 applied_rows=0 applied_bytes=0\n");
+
+  /* #1238: fact forget erases one whole batch.  Erasing the retract batch
+   * brings its tuple back; erasing the put batch then removes it for good,
+   * and a second erase of the same batch finds nothing. */
+  gchar *fact_forget_retract_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "forget",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "retract-1",
+    "--operator", "ops",
+    "--reason", "erase request 17",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *fact_forget_put_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "forget",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "batch-1",
+    "--operator", "ops",
+    "--reason", "erase request 17",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *fact_forget_unconfirmed_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "forget",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "batch-1",
+    "--operator", "ops",
+    "--reason", "erase request 17",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_forget_unconfirmed_argv,
+      "wyctl: fact forget erases the batch permanently; pass --confirm\n");
+  /* A forget that names another registered relation of the same graph
+   * finds nothing and leaves the batch erasable through its own relation. */
+  gchar *other_schema_register_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "schema", "register",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "refunds",
+    "--schema-version", "1",
+    "--columns", "order_id:symbol",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_ok (other_schema_register_argv);
+  /* One row in the other relation, so the wrong-relation forget below meets
+   * a real projection table, the case that used to drop batch-1's index. */
+  gchar *refund_input_path = NULL;
+  gint refund_fd = g_file_open_tmp ("wyctl-facts-refund-XXXXXX",
+          &refund_input_path, &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (refund_fd, >=, 0);
+  g_assert_true (g_close (refund_fd, NULL));
+  g_assert_true (g_file_set_contents (refund_input_path, "order_id\no-1\n",
+      -1, &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *refund_input_path_autofree = refund_input_path;
+  gchar *fact_put_refund_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "put",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "refunds",
+    "--schema-version", "1",
+    "--batch-id", "refund-1",
+    "--idempotency-key", "refund-key-1",
+    "--format", "csv",
+    "--input", refund_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_put_refund_argv,
+      "action=put batch_id=refund-1 operation_id=refund-key-1 replay=false "
+      "mutation_class=committed_ready effect=unknown\n");
+  gchar *fact_forget_other_relation_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "forget",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "refunds",
+    "--schema-version", "1",
+    "--batch-id", "batch-1",
+    "--operator", "ops",
+    "--reason", "erase request 17",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_failed (fact_forget_other_relation_argv, 5,
+      "wyctl: fact forget failed: fact_batch_not_found\n");
+  if (check_fact_projection_batch_rows (handle, "batch-1", 1) != 0)
+    return wyl_test_normalize_exit_status (107);
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
+  assert_wyctl_stdout (fact_forget_retract_argv,
+      "action=forget batch_id=retract-1 rows_purged=1 "
+      "mutation_class=committed_ready reconcile=false\n");
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"o-1\"");
+  assert_wyctl_stdout (fact_forget_put_argv,
+      "action=forget batch_id=batch-1 rows_purged=1 "
+      "mutation_class=committed_ready reconcile=false\n");
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
+  if (check_fact_projection_batch_rows (handle, "batch-1", 0) != 0)
+    return wyl_test_normalize_exit_status (106);
+  assert_wyctl_failed (fact_forget_put_argv, 5,
+      "wyctl: fact forget failed: fact_batch_not_found\n");
+  g_unlink (refund_input_path);
   g_unlink (missing_input_path);
   g_unlink (seam_input_path);
   g_unlink (input_path);

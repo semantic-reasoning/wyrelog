@@ -55,6 +55,7 @@ COVERAGE = {
     "/facts/schema/register": ("fact", "schema", "register"),
     "/facts/{tenant}/{graph}/{relation}:append": ("fact", "put"),
     "/facts/{tenant}/{graph}/{relation}:retract": ("fact", "retract"),
+    "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),
     "/datalog": ("datalog", "query"),
     "/auth/login": ("auth", "login"),
     "/auth/mfa/verify": ("auth", "login"),
@@ -100,7 +101,6 @@ UNSUPPORTED = {
 PENDING = {
     "/facts/status": ("fact", "status"),
     "/facts/verify": ("fact", "verify"),
-    "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),
     "/graphs": ("graph", "list"),
     "/graphs/seal": ("graph", "seal"),
     "/tenants": ("tenant", "list"),

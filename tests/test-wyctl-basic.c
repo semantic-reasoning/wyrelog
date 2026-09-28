@@ -3763,6 +3763,334 @@ test_login_raced_output_reports_collision (gconstpointer data)
   g_free (server.request);
 }
 
+#define FACT_FORGET_REFUSED \
+  "wyctl: fact forget refused: a value holds a control byte, " \
+  "--batch-id is \"operator\" or \"reason\", --operator is " \
+  "\"reason\", or the request exceeds 4096 bytes\n"
+#define FACT_FORGET_UNKNOWN_HINT \
+  "wyctl: the forget outcome is unknown; re-run the same command, and a " \
+  "404 fact_batch_not_found then means the batch is already erased or " \
+  "never existed\n"
+
+/* Run `wyctl fact forget` against a one-request fake daemon answering
+ * STATUS with BODY.  EXTRA replaces the default target options when it is
+ * not NULL.  With CONFIGURED, the daemon URL, default tenant and default
+ * graph come from GSettings instead of the command line, so a command that
+ * fell back to them would reach the fake daemon.  RUN->request stays NULL
+ * when no request arrived. */
+typedef struct
+{
+  gint exit_status;
+  gchar *out;
+  gchar *err;
+  gchar *request;
+} FactForgetRun;
+
+static void
+fact_forget_run_clear (FactForgetRun *run)
+{
+  g_clear_pointer (&run->out, g_free);
+  g_clear_pointer (&run->err, g_free);
+  g_clear_pointer (&run->request, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (FactForgetRun, fact_forget_run_clear);
+
+static void
+run_fact_forget_case (guint status, const gchar *body,
+    const gchar *const *extra, gboolean configured, FactForgetRun *run)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = status, .body = body,
+  };
+  g_autofree gchar *xdg = NULL;
+  g_auto (GStrv) envp = NULL;
+  if (configured) {
+    g_autofree gchar *url_literal = gvariant_literal_for_string (daemon_url);
+    const gchar *const keys[] = {
+      "daemon-url", "default-tenant", "default-graph", NULL,
+    };
+    const gchar *const values[] = {url_literal, "'t'", "'g'", NULL};
+    xdg = make_keyfile_xdg_dir (keys, values);
+    envp = build_gsettings_envp (xdg, FALSE);
+  }
+  GThread *thread = g_thread_new ("fact-forget",
+          policy_mutation_server_thread, &server);
+  static const gchar *const target[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b 1", "--operator", "ops",
+    "--reason", "gdpr erase", "--confirm", NULL,
+  };
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  if (envp == NULL) {
+    g_ptr_array_add (argv, "--daemon-url");
+    g_ptr_array_add (argv, daemon_url);
+  }
+  g_ptr_array_add (argv, "--timeout-ms");
+  g_ptr_array_add (argv, "2000");
+  g_ptr_array_add (argv, "fact");
+  g_ptr_array_add (argv, "forget");
+  for (const gchar *const *arg = extra != NULL ? extra : target; *arg != NULL;
+      arg++)
+    g_ptr_array_add (argv, (gpointer) *arg);
+  g_ptr_array_add (argv, "--access-token-file");
+  g_ptr_array_add (argv, token_path);
+  g_ptr_array_add (argv, "--guard-timestamp");
+  g_ptr_array_add (argv, "123");
+  g_ptr_array_add (argv, "--guard-loc-class");
+  g_ptr_array_add (argv, "trusted");
+  g_ptr_array_add (argv, "--guard-risk");
+  g_ptr_array_add (argv, "29");
+  g_ptr_array_add (argv, NULL);
+  if (envp != NULL)
+    run_child_with_env ((gchar **) argv->pdata, envp, &run->out, &run->err,
+        &run->exit_status);
+  else
+    run_child ((gchar **) argv->pdata, &run->out, &run->err,
+        &run->exit_status);
+  stop_test_server (thread, cancel);
+  run->request = server.request;
+  g_unlink (token_path);
+  if (xdg != NULL)
+    remove_dir_recursive (xdg);
+}
+
+static void
+assert_fact_forget_exit (const FactForgetRun *run, gint expected)
+{
+  if (WIFEXITED (run->exit_status)
+      && WEXITSTATUS (run->exit_status) == expected)
+    return;
+  g_printerr ("expected fact forget exit %d; stdout: %s stderr: %s\n",
+      expected, run->out, run->err);
+  g_assert_not_reached ();
+}
+
+static void
+test_fact_forget_success (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case (200, "{\"ok\":true,\"committed\":true,"
+      "\"rows_purged\":3,\"queryable\":true,\"reconcile\":false,"
+      "\"engine_generation\":7,\"mutation_class\":\"forget\"}", NULL, FALSE,
+      &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "action=forget batch_id=b%201 rows_purged=3 "
+      "mutation_class=forget reconcile=false\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request,
+      "DELETE /facts/t/g/r:forget?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "namespace=ns"));
+  g_assert_nonnull (g_strstr_len (run.request, -1,
+      "Authorization: Bearer token-1"));
+}
+
+static void
+test_fact_forget_audit_failed (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case (500, "{\"ok\":false,"
+      "\"error\":\"fact_forget_audit_failed\",\"purged\":true,"
+      "\"rows_purged\":2,\"mutation_class\":\"forget\"}", NULL, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_cmpstr (run.out, ==, "action=forget batch_id=b%201 rows_purged=2 "
+      "purged=true audit=failed\n");
+  g_assert_cmpstr (run.err, ==,
+      "wyctl: fact forget failed: fact_forget_audit_failed\n"
+      "wyctl: rows erased; audit record failed; do not retry\n");
+}
+
+/* The error code alone says the rows are gone, even in a body that does not
+ * carry the purge fields. */
+static void
+test_fact_forget_audit_failed_bare (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case (500, "{\"error\":\"fact_forget_audit_failed\"}",
+      NULL, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==,
+      "wyctl: fact forget failed: fact_forget_audit_failed\n"
+      "wyctl: rows erased; audit record failed; do not retry\n");
+}
+
+static void
+test_fact_forget_status_errors (void)
+{
+  /* A server error may follow the commit, so it leaves the outcome
+   * unknown; a client error or a missing batch does not. */
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+    gboolean unknown;
+  } cases[] = {
+    {400, "invalid_fact_forget", 3, FALSE},
+    {401, "fact_auth_required", 6, FALSE},
+    {403, "fact_forget_denied", 4, FALSE},
+    {404, "fact_batch_not_found", 5, FALSE},
+    {409, "graph_sealed", 4, FALSE},
+    {500, "policy_write_cleanup_failed", 5, TRUE},
+    {503, "fact_store_busy", 5, TRUE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            cases[i].code);
+    g_autofree gchar *expected = g_strdup_printf (
+      "wyctl: fact forget failed: %s\n%s", cases[i].code,
+      cases[i].unknown ? FACT_FORGET_UNKNOWN_HINT : "");
+    run_fact_forget_case (cases[i].status, body, NULL, FALSE, &run);
+    assert_fact_forget_exit (&run, cases[i].exit_status);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, expected);
+  }
+}
+
+static void
+test_fact_forget_unknown_outcome (void)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1",
+    "--timeout-ms", "1000", "fact", "forget", "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--batch-id", "b", "--operator", "ops", "--reason", "why", "--confirm",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (argv, &out, &err, &status);
+  g_unlink (token_path);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 5);
+  g_assert_cmpstr (out, ==, "");
+  assert_child_stderr_has (err, "wyctl: fact forget failed: ");
+  assert_child_stderr_has (err, "the forget outcome is unknown; re-run the "
+      "same command, and a 404 fact_batch_not_found then means the batch is "
+      "already erased or never existed");
+}
+
+/* A success status with a body wyctl cannot read leaves the outcome
+ * unknown too. */
+static void
+test_fact_forget_unreadable_success (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case (200, "{}", NULL, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==, "wyctl: fact forget failed: "
+      "fact_forget_failed\n" FACT_FORGET_UNKNOWN_HINT);
+}
+
+/* Every refusal happens before a request, and never reads as a transport
+ * failure. */
+static void
+test_fact_forget_refusals (void)
+{
+  static const gchar *const no_confirm[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "why", NULL,
+  };
+  static const gchar *const no_graph[] = {
+    "--tenant", "t", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "why", "--confirm", NULL,
+  };
+  static const gchar *const no_reason[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--confirm", NULL,
+  };
+  static const gchar *const control_byte[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "line\nbreak", "--confirm", NULL,
+  };
+  static const gchar *const delete_byte[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops\x7f",
+    "--reason", "why", "--confirm", NULL,
+  };
+  static const gchar *const reserved_batch[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "reason", "--operator", "ops",
+    "--reason", "why", "--confirm", NULL,
+  };
+  static const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } cases[] = {
+    {no_confirm, "wyctl: fact forget erases the batch permanently; "
+     "pass --confirm\n"},
+    {no_graph, "wyctl: fact forget needs --tenant and --graph on the "
+     "command line\n"},
+    {no_reason, "wyctl: missing fact forget target option\n"},
+    {control_byte, FACT_FORGET_REFUSED},
+    {delete_byte, FACT_FORGET_REFUSED},
+    {reserved_batch, FACT_FORGET_REFUSED},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fact_forget_case (200, "{}", cases[i].args, FALSE, &run);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_null (run.request);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, cases[i].err);
+  }
+}
+
+/* The configured default tenant and graph are never an erase target. */
+static void
+test_fact_forget_ignores_configured_target (void)
+{
+  static const gchar *const configured[] = {
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--batch-id", "b", "--operator", "ops", "--reason", "why", "--confirm",
+    NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case (200, "{}", configured, TRUE, &run);
+  assert_fact_forget_exit (&run, 2);
+  g_assert_null (run.request);
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==, "wyctl: fact forget needs --tenant and "
+      "--graph on the command line\n");
+
+  /* Positive control: the same keyfile environment does reach the fake
+   * daemon once the target is typed, so the refusal above is not an
+   * environment that could reach nothing. */
+  static const gchar *const typed[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "why", "--confirm", NULL,
+  };
+  g_auto (FactForgetRun) control = { 0 };
+  run_fact_forget_case (200, "{\"ok\":true,\"committed\":true,"
+      "\"rows_purged\":1,\"queryable\":true,\"reconcile\":true,"
+      "\"engine_generation\":2,\"mutation_class\":\"committed_degraded\","
+      "\"degraded_class\":\"replay\"}", typed, TRUE, &control);
+  assert_fact_forget_exit (&control, 0);
+  g_assert_nonnull (control.request);
+  g_assert_true (g_str_has_prefix (control.request,
+      "DELETE /facts/t/g/r:forget?"));
+  g_assert_cmpstr (control.out, ==, "action=forget batch_id=b rows_purged=1 "
+      "mutation_class=committed_degraded reconcile=true\n");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3862,6 +4190,20 @@ main (int argc, char **argv)
       test_audit_query_gsettings_supplies_daemon_url);
   g_test_add_func ("/wyctl/fact-put-gsettings-supplies-daemon-url",
       test_fact_put_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/fact-forget-success", test_fact_forget_success);
+  g_test_add_func ("/wyctl/fact-forget-audit-failed",
+      test_fact_forget_audit_failed);
+  g_test_add_func ("/wyctl/fact-forget-audit-failed-bare",
+      test_fact_forget_audit_failed_bare);
+  g_test_add_func ("/wyctl/fact-forget-status-errors",
+      test_fact_forget_status_errors);
+  g_test_add_func ("/wyctl/fact-forget-unknown-outcome",
+      test_fact_forget_unknown_outcome);
+  g_test_add_func ("/wyctl/fact-forget-unreadable-success",
+      test_fact_forget_unreadable_success);
+  g_test_add_func ("/wyctl/fact-forget-refusals", test_fact_forget_refusals);
+  g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
+      test_fact_forget_ignores_configured_target);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
       test_datalog_query_gsettings_supplies_daemon_url);
   g_test_add_func (

@@ -3045,6 +3045,167 @@ wyl_client_graph_create (WylClient *client, const gchar *tenant,
   return rc;
 }
 
+void
+wyl_client_fact_forget_result_clear (WylClientFactForgetResult *result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->mutation_class, g_free);
+  g_clear_pointer (&result->degraded_class, g_free);
+  *result = (WylClientFactForgetResult) { 0 };
+}
+
+/* The daemon's forget body reader accepts no \u escape, so a control
+ * character cannot be sent.  It also finds each key by its first quoted
+ * occurrence, so a value that spells a later key makes the daemon refuse the
+ * body with 400; the exact names are refused here instead, which gives the
+ * caller a local error.  Other values containing a quoted key name still
+ * reach the daemon and get its 400.  Neither case is ever misread. */
+static gboolean
+client_forget_field_is_valid (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0')
+    return FALSE;
+  for (const guchar * p = (const guchar *) value; *p != '\0'; p++) {
+    if (*p < 0x20 || *p == 0x7f)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+#define WYL_CLIENT_FACT_FORGET_MAX_BODY 4096
+
+wyrelog_error_t
+wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id, const gchar *operator_id,
+    const gchar *reason, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactForgetResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_forget_result_clear (out_result);
+  if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
+      namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
+      schema_version == 0 || !client_forget_field_is_valid (batch_id) ||
+      !client_forget_field_is_valid (operator_id) ||
+      !client_forget_field_is_valid (reason) ||
+      g_strcmp0 (batch_id, "operator") == 0 ||
+      g_strcmp0 (batch_id, "reason") == 0 ||
+      g_strcmp0 (operator_id, "reason") == 0)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (GString) request = g_string_new ("{\"batch_id\":");
+  append_json_string (request, batch_id);
+  g_string_append (request, ",\"operator\":");
+  append_json_string (request, operator_id);
+  g_string_append (request, ",\"reason\":");
+  append_json_string (request, reason);
+  g_string_append_c (request, '}');
+  if (request->len > WYL_CLIENT_FACT_FORGET_MAX_BODY)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
+          TRUE);
+  g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
+          NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+        ("%s/facts/%s/%s/%s:forget?%s&namespace=%s&schema_version=%u",
+          base_url, escaped_tenant, escaped_graph, escaped_relation,
+          guard_query, escaped_namespace, schema_version);
+  g_autoptr (SoupMessage) message = soup_message_new ("DELETE", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) request_body = g_bytes_new (request->str, request->len);
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request_body);
+
+  wyl_client_clear_last_http_error (client);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) body = soup_session_send_and_read (client->session,
+          message, NULL, &error);
+  if (body == NULL)
+    return WYRELOG_E_IO;
+  guint status = soup_message_get_status (message);
+  client->last_http_status = status;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+
+  if (status == 200) {
+    gboolean ok = FALSE;
+    gboolean committed = FALSE;
+    if (!parse_simple_json_bool_member (data, size, "ok", &ok) || !ok
+        || !parse_simple_json_bool_member (data, size, "committed",
+        &committed) || !committed
+        || !parse_simple_json_uint64_member (data, size, "rows_purged",
+        &out_result->rows_purged)
+        || !parse_simple_json_bool_member (data, size, "queryable",
+        &out_result->queryable)
+        || !parse_simple_json_bool_member (data, size, "reconcile",
+        &out_result->reconcile)
+        || !parse_simple_json_uint64_member (data, size, "engine_generation",
+        &out_result->engine_generation)) {
+      wyl_client_fact_forget_result_clear (out_result);
+      return WYRELOG_E_IO;
+    }
+    out_result->mutation_class = parse_simple_json_string_member (data, size,
+            "mutation_class");
+    out_result->degraded_class = parse_simple_json_string_member (data, size,
+            "degraded_class");
+    if (out_result->mutation_class == NULL) {
+      wyl_client_fact_forget_result_clear (out_result);
+      return WYRELOG_E_IO;
+    }
+    out_result->purged = TRUE;
+    out_result->audit_recorded = TRUE;
+    return WYRELOG_E_OK;
+  }
+
+  client->last_error_code = parse_simple_json_string_member (data, size,
+          "error");
+  /* The rows are gone even though no audit event was recorded; report it so
+   * the caller does not retry an erasure that already happened. */
+  if (status == 500 && g_strcmp0 (client->last_error_code,
+      "fact_forget_audit_failed") == 0) {
+    gboolean purged = FALSE;
+    if (parse_simple_json_bool_member (data, size, "purged", &purged)
+        && purged && parse_simple_json_uint64_member (data, size,
+        "rows_purged", &out_result->rows_purged)) {
+      out_result->mutation_class = parse_simple_json_string_member (data,
+              size, "mutation_class");
+      out_result->purged = TRUE;
+      out_result->audit_recorded = FALSE;
+    } else {
+      wyl_client_fact_forget_result_clear (out_result);
+    }
+    return WYRELOG_E_IO;
+  }
+  if (status == 400)
+    return WYRELOG_E_INVALID;
+  if (status == 401)
+    return WYRELOG_E_AUTH;
+  if (status == 403 || status == 409)
+    return WYRELOG_E_POLICY;
+  if (status == 404)
+    return WYRELOG_E_NOT_FOUND;
+  if (status == 503)
+    return WYRELOG_E_BUSY;
+  return WYRELOG_E_IO;
+}
+
 wyrelog_error_t
 wyl_client_fact_schema_register_with_max_rows (WylClient *client,
     const gchar *tenant,
