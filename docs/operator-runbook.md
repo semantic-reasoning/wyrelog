@@ -1456,6 +1456,19 @@ as one that matched. The final query must no longer contain `o-1, 42`; query
 results are the proof that the row was removed, rather than the batch receipt
 or HTTP status alone.
 
+There is no update command. Changing a row is a `fact retract` of the old
+value followed by a `fact put` of the new one: two batches with separate
+idempotency keys, not one atomic change. If the second batch fails (a quota
+refusal, an expired token, a daemon restart), the relation is left without
+the row, and neither command reports the half-applied change. Recover by
+re-running the failed `fact put` with the same `--batch-id`,
+`--idempotency-key` and input file; a batch that was in fact recorded answers
+`replay=true` instead of writing twice, and different rows under the same keys
+answer `409 fact_batch_conflict`. Renew an expired token with `auth refresh`
+or `auth login` first. A quota refusal repeats until the quota is raised with
+`fact quota configure` or usage drops. Then confirm the row with
+`datalog query`.
+
 Public schema registration is currently a one-time operation for each
 tenant/graph/namespace/relation. The positive `--schema-version` identifies
 that relation's initial schema and may be any positive version. Every later
