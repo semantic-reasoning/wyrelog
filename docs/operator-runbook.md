@@ -1595,8 +1595,9 @@ Three distinct lines appear in the `BOOT` section:
   converged` (error) -- an intent was found and did not complete. Personal data
   that was accepted for deletion is still present in that graph. Investigate
   before returning the graph to service. That graph also reports
-  `forget_incomplete` on `/facts/status`, so this case is visible without
-  reading logs; the warning above is not.
+  `forget_incomplete` on `/facts/status` (`wyctl fact status` prints
+  `state=forget_incomplete` on that graph's line), so this case is visible
+  without reading logs; the warning above is not.
 
   This line now also covers the case the previous revision of this runbook told
   you to watch for separately. A write lease is requested only after the
@@ -1777,9 +1778,21 @@ and fact root. Mint a fresh token after restart and run the same
 store. Check graph health with:
 
 ```sh
-curl -fsS -H "Authorization: Bearer $(cat "$TOKEN")" \
-  "$BASE_URL/facts/status?tenant=$TENANT"
+wyctl --daemon-url "$BASE_URL" fact status \
+  --tenant "$TENANT" --access-token-file "$TOKEN"
 ```
+
+It prints `scope=tenant tenant=<tenant> status=<status>` and the aggregate
+counts, then one `graph=<graph> state=<state> queryable=<bool>
+engine_generation=<n> reason=<class>` line per graph. Without `--tenant` and `--access-token-file`
+the request is anonymous and prints `scope=anonymous` with the counts alone.
+Add `--graph <graph>` to print that graph's line only. `wyctl fact status`
+exits 0 when the status is `ready` (with `--graph`, when that graph is
+queryable), 1 when it is degraded or disabled or the graph is absent or not
+queryable, 2 when its arguments, credentials or proxy settings are invalid,
+and 3 when the daemon's answer is invalid or reports a status this wyctl does
+not know, as a newer daemon can.
+Like the endpoint, it only talks to the daemon's loopback listener.
 
 The per-graph rows name a tenant and a graph, so they are returned only to an
 authenticated caller and only for that caller's own tenant; `tenant` must name
@@ -1801,7 +1814,20 @@ figure.
 A single corrupted graph should report a degraded graph entry while unrelated
 graphs remain queryable. Stop the daemon before repairing or replacing a damaged
 `facts.duckdb`, restore only the affected `<tenant>/<graph>` fact directory,
-restart, then confirm `/facts/status` returns `"status":"ready"`.
+restart, then confirm `/facts/status` returns `"status":"ready"`
+(`wyctl fact status` exits 0). To check one graph's store against the policy
+store without changing anything, which needs `wr.fact.read`:
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact verify \
+  --tenant "$TENANT" --graph "$GRAPH" --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `verified=true` and exits 0 when the graph's path, identity and
+schema match. It exits 1 with `verified=false` when the daemon finds a
+mismatch (`fact_graph_verification_failed`), and 5 when the graph does not
+exist or the check could not run.
 
 ### A graph reporting `forget_incomplete`
 

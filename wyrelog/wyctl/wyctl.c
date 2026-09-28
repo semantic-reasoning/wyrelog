@@ -177,6 +177,23 @@ typedef struct
 {
   gchar *tenant;
   gchar *graph;
+  gchar *access_token_file;
+} WyctlFactStatusOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactVerifyOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
   gchar *query;
   gchar *output;
   gchar *limit_arg;
@@ -442,6 +459,31 @@ wyctl_fact_forget_options_clear (WyctlFactForgetOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactForgetOptions,
     wyctl_fact_forget_options_clear);
+
+static void
+wyctl_fact_status_options_clear (WyctlFactStatusOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactStatusOptions,
+    wyctl_fact_status_options_clear);
+
+static void
+wyctl_fact_verify_options_clear (WyctlFactVerifyOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactVerifyOptions,
+    wyctl_fact_verify_options_clear);
 
 static void
 wyctl_datalog_query_options_clear (WyctlDatalogQueryOptions *opts)
@@ -2396,6 +2438,262 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return run_fact_mutation (global_opts, argc, argv, FALSE);
 }
 
+static void
+print_fact_graph_status (const WylClientFactGraphStatus *graph)
+{
+  g_autofree gchar *graph_id = g_uri_escape_string (graph->graph_id != NULL
+      ? graph->graph_id : "", NULL, TRUE);
+  g_print ("graph=%s state=%s queryable=%s engine_generation=%"
+      G_GUINT64_FORMAT " reason=%s\n", graph_id,
+      graph->state_name != NULL ? graph->state_name : "unknown",
+      graph->queryable ? "true" : "false", graph->engine_generation,
+      graph->last_error_class != NULL ? graph->last_error_class : "none");
+}
+
+/* Report the daemon's fact subsystem.  Anonymous callers get the aggregate
+ * counts only; typing --tenant or --access-token-file asks for that
+ * tenant's per-graph rows, which name tenants and graphs and so need the
+ * caller's own credential.  The daemon serves this on its local listener
+ * only. */
+static int
+run_fact_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlFactStatusOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Report this tenant's graphs (needs an access token)", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph,
+     "Report one graph (needs an access token)", "GRAPH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- report the fact subsystem");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Without --tenant or --access-token-file the request is anonymous and\n"
+      "reports aggregate counts only.  With either, the configured default\n"
+      "fills the other, and the tenant's graphs are listed.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the fact subsystem is ready (with --graph: that graph is\n"
+      "     queryable).\n"
+      "  1: it is degraded or disabled, or the graph is absent or not\n"
+      "     queryable.\n"
+      "  2: local arguments, credentials or proxy settings are invalid, or\n"
+      "     the daemon URL is not a loopback address.\n"
+      "  3: the daemon's answer was invalid, or it reported a status newer\n"
+      "     than this wyctl knows.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: transport, busy or internal failure.\n"
+      "  6: authentication failed or is required.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact status argument: %s\n", argv[1]);
+    return 2;
+  }
+  gboolean authenticated = opts.tenant != NULL
+      || opts.access_token_file != NULL;
+  if (opts.graph != NULL && !authenticated) {
+    g_printerr ("wyctl: fact status --graph needs --tenant or "
+        "--access-token-file\n");
+    return 2;
+  }
+  if (opts.graph != NULL && opts.graph[0] == '\0') {
+    g_printerr ("wyctl: invalid --graph\n");
+    return 2;
+  }
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (daemon_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL; fact status needs the daemon's "
+        "loopback listener\n");
+    return 2;
+  }
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+  g_autofree gchar *tenant = NULL;
+  g_autofree gchar *access_token = NULL;
+  if (authenticated) {
+    tenant = wyctl_resolve_string_option (opts.tenant, global_opts->settings,
+            "default-tenant");
+    g_autofree gchar *access_token_file =
+        wyctl_resolve_string_option (opts.access_token_file,
+            global_opts->settings, "access-token-file");
+    if (tenant == NULL || tenant[0] == '\0') {
+      g_printerr ("wyctl: missing --tenant\n");
+      return 2;
+    }
+    int token_rc = load_access_token_file (access_token_file, &access_token);
+    if (token_rc != 0)
+      return token_rc;
+  }
+  /* Exit 1 reports an unhealthy store here, so a proxy setup failure uses
+   * the local-argument code instead. */
+  if (!wyctl_check_proxy_environment ())
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+  g_auto (WylClientFactStatus) status = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_status (client, access_token, tenant,
+          &status);
+  if (rc == WYRELOG_E_IO && wyl_client_get_last_http_status (client) == 200) {
+    g_printerr ("wyctl: fact status failed: invalid daemon response\n");
+    return 3;
+  }
+  int exit_rc = fact_remote_exit (client, "fact status", rc,
+          "fact_status_failed");
+  if (exit_rc != 0)
+    return exit_rc;
+
+  g_autofree gchar *escaped_tenant = tenant != NULL
+      ? g_uri_escape_string (tenant, NULL, TRUE) : NULL;
+  g_autofree gchar *scope = escaped_tenant != NULL
+      ? g_strdup_printf ("scope=tenant tenant=%s", escaped_tenant)
+      : g_strdup ("scope=anonymous");
+  g_print ("%s status=%s graphs_total=%" G_GUINT64_FORMAT
+      " graphs_ready=%" G_GUINT64_FORMAT " graphs_degraded=%" G_GUINT64_FORMAT
+      " graphs_provisioned=%" G_GUINT64_FORMAT " graphs_sealed=%"
+      G_GUINT64_FORMAT "\n", scope,
+      status.status_name != NULL ? status.status_name : "unknown",
+      status.graphs_total, status.graphs_ready, status.graphs_degraded,
+      status.graphs_provisioned, status.graphs_sealed);
+  if (opts.graph != NULL) {
+    for (gsize i = 0; i < status.n_graphs; i++) {
+      if (g_strcmp0 (status.graphs[i].graph_id, opts.graph) != 0)
+        continue;
+      print_fact_graph_status (&status.graphs[i]);
+      return status.graphs[i].queryable ? 0 : 1;
+    }
+    g_autofree gchar *graph_id = g_uri_escape_string (opts.graph, NULL, TRUE);
+    g_print ("graph=%s state=absent\n", graph_id);
+    return 1;
+  }
+  for (gsize i = 0; i < status.n_graphs; i++)
+    print_fact_graph_status (&status.graphs[i]);
+  switch (status.status) {
+    case WYL_CLIENT_FACT_STATUS_READY:
+      return 0;
+    case WYL_CLIENT_FACT_STATUS_DEGRADED:
+    case WYL_CLIENT_FACT_STATUS_DISABLED:
+      return 1;
+    case WYL_CLIENT_FACT_STATUS_UNKNOWN:
+    default:
+      return 3;
+  }
+}
+
+/* Ask the daemon to check one graph's store path, identity and schema
+ * against the policy store without changing anything. */
+static int
+run_fact_verify (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlFactVerifyOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- verify one graph's fact store");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Exit codes:\n"
+      "  0: the graph's store matches its path, identity and schema.\n"
+      "  1: the daemon found a mismatch (fact_graph_verification_failed).\n"
+      "  2: local arguments, credentials or proxy settings are invalid.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: missing graph; transport, busy or internal failure.\n"
+      "  6: authentication failed or is required.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact verify argument: %s\n", argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+          global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+  if (graph == NULL || graph[0] == '\0') {
+    g_printerr ("wyctl: missing --graph\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  /* create_fact_client returns 1 only for a proxy setup failure, and exit 1
+   * reports a verification mismatch here. */
+  if (client_rc != 0)
+    return client_rc == 1 ? 2 : client_rc;
+  g_auto (WylClientFactGraphVerification) verification = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_graph_verify (client, tenant, graph,
+          guard_timestamp, opts.guard_loc_class, guard_risk, &verification);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
+  if (rc == WYRELOG_E_POLICY && wyl_client_get_last_http_status (client) == 409
+      && g_strcmp0 (error_code, "fact_graph_verification_failed") == 0) {
+    g_print ("tenant=%s graph=%s verified=false\n", escaped_tenant,
+        escaped_graph);
+    g_printerr ("wyctl: fact verify failed: fact_graph_verification_failed\n");
+    return 1;
+  }
+  int exit_rc = fact_remote_exit (client, "fact verify", rc,
+          "fact_verify_failed");
+  if (exit_rc == 0)
+    g_print ("tenant=%s graph=%s verified=true\n", escaped_tenant,
+        escaped_graph);
+  return exit_rc;
+}
+
 /* Erase every row of one committed batch.  The erase cannot be undone, so
  * the target must be typed on the command line: --confirm, --tenant and
  * --graph are checked before any file is read or request is sent, and the
@@ -3005,6 +3303,10 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_retract (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "forget") == 0)
     return run_fact_forget (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_fact_status (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "verify") == 0)
+    return run_fact_verify (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown fact command: %s\n", argv[1]);
   return 2;
 }
