@@ -3139,6 +3139,146 @@ wyl_client_graph_seal (WylClient *client, const gchar *tenant,
   return WYRELOG_E_OK;
 }
 
+G_STATIC_ASSERT (WYL_CLIENT_REQUEST_ID_BUF == WYL_REQUEST_ID_STRING_BUF);
+
+wyrelog_error_t
+wyl_client_request_id_new (gchar *buf, gsize buf_len)
+{
+  return wyl_request_id_new (buf, buf_len);
+}
+
+gboolean
+wyl_client_request_id_is_canonical (const gchar *request_id)
+{
+  return wyl_request_id_is_canonical (request_id);
+}
+
+/* Send one tenant management request as the __wr_default session: GET
+ * /tenants, or POST /tenants/<action>?name=<name> with an optional JSON
+ * body.  A 503 is WYRELOG_E_BUSY. */
+static wyrelog_error_t
+client_tenant_request (WylClient *client, const gchar *action,
+    const gchar *name, const gchar *json_body, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body)
+{
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, WYL_TENANT_DEFAULT,
+          guard_timestamp, guard_loc_class, guard_risk, &base_url,
+          &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (WYL_TENANT_DEFAULT,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL :
+          session_token);
+  g_autofree gchar *uri = NULL;
+  if (action == NULL) {
+    uri = g_strdup_printf ("%s/tenants?%s", base_url, guard_query);
+  } else {
+    g_autofree gchar *escaped_name = g_uri_escape_string (name, NULL, TRUE);
+    uri = g_strdup_printf ("%s/tenants/%s?%s&name=%s", base_url, action,
+            guard_query, escaped_name);
+  }
+  g_autoptr (SoupMessage) message = soup_message_new (action == NULL ? "GET"
+      : "POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  if (json_body != NULL) {
+    g_autoptr (GBytes) request = g_bytes_new (json_body, strlen (json_body));
+    soup_message_set_request_body_from_bytes (message, "application/json",
+        request);
+  }
+  rc = client_send_fact_message (client, message, out_body);
+  if (rc != WYRELOG_E_OK && client->last_http_status == 503)
+    return WYRELOG_E_BUSY;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_client_tenant_list (WylClient *client, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientTenantList *out_tenants)
+{
+  if (out_tenants == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_tenant_list_clear (out_tenants);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_tenant_request (client, NULL, NULL, NULL,
+          guard_timestamp, guard_loc_class, guard_risk, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  if (wyl_client_tenant_list_decode (data, size, out_tenants) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+client_tenant_mutation (WylClient *client, const gchar *action,
+    const gchar *name, const gchar *json_body, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gboolean *out_changed)
+{
+  if (out_changed == NULL || name == NULL || name[0] == '\0')
+    return WYRELOG_E_INVALID;
+  *out_changed = FALSE;
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_tenant_request (client, action, name,
+          json_body, guard_timestamp, guard_loc_class, guard_risk, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  gboolean ok = FALSE;
+  gboolean changed = FALSE;
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size,
+          "tenant");
+  if (!parse_simple_json_bool_member (data, size, "ok", &ok)
+      || !parse_simple_json_bool_member (data, size, "changed", &changed)
+      || !ok || g_strcmp0 (tenant, name) != 0)
+    return WYRELOG_E_IO;
+  *out_changed = changed;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_tenant_create (WylClient *client, const gchar *name,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gboolean *out_changed)
+{
+  return client_tenant_mutation (client, "create", name, NULL,
+             guard_timestamp, guard_loc_class, guard_risk, out_changed);
+}
+
+wyrelog_error_t
+wyl_client_tenant_unseal (WylClient *client, const gchar *name,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gboolean *out_changed)
+{
+  return client_tenant_mutation (client, "unseal", name, NULL,
+             guard_timestamp, guard_loc_class, guard_risk, out_changed);
+}
+
+wyrelog_error_t
+wyl_client_tenant_seal (WylClient *client, const gchar *name,
+    const gchar *request_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gboolean *out_changed)
+{
+  if (out_changed != NULL)
+    *out_changed = FALSE;
+  if (!wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) json =
+      g_string_new ("{\"version\":\"1\",\"request_id\":");
+  append_json_string (json, request_id);
+  g_string_append_c (json, '}');
+  return client_tenant_mutation (client, "seal", name, json->str,
+             guard_timestamp, guard_loc_class, guard_risk, out_changed);
+}
+
 void
 wyl_client_fact_forget_result_clear (WylClientFactForgetResult *result)
 {

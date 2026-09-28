@@ -1943,14 +1943,34 @@ policy_mutation_server_thread (gpointer data)
   if (conn == NULL)
     return NULL;
 
-  gchar buffer[4096];
+  gchar buffer[8192];
   GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
   GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
-  gssize n = g_input_stream_read (input, buffer, sizeof buffer - 1, NULL, NULL);
-  if (n > 0) {
-    buffer[n] = '\0';
-    server->request = g_strdup (buffer);
+  /* Read until the headers and the Content-Length body have both arrived:
+   * a client may send the body in a separate segment. */
+  gsize have = 0;
+  while (have < sizeof buffer - 1) {
+    gssize n = g_input_stream_read (input, buffer + have,
+            sizeof buffer - 1 - have, NULL, NULL);
+    if (n <= 0)
+      break;
+    have += (gsize) n;
+    buffer[have] = '\0';
+    const gchar *end = strstr (buffer, "\r\n\r\n");
+    if (end == NULL)
+      continue;
+    const gchar *length = g_strstr_len (buffer, end - buffer,
+            "Content-Length:");
+    if (length == NULL)
+      length = g_strstr_len (buffer, end - buffer, "content-length:");
+    gsize want = length != NULL
+        ? (gsize) g_ascii_strtoull (length + strlen ("Content-Length:"),
+            NULL, 10) : 0;
+    if (have >= (gsize) (end + 4 - buffer) + want)
+      break;
   }
+  if (have > 0)
+    server->request = g_strndup (buffer, have);
 
   const gchar *body = server->body != NULL ? server->body : "{}";
   g_autofree gchar *response =
@@ -4509,6 +4529,224 @@ test_graph_seal_refusals (void)
   }
 }
 
+static void
+test_tenant_list_and_create (void)
+{
+  static const gchar *const list[] = {
+    "tenant", "list", "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"tenants\":[{\"tenant\":\"__wr_default\","
+      "\"sealed\":false},{\"tenant\":\"acme:eu\",\"sealed\":true}]}", NULL,
+      list, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "tenant=__wr_default sealed=false\n"
+      "tenant=acme%3Aeu sealed=true\n");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "GET /tenants?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "tenant=__wr_default"));
+
+  static const gchar *const create[] = {
+    "tenant", "create", "--name", "acme", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) created = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"changed\":true}", NULL, create, FALSE, &created);
+  assert_fact_forget_exit (&created, 0);
+  g_assert_cmpstr (created.out, ==, "tenant=acme changed=true\n");
+  g_assert_true (g_str_has_prefix (created.request, "POST /tenants/create?"));
+  g_assert_nonnull (g_strstr_len (created.request, -1, "name=acme"));
+
+  g_auto (FactForgetRun) other = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant\":\"other\","
+      "\"changed\":true}", NULL, create, FALSE, &other);
+  assert_fact_forget_exit (&other, 5);
+  g_assert_cmpstr (other.out, ==, "");
+
+  static const gchar *const unseal[] = {
+    "tenant", "unseal", "--name", "acme", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) unsealed = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"changed\":false}", NULL, unseal, FALSE, &unsealed);
+  assert_fact_forget_exit (&unsealed, 0);
+  g_assert_cmpstr (unsealed.out, ==, "tenant=acme changed=false\n");
+  g_assert_true (g_str_has_prefix (unsealed.request,
+      "POST /tenants/unseal?"));
+
+  g_auto (FactForgetRun) denied = { 0 };
+  run_fake_daemon_case (403, "{\"error\":\"tenant_denied\"}", NULL, create,
+      FALSE, &denied);
+  assert_fact_forget_exit (&denied, 4);
+  g_assert_cmpstr (denied.err, ==, "wyctl: tenant create failed: "
+      "tenant_denied\n");
+
+  /* After a server error the outcome is unknown and a repeat is safe. */
+  g_auto (FactForgetRun) failed = { 0 };
+  run_fake_daemon_case (500, "{\"error\":\"tenant_mutation_failed\"}", NULL,
+      create, FALSE, &failed);
+  assert_fact_forget_exit (&failed, 5);
+  g_assert_cmpstr (failed.err, ==, "wyctl: tenant create failed: "
+      "tenant_mutation_failed\n"
+      "wyctl: the outcome is unknown; repeating the same tenant create is "
+      "safe\n");
+
+  /* A pending repair from an earlier failure blocks every tenant change. */
+  g_auto (FactForgetRun) pending = { 0 };
+  run_fake_daemon_case (503, "{\"error\":\"tenant_mutation_unavailable\"}",
+      NULL, unseal, FALSE, &pending);
+  assert_fact_forget_exit (&pending, 5);
+  g_assert_cmpstr (pending.err, ==, "wyctl: tenant unseal failed: "
+      "tenant_mutation_unavailable\n"
+      "wyctl: a tenant change that failed, this one or an earlier one, may "
+      "be pending; repeat it (a seal with its --request-id) before other "
+      "tenant changes\n");
+}
+
+/* Return the request_id the seal request carried in its JSON body. */
+static gchar *
+seal_request_id (const gchar *request)
+{
+  const gchar *key = request != NULL
+      ? strstr (request, "\"request_id\":\"") : NULL;
+  if (key == NULL)
+    return NULL;
+  key += strlen ("\"request_id\":\"");
+  const gchar *end = strchr (key, '"');
+  return end != NULL ? g_strndup (key, (gsize) (end - key)) : NULL;
+}
+
+static void
+test_tenant_seal (void)
+{
+  static const gchar *const seal[] = {
+    "tenant", "seal", "--name", "acme", "--confirm",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"changed\":true}", NULL, seal, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_true (g_str_has_prefix (run.request, "POST /tenants/seal?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "\"version\":\"1\""));
+  g_autofree gchar *minted = seal_request_id (run.request);
+  g_assert_nonnull (minted);
+  g_assert_cmpuint (strlen (minted), ==, 27);
+  g_autofree gchar *expected = g_strdup_printf ("tenant=acme changed=true "
+          "request_id=%s\n", minted);
+  g_assert_cmpstr (run.out, ==, expected);
+
+  /* A failure names the id that was sent, so the retry can reuse it. */
+  g_auto (FactForgetRun) busy = { 0 };
+  run_fake_daemon_case (503, "{\"error\":\"tenant_mutation_unavailable\"}",
+      NULL, seal, FALSE, &busy);
+  assert_fact_forget_exit (&busy, 5);
+  g_autofree gchar *sent = seal_request_id (busy.request);
+  g_assert_nonnull (sent);
+  g_autofree gchar *hint = g_strdup_printf ("wyctl: tenant seal failed: "
+          "tenant_mutation_unavailable\n"
+          "wyctl: tenant seal request_id=%s\n"
+          "wyctl: a tenant change that failed, this one or an earlier one, "
+          "may be pending; repeat it (a seal with its --request-id) before "
+          "other tenant changes\n", sent);
+  g_assert_cmpstr (busy.err, ==, hint);
+
+  /* --request-id repeats that exact seal. */
+  const gchar *const retry[] = {
+    "tenant", "seal", "--name", "acme", "--confirm", "--request-id", sent,
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) again = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant\":\"acme\","
+      "\"changed\":false}", NULL, retry, FALSE, &again);
+  assert_fact_forget_exit (&again, 0);
+  g_autofree gchar *resent = seal_request_id (again.request);
+  g_assert_cmpstr (resent, ==, sent);
+
+  g_auto (FactForgetRun) conflict = { 0 };
+  run_fake_daemon_case (409, "{\"error\":\"tenant_seal_superseded\"}", NULL,
+      retry, FALSE, &conflict);
+  assert_fact_forget_exit (&conflict, 4);
+  g_autofree gchar *superseded = g_strdup_printf ("wyctl: tenant seal failed: "
+          "tenant_seal_superseded\n"
+          "wyctl: tenant seal request_id=%s\n"
+          "wyctl: seal request_id=%s cannot apply: the tenant changed after it "
+          "was recorded, or the id belongs to another request; `wyctl tenant "
+          "list` shows the tenant's state; seal again without --request-id if "
+          "it still needs sealing\n", sent, sent);
+  g_assert_cmpstr (conflict.err, ==, superseded);
+
+  /* A definite refusal needs no retry advice, but the id is still named:
+   * a 400 can follow a repair the seal itself installed. */
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+  } refusals[] = {
+    {400, "invalid_tenant_request", 3},
+    {403, "tenant_denied", 4},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (refusals); i++) {
+    g_auto (FactForgetRun) refused = { 0 };
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            refusals[i].code);
+    g_autofree gchar *expected = g_strdup_printf ("wyctl: tenant seal failed: "
+            "%s\nwyctl: tenant seal request_id=%s\n", refusals[i].code, sent);
+    run_fake_daemon_case (refusals[i].status, body, NULL, retry, FALSE,
+        &refused);
+    assert_fact_forget_exit (&refused, refusals[i].exit_status);
+    g_assert_cmpstr (refused.err, ==, expected);
+  }
+
+  g_auto (FactForgetRun) lost = { 0 };
+  run_fake_daemon_case (500, "{\"error\":\"tenant_mutation_failed\"}", NULL,
+      retry, FALSE, &lost);
+  assert_fact_forget_exit (&lost, 5);
+  g_autofree gchar *lost_hint = g_strdup_printf ("wyctl: tenant seal failed: "
+          "tenant_mutation_failed\n"
+          "wyctl: tenant seal request_id=%s\n"
+          "wyctl: the seal outcome is unknown; repeat it with --request-id %s, "
+          "not a new id\n", sent, sent);
+  g_assert_cmpstr (lost.err, ==, lost_hint);
+}
+
+static void
+test_tenant_refusals (void)
+{
+  static const gchar *const unconfirmed[] = {
+    "tenant", "seal", "--name", "acme", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const bad_id[] = {
+    "tenant", "seal", "--name", "acme", "--confirm", "--request-id", "abc",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const no_name[] = {
+    "tenant", "create", "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  static const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } cases[] = {
+    {unconfirmed, "wyctl: tenant seal closes the whole tenant; pass "
+     "--confirm\n"},
+    {bad_id, "wyctl: invalid --request-id\n"},
+    {no_name, "wyctl: missing --name\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fake_daemon_case (200, "{}", NULL, cases[i].args, FALSE, &run);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_null (run.request);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, cases[i].err);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -4629,6 +4867,10 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/graph-list", test_graph_list);
   g_test_add_func ("/wyctl/graph-seal", test_graph_seal);
   g_test_add_func ("/wyctl/graph-seal-refusals", test_graph_seal_refusals);
+  g_test_add_func ("/wyctl/tenant-list-and-create",
+      test_tenant_list_and_create);
+  g_test_add_func ("/wyctl/tenant-seal", test_tenant_seal);
+  g_test_add_func ("/wyctl/tenant-refusals", test_tenant_refusals);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",

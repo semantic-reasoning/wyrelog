@@ -1408,6 +1408,69 @@ main (void)
     return wyl_test_normalize_exit_status (4116);
   http.status = 0;
 
+  /* #1238: tenant management as the __wr_default session. */
+  g_auto (WylClientTenantList) tenants = { 0 };
+  http.body = "{\"tenants\":[{\"tenant\":\"__wr_default\",\"sealed\":false},"
+      "{\"tenant\":\"acme\",\"sealed\":true}]}";
+  if (wyl_client_tenant_list (management_client, 123, "public", 49,
+      &tenants) != WYRELOG_E_OK || tenants.len != 2
+      || g_strcmp0 (tenants.items[1].tenant_id, "acme") != 0
+      || !tenants.items[1].sealed || tenants.items[0].sealed
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/tenants") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0)
+    return wyl_test_normalize_exit_status (4120);
+  static const gchar *const bad_tenant_lists[] = {
+    "{\"tenants\":[{\"tenant\":\"acme\"}]}",
+    "{\"tenants\":[{\"tenant\":\"acme\",\"sealed\":true,\"x\":1}]}",
+    "{\"tenants\":[{\"tenant\":\"acme\",\"tenant\":\"b\","
+    "\"sealed\":true}]}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_tenant_lists); i++) {
+    http.body = bad_tenant_lists[i];
+    if (wyl_client_tenant_list (management_client, 123, "public", 49,
+        &tenants) != WYRELOG_E_IO || tenants.items != NULL)
+      return wyl_test_normalize_exit_status (4121);
+  }
+  gboolean tenant_changed = FALSE;
+  http.body = "{\"ok\":true,\"tenant\":\"acme\",\"changed\":true}";
+  if (wyl_client_tenant_create (management_client, "acme", 123, "public",
+      49, &tenant_changed) != WYRELOG_E_OK || !tenant_changed
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/tenants/create") != 0
+      || http.last_body != NULL)
+    return wyl_test_normalize_exit_status (4122);
+  http.body = "{\"ok\":true,\"tenant\":\"other\",\"changed\":true}";
+  if (wyl_client_tenant_unseal (management_client, "acme", 123, "public",
+      49, &tenant_changed) != WYRELOG_E_IO || tenant_changed)
+    return wyl_test_normalize_exit_status (4123);
+  gchar request_id[WYL_CLIENT_REQUEST_ID_BUF];
+  if (wyl_client_request_id_new (request_id, sizeof request_id)
+      != WYRELOG_E_OK || !wyl_client_request_id_is_canonical (request_id))
+    return wyl_test_normalize_exit_status (4124);
+  guint tenant_requests = http.request_count;
+  if (wyl_client_tenant_seal (management_client, "acme", "not-an-id", 123,
+      "public", 49, &tenant_changed) != WYRELOG_E_INVALID
+      || http.request_count != tenant_requests)
+    return wyl_test_normalize_exit_status (4125);
+  http.body = "{\"ok\":true,\"tenant\":\"acme\",\"changed\":false}";
+  g_autofree gchar *seal_body = g_strdup_printf ("{\"version\":\"1\","
+          "\"request_id\":\"%s\"}", request_id);
+  if (wyl_client_tenant_seal (management_client, "acme", request_id, 123,
+      "public", 49, &tenant_changed) != WYRELOG_E_OK || tenant_changed
+      || g_strcmp0 (http.last_path, "/tenants/seal") != 0
+      || g_strcmp0 (http.last_body, seal_body) != 0
+      || g_strcmp0 (http.last_content_type, "application/json") != 0)
+    return wyl_test_normalize_exit_status (4126);
+  http.status = 503;
+  http.body = "{\"error\":\"tenant_mutation_unavailable\"}";
+  if (wyl_client_tenant_seal (management_client, "acme", request_id, 123,
+      "public", 49, &tenant_changed) != WYRELOG_E_BUSY
+      || !client_last_response_is (management_client, 503,
+      "tenant_mutation_unavailable"))
+    return wyl_test_normalize_exit_status (4127);
+  http.status = 0;
+
   /* #1096: the schema-count quota client must keep its typed contract
    * distinct from graph-count and write-rate quotas. */
   WylClientFactSchemaQuotaStatus schema_quota = { 0 };

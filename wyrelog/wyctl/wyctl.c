@@ -193,6 +193,17 @@ typedef struct
 
 typedef struct
 {
+  gchar *name;
+  gchar *request_id;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+  gboolean confirm;
+} WyctlTenantOptions;
+
+typedef struct
+{
   gchar *tenant;
   gchar *graph;
   gchar *access_token_file;
@@ -495,6 +506,20 @@ wyctl_graph_seal_options_clear (WyctlGraphSealOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphSealOptions,
     wyctl_graph_seal_options_clear);
+
+static void
+wyctl_tenant_options_clear (WyctlTenantOptions *opts)
+{
+  g_clear_pointer (&opts->name, g_free);
+  g_clear_pointer (&opts->request_id, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlTenantOptions,
+    wyctl_tenant_options_clear);
 
 static void
 wyctl_fact_verify_options_clear (WyctlFactVerifyOptions *opts)
@@ -6325,6 +6350,222 @@ run_service_permission_closure (gint argc, gchar **argv)
   return 2;
 }
 
+/* Build the __wr_default management client every tenant command uses.  A
+ * proxy setup failure is a local error here, as in the fact commands. */
+static int
+create_tenant_client (const WyctlOptions *global_opts,
+    const gchar *access_token_file_arg, WylClient **out_client)
+{
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (access_token_file_arg,
+          global_opts->settings, "access-token-file");
+  int rc = create_fact_client (daemon_url, timeout_ms_arg, WYL_TENANT_DEFAULT,
+          access_token_file, out_client);
+  return rc == 1 ? 2 : rc;
+}
+
+static const gchar *const tenant_exit_codes =
+    "Tenant management runs as the __wr_default session and needs\n"
+    "wr.tenant.manage there.\n"
+    "\n"
+    "Exit codes:\n"
+    "  0: the request succeeded.\n"
+    "  2: local arguments, credentials or proxy settings are invalid;\n"
+    "     nothing was sent.\n"
+    "  3: the daemon rejected the request as invalid (for example an\n"
+    "     invalid tenant name).\n"
+    "  4: the daemon denied the request by policy or it conflicts with the\n"
+    "     tenant's state.\n"
+    "  5: busy, transport, internal or unreadable-response failure.\n"
+    "  6: authentication failed or is required.";
+
+static int
+run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
+    const gchar *action)
+{
+  g_auto (WyctlTenantOptions) opts = { 0 };
+  gboolean listing = g_strcmp0 (action, "list") == 0;
+  gboolean sealing = g_strcmp0 (action, "seal") == 0;
+  GOptionEntry name_entry[] = {
+    {"name", 0, 0, G_OPTION_ARG_STRING, &opts.name, "Tenant name", "TENANT"},
+    {NULL}
+  };
+  GOptionEntry seal_entries[] = {
+    {"confirm", 0, 0, G_OPTION_ARG_NONE, &opts.confirm,
+     "Confirm sealing the whole tenant", NULL},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+     "Request id of an earlier seal to repeat", "ID"},
+    {NULL}
+  };
+  GOptionEntry entries[] = {
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autofree gchar *summary = g_strdup_printf ("- tenant %s", action);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new (summary);
+  if (!listing)
+    g_option_context_add_main_entries (context, name_entry, NULL);
+  if (sealing)
+    g_option_context_add_main_entries (context, seal_entries, NULL);
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_autofree gchar *description = sealing
+      ? g_strconcat ("A sealed tenant refuses every request that names it,\n"
+          "and its service credentials stop working.  When a seal's outcome\n"
+          "is unknown, repeat it with the printed --request-id; until then\n"
+          "the daemon refuses every tenant create, seal and unseal.  After a\n"
+          "409 that id can no longer apply: seal again without --request-id\n"
+          "if the tenant still needs sealing.\n\n",
+          tenant_exit_codes, NULL)
+      : g_strdup (tenant_exit_codes);
+  g_option_context_set_description (context, description);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected tenant %s argument: %s\n", action,
+        argv[1]);
+    return 2;
+  }
+  if (sealing && !opts.confirm) {
+    g_printerr ("wyctl: tenant seal closes the whole tenant; pass --confirm\n");
+    return 2;
+  }
+  if (!listing && (opts.name == NULL || opts.name[0] == '\0')) {
+    g_printerr ("wyctl: missing --name\n");
+    return 2;
+  }
+  gchar minted[WYL_REQUEST_ID_STRING_BUF] = "";
+  const gchar *request_id = NULL;
+  if (sealing) {
+    if (opts.request_id != NULL) {
+      if (!wyl_request_id_is_canonical (opts.request_id)) {
+        g_printerr ("wyctl: invalid --request-id\n");
+        return 2;
+      }
+      request_id = opts.request_id;
+    } else if (wyl_request_id_new (minted, sizeof minted) == WYRELOG_E_OK) {
+      request_id = minted;
+    } else {
+      g_printerr ("wyctl: unable to mint a request id\n");
+      return 2;
+    }
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_tenant_client (global_opts, opts.access_token_file,
+          &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_autofree gchar *command = g_strdup_printf ("tenant %s", action);
+
+  if (listing) {
+    g_auto (WylClientTenantList) tenants = { 0 };
+    wyrelog_error_t rc = wyl_client_tenant_list (client, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &tenants);
+    int exit_rc = fact_remote_exit (client, command, rc,
+            "tenant_list_failed");
+    if (exit_rc != 0)
+      return exit_rc;
+    for (gsize i = 0; i < tenants.len; i++) {
+      g_autofree gchar *tenant_id =
+          g_uri_escape_string (tenants.items[i].tenant_id, NULL, TRUE);
+      g_print ("tenant=%s sealed=%s\n", tenant_id,
+          tenants.items[i].sealed ? "true" : "false");
+    }
+    return 0;
+  }
+
+  gboolean changed = FALSE;
+  wyrelog_error_t rc;
+  if (sealing)
+    rc = wyl_client_tenant_seal (client, opts.name, request_id,
+            guard_timestamp, opts.guard_loc_class, guard_risk, &changed);
+  else if (g_strcmp0 (action, "create") == 0)
+    rc = wyl_client_tenant_create (client, opts.name, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &changed);
+  else
+    rc = wyl_client_tenant_unseal (client, opts.name, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &changed);
+  g_autofree gchar *fallback = g_strdup_printf ("tenant_%s_failed", action);
+  int exit_rc = fact_remote_exit (client, command, rc, fallback);
+  g_autofree gchar *tenant = g_uri_escape_string (opts.name, NULL, TRUE);
+  if (exit_rc == 0) {
+    if (sealing)
+      g_print ("tenant=%s changed=%s request_id=%s\n", tenant,
+          changed ? "true" : "false", request_id);
+    else
+      g_print ("tenant=%s changed=%s\n", tenant, changed ? "true" : "false");
+    return 0;
+  }
+  guint status = wyl_client_get_last_http_status (client);
+  g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
+  /* The daemon keeps one pending repair for all tenants: after a tenant
+   * change fails past its commit, every tenant change is refused until
+   * that same change is repeated. */
+  gboolean pending = g_strcmp0 (error_code,
+          "tenant_mutation_unavailable") == 0;
+  gboolean unknown = (rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
+      || status / 100 == 5;
+  /* A seal's own id is the key to its repair, whatever the failure: print
+   * it as a fact before any advice. */
+  if (sealing)
+    g_printerr ("wyctl: tenant seal request_id=%s\n", request_id);
+  if (pending)
+    g_printerr ("wyctl: a tenant change that failed, this one or an earlier "
+        "one, may be pending; repeat it (a seal with its --request-id) "
+        "before other tenant changes\n");
+  if (sealing && status == 409)
+    g_printerr ("wyctl: seal request_id=%s cannot apply: the tenant changed "
+        "after it was recorded, or the id belongs to another request; "
+        "`wyctl tenant list` shows the tenant's state; seal again without "
+        "--request-id if it still needs sealing\n", request_id);
+  else if (sealing && unknown && !pending)
+    g_printerr ("wyctl: the seal outcome is unknown; repeat it with "
+        "--request-id %s, not a new id\n", request_id);
+  else if (!pending && unknown)
+    g_printerr ("wyctl: the outcome is unknown; repeating the same tenant %s "
+        "is safe\n", action);
+  return exit_rc;
+}
+
+static int
+run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing tenant command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "list");
+  if (g_strcmp0 (argv[1], "create") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "create");
+  if (g_strcmp0 (argv[1], "seal") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "seal");
+  if (g_strcmp0 (argv[1], "unseal") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "unseal");
+  g_printerr ("wyctl: unknown tenant command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -6346,7 +6587,8 @@ main (int argc, char **argv)
       "Commands:\n"
       "  status                     Check daemon health and readiness\n"
       "  policy                     Check decisions and manage permissions/roles\n"
-      "  graph                      Create and inspect fact graphs\n"
+      "  tenant                     List, create, seal and unseal tenants\n"
+      "  graph                      Create, list and seal fact graphs\n"
       "  fact                       Manage schemas, facts, and quotas\n"
       "  datalog                    Query stored facts\n"
       "  audit                      Query the audit trail\n"
@@ -6387,6 +6629,8 @@ main (int argc, char **argv)
     return run_status (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "policy") == 0)
     return run_policy (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "tenant") == 0)
+    return run_tenant (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "graph") == 0)
     return run_graph (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "fact") == 0)
