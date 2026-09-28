@@ -7479,6 +7479,35 @@ check_policy_store_auditor_role_direct_admin_sod_fails_open (void)
 }
 
 static gint
+check_policy_store_auditor_role_direct_control_sod_fails_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 1600;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
+      != WYRELOG_E_OK)
+    return 1601;
+  if (wyl_policy_store_upsert_permission (store, "wr.tenant.manage",
+      "tenant manage", "critical") != WYRELOG_E_OK)
+    return 1602;
+  if (wyl_policy_store_grant_role_membership (store, "mixed-control-user",
+      "wr.auditor", "mixed-scope") != WYRELOG_E_OK)
+    return 1603;
+  if (wyl_policy_store_grant_direct_permission (store, "mixed-control-user",
+      "wr.tenant.manage", "mixed-scope") != WYRELOG_E_OK)
+    return 1604;
+
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 1605;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 1606;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 1607;
+}
+
+static gint
 check_policy_store_custom_role_permission_sod_fails_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -8036,6 +8065,9 @@ main (int argc, char **argv)
   if ((rc = check_policy_store_direct_audit_role_admin_sod_fails_open ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_auditor_role_direct_admin_sod_fails_open ())
+      != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_policy_store_auditor_role_direct_control_sod_fails_open ())
       != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_policy_store_custom_role_permission_sod_fails_open ()) != 0)
