@@ -18596,9 +18596,10 @@ wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
              out_digest);
 }
 
-wyrelog_error_t
-wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
-    const gchar *tenant_id, WylPolicyFactBackupSnapshot **out_snapshot)
+static wyrelog_error_t
+read_fact_backup_snapshot (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyFactBackupSnapshot **out_snapshot)
 {
   if (out_snapshot != NULL)
     *out_snapshot = NULL;
@@ -18628,7 +18629,16 @@ wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_read_tenant_authority (store, tenant_id,
             &snapshot->tenant);
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK && graph_id != NULL) {
+    WylPolicyGraphAuthorityRecord *authority = NULL;
+    rc = wyl_policy_store_read_graph_authority (store, tenant_id, graph_id,
+            &authority);
+    if (rc == WYRELOG_E_OK) {
+      authorities = g_ptr_array_new_with_free_func
+            ((GDestroyNotify) wyl_policy_graph_authority_record_free);
+      g_ptr_array_add (authorities, authority);
+    }
+  } else if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_list_graph_authorities (store, tenant_id,
             &authorities);
   for (guint i = 0; rc == WYRELOG_E_OK && i < authorities->len; i++) {
@@ -18660,6 +18670,26 @@ wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
   }
   *out_snapshot = snapshot;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_fact_backup_snapshot (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyFactBackupSnapshot **out_snapshot)
+{
+  return read_fact_backup_snapshot (store, tenant_id, NULL, out_snapshot);
+}
+
+wyrelog_error_t
+wyl_policy_store_read_fact_graph_backup_snapshot (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyFactBackupSnapshot **out_snapshot)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  return read_fact_backup_snapshot (store, tenant_id, graph_id, out_snapshot);
 }
 
 static wyrelog_error_t
@@ -21036,9 +21066,9 @@ wyl_policy_store_graph_provisioning_set_darwin_evidence (
   return rc;
 }
 
-wyrelog_error_t
-wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
-    const gchar *tenant_id, GPtrArray **out_records)
+static wyrelog_error_t
+graph_provisioning_list (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, GPtrArray **out_records)
 {
   if (out_records != NULL)
     *out_records = NULL;
@@ -21047,7 +21077,10 @@ wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
       && !wyl_policy_store_tenant_id_is_valid (tenant_id)))
     return WYRELOG_E_INVALID;
   g_rec_mutex_lock (&store->graph_authority_mutex);
-  const gchar *sql = tenant_id == NULL ?
+  const gchar *sql = graph_id != NULL ?
+      "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
+      " FROM fact_graph_provisioning WHERE tenant_id=? AND graph_id=? "
+      "ORDER BY op_uuid;" : tenant_id == NULL ?
       "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
       " FROM fact_graph_provisioning ORDER BY tenant_id,graph_id,op_uuid;" :
       "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
@@ -21058,6 +21091,8 @@ wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc == WYRELOG_E_OK && tenant_id != NULL)
     rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK && graph_id != NULL)
+    rc = bind_text (stmt, 2, graph_id);
   int step = SQLITE_ERROR;
   while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
     WylPolicyGraphProvisioningRecord *record = NULL;
@@ -21074,6 +21109,25 @@ wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
     g_ptr_array_unref (records);
   g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
+    const gchar *tenant_id, GPtrArray **out_records)
+{
+  return graph_provisioning_list (store, tenant_id, NULL, out_records);
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_list_for_graph (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  return graph_provisioning_list (store, tenant_id, graph_id, out_records);
 }
 
 wyrelog_error_t

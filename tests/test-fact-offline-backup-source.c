@@ -1004,6 +1004,7 @@ typedef struct
   gboolean record_preflight;
   WylFactOfflineRestoreJournal committed;
   guint writes;
+  const gchar *selected_graph;
 } SessionFixture;
 
 static wyrelog_error_t
@@ -1035,11 +1036,13 @@ session_assert_authority (SessionFixture *f, gboolean retained)
   for (guint i = 0; i < 2; i++) {
     if (f->snapshots[i] == NULL)
       continue;
+    gboolean excluded = retained && (f->selected_graph == NULL
+        || g_str_equal (f->selected_graph, i == 0 ? "alpha" : "zeta"));
     guint calls = 0;
     g_assert_cmpint (wyl_fact_graph_snapshot_use (f->snapshots[i],
         session_snapshot_callback, &calls), ==,
-        retained ? WYRELOG_E_BUSY : WYRELOG_E_OK);
-    g_assert_cmpuint (calls, ==, retained ? 0 : 1);
+        excluded ? WYRELOG_E_BUSY : WYRELOG_E_OK);
+    g_assert_cmpuint (calls, ==, excluded ? 0 : 1);
   }
 }
 
@@ -1139,12 +1142,13 @@ session_stage_one_graph (SessionFixture *f, guint index)
   WylFactOfflineRestoreStoreResult result;
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
         (f->fixture.policy, session_operation, &journal), ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
   g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
         (&journal, graph, &identity), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
-        (f->fixture.policy, index + 1, &journal, &result, &committed), ==, WYRELOG_E_OK);
+        (f->fixture.policy, revision, &journal, &result, &committed), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
-  g_assert_cmpuint (committed.revision, ==, index + 2);
+  g_assert_cmpuint (committed.revision, ==, revision + 1);
   wyl_fact_offline_restore_journal_clear (&journal);
   wyl_fact_offline_restore_journal_clear (&committed);
 }
@@ -1187,9 +1191,11 @@ session_remove_main_pair (SessionFixture *f, gboolean leave_companion)
 }
 
 static void
-session_fixture_init (SessionFixture *f, const gchar *mode)
+session_fixture_init_selected (SessionFixture *f, const gchar *mode,
+    const gchar *selected_graph)
 {
   f->mode = mode;
+  f->selected_graph = selected_graph;
   fixture_init (&f->fixture, "wyl-restore-session-XXXXXX");
   create_tenant (&f->fixture);
   const gchar *graphs[] = { "alpha", "zeta" };
@@ -1265,15 +1271,17 @@ session_fixture_init (SessionFixture *f, const gchar *mode)
   g_assert_cmpint (wyl_fact_offline_backup_generate (source,
       &capture_destination, &f->capture), ==, WYRELOG_E_OK);
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
-  gboolean graph_scope = g_str_equal (mode, "graph-scope");
+  gboolean graph_scope = selected_graph != NULL || g_str_equal (mode, "graph-scope");
   create_restore_journal_for_manifest_internal (&f->fixture,
       f->capture.manifest, graph_scope ? WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       : WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
-      graph_scope ? "alpha" : NULL, session_operation,
+      selected_graph != NULL ? selected_graph : graph_scope ? "alpha" : NULL, session_operation,
       !(g_str_equal (mode, "main-absence-violated")
       || g_str_equal (mode, "stage-only")
       || g_str_equal (mode, "orphan-provision")), mode);
-  if (g_str_equal (mode, "partial-staging"))
+  if (selected_graph != NULL)
+    session_stage_one_graph (f, g_str_equal (selected_graph, "alpha") ? 0 : 1);
+  else if (g_str_equal (mode, "partial-staging"))
     session_stage_one_graph (f, 0);
   else if (g_str_equal (mode, "untrusted") || g_str_equal (mode, "unconfirmed")) {
     session_stage_one_graph (f, 0);
@@ -1305,6 +1313,12 @@ session_fixture_init (SessionFixture *f, const gchar *mode)
   f->journal_before = session_journal_bytes (f);
   f->cancel = g_cancellable_new ();
   session_assert_authority (f, FALSE);
+}
+
+static void
+session_fixture_init (SessionFixture *f, const gchar *mode)
+{
+  session_fixture_init_selected (f, mode, NULL);
 }
 
 static void
@@ -1650,6 +1664,195 @@ test_restore_observational_session_cannot_record (void)
 }
 
 static void
+graph_corrupt_provision (SessionFixture *f, const gchar *graph)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "PRAGMA ignore_check_constraints=ON;"
+    "UPDATE fact_graph_provisioning SET updated_at='malformed' "
+    "WHERE tenant_id='tenant-a' AND graph_id='%s';"
+    "PRAGMA ignore_check_constraints=OFF;", graph);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f->fixture.policy),
+      sql, NULL, NULL, NULL), ==, SQLITE_OK);
+}
+
+static void
+graph_corrupt_schema (SessionFixture *f, const gchar *graph)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "UPDATE fact_relation_activation SET last_error_class='schema' "
+    "WHERE tenant_id='tenant-a' AND graph_id='%s';", graph);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f->fixture.policy),
+      sql, NULL, NULL, NULL), ==, SQLITE_OK);
+}
+
+static wyrelog_error_t
+graph_session_checkpoint (const gchar *graph, gpointer data)
+{
+  SessionFixture *f = data;
+  g_assert_cmpstr (graph, ==, f->selected_graph);
+  f->checkpoints++;
+  session_assert_authority (f, TRUE);
+  if (g_str_equal (f->mode, "cancel"))
+    g_cancellable_cancel (f->cancel);
+  if (g_str_equal (f->mode, "tenant-change"))
+    mutate_tenant_after_snapshot (&f->capture);
+  if (g_str_equal (f->mode, "late-corrupt"))
+    session_corrupt_stage (f, graph);
+  if (g_str_equal (f->mode, "selected-provision-late"))
+    graph_corrupt_provision (f, graph);
+  if (g_str_equal (f->mode, "sibling-provision-late"))
+    graph_corrupt_provision (f, g_str_equal (graph, "alpha") ? "zeta" : "alpha");
+  if (g_str_equal (f->mode, "selected-schema-late"))
+    graph_corrupt_schema (f, graph);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_record_checkpoint (const gchar *graph, guint64 revision,
+    gboolean after_write, gpointer data)
+{
+  SessionFixture *f = data;
+  g_assert_cmpstr (graph, ==, f->selected_graph);
+  session_assert_authority (f, TRUE);
+  g_assert_cmpuint (revision, ==, after_write ? 3 : 2);
+  if (after_write)
+    f->writes++;
+  return after_write && g_str_equal (f->mode, "after-write-failure")
+         ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+test_graph_scoped_session (gconstpointer data)
+{
+  const gchar *name = data;
+  const gchar *selected = g_str_has_prefix (name, "alpha/") ? "alpha" : "zeta";
+  const gchar *mode = strchr (name, '/') + 1;
+  const gchar *sibling = g_str_equal (selected, "alpha") ? "zeta" : "alpha";
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f,
+      g_str_equal (mode, "missing-sibling-runtime")
+      || g_str_equal (mode, "missing-selected-runtime") ? "missing-runtime" : "success", selected);
+  f.mode = mode;
+  f.record_preflight = !g_str_equal (mode, "observe");
+  if (g_str_equal (mode, "sibling-schema"))
+    graph_corrupt_schema (&f, sibling);
+  if (g_str_equal (mode, "sibling-provision"))
+    graph_corrupt_provision (&f, sibling);
+  if (g_str_equal (mode, "selected-provision"))
+    graph_corrupt_provision (&f, selected);
+  if (g_str_equal (mode, "sibling-artifact")) {
+    g_autofree gchar *path = graph_file_path (&f.fixture, sibling, "foreign");
+    g_assert_true (g_file_set_contents (path, "foreign", -1, NULL));
+  }
+  WylFactGraphKey sibling_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&sibling_key, "tenant-a", sibling), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  gboolean has_sibling = !g_str_equal (mode, "missing-sibling-runtime");
+  if (has_sibling)
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &sibling_key, &before), ==, WYRELOG_E_OK);
+  g_autoptr (GHashTable) files = session_graph_files (&f);
+  wyrelog_error_t rc = f.record_preflight
+      ? wyl_fact_offline_restore_validation_session_new_for_preflight
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+          session_operation, 2, 0, &f.session)
+      : wyl_fact_offline_restore_validation_session_new
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+          session_operation, 2, 0, &f.session);
+  gboolean constructor_failure = g_str_equal (mode, "selected-provision")
+      || g_str_equal (mode, "missing-selected-runtime");
+  if (constructor_failure) {
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_null (f.session);
+  } else {
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    session_assert_authority (&f, TRUE);
+    wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
+      (f.session, graph_session_checkpoint, &f);
+    wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
+      (f.session, graph_record_checkpoint, &f);
+    rc = session_run_worker (&f);
+    gboolean failed = g_str_equal (mode, "cancel") || g_str_equal (mode, "tenant-change")
+        || g_str_equal (mode, "late-corrupt") || g_str_equal (mode, "selected-schema-late")
+        || g_str_equal (mode, "selected-provision-late") || g_str_equal (mode, "after-write-failure");
+    if (failed) {
+      g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+      g_assert_null (f.committed.graphs);
+      g_assert_cmpuint (f.writes, ==, g_str_equal (mode, "after-write-failure") ? 1 : 0);
+      if (!g_str_equal (mode, "after-write-failure")) {
+        g_autoptr (GBytes) unchanged = session_journal_bytes (&f);
+        g_assert_true (g_bytes_equal (unchanged, f.journal_before));
+      }
+      session_assert_authority (&f, FALSE);
+      g_cancellable_reset (f.cancel);
+      g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_INVALID);
+    } else {
+      g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+      g_assert_cmpuint (f.checkpoints, ==, 1);
+      session_assert_authority (&f, TRUE);
+      if (!f.record_preflight) {
+        g_assert_cmpuint (f.result.checked_graph_count, ==, 1);
+        g_assert_cmpuint (f.result.validated_revision, ==, 2);
+        g_autoptr (GBytes) journal = session_journal_bytes (&f);
+        g_assert_true (g_bytes_equal (journal, f.journal_before));
+      } else {
+        g_assert_cmpuint (f.committed.revision, ==, 3);
+        g_assert_cmpuint (f.committed.graphs->len, ==, 1);
+        g_assert_cmpstr (f.committed.selected_graph_id, ==, selected);
+        g_assert_cmpuint (f.writes, ==, 1);
+        wyl_fact_offline_restore_journal_clear (&f.committed);
+        g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+        g_assert_cmpuint (f.writes, ==, 1);
+        g_assert_cmpuint (f.checkpoints, ==, 2);
+      }
+      session_assert_files_unchanged (&f, files);
+    }
+  }
+  g_clear_pointer (&f.session, wyl_fact_offline_restore_validation_session_free);
+  if (g_str_equal (mode, "record") || g_str_equal (mode, "after-write-failure")) {
+    f.mode = "record";
+    g_assert_cmpint (wyl_fact_offline_restore_validation_session_new
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+        session_operation, 3, 0, &f.session), ==, WYRELOG_E_POLICY);
+    g_assert_null (f.session);
+    g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+        session_operation, 3, 0, &f.session), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
+      (f.session, graph_session_checkpoint, &f);
+    guint checkpoints = f.checkpoints;
+    f.record_preflight = FALSE;
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.result.checked_graph_count, ==, 1);
+    g_assert_cmpuint (f.result.validated_revision, ==, 3);
+    f.record_preflight = TRUE;
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.checkpoints, ==, checkpoints + 2);
+    g_assert_cmpuint (f.committed.revision, ==, 3);
+    session_corrupt_stage (&f, selected);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_assert_cmpint (session_run_worker (&f), !=, WYRELOG_E_OK);
+    g_assert_null (f.committed.graphs);
+  }
+  if (has_sibling) {
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &sibling_key, &after), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (before.operation_generation, ==, after.operation_generation);
+    g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+    g_assert_cmpint (before.admission, ==, after.admission);
+    g_assert_cmpint (before.state, ==, after.state);
+  }
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  wyl_fact_graph_key_clear (&sibling_key);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
 test_restore_validation_session_constructor_rejects (gconstpointer data)
 {
   SessionFixture f = { 0 };
@@ -1740,6 +1943,16 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
 #ifndef G_OS_WIN32
+  const gchar *graph_modes[] = { "alpha/observe", "zeta/observe", "alpha/record", "zeta/record",
+                                 "alpha/missing-sibling-runtime", "zeta/missing-selected-runtime",
+                                 "zeta/sibling-schema", "zeta/sibling-provision", "alpha/sibling-artifact",
+                                 "zeta/sibling-provision-late", "zeta/selected-provision", "zeta/selected-provision-late",
+                                 "zeta/selected-schema-late", "zeta/tenant-change", "zeta/cancel",
+                                 "zeta/late-corrupt", "zeta/after-write-failure" };
+  for (guint i = 0; i < G_N_ELEMENTS (graph_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/graph/", graph_modes[i], NULL);
+    g_test_add_data_func (path, graph_modes[i], test_graph_scoped_session);
+  }
   g_test_add_func ("/fact-offline-backup-source/record/observational-refused",
       test_restore_observational_session_cannot_record);
   const gchar *record_modes[] = { "success", "partial", "nonprefix", "full",
