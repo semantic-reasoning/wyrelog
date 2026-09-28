@@ -1725,6 +1725,16 @@ main (void)
   assert_wyctl_stdout_contains (tenant_list_argv,
       "tenant=wyctl-t1 sealed=false\n");
 
+  /* #1238: the unauthenticated profile report. */
+  gchar *profile_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "profile", "status",
+    NULL,
+  };
+  assert_wyctl_stdout (profile_status_argv, "profile=system system_url=none "
+      "event_spool_dir=none event_queue_limit=0\n");
+
   g_unlink (token_path);
 
   g_main_loop_quit (http.loop);

@@ -10,6 +10,20 @@
 
 G_BEGIN_DECLS;
 
+/* GET /profile/status: which profile the daemon runs and where it forwards
+ * events.  system_url and event_spool_dir are NULL when not configured. */
+typedef struct
+{
+  gchar *profile;
+  gchar *system_url;
+  gchar *event_spool_dir;
+  guint32 event_queue_limit;
+} WylClientProfileStatus;
+
+void wyl_client_profile_status_clear (WylClientProfileStatus * value);
+wyrelog_error_t wyl_client_profile_status_decode (const gchar * document,
+    gsize document_len, WylClientProfileStatus * out_status);
+
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
 void wyl_client_service_credential_handoff_receipt_clear
   (WylClientServiceCredentialHandoffReceipt * value);

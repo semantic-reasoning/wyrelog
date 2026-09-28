@@ -4747,6 +4747,58 @@ test_tenant_refusals (void)
   }
 }
 
+static void
+test_profile_status (void)
+{
+  static const gchar *const args[] = {"profile", "status", NULL};
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"profile\":\"service\","
+      "\"system_url\":\"http://127.0.0.1:8765\","
+      "\"event_spool_dir\":\"/var/spool/wy relog\",\"event_queue_limit\":64}",
+      NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "profile=service "
+      "system_url=http://127.0.0.1:8765 "
+      "event_spool_dir=/var/spool/wy%20relog event_queue_limit=64\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_true (g_str_has_prefix (run.request, "GET /profile/status "));
+  g_assert_null (g_strstr_len (run.request, -1, "Authorization"));
+
+  g_auto (FactForgetRun) plain = { 0 };
+  run_fake_daemon_case (200, "{\"profile\":\"system\",\"system_url\":null,"
+      "\"event_spool_dir\":null,\"event_queue_limit\":0}", NULL, args, FALSE,
+      &plain);
+  assert_fact_forget_exit (&plain, 0);
+  g_assert_cmpstr (plain.out, ==, "profile=system system_url=none "
+      "event_spool_dir=none event_queue_limit=0\n");
+
+  g_auto (FactForgetRun) failed = { 0 };
+  run_fake_daemon_case (503, "{\"error\":\"not_ready\"}", NULL, args, FALSE,
+      &failed);
+  assert_fact_forget_exit (&failed, 1);
+  g_assert_cmpstr (failed.out, ==, "");
+  g_assert_cmpstr (failed.err, ==,
+      "wyctl: profile status failed: not_ready\n");
+
+  static const gchar *const invalid_bodies[] = {
+    "{}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":0,\"extra\":1}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":4294967296}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_bodies); i++) {
+    g_auto (FactForgetRun) invalid = { 0 };
+    run_fake_daemon_case (200, invalid_bodies[i], NULL, args, FALSE,
+        &invalid);
+    assert_fact_forget_exit (&invalid, 3);
+    g_assert_cmpstr (invalid.out, ==, "");
+    g_assert_cmpstr (invalid.err, ==,
+        "wyctl: profile status failed: invalid daemon response\n");
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -4871,6 +4923,7 @@ main (int argc, char **argv)
       test_tenant_list_and_create);
   g_test_add_func ("/wyctl/tenant-seal", test_tenant_seal);
   g_test_add_func ("/wyctl/tenant-refusals", test_tenant_refusals);
+  g_test_add_func ("/wyctl/profile-status", test_profile_status);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",

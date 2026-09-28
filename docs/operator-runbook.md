@@ -2337,9 +2337,14 @@ The daemon's error code is printed on stderr for every remote failure.
 - Profile status:
 
   ```sh
-  curl -fsS http://127.0.0.1:8765/profile/status
-  curl -fsS http://127.0.0.1:8766/profile/status
+  wyctl --daemon-url http://127.0.0.1:8765 profile status
+  wyctl --daemon-url http://127.0.0.1:8766 profile status
   ```
+
+  Each prints `profile=<system|service> system_url=<url|none>
+  event_spool_dir=<path|none> event_queue_limit=<n>`. The route needs no
+  credential; wyctl exits 1 when the daemon is unavailable or answers with an
+  error.
 
   Service-profile event forwarding targets
   `http://127.0.0.1:8765/profile/events`. If the system profile is not
