@@ -6843,9 +6843,18 @@ check_audit_scope_rejects_cross_scope_privilege (void)
       "separate-auditor", "wr.auditor", "__wr_default", TRUE)
       != WYRELOG_E_OK
       || wyl_policy_store_apply_direct_permission_mutation (store,
-      "separate-auditor", "wr.fact.read", "tenant-z", TRUE)
+      "separate-auditor", "wr.stream.read", "tenant-z", TRUE)
       != WYRELOG_E_OK)
     return 9407;
+  /* fact.read is control-plane authority despite its read-only name. */
+  gboolean fact_read_exists = FALSE;
+  if (wyl_policy_store_apply_direct_permission_mutation (store,
+      "separate-auditor", "wr.fact.read", "tenant-z", TRUE)
+      != WYRELOG_E_POLICY
+      || wyl_policy_store_direct_permission_exists (store,
+      "separate-auditor", "wr.fact.read", "tenant-z",
+      &fact_read_exists) != WYRELOG_E_OK || fact_read_exists)
+    return 9408;
 
   if (wyl_policy_store_upsert_role (store, "site.audit-reader",
       "custom audit reader") != WYRELOG_E_OK
@@ -6866,8 +6875,19 @@ check_audit_scope_rejects_cross_scope_privilege (void)
 static gint
 check_audit_so_d_permission_taxonomy (void)
 {
-  static const gchar *const incompatible_permissions[] = {
-    WYL_AUDIT_INCOMPATIBLE_PERMISSION_IDS
+  /* Keep this expected data-plane allowlist independent of the SQL builder.
+   * Iterating the built-in catalog then detects a new control permission that
+   * validation forgot, including permissions granted by custom roles. */
+  static const gchar *const expected_data_permissions[] = {
+    "wr.stream.read", "wr.stream.list", "wr.svc.read_decision"
+  };
+  static const gchar *const required_control_permissions[] = {
+    "wr.sys.admin", "wr.svc.admin", "wr.policy.write",
+    "wr.policy.grant_role", "wr.svc.grant_role", "wr.tenant.manage",
+    "wr.sys.key_rotate", "wr.sys.reload_template",
+    "wr.service_principal.manage", "wr.service_credential.manage",
+    "wr.service.self_authorize", "wr.svc.unfreeze", "wr.audit.write",
+    "wr.sys.merkle_seal"
   };
   static const gchar *const incompatible_roles[] = {
     WYL_AUDIT_INCOMPATIBLE_ROLE_IDS
@@ -6886,13 +6906,47 @@ check_audit_so_d_permission_taxonomy (void)
         != WYRELOG_E_OK)
       return 9412;
   }
-  for (gsize i = 0; i < G_N_ELEMENTS (incompatible_permissions); i++) {
+  for (gsize i = 0; i < G_N_ELEMENTS (required_control_permissions); i++) {
+    wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_LAST_;
+    gboolean exists = FALSE;
+    if (wyl_policy_store_permission_exists (store,
+        required_control_permissions[i], &exists) != WYRELOG_E_OK || !exists
+        || wyl_policy_store_permission_plane (store,
+        required_control_permissions[i], &plane) != WYRELOG_E_OK
+        || plane != WYL_PERMISSION_PLANE_CONTROL)
+      return 9419;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (expected_data_permissions); i++) {
+    wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_LAST_;
+    if (wyl_policy_store_permission_plane (store,
+        expected_data_permissions[i], &plane) != WYRELOG_E_OK
+        || plane != WYL_PERMISSION_PLANE_DATA)
+      return 9420;
+    if (wyl_policy_store_apply_direct_permission_mutation (store,
+        "direct-audit-reader", expected_data_permissions[i], "tenant-a",
+        TRUE) != WYRELOG_E_OK)
+      return 9421;
+  }
+  for (gsize i = 0; i < wyl_policy_store_builtin_permission_count (); i++) {
+    const gchar *permission = wyl_policy_store_builtin_permission_id (i);
+    wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_LAST_;
+    gboolean expected_data = FALSE;
+    for (gsize j = 0; j < G_N_ELEMENTS (expected_data_permissions); j++)
+      expected_data |= g_str_equal (permission, expected_data_permissions[j]);
+    if (wyl_policy_store_permission_plane (store, permission, &plane)
+        != WYRELOG_E_OK
+        || plane != (expected_data ? WYL_PERMISSION_PLANE_DATA
+                      : WYL_PERMISSION_PLANE_CONTROL))
+      return 9422;
+    if (expected_data || g_str_equal (permission, "wr.audit.read")
+        || g_str_equal (permission, "wr.audit.explain"))
+      continue;
     gboolean exists = FALSE;
     if (wyl_policy_store_apply_direct_permission_mutation (store,
-        "direct-audit-reader", incompatible_permissions[i], "tenant-a",
-        TRUE) != WYRELOG_E_POLICY
+        "direct-audit-reader", permission, "tenant-a", TRUE)
+        != WYRELOG_E_POLICY
         || wyl_policy_store_direct_permission_exists (store,
-        "direct-audit-reader", incompatible_permissions[i], "tenant-a",
+        "direct-audit-reader", permission, "tenant-a",
         &exists) != WYRELOG_E_OK || exists)
       return 9413;
   }
@@ -6917,7 +6971,14 @@ check_audit_so_d_permission_taxonomy (void)
       return 9418;
   }
 
-  for (gsize i = 0; i < G_N_ELEMENTS (incompatible_permissions); i++) {
+  for (gsize i = 0; i < wyl_policy_store_builtin_permission_count (); i++) {
+    const gchar *permission = wyl_policy_store_builtin_permission_id (i);
+    gboolean expected_data = FALSE;
+    for (gsize j = 0; j < G_N_ELEMENTS (expected_data_permissions); j++)
+      expected_data |= g_str_equal (permission, expected_data_permissions[j]);
+    if (expected_data || g_str_equal (permission, "wr.audit.read")
+        || g_str_equal (permission, "wr.audit.explain"))
+      continue;
     g_clear_pointer (&store, wyl_policy_store_close);
     if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
         || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
@@ -6935,18 +6996,79 @@ check_audit_so_d_permission_taxonomy (void)
         || wyl_policy_store_upsert_role (store, "site.privilege-base",
         "custom incompatible authority") != WYRELOG_E_OK
         || wyl_policy_store_grant_role_permission (store,
-        "site.privilege-base", incompatible_permissions[i])
+        "site.privilege-base", permission)
         != WYRELOG_E_OK
         || wyl_policy_store_upsert_role (store, "site.inherited-privilege",
         "inherited incompatible authority") != WYRELOG_E_OK
         || wyl_policy_store_grant_role_inheritance (store,
         "site.inherited-privilege", "site.privilege-base")
         != WYRELOG_E_OK
-        || wyl_policy_store_grant_role_membership (store, "inherited-auditor",
-        "site.inherited-privilege", "tenant-b") != WYRELOG_E_OK
-        || wyl_policy_store_validate_snapshot (store) != WYRELOG_E_POLICY)
+        || wyl_policy_store_apply_role_membership_mutation (store,
+        "inherited-auditor", "site.inherited-privilege", "tenant-b", TRUE)
+        != WYRELOG_E_POLICY)
       return 9417;
+    gboolean global_role_exists = FALSE;
+    if (wyl_policy_store_role_membership_exists (store,
+        "inherited-auditor", "site.inherited-privilege", "tenant-b",
+        &global_role_exists) != WYRELOG_E_OK || global_role_exists)
+      return 9424;
+    /* The local guard must catch the same custom-role permission when the
+     * auditor has only a tenant-scoped grant, outside the global guard. */
+    if (wyl_policy_store_grant_role_membership (store, "local-auditor",
+        "site.audit-reader", "tenant-c") != WYRELOG_E_OK
+        || wyl_policy_store_apply_role_membership_mutation (store,
+        "local-auditor", "site.inherited-privilege", "tenant-c", TRUE)
+        != WYRELOG_E_POLICY)
+      return 9425;
+    gboolean local_role_exists = FALSE;
+    if (wyl_policy_store_role_membership_exists (store,
+        "local-auditor", "site.inherited-privilege", "tenant-c",
+        &local_role_exists) != WYRELOG_E_OK || local_role_exists)
+      return 9426;
   }
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_upsert_permission (store, "site.control.approve",
+      "custom control", "basic") != WYRELOG_E_OK
+      || wyl_policy_store_upsert_role (store, "site.audit-reader",
+      "custom audit reader") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, "site.audit-reader",
+      "wr.audit.read") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "site-custom-auditor",
+      "site.audit-reader", "__wr_default") != WYRELOG_E_OK
+      || wyl_policy_store_upsert_role (store, "site.control-role",
+      "custom control role") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store,
+      "site.control-role", "site.control.approve") != WYRELOG_E_OK
+      || wyl_policy_store_apply_role_membership_mutation (store,
+      "site-custom-auditor", "site.control-role", "tenant-a", TRUE)
+      != WYRELOG_E_POLICY)
+    return 9423;
+  /* An allowlisted ID becomes CONTROL if its catalog metadata drifts.
+   * Snapshot validation must classify it the same way as the plane API. */
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_upsert_role (store, "site.audit-reader",
+      "custom audit reader") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_permission (store, "site.audit-reader",
+      "wr.audit.read") != WYRELOG_E_OK
+      || wyl_policy_store_grant_role_membership (store, "catalog-auditor",
+      "site.audit-reader", "tenant-a") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (store,
+      "catalog-auditor", "wr.stream.read", "tenant-a") != WYRELOG_E_OK)
+    return 9427;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+      "UPDATE permissions SET class = 'critical' "
+      "WHERE perm_id = 'wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
+    return 9428;
+  wyl_permission_plane_t drifted_plane = WYL_PERMISSION_PLANE_LAST_;
+  if (wyl_policy_store_permission_plane (store, "wr.stream.read",
+      &drifted_plane) != WYRELOG_E_OK
+      || drifted_plane != WYL_PERMISSION_PLANE_CONTROL
+      || wyl_policy_store_validate_snapshot (store) != WYRELOG_E_POLICY)
+    return 9429;
   return 0;
 }
 

@@ -1728,19 +1728,6 @@ wyrelog_error_t wyl_policy_store_validate_service_schema
   (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
 
-/* Any one of these effective permissions makes a principal ineligible to
- * read the profile-wide audit stream, regardless of grant scope. Keep this
- * classification shared by snapshot validation and its regression matrix. */
-#define WYL_AUDIT_INCOMPATIBLE_PERMISSION_IDS \
-  "wr.sys.admin", "wr.sys.key_rotate", "wr.sys.merkle_seal", \
-  "wr.sys.reload_template", "wr.policy.write", "wr.policy.grant_role", \
-  "wr.tenant.manage", "wr.login.skip_mfa", "wr.stream.write_reserved", \
-  "wr.svc.admin", "wr.svc.reload", "wr.svc.flush_cache", \
-  "wr.svc.grant_role", "wr.svc.freeze", "wr.svc.unfreeze", \
-  "wr.service_principal.manage", "wr.service_credential.manage", \
-  "wr.service.self_authorize", "wr.graph.manage", "wr.fact.write", \
-  "wr.schema.manage", "wr.audit.write"
-
 /* Built-in privileged roles remain incompatible even in a store snapshot
  * that has not yet materialized template role_permission rows. */
 #define WYL_AUDIT_INCOMPATIBLE_ROLE_IDS \
