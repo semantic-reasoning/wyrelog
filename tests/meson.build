@@ -3470,6 +3470,21 @@ test('check-wyctl-option-ownership-self-test',
   args : ['--self-test'],
 )
 
+check_wyctl_route_coverage = find_program(
+  '../tools/check-wyctl-route-coverage.py',
+)
+
+test('check-wyctl-route-coverage',
+  check_wyctl_route_coverage,
+  args : [meson.project_source_root()],
+)
+
+test('check-wyctl-route-coverage-self-test',
+  check_wyctl_route_coverage,
+  args : ['--self-test', meson.project_source_root()],
+  timeout : 60,
+)
+
 check_service_credential_escrow_issuer = find_program(
   '../tools/check-service-credential-escrow-issuer.py',
 )
