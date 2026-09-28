@@ -188,6 +188,17 @@ typedef struct
   gchar *guard_timestamp_arg;
   gchar *guard_loc_class;
   gchar *guard_risk_arg;
+  gboolean confirm;
+} WyctlGraphSealOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
 } WyctlFactVerifyOptions;
 
 typedef struct
@@ -470,6 +481,20 @@ wyctl_fact_status_options_clear (WyctlFactStatusOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactStatusOptions,
     wyctl_fact_status_options_clear);
+
+static void
+wyctl_graph_seal_options_clear (WyctlGraphSealOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphSealOptions,
+    wyctl_graph_seal_options_clear);
 
 static void
 wyctl_fact_verify_options_clear (WyctlFactVerifyOptions *opts)
@@ -2102,6 +2127,181 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
 }
 
 static int
+run_graph_list (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlGraphOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- list the tenant's graphs");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Prints one \"graph=<graph> sealed=<bool> schema_version=<n>\" line per\n"
+      "graph.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the graphs were listed.\n"
+      "  2: local arguments, credentials or proxy settings are invalid.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: transport, internal or unreadable-response failure.\n"
+      "  6: authentication failed or is required.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected graph list argument: %s\n", argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc == 1 ? 2 : client_rc;
+  g_auto (WylClientGraphList) graphs = { 0 };
+  wyrelog_error_t rc = wyl_client_graph_list (client, tenant, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &graphs);
+  int exit_rc = fact_remote_exit (client, "graph list", rc,
+          "graph_list_failed");
+  if (exit_rc != 0)
+    return exit_rc;
+  for (gsize i = 0; i < graphs.len; i++) {
+    g_autofree gchar *graph_id = g_uri_escape_string (graphs.items[i].graph_id,
+            NULL, TRUE);
+    g_print ("graph=%s sealed=%s schema_version=%u\n", graph_id,
+        graphs.items[i].sealed ? "true" : "false",
+        (guint) graphs.items[i].schema_version);
+  }
+  return 0;
+}
+
+/* Seal one graph.  It cannot be undone, so the target must be typed on the
+ * command line: --confirm, --tenant and --graph are checked before any file
+ * is read or request is sent, and the tenant and graph never fall back to
+ * the configured defaults. */
+static int
+run_graph_seal (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlGraphSealOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Tenant (required; no configured default)", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph,
+     "Graph (required; no configured default)", "GRAPH"},
+    {"confirm", 0, 0, G_OPTION_ARG_NONE, &opts.confirm,
+     "Confirm the irreversible seal", NULL},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- seal one graph against further writes");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "A sealed graph stays queryable but refuses append, retract and forget.\n"
+      "The seal cannot be undone.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the graph is sealed.\n"
+      "  2: local arguments, credentials or proxy settings are invalid;\n"
+      "     nothing was sent.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy.\n"
+      "  5: missing graph; busy, transport, internal or unreadable-response\n"
+      "     failure.  Without a readable answer the outcome is unknown;\n"
+      "     `wyctl graph list` shows whether the graph is sealed.\n"
+      "  6: authentication failed or is required.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected graph seal argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (!opts.confirm) {
+    g_printerr ("wyctl: graph seal cannot be undone; pass --confirm\n");
+    return 2;
+  }
+  if (opts.tenant == NULL || opts.tenant[0] == '\0' || opts.graph == NULL
+      || opts.graph[0] == '\0') {
+    g_printerr ("wyctl: graph seal needs --tenant and --graph on the command "
+        "line\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, opts.tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc == 1 ? 2 : client_rc;
+  wyrelog_error_t rc = wyl_client_graph_seal (client, opts.tenant, opts.graph,
+          guard_timestamp, opts.guard_loc_class, guard_risk);
+  int exit_rc = fact_remote_exit (client, "graph seal", rc,
+          "graph_seal_failed");
+  g_autofree gchar *tenant = g_uri_escape_string (opts.tenant, NULL, TRUE);
+  g_autofree gchar *graph = g_uri_escape_string (opts.graph, NULL, TRUE);
+  if (exit_rc == 0) {
+    g_print ("tenant=%s graph=%s sealed=true\n", tenant, graph);
+    return 0;
+  }
+  guint status = wyl_client_get_last_http_status (client);
+  if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
+      || status / 100 == 5)
+    g_printerr ("wyctl: the seal outcome is unknown; `wyctl graph list` "
+        "shows whether the graph is sealed\n");
+  return exit_rc;
+}
+
+static int
 run_graph (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -2110,6 +2310,10 @@ run_graph (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "create") == 0)
     return run_graph_create (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_graph_list (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "seal") == 0)
+    return run_graph_seal (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown graph command: %s\n", argv[1]);
   return 2;
 }

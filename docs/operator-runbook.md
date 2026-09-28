@@ -1560,6 +1560,34 @@ refuses an existing or sealed graph -- so an erasure request that arrives for
 an already-sealed graph has no in-product remedy. Seal only after any pending
 erasure work is complete.
 
+List a tenant's graphs, and whether each is sealed, with `wyctl graph list`,
+which needs `wr.graph.manage`:
+
+```sh
+wyctl --daemon-url "$BASE_URL" graph list \
+  --tenant "$TENANT" --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints one `graph=<graph> sealed=<bool> schema_version=<n>` line per graph.
+Seal a graph with `wyctl graph seal`, which needs the same permission. Because
+the seal cannot be undone, it
+requires `--confirm` and a `--tenant` and `--graph` typed on the command line;
+the configured defaults are never its target.
+
+```sh
+wyctl --daemon-url "$BASE_URL" graph seal \
+  --tenant "$TENANT" --graph "$GRAPH" --confirm \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `tenant=<tenant> graph=<graph> sealed=true`, also when the graph
+was already sealed, so a re-run is safe. Exit 5 with
+`graph_not_found` means no such graph. On no response or another 5xx the
+outcome is unknown, and wyctl says so; `wyctl graph list` then shows whether
+the graph is sealed.
+
 One case is recoverable, and it is worth distinguishing from the above. A forget
 is durable in two steps: a PENDING intent, then the deletion and its completion.
 If the daemon dies between them, the intent survives and nothing in the request

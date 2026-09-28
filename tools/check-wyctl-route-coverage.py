@@ -66,6 +66,8 @@ COVERAGE = {
     "/auth/refresh": ("auth", "refresh"),
     "/auth/logout": ("auth", "logout"),
     "/graphs/create": ("graph", "create"),
+    "/graphs": ("graph", "list"),
+    "/graphs/seal": ("graph", "seal"),
     "/decide": ("policy", "check"),
     "/policy/permissions/grant": ("policy", "permission-grant"),
     "/policy/permissions/revoke": ("policy", "permission-revoke"),
@@ -101,8 +103,6 @@ UNSUPPORTED = {
 }
 
 PENDING = {
-    "/graphs": ("graph", "list"),
-    "/graphs/seal": ("graph", "seal"),
     "/tenants": ("tenant", "list"),
     "/tenants/create": ("tenant", "create"),
     "/tenants/seal": ("tenant", "seal"),

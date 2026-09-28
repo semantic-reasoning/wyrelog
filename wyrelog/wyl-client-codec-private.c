@@ -520,6 +520,127 @@ invalid:
 }
 
 void
+wyl_client_graph_clear (WylClientGraph *value)
+{
+  if (value == NULL)
+    return;
+  g_clear_pointer (&value->tenant_id, g_free);
+  g_clear_pointer (&value->graph_id, g_free);
+  memset (value, 0, sizeof *value);
+}
+
+void
+wyl_client_graph_list_clear (WylClientGraphList *value)
+{
+  if (value == NULL)
+    return;
+  for (gsize i = 0; i < value->len; i++)
+    wyl_client_graph_clear (&value->items[i]);
+  g_clear_pointer (&value->items, g_free);
+  value->len = 0;
+}
+
+static gboolean
+parse_graph_object (JsonCursor *cursor, WylClientGraph *out)
+{
+  gchar *key = NULL;
+  gboolean seen_tenant = FALSE, seen_graph = FALSE, seen_sealed = FALSE;
+  gboolean seen_version = FALSE;
+  guint64 schema_version = 0;
+  if (!take (cursor, '{'))
+    return FALSE;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "tenant_id") == 0) {
+      if (seen_tenant || !parse_string (cursor, &out->tenant_id)
+          || !string_is_plain_token (out->tenant_id))
+        goto invalid;
+      seen_tenant = TRUE;
+    } else if (g_strcmp0 (key, "graph_id") == 0) {
+      if (seen_graph || !parse_string (cursor, &out->graph_id)
+          || !string_is_plain_token (out->graph_id))
+        goto invalid;
+      seen_graph = TRUE;
+    } else if (g_strcmp0 (key, "sealed") == 0) {
+      if (seen_sealed || !parse_bool (cursor, &out->sealed))
+        goto invalid;
+      seen_sealed = TRUE;
+    } else if (g_strcmp0 (key, "schema_version") == 0) {
+      if (seen_version || !parse_uint64 (cursor, &schema_version)
+          || schema_version > G_MAXUINT32)
+        goto invalid;
+      seen_version = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_free (key);
+  if (!seen_tenant || !seen_graph || !seen_sealed || !seen_version)
+    goto invalid_no_key;
+  out->schema_version = (guint32) schema_version;
+  return TRUE;
+invalid:
+  g_free (key);
+invalid_no_key:
+  wyl_client_graph_clear (out);
+  return FALSE;
+}
+
+wyrelog_error_t
+wyl_client_graph_list_decode (const gchar *document, gsize document_len,
+    WylClientGraphList *out_graphs)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  GArray *items = NULL;
+  if (out_graphs == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_graph_list_clear (out_graphs);
+  if (!document_init (document, document_len, &cursor))
+    return WYRELOG_E_INVALID;
+  if (!take (&cursor, '{') || !parse_string (&cursor, &key)
+      || g_strcmp0 (key, "graphs") != 0 || !take (&cursor, ':')
+      || !take (&cursor, '['))
+    goto invalid;
+  g_clear_pointer (&key, g_free);
+  items = g_array_new (FALSE, TRUE, sizeof (WylClientGraph));
+  skip_ws (&cursor);
+  if (!take (&cursor, ']')) {
+    while (TRUE) {
+      WylClientGraph graph = { 0 };
+      if (!parse_graph_object (&cursor, &graph))
+        goto invalid;
+      g_array_append_val (items, graph);
+      if (take (&cursor, ']'))
+        break;
+      if (!take (&cursor, ','))
+        goto invalid;
+    }
+  }
+  if (!take (&cursor, '}') || !document_done (&cursor))
+    goto invalid;
+  out_graphs->len = items->len;
+  out_graphs->items = (WylClientGraph *)
+      g_array_free (g_steal_pointer (&items), FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  if (items != NULL) {
+    for (gsize i = 0; i < items->len; i++)
+      wyl_client_graph_clear (&g_array_index (items, WylClientGraph, i));
+    g_array_free (items, TRUE);
+  }
+  wyl_client_graph_list_clear (out_graphs);
+  return WYRELOG_E_INVALID;
+}
+
+void
 wyl_client_service_credential_clear (WylClientServiceCredential *value)
 {
   if (value == NULL)

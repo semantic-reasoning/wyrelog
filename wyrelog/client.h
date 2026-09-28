@@ -143,6 +143,20 @@ typedef struct
 typedef struct
 {
   gchar *tenant_id;
+  gchar *graph_id;
+  gboolean sealed;
+  guint32 schema_version;
+} WylClientGraph;
+
+typedef struct
+{
+  WylClientGraph *items;
+  gsize len;
+} WylClientGraphList;
+
+typedef struct
+{
+  gchar *tenant_id;
   gboolean has_limit;
   guint64 hard_limit;
   guint64 committed;
@@ -619,6 +633,24 @@ wyrelog_error_t wyl_client_fact_graph_verify (WylClient * client,
     const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactGraphVerification * out_verification);
+void wyl_client_graph_clear (WylClientGraph * value);
+void wyl_client_graph_list_clear (WylClientGraphList * value);
+/* Lists the tenant's fact graphs.  The client must carry credentials bound to
+ * tenant, and the caller needs wr.graph.manage there.  out_graphs must be
+ * zero-initialised or cleared; it is owned by the caller and must be cleared
+ * after use.  An answer naming another tenant is WYRELOG_E_IO. */
+wyrelog_error_t wyl_client_graph_list (WylClient * client,
+    const gchar * tenant, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientGraphList * out_graphs);
+/* Seals one graph: it stays queryable but refuses append, retract and forget
+ * from then on.  Sealing cannot be undone.  Returns WYRELOG_E_NOT_FOUND for an
+ * unknown graph, WYRELOG_E_BUSY when the daemon could not take the graph in
+ * time, and WYRELOG_E_IO when a success answer does not name the requested
+ * tenant and graph as sealed. */
+wyrelog_error_t wyl_client_graph_seal (WylClient * client,
+    const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk);
 void wyl_client_fact_forget_result_clear (WylClientFactForgetResult * result);
 /* Physically erases every row of one committed batch of a relation.  The
  * client must carry credentials bound to tenant.  batch_id, operator_id and
@@ -917,6 +949,10 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientFactGraphVerification, wyl_client_fact_graph_verification_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientFactForgetResult, wyl_client_fact_forget_result_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientGraph, wyl_client_graph_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientGraphList, wyl_client_graph_list_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientServicePrincipal, wyl_client_service_principal_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
