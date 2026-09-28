@@ -31,13 +31,43 @@ wyrelog_error_t wyl_fact_offline_restore_validation_session_new
     gint64 drain_timeout_us,
     WylFactOfflineRestoreValidationSession **out_session);
 
+/* Explicit recording intent. Accepts all-bound, undecided tenant journals at
+ * revision 1 + graph_count + preflighted_count, including non-prefix progress.
+ * Recorded flags never replace fresh replay or authority checks. Ownership and
+ * Windows fail-closed behavior match the observational constructor above. */
+wyrelog_error_t wyl_fact_offline_restore_validation_session_new_for_preflight
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreValidationSession **out_session);
+
+/* Only for new_for_preflight sessions. Replays ALL graphs before recording
+ * missing per-graph preflight transitions through exact-revision CAS. Checks
+ * the entire tenant before each write and after the last write (quadratic
+ * content scanning in graph count). Success retains authority and returns the
+ * exact journal; repeated calls replay everything without duplicate writes.
+ * Failure empties output, terminalizes and releases authority. Partial writes
+ * remain: reload actual state through a healthy policy handle, then construct
+ * a fresh session to retry. A failed CAS can have committed; never infer the
+ * durable outcome from its error. No commit decision/publication/unseal occurs.
+ * Flags are historical observations, not a publication permit or a freeze of
+ * independent writers. Undecided startup recovery remains rollback.
+ * out_committed must be empty on entry. Calls are serialized/non-reentrant. */
+wyrelog_error_t wyl_fact_offline_restore_validation_session_run_and_record_preflight
+  (WylFactOfflineRestoreValidationSession *session,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Run directly on a replay worker; caller retains session and policy through
  * return. Every call repeats replay and final observations. Cancellation is
  * checked between bounded operations, not inside context-free content scans.
  * Failure clears success evidence, terminalizes the session and immediately
  * releases authority. Retry requires a new session. Success retains root and
  * runtime exclusion, NOT a freeze of independent policy/external writers and
- * NOT a publication permit. Later publication needs fresh authority checks
+ * NOT a publication permit. On a new_for_preflight session this remains
+ * observational and validates the actual progress revision without writes.
+ * Later publication needs fresh authority checks
  * and its own durable recovery protocol. */
 wyrelog_error_t wyl_fact_offline_restore_validation_session_run
   (WylFactOfflineRestoreValidationSession *session,
@@ -54,5 +84,12 @@ void wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
   (WylFactOfflineRestoreValidationSession *session,
     wyrelog_error_t (*checkpoint) (const gchar *graph_id, gpointer user_data),
     gpointer user_data);
+
+/* Before-write seam precedes fresh validation; after-write seam follows exact
+ * committed-state adoption. No capabilities or writable journal are exposed. */
+void wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
+  (WylFactOfflineRestoreValidationSession *session,
+    wyrelog_error_t (*checkpoint) (const gchar *graph_id, guint64 revision,
+    gboolean after_write, gpointer user_data), gpointer user_data);
 
 G_END_DECLS

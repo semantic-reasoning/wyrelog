@@ -724,10 +724,186 @@ compatibility_is_internal (void)
   fixture_clear (&fixture);
 }
 
+static void
+mark_subset (Fixture *fixture, guint mask)
+{
+  for (guint i = 0; i < fixture->journal.graphs->len; i++) {
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (fixture->journal.graphs, i);
+    if (mask & (1u << i))
+      g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+            (&fixture->journal, graph->graph_id), ==, WYRELOG_E_OK);
+  }
+}
+
+static void
+progress_subsets_are_pure (void)
+{
+  for (guint mask = 0; mask < 4; mask++) {
+    Fixture fixture;
+    fixture_init (&fixture, TRUE);
+    mark_subset (&fixture, mask);
+    g_autoptr (GBytes) before = NULL;
+    g_autoptr (GBytes) after = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+          (&fixture.journal, &before), ==, WYRELOG_E_OK);
+    g_assert_true (wyl_fact_offline_restore_validation_progress_phase
+          (&fixture.journal));
+    WylFactOfflineRestoreValidationResult result;
+    g_assert_cmpint (wyl_fact_offline_restore_validate
+          (WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS,
+        fixture.manifest, &fixture.journal, &fixture.admission,
+        fixture.staged, &result), ==,
+        WYL_FACT_OFFLINE_RESTORE_VALIDATION_STAGED_VALIDATED);
+    g_assert_cmpuint (result.validated_revision, ==,
+        3 + ((mask & 1) != 0) + ((mask & 2) != 0));
+    g_assert_cmpuint (result.checked_graph_count, ==, 2);
+    g_assert_cmpint (result.failure, ==,
+        WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_NONE);
+    g_assert_cmpuint (result.pending_checks, ==, 0);
+    if (mask != 0)
+      assert_failure (&fixture,
+          WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_JOURNAL_PHASE);
+    for (guint i = 0; i < 2; i++)
+      fixture.admission_graphs[i].staged_main_identity =
+          (WylFactArtifactInventoryIdentity) { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_validate
+          (WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_DRY_RUN,
+        fixture.manifest, &fixture.journal, &fixture.admission, NULL,
+        &result), ==, WYL_FACT_OFFLINE_RESTORE_VALIDATION_BLOCKED);
+    g_assert_cmpint (result.failure, ==,
+        WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_JOURNAL_PHASE);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+          (&fixture.journal, &after), ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (before, after));
+    fixture_clear (&fixture);
+  }
+}
+
+static void
+progress_phase_rejects_invalid (void)
+{
+  g_assert_false (wyl_fact_offline_restore_validation_progress_phase (NULL));
+  Fixture fixture;
+  fixture_init (&fixture, FALSE);
+  g_assert_false (wyl_fact_offline_restore_validation_progress_phase
+        (&fixture.journal));
+  fixture_clear (&fixture);
+  fixture_init (&fixture, TRUE);
+  mark_subset (&fixture, 2);
+  WylFactOfflineRestoreJournal saved = fixture.journal;
+  WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (fixture.journal.graphs, 1);
+  WylFactOfflineRestoreJournalGraph saved_graph = *graph;
+  for (guint mutation = 0; mutation < 21; mutation++) {
+    switch (mutation) {
+      case 0: fixture.journal.graphs = NULL; break;
+      case 1: fixture.journal.graphs->len = 0; break;
+      case 2:
+        fixture.journal.graphs->len = WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS + 1;
+        break;
+      case 3: g_ptr_array_index (fixture.journal.graphs, 1) = NULL; break;
+      case 4: fixture.journal.revision--; break;
+      case 5: fixture.journal.revision++; break;
+      case 6: fixture.journal.revision = G_MAXUINT64; break;
+      case 7: graph->checksum_verified = FALSE; break;
+      case 8:
+        graph->staged_main_identity = (WylFactArtifactInventoryIdentity) { 0 };
+        break;
+      case 9:
+        fixture.journal.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK;
+        break;
+      case 10: fixture.journal.policy_generation_published = TRUE; break;
+      case 11: fixture.journal.lifecycle_handoff_complete = TRUE; break;
+      case 12:
+        graph->transition_state = WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED;
+        break;
+      case 13:
+        graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH;
+        break;
+      case 14: graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED; break;
+      case 15:
+        graph->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED;
+        break;
+      case 16: graph->transition_terminal = TRUE; break;
+      case 17: graph->resume_forbidden = TRUE; break;
+      case 18: graph->durability_unprovable_acknowledged = TRUE; break;
+      case 19: fixture.journal.version++; break;
+      case 20: graph->staged_main_identity.object_width = 8; break;
+    }
+    g_test_message ("progress phase mutation %u", mutation);
+    g_assert_false (wyl_fact_offline_restore_validation_progress_phase
+          (&fixture.journal));
+    fixture.journal = saved;
+    fixture.journal.graphs->len = 2;
+    g_ptr_array_index (fixture.journal.graphs, 1) = graph;
+    *graph = saved_graph;
+  }
+  g_assert_true (wyl_fact_offline_restore_validation_progress_phase
+        (&fixture.journal));
+  fixture_clear (&fixture);
+}
+
+static void
+progress_flags_are_not_evidence (void)
+{
+  const WylFactOfflineRestoreValidationFailure failures[] = {
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_INVALID_INPUT,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_STAGED_CARDINALITY,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_STAGE_MISSING,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_CHECKSUM,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_SCHEMA,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_REPLAY,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_REPLAY,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_INVENTORY_UNSTABLE,
+    WYL_FACT_OFFLINE_RESTORE_VALIDATION_FAILURE_STAGE_IDENTITY,
+  };
+  for (guint mutation = 0; mutation < G_N_ELEMENTS (failures); mutation++) {
+    Fixture fixture;
+    fixture_init (&fixture, TRUE);
+    mark_subset (&fixture, 3);
+    const GPtrArray *staged = fixture.staged;
+    switch (mutation) {
+      case 0: staged = NULL; break;
+      case 1: g_ptr_array_set_size (fixture.staged, 1); break;
+      case 2: fixture.observations[1].present = FALSE; break;
+      case 3: fixture.observations[1].checksum = SHA_A; break;
+      case 4: fixture.observations[1].schema_digest = SHA_A; break;
+      case 5:
+        fixture.observations[1].replay_result = WYL_FACT_OFFLINE_RESTORE_REPLAY_NOT_RUN;
+        break;
+      case 6:
+        fixture.observations[1].replay_result = WYL_FACT_OFFLINE_RESTORE_REPLAY_OPEN_FAILED;
+        break;
+      case 7: fixture.observations[1].inventory_end.entry_fingerprint++; break;
+      case 8: fixture.observations[1].identity.domain++; break;
+    }
+    WylFactOfflineRestoreValidationResult result;
+    g_assert_cmpint (wyl_fact_offline_restore_validate
+          (WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS,
+        fixture.manifest, &fixture.journal, &fixture.admission, staged,
+        &result), ==, WYL_FACT_OFFLINE_RESTORE_VALIDATION_BLOCKED);
+    g_assert_cmpint (result.failure, ==, failures[mutation]);
+    g_assert_cmpuint (result.validated_revision, ==, 0);
+    g_assert_cmpuint (result.pending_checks, ==, 0);
+    if (mutation >= 2) {
+      g_assert_cmpuint (result.graph_index, ==, 1);
+      g_assert_cmpuint (result.checked_graph_count, ==, 1);
+    }
+    fixture_clear (&fixture);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact/offline-restore-validation/progress-subsets",
+      progress_subsets_are_pure);
+  g_test_add_func ("/fact/offline-restore-validation/progress-phase",
+      progress_phase_rejects_invalid);
+  g_test_add_func ("/fact/offline-restore-validation/progress-evidence",
+      progress_flags_are_not_evidence);
   g_test_add_func ("/fact/offline-restore-validation/pure-success",
       dry_run_and_staged_are_pure);
   g_test_add_func ("/fact/offline-restore-validation/precedence",

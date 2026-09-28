@@ -1001,6 +1001,9 @@ typedef struct
   const gchar *mode;
   guint checkpoints;
   GCancellable *cancel;
+  gboolean record_preflight;
+  WylFactOfflineRestoreJournal committed;
+  guint writes;
 } SessionFixture;
 
 static wyrelog_error_t
@@ -1374,6 +1377,9 @@ static wyrelog_error_t
 session_job (WylFactReplayJobContext *context, gpointer data)
 {
   SessionFixture *f = data;
+  if (f->record_preflight)
+    return wyl_fact_offline_restore_validation_session_run_and_record_preflight
+             (f->session, context, &f->committed);
   return wyl_fact_offline_restore_validation_session_run (f->session,
              context, &f->result);
 }
@@ -1447,6 +1453,203 @@ test_restore_validation_session_run (gconstpointer data)
 }
 
 static void
+session_mark_preflight (SessionFixture *f, const gchar *graph_id)
+{
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  WylFactOfflineRestoreStoreResult result;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f->fixture.policy, session_operation, &journal), ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+        (&journal, graph_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (f->fixture.policy, revision, &journal, &result, &committed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+}
+
+static wyrelog_error_t
+session_record_checkpoint (const gchar *graph, guint64 revision,
+    gboolean after_write, gpointer data)
+{
+  SessionFixture *f = data;
+  (void) graph;
+  session_assert_authority (f, TRUE);
+  if (after_write)
+    f->writes++;
+  if ((!after_write && revision == 3 && g_str_equal (f->mode, "fail-before"))
+      || (after_write && revision == 4 && g_str_equal (f->mode, "fail-between"))
+      || (after_write && revision == 5 && g_str_equal (f->mode, "fail-after")))
+    return WYRELOG_E_IO;
+  if ((!after_write && revision == 3 && g_str_equal (f->mode, "cancel-before"))
+      || (after_write && revision == 4 && g_str_equal (f->mode, "cancel-between"))
+      || (after_write && revision == 5 && g_str_equal (f->mode, "cancel-after")))
+    g_cancellable_cancel (f->cancel);
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "stale-write"))
+    session_mark_preflight (f, "zeta");
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "boundary-policy"))
+    mutate_tenant_after_snapshot (&f->capture);
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "boundary-schema"))
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f->fixture.policy),
+        "UPDATE fact_relation_schema_columns SET visible=0 "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "boundary-provision"))
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f->fixture.policy),
+        "DELETE FROM fact_graph_provisioning "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+  if (!after_write && revision == 4 && g_str_equal (f->mode, "boundary-content"))
+    session_corrupt_stage (f, "alpha");
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "boundary-entry")) {
+    g_autofree gchar *path = graph_file_path (&f->fixture, "alpha", "foreign");
+    g_assert_true (g_file_set_contents (path, "foreign", -1, NULL));
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (!after_write && revision == 3 && g_str_equal (f->mode, "commit-response"))
+    wyl_policy_store_offline_restore_fail_once (f->fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+#endif
+  return WYRELOG_E_OK;
+}
+
+static void
+test_restore_record_preflight (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  f.mode = mode;
+  f.record_preflight = TRUE;
+  guint64 revision = 3;
+  if (g_str_equal (mode, "partial") || g_str_equal (mode, "full")
+      || g_str_equal (mode, "verified-corrupt")) {
+    session_mark_preflight (&f, "alpha");
+    revision++;
+  }
+  if (g_str_equal (mode, "nonprefix") || g_str_equal (mode, "full")) {
+    session_mark_preflight (&f, "zeta");
+    revision++;
+  }
+  if (g_str_equal (mode, "verified-corrupt"))
+    session_corrupt_stage (&f, "alpha");
+  g_autoptr (GHashTable) files_before = session_graph_files (&f);
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+      session_operation, revision, 0, &f.session), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
+    (f.session, session_checkpoint, &f);
+  wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
+    (f.session, session_record_checkpoint, &f);
+  if (g_str_equal (mode, "nonprefix")) {
+    /* Reading a recording session remains observational, even with progress. */
+    g_autoptr (GBytes) before = session_journal_bytes (&f);
+    f.record_preflight = FALSE;
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.result.validated_revision, ==, revision);
+    g_autoptr (GBytes) after = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (before, after));
+    f.record_preflight = TRUE;
+    f.checkpoints = 0;
+  }
+  wyrelog_error_t rc = session_run_worker (&f);
+  gboolean success = g_str_equal (mode, "success") || g_str_equal (mode, "partial")
+      || g_str_equal (mode, "nonprefix") || g_str_equal (mode, "full");
+  if (success) {
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 5);
+    g_assert_cmpuint (f.writes, ==, 5 - revision);
+    g_assert_cmpuint (f.checkpoints, ==, 2);
+    session_assert_authority (&f, TRUE);
+    g_autoptr (GBytes) returned = NULL;
+    g_autoptr (GBytes) durable = session_journal_bytes (&f);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+          (&f.committed, &returned), ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (returned, durable));
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.checkpoints, ==, 4);
+    g_assert_cmpuint (f.writes, ==, 5 - revision);
+    session_assert_files_unchanged (&f, files_before);
+  } else {
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_null (f.committed.graphs);
+    g_assert_cmpuint (f.committed.revision, ==, 0);
+    session_assert_authority (&f, FALSE);
+    g_cancellable_reset (f.cancel);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_INVALID);
+  }
+  g_clear_pointer (&f.session, wyl_fact_offline_restore_validation_session_free);
+  if (g_str_equal (mode, "commit-response")) {
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *path = g_build_filename (f.fixture.root, "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (path, &f.fixture.policy), ==, WYRELOG_E_OK);
+  }
+  g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &durable), ==, WYRELOG_E_OK);
+  guint64 expected_revision = success ? 5 : revision;
+  if (g_str_equal (mode, "fail-between") || g_str_equal (mode, "cancel-between")
+      || g_str_equal (mode, "stale-write") || g_str_equal (mode, "boundary-content"))
+    expected_revision = 4;
+  if (g_str_equal (mode, "fail-after") || g_str_equal (mode, "cancel-after"))
+    expected_revision = 5;
+  if (g_str_equal (mode, "commit-response")) {
+    g_assert_cmpuint (durable.revision, >=, 3);
+    g_assert_cmpuint (durable.revision, <=, 4);
+  } else
+    g_assert_cmpuint (durable.revision, ==, expected_revision);
+  g_assert_cmpint (durable.decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  g_assert_false (durable.policy_generation_published);
+  g_assert_false (durable.lifecycle_handoff_complete);
+  guint verified = 0;
+  for (guint i = 0; i < durable.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (durable.graphs, i);
+    g_assert_cmpint (graph->copied, ==, graph->checksum_verified);
+    g_assert_cmpint (graph->copied, ==, graph->identity_verified);
+    g_assert_cmpint (graph->copied, ==, graph->schema_verified);
+    g_assert_cmpint (graph->copied, ==, graph->replay_preflighted);
+    verified += graph->copied ? 1 : 0;
+  }
+  g_assert_cmpuint (verified, ==, durable.revision - 3);
+  gboolean retry = g_str_has_prefix (mode, "fail-")
+      || g_str_has_prefix (mode, "cancel-") || g_str_equal (mode, "commit-response");
+  if (retry) {
+    f.mode = "success";
+    f.checkpoints = 0;
+    g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+        session_operation, durable.revision, 0, &f.session), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_validation_session_set_checkpoint_for_test
+      (f.session, session_checkpoint, &f);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.checkpoints, ==, 2);
+    g_assert_cmpuint (f.committed.revision, ==, 5);
+    session_assert_files_unchanged (&f, files_before);
+  }
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
+test_restore_observational_session_cannot_record (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  f.record_preflight = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+      session_operation, 3, 0, &f.session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_INVALID);
+  g_assert_null (f.committed.graphs);
+  session_fixture_clear (&f);
+}
+
+static void
 test_restore_validation_session_constructor_rejects (gconstpointer data)
 {
   SessionFixture f = { 0 };
@@ -1494,6 +1697,9 @@ test_restore_validation_session_invalid_constructor (void)
   g_assert_cmpint (wyl_fact_offline_restore_validation_session_new (NULL,
       NULL, NULL, NULL, NULL, 0, 0, &session), ==, WYRELOG_E_INVALID);
   g_assert_null (session);
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+        (NULL, NULL, NULL, NULL, NULL, 0, 0, &session), ==, WYRELOG_E_INVALID);
+  g_assert_null (session);
 }
 
 static void
@@ -1514,6 +1720,11 @@ test_restore_validation_session_windows_fail_closed (void)
       "018f22d0-7b6d-7a5b-8c31-123456789ab4", 1, 0, &session), ==,
       WYRELOG_E_POLICY);
   g_assert_null (session);
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+        (fixture.policy, fixture.root, fixture.runtime, canonical,
+      "018f22d0-7b6d-7a5b-8c31-123456789ab4", 1, 0, &session), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (session);
   fixture_clear (&fixture);
 #else
   g_test_skip ("Windows-only fail-closed boundary");
@@ -1529,6 +1740,22 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
 #ifndef G_OS_WIN32
+  g_test_add_func ("/fact-offline-backup-source/record/observational-refused",
+      test_restore_observational_session_cannot_record);
+  const gchar *record_modes[] = { "success", "partial", "nonprefix", "full",
+                                  "verified-corrupt", "second-graph-failure", "first-graph-late-mutation",
+                                  "fail-before", "fail-between", "fail-after", "cancel-before",
+                                  "cancel-between", "cancel-after", "stale-write", "boundary-policy",
+                                  "boundary-content", "boundary-entry", "boundary-schema", "boundary-provision",
+#ifdef WYL_TEST_HANDLE_SEAMS
+                                  "commit-response",
+#endif
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (record_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/record/",
+            record_modes[i], NULL);
+    g_test_add_data_func (path, record_modes[i], test_restore_record_preflight);
+  }
   const gchar *session_runs[] = { "success", "stage-only", "successful-rerun-mutation",
                                   "second-graph-failure",
                                   "first-graph-late-mutation", "cancel", "policy-change", "schema-change",
