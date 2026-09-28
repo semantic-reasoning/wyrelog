@@ -122,6 +122,7 @@ grant_fact_authority (WylHandle *handle, const gchar *subject)
     "wr.graph.manage",
     "wr.schema.manage",
     "wr.fact.write",
+    "wr.fact.read",
     "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
@@ -1515,6 +1516,53 @@ main (void)
     return wyl_test_normalize_exit_status (106);
   assert_wyctl_failed (fact_forget_put_argv, 5,
       "wyctl: fact forget failed: fact_batch_not_found\n");
+  /* #1238: the fact subsystem report and one graph's verification. */
+  gchar *fact_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "status",
+    NULL,
+  };
+  gchar *fact_status_graph_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    "--graph", "orders",
+    NULL,
+  };
+  gchar *fact_verify_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "verify",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *fact_verify_missing_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "verify",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "no-such-graph",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (fact_status_argv, "scope=anonymous status=");
+  assert_wyctl_stdout_contains (fact_status_graph_argv,
+      "\ngraph=orders state=ready queryable=true ");
+  assert_wyctl_stdout (fact_verify_argv,
+      "tenant=__wr_default graph=orders verified=true\n");
+  assert_wyctl_failed (fact_verify_missing_argv, 5,
+      "wyctl: fact verify failed: graph_not_found\n");
   g_unlink (refund_input_path);
   g_unlink (missing_input_path);
   g_unlink (seam_input_path);

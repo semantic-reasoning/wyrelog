@@ -50,6 +50,8 @@ UNSUPPORTED_HEADING = "### Unsupported by the daemon"
 COVERAGE = {
     "/healthz": ("status",),
     "/readyz": ("status",),
+    "/facts/status": ("fact", "status"),
+    "/facts/verify": ("fact", "verify"),
     "/facts/quota": ("fact", "quota", "configure"),
     "/facts/quota/operation-status": ("fact", "quota", "operation-status"),
     "/facts/schema/register": ("fact", "schema", "register"),
@@ -99,8 +101,6 @@ UNSUPPORTED = {
 }
 
 PENDING = {
-    "/facts/status": ("fact", "status"),
-    "/facts/verify": ("fact", "verify"),
     "/graphs": ("graph", "list"),
     "/graphs/seal": ("graph", "seal"),
     "/tenants": ("tenant", "list"),

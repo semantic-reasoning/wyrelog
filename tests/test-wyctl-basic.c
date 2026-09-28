@@ -4091,6 +4091,291 @@ test_fact_forget_ignores_configured_target (void)
       "mutation_class=committed_degraded reconcile=true\n");
 }
 
+/* Run wyctl with ARGS against a one-request fake daemon answering STATUS
+ * with BODY.  An argument "@TOKEN@" is replaced by a protected token file
+ * holding "token-1"; DAEMON_URL NULL means the fake daemon's own URL.  With
+ * CONFIGURED, GSettings supplies default-tenant "t" and that token file as
+ * access-token-file. */
+static void
+run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
+    const gchar *const *args, gboolean configured, FactForgetRun *run)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autofree gchar *xdg = NULL;
+  g_auto (GStrv) envp = NULL;
+  if (configured) {
+    g_autofree gchar *token_literal = gvariant_literal_for_string (token_path);
+    const gchar *const keys[] = {
+      "default-tenant", "access-token-file", NULL,
+    };
+    const gchar *const values[] = {"'t'", token_literal, NULL};
+    xdg = make_keyfile_xdg_dir (keys, values);
+    envp = build_gsettings_envp (xdg, FALSE);
+  }
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *server_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = status, .body = body,
+  };
+  GThread *thread = g_thread_new ("fake-daemon",
+          policy_mutation_server_thread, &server);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  g_ptr_array_add (argv, "--daemon-url");
+  g_ptr_array_add (argv, (gpointer) (daemon_url != NULL ? daemon_url
+      : server_url));
+  g_ptr_array_add (argv, "--timeout-ms");
+  g_ptr_array_add (argv, "2000");
+  for (const gchar *const *arg = args; *arg != NULL; arg++)
+    g_ptr_array_add (argv, g_strcmp0 (*arg, "@TOKEN@") == 0
+        ? (gpointer) token_path : (gpointer) *arg);
+  g_ptr_array_add (argv, NULL);
+  if (envp != NULL)
+    run_child_with_env ((gchar **) argv->pdata, envp, &run->out, &run->err,
+        &run->exit_status);
+  else
+    run_child ((gchar **) argv->pdata, &run->out, &run->err,
+        &run->exit_status);
+  stop_test_server (thread, cancel);
+  run->request = server.request;
+  g_unlink (token_path);
+  if (xdg != NULL)
+    remove_dir_recursive (xdg);
+}
+
+#define FACT_STATUS_READY_BODY \
+  "{\"status\":\"ready\",\"graphs_total\":2,\"graphs_ready\":2," \
+  "\"graphs_degraded\":0,\"graphs_provisioned\":0,\"graphs_sealed\":0}"
+
+#define FACT_STATUS_TENANT_BODY \
+  "{\"status\":\"degraded\",\"graphs_total\":2,\"graphs_ready\":1," \
+  "\"graphs_degraded\":1,\"graphs_provisioned\":0,\"graphs_sealed\":0," \
+  "\"graphs\":[{\"tenant_id\":\"t\",\"graph_id\":\"orders\"," \
+  "\"state\":\"ready\",\"queryable\":true,\"engine_generation\":3," \
+  "\"last_error_class\":null},{\"tenant_id\":\"t\",\"graph_id\":\"bad\"," \
+  "\"state\":\"replay_failed\",\"queryable\":false," \
+  "\"engine_generation\":0,\"last_error_class\":\"replay_failed\"}]}"
+
+static void
+test_fact_status_anonymous (void)
+{
+  static const gchar *const args[] = {"fact", "status", NULL};
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_READY_BODY, NULL, args, FALSE,
+      &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "scope=anonymous status=ready graphs_total=2 "
+      "graphs_ready=2 graphs_degraded=0 graphs_provisioned=0 "
+      "graphs_sealed=0\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "GET /facts/status "));
+  g_assert_null (g_strstr_len (run.request, -1, "Authorization"));
+
+  g_auto (FactForgetRun) degraded = { 0 };
+  run_fake_daemon_case (200, "{\"status\":\"degraded\",\"graphs_total\":1,"
+      "\"graphs_ready\":0,\"graphs_degraded\":1,\"graphs_sealed\":0}", NULL,
+      args, FALSE, &degraded);
+  assert_fact_forget_exit (&degraded, 1);
+  g_assert_true (g_str_has_prefix (degraded.out,
+      "scope=anonymous status=degraded "));
+
+  g_auto (FactForgetRun) unknown = { 0 };
+  run_fake_daemon_case (200, "{\"status\":\"rebalancing\",\"graphs_total\":1,"
+      "\"graphs_ready\":0,\"graphs_degraded\":0,\"graphs_sealed\":0}", NULL,
+      args, FALSE, &unknown);
+  assert_fact_forget_exit (&unknown, 3);
+  g_assert_true (g_str_has_prefix (unknown.out,
+      "scope=anonymous status=rebalancing "));
+
+  g_auto (FactForgetRun) invalid = { 0 };
+  run_fake_daemon_case (200, "{}", NULL, args, FALSE, &invalid);
+  assert_fact_forget_exit (&invalid, 3);
+  g_assert_cmpstr (invalid.out, ==, "");
+  g_assert_cmpstr (invalid.err, ==,
+      "wyctl: fact status failed: invalid daemon response\n");
+}
+
+static void
+test_fact_status_tenant (void)
+{
+  static const gchar *const args[] = {
+    "fact", "status", "--tenant", "t", "--access-token-file", "@TOKEN@", NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, args, FALSE,
+      &run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_cmpstr (run.out, ==, "scope=tenant tenant=t status=degraded "
+      "graphs_total=2 graphs_ready=1 graphs_degraded=1 graphs_provisioned=0 "
+      "graphs_sealed=0\n"
+      "graph=orders state=ready queryable=true engine_generation=3 "
+      "reason=none\n"
+      "graph=bad state=replay_failed queryable=false engine_generation=0 "
+      "reason=replay_failed\n");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request,
+      "GET /facts/status?tenant=t "));
+  g_assert_nonnull (g_strstr_len (run.request, -1,
+      "Authorization: Bearer token-1"));
+
+  static const gchar *const one_graph[] = {
+    "fact", "status", "--tenant", "t", "--access-token-file", "@TOKEN@",
+    "--graph", "orders", NULL,
+  };
+  g_auto (FactForgetRun) ready = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, one_graph, FALSE,
+      &ready);
+  assert_fact_forget_exit (&ready, 0);
+  g_assert_true (g_str_has_suffix (ready.out, "\ngraph=orders state=ready "
+      "queryable=true engine_generation=3 reason=none\n"));
+
+  static const gchar *const bad_graph[] = {
+    "fact", "status", "--tenant", "t", "--access-token-file", "@TOKEN@",
+    "--graph", "bad", NULL,
+  };
+  g_auto (FactForgetRun) failed = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, bad_graph, FALSE,
+      &failed);
+  assert_fact_forget_exit (&failed, 1);
+  g_assert_true (g_str_has_suffix (failed.out, "\ngraph=bad "
+      "state=replay_failed queryable=false engine_generation=0 "
+      "reason=replay_failed\n"));
+
+  static const gchar *const absent_graph[] = {
+    "fact", "status", "--tenant", "t", "--access-token-file", "@TOKEN@",
+    "--graph", "gone", NULL,
+  };
+  g_auto (FactForgetRun) absent = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, absent_graph, FALSE,
+      &absent);
+  assert_fact_forget_exit (&absent, 1);
+  g_assert_true (g_str_has_suffix (absent.out, "\ngraph=gone state=absent\n"));
+
+  g_auto (FactForgetRun) denied = { 0 };
+  run_fake_daemon_case (401, "{\"error\":\"fact_status_auth_required\"}",
+      NULL, args, FALSE, &denied);
+  assert_fact_forget_exit (&denied, 6);
+  g_assert_cmpstr (denied.out, ==, "");
+}
+
+/* Typing either --tenant or --access-token-file makes the request
+ * authenticated; the configured default fills the other one. */
+static void
+test_fact_status_fills_from_settings (void)
+{
+  static const gchar *const tenant_only[] = {
+    "fact", "status", "--tenant", "t", NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, tenant_only,
+      TRUE, &run);
+  assert_fact_forget_exit (&run, 1);
+  g_assert_nonnull (run.request);
+  g_assert_nonnull (g_strstr_len (run.request, -1,
+      "Authorization: Bearer token-1"));
+
+  static const gchar *const token_only[] = {
+    "fact", "status", "--access-token-file", "@TOKEN@", NULL,
+  };
+  g_auto (FactForgetRun) filled = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_TENANT_BODY, NULL, token_only, TRUE,
+      &filled);
+  assert_fact_forget_exit (&filled, 1);
+  g_assert_nonnull (filled.request);
+  g_assert_true (g_str_has_prefix (filled.request,
+      "GET /facts/status?tenant=t "));
+
+  /* The configured values alone never make the request authenticated. */
+  static const gchar *const anonymous[] = {"fact", "status", NULL};
+  g_auto (FactForgetRun) plain = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_READY_BODY, NULL, anonymous, TRUE,
+      &plain);
+  assert_fact_forget_exit (&plain, 0);
+  g_assert_nonnull (plain.request);
+  g_assert_true (g_str_has_prefix (plain.request, "GET /facts/status "));
+  g_assert_null (g_strstr_len (plain.request, -1, "Authorization"));
+}
+
+/* Every refusal happens before a request. */
+static void
+test_fact_status_refusals (void)
+{
+  static const gchar *const graph_only[] = {
+    "fact", "status", "--graph", "orders", NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_READY_BODY, NULL, graph_only,
+      FALSE, &run);
+  assert_fact_forget_exit (&run, 2);
+  g_assert_null (run.request);
+  g_assert_cmpstr (run.err, ==, "wyctl: fact status --graph needs --tenant "
+      "or --access-token-file\n");
+
+  static const gchar *const anonymous[] = {"fact", "status", NULL};
+  g_auto (FactForgetRun) remote = { 0 };
+  run_fake_daemon_case (200, FACT_STATUS_READY_BODY,
+      "http://wyrelog.example:8080", anonymous, FALSE, &remote);
+  assert_fact_forget_exit (&remote, 2);
+  g_assert_null (remote.request);
+  g_assert_cmpstr (remote.err, ==, "wyctl: invalid daemon URL; fact status "
+      "needs the daemon's loopback listener\n");
+}
+
+static void
+test_fact_verify (void)
+{
+  static const gchar *const args[] = {
+    "fact", "verify", "--tenant", "t", "--graph", "orders",
+    "--access-token-file", "@TOKEN@", "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"verified\":true,"
+      "\"tenant_id\":\"t\",\"graph_id\":\"orders\"}", NULL, args, FALSE,
+      &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "tenant=t graph=orders verified=true\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "GET /facts/verify?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "graph=orders"));
+
+  g_auto (FactForgetRun) mismatch = { 0 };
+  run_fake_daemon_case (409, "{\"error\":\"fact_graph_verification_failed\"}",
+      NULL, args, FALSE, &mismatch);
+  assert_fact_forget_exit (&mismatch, 1);
+  g_assert_cmpstr (mismatch.out, ==, "tenant=t graph=orders verified=false\n");
+  g_assert_cmpstr (mismatch.err, ==,
+      "wyctl: fact verify failed: fact_graph_verification_failed\n");
+
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+  } cases[] = {
+    {400, "invalid_fact_verify_request", 3},
+    {401, "fact_verify_auth_required", 6},
+    {403, "fact_verify_denied", 4},
+    {404, "graph_not_found", 5},
+    {409, "graph_sealed", 4},
+    {503, "fact_graph_verification_unavailable", 5},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) failed = { 0 };
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            cases[i].code);
+    g_autofree gchar *expected = g_strdup_printf (
+      "wyctl: fact verify failed: %s\n", cases[i].code);
+    run_fake_daemon_case (cases[i].status, body, NULL, args, FALSE, &failed);
+    assert_fact_forget_exit (&failed, cases[i].exit_status);
+    g_assert_cmpstr (failed.out, ==, "");
+    g_assert_cmpstr (failed.err, ==, expected);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -4202,6 +4487,12 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/fact-forget-unreadable-success",
       test_fact_forget_unreadable_success);
   g_test_add_func ("/wyctl/fact-forget-refusals", test_fact_forget_refusals);
+  g_test_add_func ("/wyctl/fact-status-anonymous", test_fact_status_anonymous);
+  g_test_add_func ("/wyctl/fact-status-tenant", test_fact_status_tenant);
+  g_test_add_func ("/wyctl/fact-status-fills-from-settings",
+      test_fact_status_fills_from_settings);
+  g_test_add_func ("/wyctl/fact-status-refusals", test_fact_status_refusals);
+  g_test_add_func ("/wyctl/fact-verify", test_fact_verify);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
