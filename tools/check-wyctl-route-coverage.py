@@ -15,7 +15,8 @@ Every route must appear in exactly one table:
   COVERAGE     route -> wyctl command path that drives it
   HTTP_ONLY    route -> why an operator has no wyctl command for it
   UNSUPPORTED  route -> why the daemon refuses it outright
-  PENDING      route -> wyctl command path planned under #1238
+  PENDING      route -> wyctl command path being added; empty when every
+               route is settled
 
 Each COVERAGE path must be listed in tests/test-wyctl-runbook-options.py
 COMMAND_PATHS (which runs `wyctl PATH --help`) and each of its steps must be
@@ -50,6 +51,7 @@ UNSUPPORTED_HEADING = "### Unsupported by the daemon"
 COVERAGE = {
     "/healthz": ("status",),
     "/readyz": ("status",),
+    "/profile/status": ("profile", "status"),
     "/facts/status": ("fact", "status"),
     "/facts/verify": ("fact", "verify"),
     "/facts/quota": ("fact", "quota", "configure"),
@@ -106,9 +108,7 @@ UNSUPPORTED = {
         "with a tenant seal",
 }
 
-PENDING = {
-    "/profile/status": ("profile", "status"),
-}
+PENDING: dict[str, tuple[str, ...]] = {}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {

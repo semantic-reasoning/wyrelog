@@ -11,6 +11,7 @@ import sys
 
 COMMAND_PATHS = {
     ("status",): 1,
+    ("profile", "status"): 2,
     ("policy", "check"): 2,
     ("policy", "explain"): 2,
     ("policy", "permission-grant"): 2,
@@ -179,9 +180,9 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 60:
+    if len(invocations) != 62:
         errors.append(
-            f"{runbook}: expected 60 reviewed wyctl invocations, found "
+            f"{runbook}: expected 62 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(

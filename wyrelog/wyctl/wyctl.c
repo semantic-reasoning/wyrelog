@@ -29,6 +29,7 @@
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 #include "wyrelog/wyl-request-id-private.h"
+#include "wyrelog/wyl-client-codec-private.h"
 #include "wyctl-config.h"
 #include "wyctl-token-file.h"
 #include "wyctl-publication-private.h"
@@ -6566,6 +6567,112 @@ run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* Report GET /profile/status, which needs no credential: which profile the
+ * daemon runs and where it forwards events. */
+static int
+run_profile_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
+     "Daemon URL", "URL"},
+    {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
+     "Daemon probe timeout in milliseconds", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- report the daemon's profile");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "Prints \"profile=<system|service> system_url=<url|none>\n"
+      "event_spool_dir=<path|none> event_queue_limit=<n>\".\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the daemon reported its profile.\n"
+      "  1: the daemon is unavailable or answered with an error.\n"
+      "  2: local arguments are invalid.\n"
+      "  3: the daemon's answer was invalid.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected profile status argument: %s\n", argv[1]);
+    return 2;
+  }
+  const gchar *daemon_url_arg = opts.daemon_url != NULL ? opts.daemon_url :
+      global_opts->daemon_url;
+  const gchar *timeout_ms_arg_input = opts.timeout_ms_arg != NULL ?
+      opts.timeout_ms_arg : global_opts->timeout_ms_arg;
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (daemon_url_arg,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (timeout_ms_arg_input,
+          global_opts->settings, "default-timeout-ms");
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+  g_autofree gchar *uri = build_daemon_path_uri (daemon_url,
+          "/profile/status");
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  int probe_rc = send_status_probe (uri, timeout_ms, &status, &body);
+  if (probe_rc == 2) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  if (probe_rc != 0) {
+    g_printerr ("wyctl: daemon unavailable: %s\n", daemon_url);
+    return 1;
+  }
+  if (status < 200 || status >= 300) {
+    g_autofree gchar *code = body != NULL
+        ? wyl_client_parse_remote_error_code (body, strlen (body)) : NULL;
+    g_printerr ("wyctl: profile status failed: %s\n",
+        code != NULL ? code : "profile_status_failed");
+    return 1;
+  }
+  WylClientProfileStatus profile = { 0 };
+  if (body == NULL || wyl_client_profile_status_decode (body, strlen (body),
+      &profile) != WYRELOG_E_OK) {
+    g_printerr ("wyctl: profile status failed: invalid daemon response\n");
+    return 3;
+  }
+  g_autofree gchar *system_url = profile.system_url != NULL
+      ? g_uri_escape_string (profile.system_url, ":/", TRUE) : NULL;
+  g_autofree gchar *spool = profile.event_spool_dir != NULL
+      ? g_uri_escape_string (profile.event_spool_dir, "/", TRUE) : NULL;
+  g_print ("profile=%s system_url=%s event_spool_dir=%s event_queue_limit=%u\n",
+      profile.profile, system_url != NULL ? system_url : "none",
+      spool != NULL ? spool : "none", (guint) profile.event_queue_limit);
+  wyl_client_profile_status_clear (&profile);
+  return 0;
+}
+
+static int
+run_profile (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing profile command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_profile_status (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown profile command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -6587,6 +6694,7 @@ main (int argc, char **argv)
       "Commands:\n"
       "  status                     Check daemon health and readiness\n"
       "  policy                     Check decisions and manage permissions/roles\n"
+      "  profile                    Report the daemon's profile\n"
       "  tenant                     List, create, seal and unseal tenants\n"
       "  graph                      Create, list and seal fact graphs\n"
       "  fact                       Manage schemas, facts, and quotas\n"
@@ -6629,6 +6737,8 @@ main (int argc, char **argv)
     return run_status (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "policy") == 0)
     return run_policy (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "profile") == 0)
+    return run_profile (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "tenant") == 0)
     return run_tenant (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "graph") == 0)

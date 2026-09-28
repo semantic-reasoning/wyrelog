@@ -84,6 +84,7 @@ EXPECTED_FIELDS = {
 
 EXPECTED_PARSE_SITES = {
     "run_status": "WyctlOptions",
+    "run_profile_status": "WyctlOptions",
     "run_auth_service_token": "WyctlServiceTokenOptions",
     "run_auth_login": "WyctlHumanAuthOptions",
     "run_auth_refresh": "WyctlHumanAuthOptions",
@@ -125,7 +126,7 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 222
+EXPECTED_STRING_DESTINATIONS = 224
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

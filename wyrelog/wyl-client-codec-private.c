@@ -641,6 +641,75 @@ invalid:
 }
 
 void
+wyl_client_profile_status_clear (WylClientProfileStatus *value)
+{
+  if (value == NULL)
+    return;
+  g_clear_pointer (&value->profile, g_free);
+  g_clear_pointer (&value->system_url, g_free);
+  g_clear_pointer (&value->event_spool_dir, g_free);
+  memset (value, 0, sizeof *value);
+}
+
+wyrelog_error_t
+wyl_client_profile_status_decode (const gchar *document, gsize document_len,
+    WylClientProfileStatus *out_status)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  gboolean seen_profile = FALSE, seen_url = FALSE, seen_spool = FALSE;
+  gboolean seen_limit = FALSE;
+  guint64 limit = 0;
+  if (out_status == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_profile_status_clear (out_status);
+  if (!document_init (document, document_len, &cursor) || !take (&cursor, '{'))
+    goto invalid;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "profile") == 0) {
+      if (seen_profile || !parse_string (&cursor, &out_status->profile)
+          || !string_is_plain_token (out_status->profile))
+        goto invalid;
+      seen_profile = TRUE;
+    } else if (g_strcmp0 (key, "system_url") == 0) {
+      if (seen_url
+          || !parse_nullable_string (&cursor, &out_status->system_url))
+        goto invalid;
+      seen_url = TRUE;
+    } else if (g_strcmp0 (key, "event_spool_dir") == 0) {
+      if (seen_spool
+          || !parse_nullable_string (&cursor, &out_status->event_spool_dir))
+        goto invalid;
+      seen_spool = TRUE;
+    } else if (g_strcmp0 (key, "event_queue_limit") == 0) {
+      if (seen_limit || !parse_uint64 (&cursor, &limit)
+          || limit > G_MAXUINT32)
+        goto invalid;
+      seen_limit = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  g_clear_pointer (&key, g_free);
+  if (!seen_profile || !seen_url || !seen_spool || !seen_limit
+      || !document_done (&cursor))
+    goto invalid;
+  out_status->event_queue_limit = (guint32) limit;
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  wyl_client_profile_status_clear (out_status);
+  return WYRELOG_E_INVALID;
+}
+
+void
 wyl_client_tenant_clear (WylClientTenant *value)
 {
   if (value == NULL)
