@@ -25,6 +25,7 @@ COMMAND_PATHS = {
     ("fact", "quota", "operation-status"): 3,
     ("fact", "put"): 2,
     ("fact", "retract"): 2,
+    ("fact", "forget"): 2,
     ("datalog", "query"): 2,
     ("audit", "query"): 2,
     ("key", "status"): 2,
@@ -59,6 +60,7 @@ REQUIRED_GUARDS = {
     ("policy", "role-revoke"),
     ("audit", "query"),
     ("service-principal", "list"),
+    ("fact", "forget"),
 }
 GUARD_OPTIONS = {
     "--guard-timestamp", "--guard-loc-class", "--guard-risk",
@@ -162,9 +164,9 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 51:
+    if len(invocations) != 52:
         errors.append(
-            f"{runbook}: expected 51 reviewed wyctl invocations, found "
+            f"{runbook}: expected 52 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(

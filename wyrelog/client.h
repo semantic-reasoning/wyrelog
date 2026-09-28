@@ -130,6 +130,18 @@ typedef struct
 
 typedef struct
 {
+  guint64 rows_purged;
+  gchar *mutation_class;
+  gboolean queryable;
+  gboolean reconcile;
+  gchar *degraded_class;
+  guint64 engine_generation;
+  gboolean purged;
+  gboolean audit_recorded;
+} WylClientFactForgetResult;
+
+typedef struct
+{
   gchar *tenant_id;
   gboolean has_limit;
   guint64 hard_limit;
@@ -607,6 +619,26 @@ wyrelog_error_t wyl_client_fact_graph_verify (WylClient * client,
     const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactGraphVerification * out_verification);
+void wyl_client_fact_forget_result_clear (WylClientFactForgetResult * result);
+/* Physically erases every row of one committed batch of a relation.  The
+ * client must carry credentials bound to tenant.  batch_id, operator_id and
+ * reason must be non-empty and free of control characters; batch_id may not
+ * be "operator" or "reason", nor operator_id "reason" (the daemon would
+ * refuse those bodies), and the encoded body must fit in 4096 bytes.  Any of
+ * those returns WYRELOG_E_INVALID without a request.  operator_id and reason
+ * are recorded as given; the audited actor is the authenticated caller.
+ * When the daemon erased the rows but could not record the audit event,
+ * returns WYRELOG_E_IO with out_result filled: purged is TRUE and
+ * audit_recorded FALSE, and the batch must not be forgotten again.
+ * out_result must be zero-initialised or cleared before the call, since its
+ * fields are freed on entry; it is owned by the caller and must be cleared
+ * after use. */
+wyrelog_error_t wyl_client_fact_forget_batch (WylClient * client,
+    const gchar * tenant, const gchar * graph, const gchar * namespace_id,
+    const gchar * relation, guint32 schema_version, const gchar * batch_id,
+    const gchar * operator_id, const gchar * reason, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactForgetResult * out_result);
 wyrelog_error_t wyl_client_fact_quota_status (WylClient * client,
     const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
@@ -883,6 +915,8 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC
   (WylClientFactStatus, wyl_client_fact_status_free)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientFactGraphVerification, wyl_client_fact_graph_verification_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactForgetResult, wyl_client_fact_forget_result_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientServicePrincipal, wyl_client_service_principal_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC

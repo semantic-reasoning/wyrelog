@@ -41,6 +41,9 @@ typedef struct
   gchar *last_guard_timestamp;
   gchar *last_guard_loc_class;
   gchar *last_guard_risk;
+  gchar *last_namespace;
+  gchar *last_schema_version;
+  gchar *last_content_type;
 } TestHttpServer;
 
 static const gchar *two_event_body =
@@ -101,6 +104,17 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_guard_timestamp);
   g_free (http->last_guard_loc_class);
   g_free (http->last_guard_risk);
+  g_free (http->last_namespace);
+  g_free (http->last_schema_version);
+  g_free (http->last_content_type);
+  http->last_namespace =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "namespace"))
+      : NULL;
+  http->last_schema_version =
+      query != NULL ? g_strdup (g_hash_table_lookup (query,
+          "schema_version")) : NULL;
+  http->last_content_type = g_strdup (soup_message_headers_get_one
+            (soup_server_message_get_request_headers (msg), "Content-Type"));
   http->last_method = g_strdup (soup_server_message_get_method (msg));
   http->last_path = g_strdup (path);
   SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
@@ -1208,6 +1222,114 @@ main (void)
       || verification.tenant_id != NULL || verification.graph_id != NULL
       || verification.verified)
     return wyl_test_normalize_exit_status (291);
+  http.status = 0;
+
+  /* #1238: physical erasure of one committed batch.  The daemon reads the
+   * body with a first-match member scan, so the client escapes quotes and
+   * backslashes, refuses control bytes, and refuses the values the daemon
+   * would reject as spelling a later key; each refusal happens before any
+   * request. */
+  g_auto (WylClientFactForgetResult) forget = { 0 };
+  http.body = "{\"ok\":true,\"rows_purged\":2,\"committed\":true,"
+      "\"mutation_class\":\"committed_ready\",\"queryable\":true,"
+      "\"reconcile\":false,\"engine_generation\":7}";
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-1", "ops a\"b\\c", "gdpr erasure",
+      123, "public", 49, &forget) != WYRELOG_E_OK
+      || forget.rows_purged != 2 || !forget.purged || !forget.audit_recorded
+      || g_strcmp0 (forget.mutation_class, "committed_ready") != 0
+      || !forget.queryable || forget.reconcile || forget.engine_generation != 7
+      || g_strcmp0 (http.last_method, "DELETE") != 0
+      || g_strcmp0 (http.last_path,
+      "/facts/__wr_default/orders/orders:forget") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_namespace, "shop") != 0
+      || g_strcmp0 (http.last_schema_version, "1") != 0
+      || g_strcmp0 (http.last_guard_risk, "49") != 0
+      || g_strcmp0 (http.last_content_type, "application/json") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0
+      || g_strcmp0 (http.last_body, "{\"batch_id\":\"b-1\","
+      "\"operator\":\"ops a\\\"b\\\\c\",\"reason\":\"gdpr erasure\"}")
+      != 0)
+    return wyl_test_normalize_exit_status (4101);
+  wyl_client_fact_forget_result_clear (&forget);
+
+  guint forget_requests = http.request_count;
+  g_autofree gchar *long_reason = g_strnfill (4100, 'r');
+  static const struct
+  {
+    const gchar *batch_id;
+    const gchar *operator_id;
+    const gchar *reason;
+  } refused_forgets[] = {
+    {"b-1", "ops", "line\nbreak"},
+    {"b-1", "ops", "del\x7f"},
+    {"operator", "ops", "gdpr"},
+    {"reason", "ops", "gdpr"},
+    {"b-1", "reason", "gdpr"},
+    {"", "ops", "gdpr"},
+    {"b-1", "", "gdpr"},
+    {"b-1", "ops", ""},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (refused_forgets); i++) {
+    if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+        "orders", "shop", "orders", 1, refused_forgets[i].batch_id,
+        refused_forgets[i].operator_id, refused_forgets[i].reason, 123,
+        "public", 49, &forget) != WYRELOG_E_INVALID || forget.purged)
+      return wyl_test_normalize_exit_status (4102);
+  }
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-1", "ops", long_reason, 123,
+      "public", 49, &forget) != WYRELOG_E_INVALID
+      || http.request_count != forget_requests)
+    return wyl_test_normalize_exit_status (4103);
+  /* The daemon accepts a body of exactly 4096 bytes: 47 bytes of envelope
+   * around the reason. */
+  g_autofree gchar *fitting_reason = g_strnfill (4096 - 47, 'r');
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-1", "ops", fitting_reason, 123,
+      "public", 49, &forget) != WYRELOG_E_OK
+      || http.request_count != forget_requests + 1
+      || strlen (http.last_body) != 4096)
+    return wyl_test_normalize_exit_status (4107);
+  wyl_client_fact_forget_result_clear (&forget);
+  g_autofree gchar *overlong_reason = g_strnfill (4096 - 46, 'r');
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-1", "ops", overlong_reason, 123,
+      "public", 49, &forget) != WYRELOG_E_INVALID
+      || http.request_count != forget_requests + 1)
+    return wyl_test_normalize_exit_status (4108);
+
+  /* The rows are gone even though the audit record failed; the result must
+   * say so, or a caller would retry a delete that already happened. */
+  http.status = 500;
+  http.body = "{\"ok\":false,\"error\":\"fact_forget_audit_failed\","
+      "\"purged\":true,\"rows_purged\":1,"
+      "\"mutation_class\":\"committed_ready\"}";
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-2", "ops", "gdpr", 123, "public", 49,
+      &forget) != WYRELOG_E_IO
+      || !forget.purged || forget.audit_recorded || forget.rows_purged != 1
+      || g_strcmp0 (forget.mutation_class, "committed_ready") != 0
+      || !client_last_response_is (management_client, 500,
+      "fact_forget_audit_failed"))
+    return wyl_test_normalize_exit_status (4104);
+  wyl_client_fact_forget_result_clear (&forget);
+  http.status = 409;
+  http.body = "{\"error\":\"graph_sealed\"}";
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-3", "ops", "gdpr", 123, "public", 49,
+      &forget) != WYRELOG_E_POLICY || forget.purged
+      || !client_last_response_is (management_client, 409, "graph_sealed"))
+    return wyl_test_normalize_exit_status (4105);
+  http.status = 404;
+  http.body = "{\"error\":\"fact_batch_not_found\"}";
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-4", "ops", "gdpr", 123, "public", 49,
+      &forget) != WYRELOG_E_NOT_FOUND || forget.purged
+      || !client_last_response_is (management_client, 404,
+      "fact_batch_not_found"))
+    return wyl_test_normalize_exit_status (4106);
   http.status = 0;
 
   /* #1096: the schema-count quota client must keep its typed contract
@@ -3015,6 +3137,9 @@ main (void)
   g_clear_pointer (&http.last_guard_timestamp, g_free);
   g_clear_pointer (&http.last_guard_loc_class, g_free);
   g_clear_pointer (&http.last_guard_risk, g_free);
+  g_clear_pointer (&http.last_namespace, g_free);
+  g_clear_pointer (&http.last_schema_version, g_free);
+  g_clear_pointer (&http.last_content_type, g_free);
   g_clear_pointer (&http.loop, g_main_loop_unref);
 
   return wyl_test_normalize_exit_status (0);

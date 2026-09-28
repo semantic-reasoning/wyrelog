@@ -1469,6 +1469,46 @@ or `auth login` first. A quota refusal repeats until the quota is raised with
 `fact quota configure` or usage drops. Then confirm the row with
 `datalog query`.
 
+### Erasing a batch
+
+A retract only hides a row behind a tombstone; the batch that wrote the row
+stays in the fact store. `wyctl fact forget` erases every row of one committed
+batch, for example to honour an erasure request. It cannot be undone, so it
+requires `--confirm` and a `--tenant` and `--graph` typed on the command line;
+the configured default tenant and graph are never used as its target. The
+caller needs `wr.fact.write` in the tenant.
+
+```sh
+wyctl --daemon-url "$BASE_URL" --timeout-ms 30000 fact forget \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --batch-id orders-1 --operator ops-oncall --reason 'erasure request 17' \
+  --confirm --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `action=forget batch_id=orders-1 rows_purged=1
+mutation_class=committed_ready reconcile=false`. `--operator` and `--reason`
+are recorded with the erase as annotations; the audited actor is the subject
+of the access token. Erasing a retract batch removes its tombstones, so the
+rows it hid become visible again; erase the batch that wrote a row to remove
+the row itself.
+
+- Exit 4 with `graph_sealed`: the graph is sealed and nothing was erased.
+- Exit 5 with `fact_batch_not_found`: no batch with that id was recorded for
+  that namespace, relation and schema version. A batch recorded for another
+  relation is left untouched.
+- Exit 5 with `graph_not_found` or `fact_schema_not_found`: the graph, or the
+  relation schema, does not exist.
+- Exit 5 with `fact_forget_audit_failed`: the rows **were** erased but the
+  audit record was not written. wyctl prints `purged=true audit=failed` and
+  `do not retry`; record the erase by hand from that output.
+- No response (a timeout or a dropped connection), an unreadable answer, or
+  any other 5xx: the outcome is unknown, since the daemon records the erase
+  before it runs and can fail after it commits. wyctl says so. Re-run the same
+  command; `fact_batch_not_found` on the re-run means the batch is already
+  erased, or never existed.
+
 Public schema registration is currently a one-time operation for each
 tenant/graph/namespace/relation. The positive `--schema-version` identifies
 that relation's initial schema and may be any positive version. Every later

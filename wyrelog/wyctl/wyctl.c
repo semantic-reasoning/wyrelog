@@ -160,6 +160,23 @@ typedef struct
 {
   gchar *tenant;
   gchar *graph;
+  gchar *namespace_id;
+  gchar *relation;
+  gchar *schema_version_arg;
+  gchar *batch_id;
+  gchar *operator_id;
+  gchar *reason;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+  gboolean confirm;
+} WyctlFactForgetOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
   gchar *query;
   gchar *output;
   gchar *limit_arg;
@@ -405,6 +422,26 @@ wyctl_fact_put_options_clear (WyctlFactPutOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactPutOptions,
     wyctl_fact_put_options_clear);
+
+static void
+wyctl_fact_forget_options_clear (WyctlFactForgetOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->namespace_id, g_free);
+  g_clear_pointer (&opts->relation, g_free);
+  g_clear_pointer (&opts->schema_version_arg, g_free);
+  g_clear_pointer (&opts->batch_id, g_free);
+  g_clear_pointer (&opts->operator_id, g_free);
+  g_clear_pointer (&opts->reason, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactForgetOptions,
+    wyctl_fact_forget_options_clear);
 
 static void
 wyctl_datalog_query_options_clear (WyctlDatalogQueryOptions *opts)
@@ -2359,6 +2396,166 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return run_fact_mutation (global_opts, argc, argv, FALSE);
 }
 
+/* Erase every row of one committed batch.  The erase cannot be undone, so
+ * the target must be typed on the command line: --confirm, --tenant and
+ * --graph are checked before any file is read or request is sent, and the
+ * tenant and graph never fall back to the configured defaults. */
+static int
+run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  g_auto (WyctlFactForgetOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+     "Tenant (required; no configured default)", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph,
+     "Graph (required; no configured default)", "GRAPH"},
+    {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
+     "NS"},
+    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
+     "REL"},
+    {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
+     "Schema version", "N"},
+    {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id,
+     "Batch id to erase", "ID"},
+    {"operator", 0, 0, G_OPTION_ARG_STRING, &opts.operator_id,
+     "Operator annotation recorded with the erase", "NAME"},
+    {"reason", 0, 0, G_OPTION_ARG_STRING, &opts.reason,
+     "Reason recorded with the erase", "TEXT"},
+    {"confirm", 0, 0, G_OPTION_ARG_NONE, &opts.confirm,
+     "Confirm the irreversible erase", NULL},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- erase every row of one fact batch");
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_description (context,
+      "The erase cannot be undone.  --operator is an annotation; the audited\n"
+      "actor is the subject of the access token.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the batch was erased and the erase was audited.\n"
+      "  2: local arguments or credentials are invalid; nothing was sent.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy or the graph is sealed.\n"
+      "  5: missing batch, graph or schema; transport, busy, internal or\n"
+      "     unreadable-response failure, including rows erased without an\n"
+      "     audit record.  Without a readable answer the outcome is unknown;\n"
+      "     re-run the same command to learn it.\n"
+      "  6: authentication failed or is required.");
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact forget argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (!opts.confirm) {
+    g_printerr ("wyctl: fact forget erases the batch permanently; "
+        "pass --confirm\n");
+    return 2;
+  }
+  if (opts.tenant == NULL || opts.tenant[0] == '\0' || opts.graph == NULL
+      || opts.graph[0] == '\0') {
+    g_printerr ("wyctl: fact forget needs --tenant and --graph on the "
+        "command line\n");
+    return 2;
+  }
+  if (opts.namespace_id == NULL || opts.namespace_id[0] == '\0'
+      || opts.relation == NULL || opts.relation[0] == '\0'
+      || opts.batch_id == NULL || opts.batch_id[0] == '\0'
+      || opts.operator_id == NULL || opts.operator_id[0] == '\0'
+      || opts.reason == NULL || opts.reason[0] == '\0') {
+    g_printerr ("wyctl: missing fact forget target option\n");
+    return 2;
+  }
+  guint32 schema_version = 0;
+  if (!parse_positive_uint32 (opts.schema_version_arg, &schema_version)) {
+    g_printerr ("wyctl: invalid --schema-version\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings,
+          "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, opts.tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_auto (WylClientFactForgetResult) result = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_forget_batch (client, opts.tenant,
+          opts.graph, opts.namespace_id, opts.relation, schema_version,
+          opts.batch_id, opts.operator_id, opts.reason, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &result);
+  g_autofree gchar *batch_id = g_uri_escape_string (opts.batch_id, NULL,
+          TRUE);
+  if (rc == WYRELOG_E_INVALID
+      && wyl_client_get_last_http_status (client) == 0) {
+    /* Refused before any request by the client's own checks. */
+    g_printerr ("wyctl: fact forget refused: a value holds a control byte, "
+        "--batch-id is \"operator\" or \"reason\", --operator is "
+        "\"reason\", or the request exceeds 4096 bytes\n");
+    return 2;
+  }
+  g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
+  if (rc != WYRELOG_E_OK && !result.purged
+      && g_strcmp0 (error_code, "fact_forget_audit_failed") == 0) {
+    /* The daemon names this error only after the rows are gone. */
+    (void) fact_remote_exit (client, "fact forget", rc,
+        "fact_forget_audit_failed");
+    g_printerr ("wyctl: rows erased; audit record failed; do not retry\n");
+    return 5;
+  }
+  if (rc != WYRELOG_E_OK && result.purged && !result.audit_recorded) {
+    g_print ("action=forget batch_id=%s rows_purged=%" G_GUINT64_FORMAT
+        " purged=true audit=failed\n", batch_id, result.rows_purged);
+    (void) fact_remote_exit (client, "fact forget", rc,
+        "fact_forget_audit_failed");
+    g_printerr ("wyctl: rows erased; audit record failed; do not retry\n");
+    return 5;
+  }
+  int exit_rc = fact_remote_exit (client, "fact forget", rc,
+          "fact_forget_failed");
+  if (exit_rc == 0) {
+    g_print ("action=forget batch_id=%s rows_purged=%" G_GUINT64_FORMAT
+        " mutation_class=%s reconcile=%s\n", batch_id, result.rows_purged,
+        result.mutation_class != NULL ? result.mutation_class : "unknown",
+        result.reconcile ? "true" : "false");
+  } else {
+    /* No response, a success status with an unreadable body, or a server
+     * error: the erase may have committed, since the daemon records its
+     * intent first and a failed cleanup after the commit answers 500. */
+    guint status = wyl_client_get_last_http_status (client);
+    if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
+        || status / 100 == 5)
+      g_printerr ("wyctl: the forget outcome is unknown; re-run the same "
+          "command, and a 404 fact_batch_not_found then means the batch is "
+          "already erased or never existed\n");
+  }
+  return exit_rc;
+}
+
 static int
 run_fact_retract (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -2806,6 +3003,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_put (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "retract") == 0)
     return run_fact_retract (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "forget") == 0)
+    return run_fact_forget (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown fact command: %s\n", argv[1]);
   return 2;
 }
