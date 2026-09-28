@@ -4094,8 +4094,8 @@ test_fact_forget_ignores_configured_target (void)
 /* Run wyctl with ARGS against a one-request fake daemon answering STATUS
  * with BODY.  An argument "@TOKEN@" is replaced by a protected token file
  * holding "token-1"; DAEMON_URL NULL means the fake daemon's own URL.  With
- * CONFIGURED, GSettings supplies default-tenant "t" and that token file as
- * access-token-file. */
+ * CONFIGURED, GSettings supplies default-tenant "t", default-graph "orders"
+ * and that token file as access-token-file. */
 static void
 run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
     const gchar *const *args, gboolean configured, FactForgetRun *run)
@@ -4106,9 +4106,9 @@ run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
   if (configured) {
     g_autofree gchar *token_literal = gvariant_literal_for_string (token_path);
     const gchar *const keys[] = {
-      "default-tenant", "access-token-file", NULL,
+      "default-tenant", "access-token-file", "default-graph", NULL,
     };
-    const gchar *const values[] = {"'t'", token_literal, NULL};
+    const gchar *const values[] = {"'t'", token_literal, "'orders'", NULL};
     xdg = make_keyfile_xdg_dir (keys, values);
     envp = build_gsettings_envp (xdg, FALSE);
   }
@@ -4376,6 +4376,139 @@ test_fact_verify (void)
   }
 }
 
+#define GRAPH_GUARDS \
+  "--guard-timestamp", "123", "--guard-loc-class", "trusted", \
+  "--guard-risk", "29"
+
+static void
+test_graph_list (void)
+{
+  static const gchar *const args[] = {
+    "graph", "list", "--tenant", "t", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"graphs\":[{\"tenant_id\":\"t\","
+      "\"graph_id\":\"orders\",\"sealed\":false,\"schema_version\":1},"
+      "{\"tenant_id\":\"t\",\"graph_id\":\"old:stuff\",\"sealed\":true,"
+      "\"schema_version\":0}]}", NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "graph=orders sealed=false schema_version=1\n"
+      "graph=old%3Astuff sealed=true schema_version=0\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "GET /graphs?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "tenant=t"));
+
+  g_auto (FactForgetRun) other = { 0 };
+  run_fake_daemon_case (200, "{\"graphs\":[{\"tenant_id\":\"u\","
+      "\"graph_id\":\"orders\",\"sealed\":false,\"schema_version\":1}]}",
+      NULL, args, FALSE, &other);
+  assert_fact_forget_exit (&other, 5);
+  g_assert_cmpstr (other.out, ==, "");
+
+  g_auto (FactForgetRun) denied = { 0 };
+  run_fake_daemon_case (403, "{\"error\":\"graph_denied\"}", NULL, args,
+      FALSE, &denied);
+  assert_fact_forget_exit (&denied, 4);
+  g_assert_cmpstr (denied.err, ==, "wyctl: graph list failed: graph_denied\n");
+}
+
+#define GRAPH_SEAL_UNKNOWN_HINT \
+  "wyctl: the seal outcome is unknown; `wyctl graph list` shows whether " \
+  "the graph is sealed\n"
+
+static void
+test_graph_seal (void)
+{
+  static const gchar *const args[] = {
+    "graph", "seal", "--tenant", "t", "--graph", "orders", "--confirm",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant_id\":\"t\","
+      "\"graph_id\":\"orders\",\"sealed\":true}", NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "tenant=t graph=orders sealed=true\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "POST /graphs/seal?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "graph=orders"));
+
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+    gboolean unknown;
+  } cases[] = {
+    {400, "invalid_graph_request", 3, FALSE},
+    {401, "graph_auth_required", 6, FALSE},
+    {403, "graph_denied", 4, FALSE},
+    {404, "graph_not_found", 5, FALSE},
+    {500, "graph_mutation_failed", 5, TRUE},
+    {503, "graph_mutation_unavailable", 5, TRUE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) failed = { 0 };
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            cases[i].code);
+    g_autofree gchar *expected = g_strdup_printf (
+      "wyctl: graph seal failed: %s\n%s", cases[i].code,
+      cases[i].unknown ? GRAPH_SEAL_UNKNOWN_HINT : "");
+    run_fake_daemon_case (cases[i].status, body, NULL, args, FALSE, &failed);
+    assert_fact_forget_exit (&failed, cases[i].exit_status);
+    g_assert_cmpstr (failed.out, ==, "");
+    g_assert_cmpstr (failed.err, ==, expected);
+  }
+
+  /* A success answer that names another graph leaves the outcome unknown. */
+  g_auto (FactForgetRun) other = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant_id\":\"t\","
+      "\"graph_id\":\"archive\",\"sealed\":true}", NULL, args, FALSE,
+      &other);
+  assert_fact_forget_exit (&other, 5);
+  g_assert_cmpstr (other.out, ==, "");
+  g_assert_cmpstr (other.err, ==, "wyctl: graph seal failed: "
+      "graph_seal_failed\n" GRAPH_SEAL_UNKNOWN_HINT);
+}
+
+/* Every refusal happens before a request; the configured default tenant
+ * and graph are never a seal target. */
+static void
+test_graph_seal_refusals (void)
+{
+  static const gchar *const unconfirmed[] = {
+    "graph", "seal", "--tenant", "t", "--graph", "orders",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const no_tenant[] = {
+    "graph", "seal", "--graph", "orders", "--confirm", GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const no_graph[] = {
+    "graph", "seal", "--tenant", "t", "--confirm", GRAPH_GUARDS, NULL,
+  };
+  static const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } cases[] = {
+    {unconfirmed, "wyctl: graph seal cannot be undone; pass --confirm\n"},
+    {no_tenant, "wyctl: graph seal needs --tenant and --graph on the "
+     "command line\n"},
+    {no_graph, "wyctl: graph seal needs --tenant and --graph on the "
+     "command line\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fake_daemon_case (200, "{}", NULL, cases[i].args, TRUE, &run);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_null (run.request);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, cases[i].err);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -4493,6 +4626,9 @@ main (int argc, char **argv)
       test_fact_status_fills_from_settings);
   g_test_add_func ("/wyctl/fact-status-refusals", test_fact_status_refusals);
   g_test_add_func ("/wyctl/fact-verify", test_fact_verify);
+  g_test_add_func ("/wyctl/graph-list", test_graph_list);
+  g_test_add_func ("/wyctl/graph-seal", test_graph_seal);
+  g_test_add_func ("/wyctl/graph-seal-refusals", test_graph_seal_refusals);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",

@@ -43,6 +43,10 @@ REQUIRED = {
     "wyl_client_fact_graph_verify",
     "wyl_client_fact_forget_result_clear",
     "wyl_client_fact_forget_batch",
+    "wyl_client_graph_clear",
+    "wyl_client_graph_list_clear",
+    "wyl_client_graph_list",
+    "wyl_client_graph_seal",
 }
 
 

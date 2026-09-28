@@ -42,6 +42,7 @@ typedef struct
   gchar *last_guard_loc_class;
   gchar *last_guard_risk;
   gchar *last_namespace;
+  gchar *last_graph;
   gchar *last_schema_version;
   gchar *last_content_type;
 } TestHttpServer;
@@ -105,11 +106,14 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_guard_loc_class);
   g_free (http->last_guard_risk);
   g_free (http->last_namespace);
+  g_free (http->last_graph);
   g_free (http->last_schema_version);
   g_free (http->last_content_type);
   http->last_namespace =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "namespace"))
       : NULL;
+  http->last_graph =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "graph")) : NULL;
   http->last_schema_version =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "schema_version")) : NULL;
@@ -1330,6 +1334,78 @@ main (void)
       || !client_last_response_is (management_client, 404,
       "fact_batch_not_found"))
     return wyl_test_normalize_exit_status (4106);
+  http.status = 0;
+
+  /* #1238: listing and sealing a tenant's graphs. */
+  g_auto (WylClientGraphList) graphs = { 0 };
+  http.body = "{\"graphs\":[{\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"orders\",\"sealed\":false,\"schema_version\":1},"
+      "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"archive\","
+      "\"sealed\":true,\"schema_version\":0}]}";
+  if (wyl_client_graph_list (management_client, "__wr_default", 123,
+      "public", 49, &graphs) != WYRELOG_E_OK || graphs.len != 2
+      || g_strcmp0 (graphs.items[0].graph_id, "orders") != 0
+      || graphs.items[0].sealed || graphs.items[0].schema_version != 1
+      || g_strcmp0 (graphs.items[1].graph_id, "archive") != 0
+      || !graphs.items[1].sealed
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/graphs") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_guard_risk, "49") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
+    return wyl_test_normalize_exit_status (4110);
+  /* An answer naming another tenant, or missing a field, is refused. */
+  static const gchar *const bad_graph_lists[] = {
+    "{\"graphs\":[{\"tenant_id\":\"other\",\"graph_id\":\"orders\","
+    "\"sealed\":false,\"schema_version\":1}]}",
+    "{\"graphs\":[{\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"sealed\":false}]}",
+    "{\"graphs\":{}}",
+    "{\"graphs\":[{\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"sealed\":false,\"schema_version\":1,\"owner\":\"x\"}]}",
+    "{\"graphs\":[{\"tenant_id\":\"__wr_default\",\"tenant_id\":"
+    "\"__wr_default\",\"graph_id\":\"orders\",\"sealed\":false,"
+    "\"schema_version\":1}]}",
+    "{\"graphs\":[{\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"sealed\":false,\"schema_version\":4294967296}]}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_graph_lists); i++) {
+    http.body = bad_graph_lists[i];
+    if (wyl_client_graph_list (management_client, "__wr_default", 123,
+        "public", 49, &graphs) != WYRELOG_E_IO || graphs.len != 0
+        || graphs.items != NULL)
+      return wyl_test_normalize_exit_status (4111);
+  }
+  http.body = "{\"graphs\":[]}";
+  if (wyl_client_graph_list (management_client, "__wr_default", 123,
+      "public", 49, &graphs) != WYRELOG_E_OK || graphs.len != 0)
+    return wyl_test_normalize_exit_status (4112);
+
+  http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"orders\",\"sealed\":true}";
+  if (wyl_client_graph_seal (management_client, "__wr_default", "orders",
+      123, "public", 49) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/graphs/seal") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_graph, "orders") != 0)
+    return wyl_test_normalize_exit_status (4113);
+  http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"archive\",\"sealed\":true}";
+  if (wyl_client_graph_seal (management_client, "__wr_default", "orders",
+      123, "public", 49) != WYRELOG_E_IO)
+    return wyl_test_normalize_exit_status (4114);
+  http.status = 404;
+  http.body = "{\"error\":\"graph_not_found\"}";
+  if (wyl_client_graph_seal (management_client, "__wr_default", "orders",
+      123, "public", 49) != WYRELOG_E_NOT_FOUND
+      || !client_last_response_is (management_client, 404, "graph_not_found"))
+    return wyl_test_normalize_exit_status (4115);
+  http.status = 503;
+  http.body = "{\"error\":\"graph_mutation_unavailable\"}";
+  if (wyl_client_graph_seal (management_client, "__wr_default", "orders",
+      123, "public", 49) != WYRELOG_E_BUSY)
+    return wyl_test_normalize_exit_status (4116);
   http.status = 0;
 
   /* #1096: the schema-count quota client must keep its typed contract
@@ -3138,6 +3214,7 @@ main (void)
   g_clear_pointer (&http.last_guard_loc_class, g_free);
   g_clear_pointer (&http.last_guard_risk, g_free);
   g_clear_pointer (&http.last_namespace, g_free);
+  g_clear_pointer (&http.last_graph, g_free);
   g_clear_pointer (&http.last_schema_version, g_free);
   g_clear_pointer (&http.last_content_type, g_free);
   g_clear_pointer (&http.loop, g_main_loop_unref);

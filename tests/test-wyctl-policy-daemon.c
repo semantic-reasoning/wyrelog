@@ -1563,6 +1563,71 @@ main (void)
       "tenant=__wr_default graph=orders verified=true\n");
   assert_wyctl_failed (fact_verify_missing_argv, 5,
       "wyctl: fact verify failed: graph_not_found\n");
+
+  /* #1238: list the tenant's graphs, then seal a second graph, which the
+   * graph-count quota of 2 configured above still admits. */
+  gchar *graph_create_sealed_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "graph", "create",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "seal-me",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *graph_list_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "graph", "list",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *graph_seal_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "graph", "seal",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "seal-me",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *graph_seal_missing_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "graph", "seal",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "no-such-graph",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_ok (graph_create_sealed_argv);
+  assert_wyctl_stdout_contains (graph_list_argv, "graph=orders sealed=false ");
+  assert_wyctl_stdout_contains (graph_list_argv,
+      "graph=seal-me sealed=false ");
+  assert_wyctl_stdout (graph_seal_argv,
+      "tenant=__wr_default graph=seal-me sealed=true\n");
+  assert_wyctl_stdout_contains (graph_list_argv, "graph=seal-me sealed=true ");
+  /* Sealing a sealed graph is a no-op that still answers success. */
+  assert_wyctl_stdout (graph_seal_argv,
+      "tenant=__wr_default graph=seal-me sealed=true\n");
+  assert_wyctl_stdout_contains (graph_list_argv, "graph=orders sealed=false ");
+  assert_wyctl_failed (graph_seal_missing_argv, 5,
+      "wyctl: graph seal failed: graph_not_found\n");
   g_unlink (refund_input_path);
   g_unlink (missing_input_path);
   g_unlink (seam_input_path);

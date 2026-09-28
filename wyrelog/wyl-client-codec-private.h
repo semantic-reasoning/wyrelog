@@ -29,6 +29,8 @@ wyrelog_error_t wyl_client_service_principal_decode
 wyrelog_error_t wyl_client_service_principal_list_decode
   (const gchar * document, gsize document_len,
     WylClientServicePrincipalList * out_principals);
+wyrelog_error_t wyl_client_graph_list_decode (const gchar * document,
+    gsize document_len, WylClientGraphList * out_graphs);
 wyrelog_error_t wyl_client_service_credential_decode
   (const gchar * document, gsize document_len,
     WylClientServiceCredential * out_credential);
