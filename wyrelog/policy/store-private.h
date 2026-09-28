@@ -453,6 +453,12 @@ wyrelog_error_t wyl_policy_store_graph_provisioning_set_darwin_evidence
 wyrelog_error_t wyl_policy_store_graph_provisioning_list
   (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
+/* Both IDs are required. Filters before decoding; returns all phases ordered
+ * by op_uuid, including an empty owned array on no match. Clears output on
+ * failure. Release the array with g_ptr_array_unref. */
+wyrelog_error_t wyl_policy_store_graph_provisioning_list_for_graph
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    GPtrArray **out_records);
 wyrelog_error_t wyl_policy_store_graph_provisioning_transition
   (wyl_policy_store_t * store, const gchar * op_uuid,
     WylPolicyGraphProvisioningPhase expected_phase,
@@ -511,6 +517,13 @@ void wyl_policy_fact_backup_snapshot_free
  * transaction rather than accidentally joining a wider mutation. */
 wyrelog_error_t wyl_policy_store_read_fact_backup_snapshot
   (wyl_policy_store_t *store, const gchar *tenant_id,
+    WylPolicyFactBackupSnapshot **out_snapshot);
+/* Same transaction and ownership contract as the full snapshot, but reads
+ * exactly the selected graph authority and active digest without enumerating
+ * siblings. Both IDs must be valid. Missing tenant/graph returns NOT_FOUND;
+ * failures clear output, and an existing transaction returns BUSY untouched. */
+wyrelog_error_t wyl_policy_store_read_fact_graph_backup_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
     WylPolicyFactBackupSnapshot **out_snapshot);
 wyrelog_error_t wyl_policy_store_read_tenant_authority
   (wyl_policy_store_t * store, const gchar * tenant_id,

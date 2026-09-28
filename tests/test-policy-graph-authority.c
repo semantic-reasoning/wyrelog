@@ -6466,6 +6466,153 @@ test_fact_backup_snapshot_schema_digest (void)
 }
 
 static void
+test_fact_graph_backup_snapshot (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-backup", "graph-a", FALSE);
+  exec_ok (db, "INSERT INTO fact_graphs "
+      "(tenant_id,graph_id,storage_uri,storage_path,schema_version,owner_scope,"
+      "sealed,created_at,updated_at) VALUES "
+      "('tenant-backup','graph-b','file:///b','/b',1,'tenant-backup',0,1,1);");
+  insert_backup_schema (db, "graph-a", FALSE);
+  insert_backup_schema (db, "graph-b", TRUE);
+  activate_backup_schema (store, "graph-a");
+  activate_backup_schema (store, "graph-b");
+  WylPolicyFactBackupSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+      "tenant-backup", "graph-b", &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (snapshot->tenant->tenant_id, ==, "tenant-backup");
+  g_assert_cmpuint (snapshot->graphs->len, ==, 1);
+  WylPolicyFactBackupGraphSnapshot *graph = g_ptr_array_index (snapshot->graphs, 0);
+  g_assert_cmpstr (graph->authority->graph_id, ==, "graph-b");
+  g_assert_cmpstr (graph->active_schema_digest, ==,
+      "sha256:46209a204c82013fab67c8212ab8009338a710a4abb9869da58c9e8d7badbef3");
+  wyl_policy_fact_backup_snapshot_free (snapshot);
+  const gchar *tenants[] = { "tenant-backup", "missing", NULL, "" };
+  const gchar *graphs[] = { "missing", "graph-b", "graph-b", "graph-b" };
+  for (guint i = 0; i < G_N_ELEMENTS (tenants); i++) {
+    snapshot = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+        tenants[i], graphs[i], &snapshot), ==,
+        i < 2 ? WYRELOG_E_NOT_FOUND : WYRELOG_E_INVALID);
+    g_assert_null (snapshot);
+    g_assert_true (sqlite3_get_autocommit (db));
+  }
+  const gchar *invalid_graphs[] = { NULL, "", "../bad" };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid_graphs); i++) {
+    snapshot = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+        "tenant-backup", invalid_graphs[i], &snapshot), ==, WYRELOG_E_INVALID);
+    g_assert_null (snapshot);
+  }
+  exec_ok (db, "BEGIN;");
+  snapshot = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+      "tenant-backup", "graph-b", &snapshot), ==, WYRELOG_E_BUSY);
+  g_assert_null (snapshot);
+  g_assert_false (sqlite3_get_autocommit (db));
+  exec_ok (db, "ROLLBACK;");
+  const gchar *defects[] = {
+    "DROP TRIGGER fact_graph_authority_update_guard;"
+    "PRAGMA ignore_check_constraints=ON;"
+    "UPDATE fact_graphs SET lifecycle_state='broken' WHERE graph_id='graph-a';",
+    "UPDATE fact_graphs SET lifecycle_state='legacy_unclassified' WHERE graph_id='graph-a';"
+    "UPDATE fact_relation_activation SET last_error_class='schema' WHERE graph_id='graph-a';"
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (defects); i++) {
+    exec_ok (db, defects[i]);
+    g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+        "tenant-backup", "graph-b", &snapshot), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (snapshot->graphs->len, ==, 1);
+    wyl_policy_fact_backup_snapshot_free (snapshot);
+    snapshot = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot (store,
+        "tenant-backup", "graph-a", &snapshot), ==, WYRELOG_E_POLICY);
+    g_assert_null (snapshot);
+    g_assert_cmpint (wyl_policy_store_read_fact_backup_snapshot (store,
+        "tenant-backup", &snapshot), ==, WYRELOG_E_POLICY);
+    g_assert_null (snapshot);
+    g_assert_true (sqlite3_get_autocommit (db));
+  }
+}
+
+static void
+test_graph_provisioning_selected_list (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  /* Remove fixture constraints to exercise all-row decoding and ordering,
+   * even when multiple operations name the same graph. */
+  exec_ok (db, "PRAGMA foreign_keys=OFF;"
+      "CREATE TABLE provisioning_fixture AS SELECT * FROM fact_graph_provisioning;"
+      "DROP TABLE fact_graph_provisioning;"
+      "ALTER TABLE provisioning_fixture RENAME TO fact_graph_provisioning;");
+  const gchar *tenants[] = { "tenant-a", "tenant-a", "tenant-a", "tenant-b" };
+  const gchar *graphs[] = { "graph-b", "graph-a", "graph-b", "graph-b" };
+  const gchar *phases[] = { "published", "reserved", "reserved", "reserved" };
+  for (guint i = 0; i < 4; i++) {
+    g_autofree gchar *sql = g_strdup_printf (
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c07061%u','%s','%s',"
+      "'01890f47-3c4b-7cc2-b8c4-dc0c0c070699',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c07061%u.sqlite',"
+      "1,0,'%s',0,1,1);", 3-i, tenants[i], graphs[i], 3-i, phases[i]);
+    exec_ok (db, sql);
+  }
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+      "tenant-a", "graph-b", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 2);
+  WylPolicyGraphProvisioningRecord *first = g_ptr_array_index (records, 0);
+  WylPolicyGraphProvisioningRecord *second = g_ptr_array_index (records, 1);
+  g_assert_cmpstr (first->op_uuid, <, second->op_uuid);
+  g_assert_cmpint (second->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED);
+  g_ptr_array_unref (records);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+      "tenant-a", "missing", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 0);
+  g_ptr_array_unref (records);
+  const gchar *invalid[] = { NULL, "", "../bad" };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    records = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+        invalid[i], "graph-b", &records), ==, WYRELOG_E_INVALID);
+    g_assert_null (records);
+    records = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+        "tenant-a", invalid[i], &records), ==, WYRELOG_E_INVALID);
+    g_assert_null (records);
+  }
+  exec_ok (db, "PRAGMA ignore_check_constraints=ON;"
+      "UPDATE fact_graph_provisioning SET phase=CAST('reserved' AS BLOB) "
+      "WHERE graph_id='graph-a' OR tenant_id='tenant-b';");
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+      "tenant-a", "graph-b", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 2);
+  g_ptr_array_unref (records);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (store,
+      "tenant-a", &records), ==, WYRELOG_E_POLICY);
+  g_assert_null (records);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list (store,
+      NULL, &records), ==, WYRELOG_E_POLICY);
+  g_assert_null (records);
+  exec_ok (db, "UPDATE fact_graph_provisioning SET phase=CAST('reserved' AS BLOB) "
+      "WHERE op_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c070613';");
+  records = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph (store,
+      "tenant-a", "graph-b", &records), ==, WYRELOG_E_POLICY);
+  g_assert_null (records);
+}
+
+static void
 test_fact_write_rate_quota_persists (void)
 {
   g_autofree gchar *store_root = NULL;
@@ -7460,5 +7607,9 @@ main (int argc, char **argv)
       test_relation_activation_typed_api);
   g_test_add_func ("/policy/graph-authority/fact-backup-snapshot-digest",
       test_fact_backup_snapshot_schema_digest);
+  g_test_add_func ("/policy/graph-authority/fact-graph-backup-snapshot",
+      test_fact_graph_backup_snapshot);
+  g_test_add_func ("/policy/graph-authority/graph-provisioning-selected-list",
+      test_graph_provisioning_selected_list);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

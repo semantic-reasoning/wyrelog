@@ -11,12 +11,17 @@ G_BEGIN_DECLS
 typedef struct WylFactOfflineRestoreValidationSession
     WylFactOfflineRestoreValidationSession;
 
-/* Tenant-wide, observational validation of a pristine all-bound journal.
+/* Observational validation of a pristine all-bound tenant or graph journal.
  * Caller-established manifest authentication remains a prerequisite: neither
  * decoding nor the durable trust assertion authenticates the supplied bytes.
  * Borrows policy; references runtime and manifest. Owns root authority,
  * directories, readers, provisioning pairs and runtime quiescence until free
- * or failed run. Existing runtime entries are required (NOT_FOUND otherwise).
+ * or failed run. Existing selected runtime entries are required (NOT_FOUND
+ * otherwise). Graph scope reads only selected graph policy/provisioning,
+ * opens only its directory/stage and quiesces only its runtime. Other graph
+ * snapshots and generations are untouched. Both scopes still require a sealed
+ * tenant with matching epochs and exclusive ROOT-wide authority; graph scope
+ * does not enable active-tenant restore or concurrent root writers.
  * Constructor acquisition uses one monotonic timeout budget, is not
  * cancellable, and may establish the existing policy/root binding.
  *
@@ -31,7 +36,7 @@ wyrelog_error_t wyl_fact_offline_restore_validation_session_new
     gint64 drain_timeout_us,
     WylFactOfflineRestoreValidationSession **out_session);
 
-/* Explicit recording intent. Accepts all-bound, undecided tenant journals at
+/* Explicit recording intent. Accepts all-bound, undecided tenant/graph journals at
  * revision 1 + graph_count + preflighted_count, including non-prefix progress.
  * Recorded flags never replace fresh replay or authority checks. Ownership and
  * Windows fail-closed behavior match the observational constructor above. */
@@ -44,7 +49,7 @@ wyrelog_error_t wyl_fact_offline_restore_validation_session_new_for_preflight
 
 /* Only for new_for_preflight sessions. Replays ALL graphs before recording
  * missing per-graph preflight transitions through exact-revision CAS. Checks
- * the entire tenant before each write and after the last write (quadratic
+ * the selected scope before each write and after the last write (quadratic
  * content scanning in graph count). Success retains authority and returns the
  * exact journal; repeated calls replay everything without duplicate writes.
  * Failure empties output, terminalizes and releases authority. Partial writes

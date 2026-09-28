@@ -105,7 +105,8 @@ wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
 static gboolean
 staged_phase (const WylFactOfflineRestoreJournal *journal)
 {
-  if (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+  if ((journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
       || journal->graphs == NULL || journal->graphs->len == 0
       || journal->revision != 1 + journal->graphs->len
       || journal->confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
@@ -135,7 +136,10 @@ check_policy (WylFactOfflineRestoreValidationSession *session)
 {
   WylPolicyFactBackupSnapshot *snapshot = NULL;
   const WylFactOfflineRestoreJournal *journal = &session->journal;
-  wyrelog_error_t rc = wyl_policy_store_read_fact_backup_snapshot
+  wyrelog_error_t rc = journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      ? wyl_policy_store_read_fact_graph_backup_snapshot
+        (session->policy, journal->tenant_id, journal->selected_graph_id, &snapshot)
+      : wyl_policy_store_read_fact_backup_snapshot
         (session->policy, journal->tenant_id, &snapshot);
   if (rc == WYRELOG_E_OK
       && (snapshot->tenant == NULL || snapshot->graphs == NULL
@@ -176,7 +180,10 @@ provisioning_record (WylFactOfflineRestoreValidationSession *session,
   *out_uuid = NULL;
   *out_evidence = NULL;
   g_autoptr (GPtrArray) records = NULL;
-  wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list
+  wyrelog_error_t rc = session->journal.scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      ? wyl_policy_store_graph_provisioning_list_for_graph
+        (session->policy, session->journal.tenant_id, session->journal.selected_graph_id, &records)
+      : wyl_policy_store_graph_provisioning_list
         (session->policy, session->journal.tenant_id, &records);
   gboolean found = FALSE;
   for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
@@ -330,7 +337,8 @@ session_new
   if (rc == WYRELOG_E_OK && session->journal.revision != expected_revision)
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK && (record_preflight
-      ? session->journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      ? (session->journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && session->journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
       || session->journal.confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
       || session->journal.manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
       || !wyl_fact_offline_restore_validation_progress_phase (&session->journal)
@@ -456,6 +464,7 @@ validate_current (WylFactOfflineRestoreValidationSession *session,
     WylFactOfflineRestoreAdmissionEvidence admission = {
       .operation_uuid = session->journal.operation_uuid,
       .tenant_id = session->journal.tenant_id,
+      .selected_graph_id = session->journal.selected_graph_id,
       .tenant_lifecycle_generation = session->journal.destination_tenant_lifecycle_generation,
       .tenant_reconciliation_generation = session->journal.destination_tenant_reconciliation_generation,
       .confirmed = TRUE, .manifest_authenticated = TRUE,
