@@ -157,6 +157,18 @@ typedef struct
 typedef struct
 {
   gchar *tenant_id;
+  gboolean sealed;
+} WylClientTenant;
+
+typedef struct
+{
+  WylClientTenant *items;
+  gsize len;
+} WylClientTenantList;
+
+typedef struct
+{
+  gchar *tenant_id;
   gboolean has_limit;
   guint64 hard_limit;
   guint64 committed;
@@ -651,6 +663,37 @@ wyrelog_error_t wyl_client_graph_list (WylClient * client,
 wyrelog_error_t wyl_client_graph_seal (WylClient * client,
     const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk);
+void wyl_client_tenant_clear (WylClientTenant * value);
+void wyl_client_tenant_list_clear (WylClientTenantList * value);
+/* Tenant management.  Every call needs a client whose credentials are bound
+ * to __wr_default, and wr.tenant.manage there.  out_tenants must be
+ * zero-initialised or cleared; it is owned by the caller and must be cleared
+ * after use. */
+wyrelog_error_t wyl_client_tenant_list (WylClient * client,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientTenantList * out_tenants);
+/* Create, seal and unseal report through out_changed whether the call
+ * changed the tenant; repeating one that already took effect succeeds with
+ * FALSE.  A success answer that does not name the tenant is WYRELOG_E_IO,
+ * and WYRELOG_E_BUSY means the daemon could not take the tenant now. */
+wyrelog_error_t wyl_client_tenant_create (WylClient * client,
+    const gchar * name, gint64 guard_timestamp, const gchar * guard_loc_class,
+    gint64 guard_risk, gboolean * out_changed);
+wyrelog_error_t wyl_client_tenant_unseal (WylClient * client,
+    const gchar * name, gint64 guard_timestamp, const gchar * guard_loc_class,
+    gint64 guard_risk, gboolean * out_changed);
+/* Seals a tenant under the caller's canonical request_id.  If the outcome is
+ * not known, repeat the call with the same request_id: the daemon completes
+ * or confirms that seal, and refuses other changes to the tenant until it
+ * does. */
+wyrelog_error_t wyl_client_tenant_seal (WylClient * client,
+    const gchar * name, const gchar * request_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk, gboolean * out_changed);
+/* Writes a fresh canonical request id into buf, which must hold at least
+ * WYL_CLIENT_REQUEST_ID_BUF bytes. */
+#define WYL_CLIENT_REQUEST_ID_BUF 28
+wyrelog_error_t wyl_client_request_id_new (gchar * buf, gsize buf_len);
+gboolean wyl_client_request_id_is_canonical (const gchar * request_id);
 void wyl_client_fact_forget_result_clear (WylClientFactForgetResult * result);
 /* Physically erases every row of one committed batch of a relation.  The
  * client must carry credentials bound to tenant.  batch_id, operator_id and
@@ -953,6 +996,10 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientGraph, wyl_client_graph_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientGraphList, wyl_client_graph_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientTenant, wyl_client_tenant_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientTenantList, wyl_client_tenant_list_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientServicePrincipal, wyl_client_service_principal_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC

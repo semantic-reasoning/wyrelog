@@ -74,6 +74,25 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+/* Tenant management is authorized in __wr_default and needs the permission
+ * armed, not merely granted. */
+static wyrelog_error_t
+grant_tenant_authority (WylHandle *handle, const gchar *subject)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
+          "wr.tenant.manage", WYL_TENANT_DEFAULT);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_set_permission_state (store, subject,
+            "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+            "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
 static wyrelog_error_t
 grant_policy_role_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
@@ -491,7 +510,6 @@ assert_wyctl_ok (gchar **argv)
   g_assert_cmpstr (stderr_buf, ==, "");
 }
 
-#ifdef WYL_HAS_FACT_STORE
 static void
 assert_wyctl_stdout (gchar **argv, const gchar *expected_stdout)
 {
@@ -564,7 +582,6 @@ assert_wyctl_failed (gchar **argv, gint expected_status,
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_cmpstr (stderr_buf, ==, expected_stderr);
 }
-#endif
 
 int
 main (void)
@@ -645,6 +662,8 @@ main (void)
   if (grant_policy_role_authority (handle, "wyctl-policy-admin", "tenant-x")
       != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (9);
+  if (grant_tenant_authority (handle, "wyctl-policy-admin") != WYRELOG_E_OK)
+    return wyl_test_normalize_exit_status (18);
 #ifdef WYL_HAS_FACT_STORE
   if (grant_fact_authority (handle, "wyctl-policy-admin") != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (103);
@@ -1633,6 +1652,78 @@ main (void)
   g_unlink (seam_input_path);
   g_unlink (input_path);
 #endif
+
+  /* #1238: the tenant lifecycle through wyctl.  It needs no fact store, so
+   * it runs in every build.  wyctl-t1 is used by nothing else here. */
+  gchar *tenant_create_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "create", "--name", "wyctl-t1",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *tenant_create_invalid_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "create", "--name", "bad name",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *tenant_list_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "list",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *tenant_seal_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "seal", "--name", "wyctl-t1", "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *tenant_seal_unconfirmed_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "seal", "--name", "wyctl-t1",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *tenant_unseal_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "tenant", "unseal", "--name", "wyctl-t1",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (tenant_create_argv, "tenant=wyctl-t1 changed=true\n");
+  assert_wyctl_stdout (tenant_create_argv, "tenant=wyctl-t1 changed=false\n");
+  assert_wyctl_failed (tenant_create_invalid_argv, 3,
+      "wyctl: tenant create failed: invalid_tenant_request\n");
+  assert_wyctl_stdout_contains (tenant_list_argv,
+      "tenant=wyctl-t1 sealed=false\n");
+  assert_wyctl_rejected (tenant_seal_unconfirmed_argv,
+      "wyctl: tenant seal closes the whole tenant; pass --confirm\n");
+  assert_wyctl_stdout_contains (tenant_seal_argv,
+      "tenant=wyctl-t1 changed=true request_id=");
+  assert_wyctl_stdout_contains (tenant_list_argv,
+      "tenant=wyctl-t1 sealed=true\n");
+  assert_wyctl_stdout (tenant_unseal_argv, "tenant=wyctl-t1 changed=true\n");
+  assert_wyctl_stdout_contains (tenant_list_argv,
+      "tenant=wyctl-t1 sealed=false\n");
 
   g_unlink (token_path);
 

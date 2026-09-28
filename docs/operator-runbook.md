@@ -1129,12 +1129,14 @@ wyctl service-principal disable \
   --access-token-file <path>
 ```
 
-Seal the tenant (blocks the entire tenant surface):
+Seal the tenant (blocks the entire tenant surface; see "Tenants"):
 
 ```
-POST /tenants/seal
-  Authorization: Bearer <token>
-  { "version": "1", "request_id": "<canonical-request-id>" }
+wyctl tenant seal \
+  --name <tenant> --confirm \
+  [--request-id <id>] \
+  --access-token-file <path>
+# receipt: tenant=<tenant> changed=true request_id=<id>
 ```
 
 After any of these, a fresh exchange for an affected credential fails and an
@@ -1940,6 +1942,70 @@ of the process even if the store later becomes readable and the graph returns to
 was never reconciled. Restart re-probes it. This is not a state the daemon can
 detect while running, which is why the startup `BOOT` lines are worth
 collecting.
+
+## Tenants
+
+Tenant management runs as a `__wr_default` session and needs
+`wr.tenant.manage` there, armed. Every command below takes the usual guard
+options.
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant list \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" tenant create --name acme \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+`tenant list` prints one `tenant=<tenant> sealed=<bool>` line per tenant.
+`tenant create` prints `tenant=<tenant> changed=<bool>`; creating a tenant that
+already exists succeeds with `changed=false`. Creating a tenant grants the
+caller the `wr.system_admin` role in it.
+
+Sealing closes the whole tenant: every request that names it is refused, and
+its service credentials stop working (see "Incident revocation and
+zero-survivor"). It needs `--confirm`:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant seal --name acme --confirm \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `tenant=<tenant> changed=<bool> request_id=<id>`. Every seal carries
+a request id, which wyctl mints unless `--request-id` names one, and a failed
+seal always prints it (`wyctl: tenant seal request_id=<id>`). When the outcome
+is unknown (no answer, an unreadable answer or a 5xx), repeat the seal with
+`--request-id <id>`, not a new id, so the daemon completes or confirms that
+same seal. `409 tenant_seal_superseded` or `tenant_seal_conflict` means that
+id can no longer apply: the tenant changed after the seal was recorded, or the
+id belongs to another request. Check `wyctl tenant list`, and if the tenant
+still needs sealing, seal it again without `--request-id`.
+
+A create, seal or unseal that fails after the daemon committed it leaves a
+pending repair, and the daemon holds one for all tenants. Until the same
+command is repeated -- a seal with the same `--request-id` -- the daemon
+answers every tenant create, seal and unseal, for any tenant, with `503
+tenant_mutation_unavailable`, and wyctl says so. The failed command may be the
+one that just got that answer: a seal that fails after its own commit installs
+the repair and answers the same way. The same answer can also mean the daemon
+was momentarily busy, so repeating is safe either way. Create and unseal are
+safe to repeat: once done they answer `changed=false`. So after a 5xx or no
+answer, repeat the same command before anything else. A seal can also answer
+`503 tenant_lifecycle_coordination_required`; repeat it the same way.
+
+Unsealing reopens the tenant; it does not unseal its graphs:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant unseal --name acme \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+Tenants cannot be deleted (`/tenants/delete` answers `501`); seal one to
+retire it.
 
 ## Tenant Resource Quotas
 

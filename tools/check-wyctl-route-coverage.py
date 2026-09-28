@@ -65,6 +65,10 @@ COVERAGE = {
     "/auth/mfa/enroll/confirm": ("mfa", "enroll"),
     "/auth/refresh": ("auth", "refresh"),
     "/auth/logout": ("auth", "logout"),
+    "/tenants": ("tenant", "list"),
+    "/tenants/create": ("tenant", "create"),
+    "/tenants/seal": ("tenant", "seal"),
+    "/tenants/unseal": ("tenant", "unseal"),
     "/graphs/create": ("graph", "create"),
     "/graphs": ("graph", "list"),
     "/graphs/seal": ("graph", "seal"),
@@ -103,10 +107,6 @@ UNSUPPORTED = {
 }
 
 PENDING = {
-    "/tenants": ("tenant", "list"),
-    "/tenants/create": ("tenant", "create"),
-    "/tenants/seal": ("tenant", "seal"),
-    "/tenants/unseal": ("tenant", "unseal"),
     "/profile/status": ("profile", "status"),
 }
 

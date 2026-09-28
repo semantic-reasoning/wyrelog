@@ -47,6 +47,14 @@ REQUIRED = {
     "wyl_client_graph_list_clear",
     "wyl_client_graph_list",
     "wyl_client_graph_seal",
+    "wyl_client_tenant_clear",
+    "wyl_client_tenant_list_clear",
+    "wyl_client_tenant_list",
+    "wyl_client_tenant_create",
+    "wyl_client_tenant_unseal",
+    "wyl_client_tenant_seal",
+    "wyl_client_request_id_new",
+    "wyl_client_request_id_is_canonical",
 }
 
 
