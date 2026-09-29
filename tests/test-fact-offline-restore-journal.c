@@ -8,6 +8,8 @@
 #define OP "018f22d0-7b6d-7a5b-8c31-123456789abc"
 #define OLD_PROVISION "018f22d0-7b6d-7a5b-8c31-123456789abd"
 #define SECOND_PROVISION "018f22d0-7b6d-7a5b-8c31-123456789abe"
+#define FIRST_REPLACEMENT "018f22d0-7b6d-7a5b-8c31-123456789abf"
+#define SECOND_REPLACEMENT "018f22d0-7b6d-7a5b-8c31-123456789ac0"
 
 static WylFactArtifactInventoryIdentity
 identity (guint64 object)
@@ -308,6 +310,92 @@ tenant_provisioned_binding (void)
       &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpuint (decoded.version, ==,
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION);
+}
+
+static void
+tenant_replacement_binding (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  WylFactOfflineRestoreTargetGraph *zeta = g_ptr_array_index (targets, 1);
+  zeta->expected_main_absent = FALSE;
+  zeta->expected_main_identity = identity (102);
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < 2; i++) {
+    const gchar *id = i == 0 ? "alpha" : "zeta";
+    WylFactArtifactInventoryIdentity staged = identity (201 + i);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+          (&journal, id, &staged), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+          (&journal, id), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&journal, "alpha", OLD_PROVISION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&journal, "zeta", SECOND_PROVISION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreTenantReplacementBinding first = {
+    "alpha", FIRST_REPLACEMENT
+  };
+  WylFactOfflineRestoreTenantReplacementBinding second = {
+    "zeta", SECOND_REPLACEMENT
+  };
+  g_autoptr (GPtrArray) bindings = g_ptr_array_new ();
+  g_ptr_array_add (bindings, &first);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_POLICY);
+  g_ptr_array_add (bindings, &second);
+  second.replacement_provisioning_uuid = OLD_PROVISION;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_POLICY);
+  second.replacement_provisioning_uuid = FIRST_REPLACEMENT;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_POLICY);
+  second.replacement_provisioning_uuid = SECOND_REPLACEMENT;
+  second.graph_id = "alpha";
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_POLICY);
+  second.graph_id = "zeta";
+  for (guint i = 0; i < 2; i++) {
+    WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+          (journal.graphs, i);
+    graph->transition_state =
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+    graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+    graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  }
+  g_autoptr (GBytes) before_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &before_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) before = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (before_blob,
+      &before), ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, revision + 1);
+  g_assert_cmpuint (journal.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&before, &journal));
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &encoded), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) decoded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (encoded,
+      &decoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&decoded), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_assert_cmpstr (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (decoded.graphs, 1))->replacement_provisioning_uuid,
+      ==, SECOND_REPLACEMENT);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
+        (&journal, bindings), ==, WYRELOG_E_POLICY);
 }
 
 static void
@@ -873,6 +961,8 @@ main (int argc, char **argv)
       provisioned_handoff_binding);
   g_test_add_func ("/fact/offline-restore/tenant-provisioned-binding",
       tenant_provisioned_binding);
+  g_test_add_func ("/fact/offline-restore/tenant-replacement-binding",
+      tenant_replacement_binding);
   g_test_add_func ("/fact/offline-restore/imported-provisioned-early-commit",
       imported_provisioned_commit_early_successors);
   g_test_add_func ("/fact/offline-restore/admission",
