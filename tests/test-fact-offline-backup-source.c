@@ -4108,6 +4108,61 @@ test_graph_restore_replacement_reservation (void)
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       published.revision, 0, &reopened_selected), !=, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      selected.revision + 1, 0, &finalized), !=, WYRELOG_E_OK);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  const gchar *finalize_failure = "restore-selected-after-companion-unlink";
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (fail_retain_once, &finalize_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      selected.revision, 0, &finalized), ==, WYRELOG_E_IO);
+  g_assert_null (finalize_failure);
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_auto (WylFactOfflineRestoreJournal) finalize_pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &finalize_pending), ==,
+      WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *finalize_pending_graph =
+      g_ptr_array_index (finalize_pending.graphs, 0);
+  g_assert_cmpint (finalize_pending_graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+  g_assert_cmpint (finalize_pending_graph->pending_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+  g_assert_false (g_file_test (old_companion, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (rollback_path, G_FILE_TEST_IS_REGULAR));
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  finalize_failure = "restore-selected-after-rollback-unlink";
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (fail_retain_once, &finalize_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      finalize_pending.revision, 0, &finalized), ==, WYRELOG_E_IO);
+  g_assert_null (finalize_failure);
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      finalize_pending.revision, 0, &finalized), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      selected.revision, 0, &finalized), ==, WYRELOG_E_OK);
+#endif
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (finalized.graphs, 0))->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+  g_assert_true (g_file_test (main_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
 #endif
   wyl_policy_graph_restore_replacement_record_free (replayed);
   wyl_policy_graph_restore_replacement_record_free (reserved);
