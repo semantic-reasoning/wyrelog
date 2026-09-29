@@ -322,6 +322,47 @@ wyctl_token_file_free_sensitive (gchar *value, gsize capacity)
 }
 
 WyctlTokenFileStatus
+wyctl_token_file_check_available (const gchar *path)
+{
+  if (path == NULL || path[0] == '\0')
+    return WYCTL_TOKEN_FILE_MISSING_PATH;
+#ifdef G_OS_WIN32
+  WyctlTokenFileWindowsParentAnchor anchor = { NULL, NULL };
+  if (!wyctl_token_file_windows_parent_anchor_open (path, &anchor))
+    return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
+  DWORD attrs = GetFileAttributesW (anchor.child_path);
+  DWORD error = attrs == INVALID_FILE_ATTRIBUTES ? GetLastError () : 0;
+  wyctl_token_file_windows_parent_anchor_clear (&anchor);
+  if (attrs != INVALID_FILE_ATTRIBUTES)
+    return WYCTL_TOKEN_FILE_ALREADY_EXISTS;
+  if (error == ERROR_FILE_NOT_FOUND)
+    return WYCTL_TOKEN_FILE_OK;
+  return error == ERROR_ACCESS_DENIED ? WYCTL_TOKEN_FILE_PERMISSION_DENIED
+                                     : WYCTL_TOKEN_FILE_IO;
+#else
+  g_autofree gchar *parent = g_path_get_dirname (path);
+  g_autofree gchar *basename = g_path_get_basename (path);
+  int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (dirfd < 0) {
+    if (errno == ELOOP || errno == ENOTDIR)
+      return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
+    return errno == EACCES || errno == EPERM
+           ? WYCTL_TOKEN_FILE_PERMISSION_DENIED : WYCTL_TOKEN_FILE_IO;
+  }
+  struct stat st;
+  int result = fstatat (dirfd, basename, &st, AT_SYMLINK_NOFOLLOW);
+  int saved_errno = errno;
+  close (dirfd);
+  if (result == 0)
+    return WYCTL_TOKEN_FILE_ALREADY_EXISTS;
+  if (saved_errno == ENOENT)
+    return WYCTL_TOKEN_FILE_OK;
+  return saved_errno == EACCES || saved_errno == EPERM
+         ? WYCTL_TOKEN_FILE_PERMISSION_DENIED : WYCTL_TOKEN_FILE_IO;
+#endif
+}
+
+WyctlTokenFileStatus
 wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     gsize token_len)
 {
@@ -332,7 +373,7 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
 #ifdef G_OS_WIN32
   WyctlTokenFileWindowsParentAnchor anchor = { NULL, NULL };
   if (!wyctl_token_file_windows_parent_anchor_open (path, &anchor))
-    return WYCTL_TOKEN_FILE_SYMLINK;
+    return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
   PSECURITY_DESCRIPTOR descriptor = NULL;
   SECURITY_ATTRIBUTES security = { 0 };
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW
@@ -348,8 +389,12 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
           FILE_ATTRIBUTE_READONLY | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   LocalFree (descriptor);
   if (h == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError ();
     wyctl_token_file_windows_parent_anchor_clear (&anchor);
-    return WYCTL_TOKEN_FILE_IO;
+    if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+      return WYCTL_TOKEN_FILE_ALREADY_EXISTS;
+    return error == ERROR_ACCESS_DENIED ? WYCTL_TOKEN_FILE_PERMISSION_DENIED
+                                        : WYCTL_TOKEN_FILE_IO;
   }
   if (wyctl_token_file_windows_handle_is_reparse (h)) {
     FILE_DISPOSITION_INFO disposition = { TRUE };
@@ -377,13 +422,23 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   g_autofree gchar *parent = g_path_get_dirname (path);
   g_autofree gchar *basename = g_path_get_basename (path);
   int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  if (dirfd < 0)
-    return WYCTL_TOKEN_FILE_IO;
+  if (dirfd < 0) {
+    if (errno == ELOOP || errno == ENOTDIR)
+      return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
+    return errno == EACCES || errno == EPERM
+           ? WYCTL_TOKEN_FILE_PERMISSION_DENIED : WYCTL_TOKEN_FILE_IO;
+  }
   int fd = openat (dirfd, basename,
           O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY | O_NOFOLLOW, 0600);
   if (fd < 0) {
+    int saved_errno = errno;
     close (dirfd);
-    return WYCTL_TOKEN_FILE_IO;
+    if (saved_errno == EEXIST)
+      return WYCTL_TOKEN_FILE_ALREADY_EXISTS;
+    if (saved_errno == ELOOP || saved_errno == ENOTDIR)
+      return WYCTL_TOKEN_FILE_UNSAFE_PARENT;
+    return saved_errno == EACCES || saved_errno == EPERM
+           ? WYCTL_TOKEN_FILE_PERMISSION_DENIED : WYCTL_TOKEN_FILE_IO;
   }
   gsize written = 0;
   while (written < token_len) {
@@ -822,8 +877,10 @@ WyctlTokenFileStatus
 wyctl_token_file_write_pair_protected (const gchar *refresh_path,
     const gchar *refresh_token, gsize refresh_token_len,
     const gchar *access_path, const gchar *access_token,
-    gsize access_token_len)
+    gsize access_token_len, const gchar **failed_path)
 {
+  if (failed_path != NULL)
+    *failed_path = NULL;
   g_autofree gchar *refresh_canonical = refresh_path != NULL
       ? g_canonicalize_filename (refresh_path, NULL) : NULL;
   g_autofree gchar *access_canonical = access_path != NULL
@@ -833,8 +890,11 @@ wyctl_token_file_write_pair_protected (const gchar *refresh_path,
     return WYCTL_TOKEN_FILE_INVALID_BYTES;
   WyctlTokenFileStatus status = wyctl_token_file_write_protected
         (refresh_path, refresh_token, refresh_token_len);
-  if (status != WYCTL_TOKEN_FILE_OK)
+  if (status != WYCTL_TOKEN_FILE_OK) {
+    if (failed_path != NULL)
+      *failed_path = refresh_path;
     return status;
+  }
   guint64 file_id_a = 0;
   guint64 file_id_b = 0;
 #ifdef G_OS_WIN32
@@ -873,10 +933,15 @@ wyctl_token_file_write_pair_protected (const gchar *refresh_path,
     }
   }
 #endif
-  if (file_id_b == 0)
+  if (file_id_b == 0) {
+    if (failed_path != NULL)
+      *failed_path = refresh_path;
     return WYCTL_TOKEN_FILE_IO;
+  }
   status = wyctl_token_file_write_protected
         (access_path, access_token, access_token_len);
+  if (status != WYCTL_TOKEN_FILE_OK && failed_path != NULL)
+    *failed_path = access_path;
   if (status != WYCTL_TOKEN_FILE_OK
       && !wyctl_token_file_remove_if_same_file (refresh_path,
       file_id_a, file_id_b))
@@ -918,6 +983,12 @@ wyctl_token_file_status_message (WyctlTokenFileStatus status)
       return "wyctl: access token file ACL validation unavailable: %s";
     case WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN:
       return "wyctl: token update durability uncertain: %s";
+    case WYCTL_TOKEN_FILE_ALREADY_EXISTS:
+      return "wyctl: token output already exists: %s";
+    case WYCTL_TOKEN_FILE_UNSAFE_PARENT:
+      return "wyctl: unsafe token output parent: %s";
+    case WYCTL_TOKEN_FILE_PERMISSION_DENIED:
+      return "wyctl: permission denied for token output: %s";
   }
   return NULL;
 }

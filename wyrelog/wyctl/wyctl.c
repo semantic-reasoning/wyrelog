@@ -4109,6 +4109,63 @@ read_mfa_code (gchar **out_code)
 }
 
 static int
+check_login_token_output (const gchar *option, const gchar *path)
+{
+  WyctlTokenFileStatus status = wyctl_token_file_check_available (path);
+  if (status == WYCTL_TOKEN_FILE_OK)
+    return 0;
+  if (status == WYCTL_TOKEN_FILE_ALREADY_EXISTS)
+    g_printerr ("wyctl: --%s already exists: %s\n", option, path);
+  else if (status == WYCTL_TOKEN_FILE_UNSAFE_PARENT)
+    g_printerr ("wyctl: --%s has an unsafe parent directory: %s\n",
+        option, path);
+  else if (status == WYCTL_TOKEN_FILE_PERMISSION_DENIED)
+    g_printerr ("wyctl: permission denied checking --%s: %s\n", option,
+        path);
+  else
+    g_printerr ("wyctl: unable to check --%s: %s\n", option, path);
+  return 2;
+}
+
+static void
+emit_login_token_publication_error (WyctlTokenFileStatus status,
+    const gchar *failed_path, const gchar *access_path,
+    const gchar *refresh_path)
+{
+  const gchar *path = failed_path != NULL ? failed_path : "(unknown path)";
+  switch (status) {
+    case WYCTL_TOKEN_FILE_ALREADY_EXISTS:
+      g_printerr ("wyctl: token-file publication failed: output already "
+          "exists: %s; server logout was attempted; use unused output "
+          "paths for the next login\n", path);
+      return;
+    case WYCTL_TOKEN_FILE_UNSAFE_PARENT:
+    case WYCTL_TOKEN_FILE_SYMLINK:
+      g_printerr ("wyctl: token-file publication failed: unsafe parent "
+          "directory or symlink: %s; server logout was attempted\n", path);
+      return;
+    case WYCTL_TOKEN_FILE_PERMISSION_DENIED:
+    case WYCTL_TOKEN_FILE_PERMISSIONS_TOO_BROAD:
+      g_printerr ("wyctl: token-file publication failed: permission denied: "
+          "%s; server logout was attempted\n", path);
+      return;
+    case WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN:
+      g_printerr ("wyctl: token-file publication durability uncertain; "
+          "server logout was attempted; inspect both output files before "
+          "retrying: %s, %s\n", access_path, refresh_path);
+      return;
+    case WYCTL_TOKEN_FILE_IO:
+      g_printerr ("wyctl: token-file publication failed: I/O error: %s; "
+          "server logout was attempted\n", path);
+      return;
+    default:
+      g_printerr ("wyctl: token-file publication failed: invalid output: "
+          "%s; server logout was attempted\n", path);
+      return;
+  }
+}
+
+static int
 run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   g_auto (WyctlHumanAuthOptions) opts = { 0 };
@@ -4150,6 +4207,9 @@ run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: access and refresh token paths must differ\n");
     return 2;
   }
+  if (check_login_token_output ("token-output", access_path) != 0
+      || check_login_token_output ("refresh-token-output", refresh_path) != 0)
+    return 2;
   g_autofree gchar *daemon_url = wyctl_resolve_string_option
         (global_opts->daemon_url, global_opts->settings, "daemon-url");
   g_autofree gchar *timeout_arg = wyctl_resolve_uint_option_as_string
@@ -4201,15 +4261,16 @@ run_auth_login (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: login returned no token pair\n");
     return 1;
   }
+  const gchar *failed_path = NULL;
   WyctlTokenFileStatus status = wyctl_token_file_write_pair_protected
         (refresh_path, refresh, strlen (refresh), access_path, access,
-          strlen (access));
+          strlen (access), &failed_path);
   sodium_memzero (access, strlen (access));
   sodium_memzero (refresh, strlen (refresh));
   if (status != WYCTL_TOKEN_FILE_OK) {
     (void) wyl_client_logout (client);
-    g_printerr ("wyctl: token-file publication failed; server logout was "
-        "attempted; retry login and inspect protected files\n");
+    emit_login_token_publication_error (status, failed_path, access_path,
+        refresh_path);
     return 1;
   }
   return 0;

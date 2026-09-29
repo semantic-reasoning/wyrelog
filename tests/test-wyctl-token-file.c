@@ -303,7 +303,7 @@ test_status_message_table_has_no_token_placeholder (void)
    * placeholder may exist for the token bytes themselves; that
    * would risk leaking credentials into stderr. */
   for (int s = WYCTL_TOKEN_FILE_OK;
-      s <= WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN; s++) {
+      s <= WYCTL_TOKEN_FILE_PERMISSION_DENIED; s++) {
     const gchar *msg = wyctl_token_file_status_message (
       (WyctlTokenFileStatus) s);
     if (msg == NULL)
@@ -321,6 +321,36 @@ test_status_message_table_has_no_token_placeholder (void)
 }
 
 static void
+test_output_preflight (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-output-preflight-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "token", NULL);
+  g_autofree gchar *missing_parent = g_build_filename (dir, "missing",
+          "token", NULL);
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_check_available (missing_parent), ==,
+      WYCTL_TOKEN_FILE_IO);
+  g_assert_true (g_file_set_contents (path, "old", -1, NULL));
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_unlink (path);
+  g_assert_cmpint (g_mkdir (path, 0700), ==, 0);
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_rmdir (path);
+#ifndef G_OS_WIN32
+  g_assert_cmpint (symlink ("missing-target", path), ==, 0);
+  g_assert_cmpint (wyctl_token_file_check_available (path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_unlink (path);
+#endif
+  g_rmdir (dir);
+}
+
+static void
 test_protected_writer_is_no_replace (void)
 {
   g_autofree gchar *path = NULL;
@@ -331,7 +361,7 @@ test_protected_writer_is_no_replace (void)
   g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
       ==, WYCTL_TOKEN_FILE_OK);
   g_assert_cmpint (wyctl_token_file_write_protected (path, "access-2", 8),
-      !=, WYCTL_TOKEN_FILE_OK);
+      ==, WYCTL_TOKEN_FILE_ALREADY_EXISTS);
   g_autofree gchar *token = NULL;
   g_assert_cmpint (wyctl_token_file_read (path, &token), ==,
       WYCTL_TOKEN_FILE_OK);
@@ -370,20 +400,41 @@ test_protected_pair_rolls_back_only_its_refresh_file (void)
   g_autofree gchar *access_path = g_build_filename (directory, "access", NULL);
   g_assert_cmpint (wyctl_token_file_write_protected (access_path,
       "preexisting", 11), ==, WYCTL_TOKEN_FILE_OK);
+  const gchar *failed_path = NULL;
   g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh_path,
-      "refresh-new", 11, access_path, "access-new", 10), !=,
-      WYCTL_TOKEN_FILE_OK);
+      "refresh-new", 11, access_path, "access-new", 10, &failed_path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpstr (failed_path, ==, access_path);
   g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
   g_autofree gchar *access = NULL;
   g_assert_cmpint (wyctl_token_file_read (access_path, &access), ==,
       WYCTL_TOKEN_FILE_OK);
   g_assert_cmpstr (access, ==, "preexisting");
   g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh_path,
-      "refresh-new", 11, access_path, "access-new", 10), !=,
-      WYCTL_TOKEN_FILE_OK);
+      "refresh-new", 11, access_path, "access-new", 10, &failed_path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpstr (failed_path, ==, access_path);
   g_assert_cmpstr (access, ==, "preexisting");
   g_unlink (access_path);
   g_rmdir (directory);
+}
+
+static void
+test_protected_pair_identifies_refresh_collision (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-pair-refresh-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_assert_true (g_file_set_contents (refresh_path, "old", -1, NULL));
+  const gchar *failed_path = NULL;
+  g_assert_cmpint (wyctl_token_file_write_pair_protected (refresh_path,
+      "new-refresh", 11, access_path, "new-access", 10, &failed_path), ==,
+      WYCTL_TOKEN_FILE_ALREADY_EXISTS);
+  g_assert_cmpstr (failed_path, ==, refresh_path);
+  g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_unlink (refresh_path);
+  g_rmdir (dir);
 }
 
 #ifndef G_OS_WIN32
@@ -586,10 +637,14 @@ main (int argc, char **argv)
       test_windows_attrs_reject_reparse_point);
   g_test_add_func ("/wyctl/token-file/protected-writer-no-replace",
       test_protected_writer_is_no_replace);
+  g_test_add_func ("/wyctl/token-file/output-preflight",
+      test_output_preflight);
   g_test_add_func ("/wyctl/token-file/protected-replace-and-remove",
       test_protected_replace_and_remove);
   g_test_add_func ("/wyctl/token-file/protected-pair-rollback",
       test_protected_pair_rolls_back_only_its_refresh_file);
+  g_test_add_func ("/wyctl/token-file/protected-pair-refresh-collision",
+      test_protected_pair_identifies_refresh_collision);
 #ifndef G_OS_WIN32
   g_test_add_func ("/wyctl/token-file/refresh-lock-serializes-processes",
       test_refresh_lock_serializes_processes);
