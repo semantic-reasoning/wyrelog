@@ -398,6 +398,7 @@ typedef enum
 {
   WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN,
   WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+  WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION,
 } WylFactGraphProvisionedRestoreSlot;
 
 /* Ephemeral read-only proof of the old provisioned inode across restore
@@ -406,7 +407,8 @@ typedef enum
  * cannot authenticate policy. It derives both names from canonical UUIDs and
  * never supplies an fd, name or transferable authorization to its caller.
  * READY requires main+companion; RETAINED requires rollback+companion and
- * allows a distinct one-link new main. Reconstruct after restart and
+ * allows a distinct one-link new main. DUAL_COMPANION adds the replacement
+ * companion bound to a distinct two-link new main. Reconstruct after restart and
  * revalidate immediately before each use. Darwin and Windows fail closed. */
 wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_open
   (WylFactGraphDirectory *directory, const gchar *provisioning_uuid,
@@ -419,6 +421,18 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_revalidate
     const WylFactGraphDirectory *directory);
 void wyl_fact_graph_provisioned_restore_witness_free
   (WylFactGraphProvisionedRestoreWitness *witness);
+/* Post-publication read-only proof. The old ACTIVE companion and rollback
+ * still bind the old inode; the replacement companion and new main bind a
+ * distinct inode. Callers must authenticate both UUIDs against one durable
+ * restore reservation and retain the sealed/root writer authority. This
+ * does not prove journal decision, directory closure or durability by itself.
+ * Darwin and Windows fail closed until native evidence is implemented. */
+wyrelog_error_t wyl_fact_graph_provisioned_restore_dual_witness_open
+  (WylFactGraphDirectory *directory, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphProvisionedRestoreWitness,
     wyl_fact_graph_provisioned_restore_witness_free)
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
