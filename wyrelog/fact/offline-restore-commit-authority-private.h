@@ -99,6 +99,16 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_select_replacement_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Durable selected-authority FINALIZE: commit UNKNOWN intent before old-pair
+ * cleanup, then complete the v3 journal only after exact terminal proof and
+ * directory fsync. A failed response requires a fresh policy handle and
+ * journal/namespace observation before retry. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalize_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
@@ -109,6 +119,8 @@ void wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
 void wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+void wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 #endif
 

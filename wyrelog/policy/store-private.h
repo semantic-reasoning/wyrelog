@@ -3538,6 +3538,23 @@ wyrelog_error_t wyl_policy_store_graph_restore_select_with_effect
     WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Selected v3 FINALIZE has a durable begin before either old name is
+ * removed. Completion runs the exact cleanup effect inside a second fenced
+ * writer transaction and CASes FINALIZED only after that effect succeeds. */
+wyrelog_error_t wyl_policy_store_graph_restore_selected_finalize_begin
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *current,
+    const WylPolicyOfflineRestoreRecord *pending,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+wyrelog_error_t wyl_policy_store_graph_restore_selected_finalize_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+
 /* Complete a pending graph COMMIT RETAIN only after the callback proves the
  * exact retained filesystem shape. The effect runs under the policy writer
  * transaction and must not reenter the policy store. */

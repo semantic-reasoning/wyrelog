@@ -39242,6 +39242,179 @@ wyl_policy_store_graph_restore_select_with_effect
 }
 
 static wyrelog_error_t
+restore_selected_finalize_step
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *before_record,
+    const WylPolicyOfflineRestoreRecord *after_record, gboolean begin,
+    WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (store == NULL || expected == NULL || before_record == NULL
+      || after_record == NULL || out_result == NULL
+      || (!begin && effect == NULL)
+      || !g_str_equal (expected->phase, "selected_pending_cleanup")
+      || !offline_restore_record_valid (before_record)
+      || !offline_restore_record_valid (after_record)
+      || before_record->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      || before_record->graph_count != 1
+      || after_record->revision != before_record->revision + 1
+      || g_strcmp0 (before_record->operation_uuid,
+      after_record->operation_uuid) != 0
+      || g_strcmp0 (before_record->tenant_id,
+      after_record->tenant_id) != 0
+      || g_strcmp0 (before_record->selected_graph_id,
+      after_record->selected_graph_id) != 0
+      || after_record->scope != before_record->scope
+      || after_record->graph_count != before_record->graph_count
+      || memcmp (before_record->manifest_sha256,
+      after_record->manifest_sha256, 32) != 0)
+    return WYRELOG_E_INVALID;
+  g_auto (WylFactOfflineRestoreJournal) before = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) after = { 0 };
+  g_autoptr (GBytes) canonical_before = NULL;
+  g_autoptr (GBytes) canonical_after = NULL;
+  if (wyl_fact_offline_restore_journal_decode (before_record->journal_blob,
+      &before) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_decode (after_record->journal_blob,
+      &after) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_encode (&before,
+      &canonical_before) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_encode (&after,
+      &canonical_after) != WYRELOG_E_OK
+      || !g_bytes_equal (canonical_before, before_record->journal_blob)
+      || !g_bytes_equal (canonical_after, after_record->journal_blob)
+      || before.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || after.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || !before.replacement_selected_pending_cleanup
+      || !after.replacement_selected_pending_cleanup
+      || before.revision != before_record->revision
+      || after.revision != after_record->revision
+      || before.graphs == NULL || before.graphs->len != 1
+      || after.graphs == NULL || after.graphs->len != 1
+      || !wyl_fact_offline_restore_journal_is_legal_successor (&before, &after))
+    return WYRELOG_E_POLICY;
+  const WylFactOfflineRestoreJournalGraph *old_graph =
+      g_ptr_array_index (before.graphs, 0);
+  const WylFactOfflineRestoreJournalGraph *new_graph =
+      g_ptr_array_index (after.graphs, 0);
+  gboolean valid_transition = begin
+    ? old_graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+      && old_graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && old_graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      && old_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      && new_graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+      && new_graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && new_graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && new_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+    : old_graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+      && old_graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && old_graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && old_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+      && new_graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      && new_graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      && new_graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      && new_graph->transition_terminal
+      && new_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  if (!valid_transition
+      || g_strcmp0 (before.operation_uuid, expected->operation_uuid) != 0
+      || g_strcmp0 (before.tenant_id, expected->tenant_id) != 0
+      || g_strcmp0 (before.selected_graph_id, expected->graph_id) != 0
+      || g_strcmp0 (old_graph->graph_id, expected->graph_id) != 0
+      || g_strcmp0 (old_graph->store_uuid, expected->store_uuid) != 0
+      || g_strcmp0 (old_graph->old_provisioning_uuid,
+      expected->old_provisioning_uuid) != 0
+      || before.destination_tenant_lifecycle_generation !=
+      expected->tenant_lifecycle_generation
+      || before.destination_tenant_reconciliation_generation !=
+      expected->tenant_reconciliation_generation
+      || old_graph->destination_lifecycle_generation !=
+      expected->graph_lifecycle_generation
+      || old_graph->destination_reconciliation_generation !=
+      expected->graph_reconciliation_generation)
+    return WYRELOG_E_POLICY;
+
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  WylPolicyOfflineRestoreRecord *stored = NULL;
+  rc = restore_replacement_load_locked (store, expected->operation_uuid,
+          &row);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_NOT_FOUND;
+    rc = WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK && row != NULL)
+    rc = offline_restore_load_locked (store, expected->operation_uuid,
+            &stored);
+  if (rc == WYRELOG_E_NOT_FOUND && row != NULL) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_STALE;
+    rc = WYRELOG_E_OK;
+  }
+  gboolean matched = rc == WYRELOG_E_OK && row != NULL && stored != NULL
+      && restore_replacement_same_identity (row, expected)
+      && g_str_equal (row->phase, "selected_pending_cleanup")
+      && offline_restore_record_equal (stored, before_record);
+  if (rc == WYRELOG_E_OK && row != NULL && !matched)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_STALE;
+  if (matched)
+    rc = restore_selection_postcondition_locked (store, row, stored);
+  if (matched && rc == WYRELOG_E_OK && effect != NULL)
+    rc = effect (row, effect_data);
+  if (matched && rc == WYRELOG_E_OK)
+    rc = restore_selection_cas_journal_locked (store->db, stored,
+            after_record);
+  if (matched && rc == WYRELOG_E_OK)
+    rc = restore_selection_postcondition_locked (store, row, after_record);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  wyl_policy_offline_restore_record_free (stored);
+  gboolean changed = matched && rc == WYRELOG_E_OK;
+  rc = offline_restore_finish_mutation (store, &fence, rc, changed);
+  if (rc == WYRELOG_E_OK && changed)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_selected_finalize_begin
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *current,
+    const WylPolicyOfflineRestoreRecord *pending,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  return restore_selected_finalize_step (store, expected, current, pending,
+             TRUE, NULL, NULL, out_result);
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_selected_finalize_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  return restore_selected_finalize_step (store, expected, pending, completed,
+             FALSE, effect, effect_data, out_result);
+}
+
+static wyrelog_error_t
 graph_restore_early_commit_with_effect
   (wyl_policy_store_t *store,
     const WylPolicyGraphRestoreReplacementRecord *expected,
