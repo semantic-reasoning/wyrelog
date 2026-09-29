@@ -3235,7 +3235,8 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
   const gchar *mode = data;
   gboolean reverse = g_str_equal (mode, "reverse")
       || g_str_equal (mode, "retain-reverse")
-      || g_str_equal (mode, "retain-sync-reverse");
+      || g_str_equal (mode, "retain-sync-reverse")
+      || g_str_equal (mode, "retain-sync-dir-reverse");
   const gchar *first = reverse ? "zeta" : "alpha";
   const gchar *second = reverse ? "alpha" : "zeta";
   SessionFixture f = { 0 };
@@ -3487,6 +3488,93 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR);
         g_assert_cmpint (graph->attempt, ==,
             WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+      }
+      if (g_str_has_prefix (mode, "retain-sync-dir-")) {
+        guint64 dir_revision = 20;
+        if (g_str_equal (mode, "retain-sync-dir-after-begin")
+            || g_str_equal (mode, "retain-sync-dir-after-fsync")) {
+          const gchar *failure =
+              g_str_equal (mode, "retain-sync-dir-after-begin")
+              ? "restore-sync-retain-dir-after-begin"
+              : "restore-sync-retain-dir-after-fsync";
+          wyl_fact_offline_restore_tenant_commit_sync_retain_dir_set_checkpoint_for_test
+            (fail_retain_once, &failure);
+          wyl_fact_offline_restore_journal_clear (&f.committed);
+          g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+                (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+              session_operation, first, 20, 0, &f.committed), ==,
+              WYRELOG_E_IO);
+          g_assert_null (failure);
+          g_assert_null (f.committed.graphs);
+          wyl_fact_offline_restore_tenant_commit_sync_retain_dir_set_checkpoint_for_test
+            (NULL, NULL);
+          g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+          g_assert_cmpint (wyl_policy_store_open (policy_path,
+              &f.fixture.policy), ==, WYRELOG_E_OK);
+          g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy),
+              ==, WYRELOG_E_OK);
+          WylFactOfflineRestoreJournal pending = { 0 };
+          g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                (f.fixture.policy, session_operation, &pending), ==,
+              WYRELOG_E_OK);
+          g_assert_cmpuint (pending.revision, ==, 21);
+          const WylFactOfflineRestoreJournalGraph *pending_graph =
+              g_ptr_array_index (pending.graphs, 0);
+          g_assert_cmpint (pending_graph->attempt, ==,
+              WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+          wyl_fact_offline_restore_journal_clear (&pending);
+          if (g_str_equal (mode, "retain-sync-dir-after-begin")) {
+            g_autofree gchar *name = g_strdup_printf
+                  ("restore-%s.duckdb.superseded", session_operation);
+            g_autofree gchar *rollback = graph_file_path (&f.fixture, first,
+                    name);
+            g_autofree gchar *parked = graph_file_path (&f.fixture, first,
+                    "parked-sync-retain-dir-test");
+            g_assert_cmpint (g_rename (rollback, parked), ==, 0);
+            g_assert_true (g_file_set_contents (rollback, "foreign", -1,
+                NULL));
+            g_assert_cmpint (g_chmod (rollback, 0600), ==, 0);
+            g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+                  (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                session_operation, first, 21, 0, &f.committed), !=,
+                WYRELOG_E_OK);
+            g_assert_null (f.committed.graphs);
+            g_assert_cmpint (g_remove (rollback), ==, 0);
+            g_assert_cmpint (g_rename (parked, rollback), ==, 0);
+            wyl_fact_artifact_transition_posix_set_test_fault
+              (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC);
+            g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+                  (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                session_operation, first, 21, 0, &f.committed), !=,
+                WYRELOG_E_OK);
+            g_assert_null (f.committed.graphs);
+            wyl_fact_artifact_transition_posix_set_test_fault
+              (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+          }
+          dir_revision = 21;
+        }
+        wyl_fact_offline_restore_journal_clear (&f.committed);
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+              (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+            session_operation, first, dir_revision, 0, &f.committed), ==,
+            WYRELOG_E_OK);
+        g_assert_cmpuint (f.committed.revision, ==, 22);
+        wyl_fact_offline_restore_journal_clear (&f.committed);
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+              (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+            session_operation, second, 22, 0, &f.committed), ==,
+            WYRELOG_E_OK);
+        g_assert_cmpuint (f.committed.revision, ==, 24);
+        for (guint i = 0; i < f.committed.graphs->len; i++) {
+          const WylFactOfflineRestoreJournalGraph *graph =
+              g_ptr_array_index (f.committed.graphs, i);
+          g_assert_cmpint (graph->transition_state, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+          g_assert_cmpint (graph->next_op, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
+          g_assert_cmpint (graph->attempt, ==,
+              WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+        }
       }
     }
   }
@@ -5252,6 +5340,14 @@ main (int argc, char **argv)
       "retain-sync-after-begin", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-rollback/after-fsync",
       "retain-sync-after-fsync", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-retain-dir/both/forward",
+      "retain-sync-dir-forward", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-retain-dir/both/reverse",
+      "retain-sync-dir-reverse", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-retain-dir/after-begin",
+      "retain-sync-dir-after-begin", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-retain-dir/after-fsync",
+      "retain-sync-dir-after-fsync", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-foreign",
       "sibling-foreign", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-stage-content",
