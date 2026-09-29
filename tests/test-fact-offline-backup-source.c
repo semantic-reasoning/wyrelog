@@ -819,12 +819,24 @@ create_restore_journal_for_manifest_internal (BackupFixture *fixture, GBytes *ma
       target->expected_main_identity.domain = (guint64) statbuf.st_dev;
       target->expected_main_identity.object = (guint64) statbuf.st_ino;
     }
+    /* Malformed destination expectations are established before creation;
+     * never rewrite an already durable journal to arrange a rejection. */
+    if (g_strcmp0 (mode, "wrong-inode") == 0)
+      target->expected_main_identity.object++;
+    if (g_strcmp0 (mode, "graph-lifecycle") == 0)
+      target->lifecycle_generation++;
+    if (g_strcmp0 (mode, "graph-reconciliation") == 0)
+      target->reconciliation_generation++;
 #else
     (void) session_identity;
 #endif
     g_ptr_array_add (targets, target);
   }
   WylFactOfflineRestoreJournal journal = { 0 };
+  if (g_strcmp0 (mode, "tenant-lifecycle") == 0)
+    tenant->lifecycle_generation++;
+  if (g_strcmp0 (mode, "tenant-reconciliation") == 0)
+    tenant->reconciliation_generation++;
   g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
       operation_uuid, scope, selected_graph_id, tenant->lifecycle_generation,
       tenant->reconciliation_generation, targets,
@@ -1271,6 +1283,50 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
   g_assert_cmpint (wyl_fact_offline_backup_generate (source,
       &capture_destination, &f->capture), ==, WYRELOG_E_OK);
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  if (g_str_equal (mode, "coordinator/import-historical")) {
+    /* Capture A first, then append real data B in place, preserving the
+     * provisioned inode, store identity and relation schema. */
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (f->fixture.policy,
+        f->fixture.root, "tenant-a", selected_graph, TRUE, &store), ==, WYRELOG_E_OK);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      { "id", "symbol", FALSE, TRUE },
+    };
+    const wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = "tenant-a", .graph_id = selected_graph,
+      .namespace_id = "backup", .relation_name = "items",
+      .schema_version = 1, .relation_visible = TRUE,
+      .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+    };
+    const wyl_fact_value_t values[] = {
+      { .type = WYL_FACT_VALUE_SYMBOL, .as.text = "current-main-B" },
+    };
+    const wyl_fact_row_t rows[] = { { values, G_N_ELEMENTS (values) } };
+    const wyl_fact_store_batch_t batch = {
+      .batch_id = "import-current-B", .tenant_id = "tenant-a",
+      .graph_id = selected_graph, .namespace_id = "backup",
+      .relation_name = "items", .schema_version = 1, .source = "test",
+      .idempotency_key = "import-B", .op = WYL_FACT_STORE_OP_ASSERT,
+      .rows = rows, .n_rows = G_N_ELEMENTS (rows),
+    };
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+        &created), ==, WYRELOG_E_OK);
+    g_assert_true (created);
+    g_clear_pointer (&store, wyl_fact_store_close);
+    const WylPolicyTenantLifecycleState states[] = {
+      WYL_POLICY_TENANT_LIFECYCLE_SEALED, WYL_POLICY_TENANT_LIFECYCLE_UNSEALING,
+      WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+      WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+    };
+    for (guint i = 1; i < G_N_ELEMENTS (states); i++) {
+      WylPolicyAuthorityMutationResult mutation;
+      g_assert_cmpint (wyl_policy_store_transition_tenant_authority
+            (f->fixture.policy, "tenant-a", states[i - 1], states[i],
+          2 + i, 1, &mutation), ==, WYRELOG_E_OK);
+      g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    }
+  }
   if (g_str_equal (mode, "coordinator/checksum")) {
     WylFactOfflineBackupManifest manifest = { 0 };
     g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (f->capture.manifest,
@@ -1297,6 +1353,7 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
       graph_scope ? selected_graph != NULL ? selected_graph : "alpha" : NULL, session_operation,
       !(g_str_equal (mode, "main-absence-violated")
       || g_str_equal (mode, "stage-only")
+      || g_str_equal (mode, "coordinator/expected-main-absent")
       || g_str_equal (mode, "orphan-provision")), journal_mode);
   if (selected_graph != NULL && !g_str_has_prefix (mode, "coordinator"))
     session_stage_one_graph (f, g_str_equal (selected_graph, "alpha") ? 0 : 1);
@@ -2210,10 +2267,464 @@ test_graph_coordinator_invalid_input (void)
 #endif
 }
 
+static void
+test_graph_import_invalid_input (void)
+{
+  WylFactOfflineRestoreJournal journal = { 0 };
+  WylFactOfflineRestoreInput input = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_import_run (NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, 0, 0, &input, NULL, &journal), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (journal.graphs);
+}
+
+#ifdef G_OS_WIN32
+static wyrelog_error_t
+import_windows_read (guint64 offset, guint8 *buffer, gsize capacity,
+    gsize *out_read, gpointer data)
+{
+  (void) offset;
+  (void) buffer;
+  (void) capacity;
+  (void) out_read;
+  (*(guint *) data)++;
+  return WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+import_windows_revalidate (gpointer data)
+{
+  (*(guint *) data)++;
+  return WYRELOG_E_IO;
+}
+#endif
+
+static void
+test_graph_import_windows (void)
+{
+#ifdef G_OS_WIN32
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-import-windows-XXXXXX");
+  guint calls = 0;
+  const WylFactOfflineRestoreInput input = {
+    import_windows_read, import_windows_revalidate,
+  };
+  g_autoptr (GBytes) manifest = g_bytes_new_static ("{}", 2);
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "zeta",
+      manifest, "018f22d0-7b6d-7a5b-8c31-123456789ab4", 1, 0,
+      &input, &calls, &journal), ==, WYRELOG_E_POLICY);
+  g_assert_null (journal.graphs);
+  g_assert_cmpuint (calls, ==, 0);
+  fixture_clear (&fixture);
+#else
+  g_test_skip ("Windows-only fail-closed boundary");
+#endif
+}
+
+#ifndef G_OS_WIN32
+static void
+test_graph_import_authority_accessor (void)
+{
+  WylFactOfflineBackupSourceAuthority authority;
+  memset (&authority, 0xff, sizeof authority);
+  g_assert_false (wyl_fact_offline_backup_source_get_authority (NULL, 0, &authority));
+  g_assert_true (artifact_identity_is_zero (&authority.main_identity));
+  g_assert_cmpuint (authority.tenant_lifecycle_generation, ==, 0);
+  g_assert_cmpuint (authority.tenant_reconciliation_generation, ==, 0);
+  g_assert_cmpuint (authority.graph_lifecycle_generation, ==, 0);
+  g_assert_cmpuint (authority.graph_reconciliation_generation, ==, 0);
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "coordinator", "zeta");
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (f.fixture.root, &lease), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", "zeta",
+      0, lease, &source), ==, WYRELOG_E_OK);
+  g_assert_false (wyl_fact_offline_backup_source_get_authority (source, 0, NULL));
+  memset (&authority, 0xff, sizeof authority);
+  g_assert_false (wyl_fact_offline_backup_source_get_authority (source, 1, &authority));
+  g_assert_true (artifact_identity_is_zero (&authority.main_identity));
+  g_assert_cmpuint (authority.tenant_lifecycle_generation, ==, 0);
+  g_assert_cmpuint (authority.tenant_reconciliation_generation, ==, 0);
+  g_assert_cmpuint (authority.graph_lifecycle_generation, ==, 0);
+  g_assert_cmpuint (authority.graph_reconciliation_generation, ==, 0);
+  g_assert_true (wyl_fact_offline_backup_source_get_authority (source, 0, &authority));
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &journal), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (journal.graphs, 0);
+  g_assert_cmpuint (authority.main_identity.domain, ==, graph->expected_main_identity.domain);
+  g_assert_cmpuint (authority.main_identity.object, ==, graph->expected_main_identity.object);
+  g_assert_cmpuint (authority.tenant_lifecycle_generation, ==, journal.destination_tenant_lifecycle_generation);
+  g_assert_cmpuint (authority.tenant_reconciliation_generation, ==, journal.destination_tenant_reconciliation_generation);
+  g_assert_cmpuint (authority.graph_lifecycle_generation, ==, graph->destination_lifecycle_generation);
+  g_assert_cmpuint (authority.graph_reconciliation_generation, ==, graph->destination_reconciliation_generation);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  session_fixture_clear (&f);
+}
+
+typedef struct
+{
+  SessionFixture *fixture;
+  const gchar *mode;
+  GBytes *payload;
+  guint reads;
+  guint validations;
+  guint64 offset;
+} ImportInput;
+
+static wyrelog_error_t
+import_read (guint64 offset, guint8 *buffer, gsize capacity,
+    gsize *out_read, gpointer data)
+{
+  ImportInput *input = data;
+  session_assert_authority (input->fixture, TRUE);
+  g_assert_cmpuint (offset, ==, input->offset);
+  g_assert_cmpuint (capacity, >, 0);
+  g_assert_cmpuint (capacity, <=, 64 * 1024);
+  input->reads++;
+  *out_read = 0;
+  gsize length;
+  const guint8 *bytes = g_bytes_get_data (input->payload, &length);
+  if (g_str_equal (input->mode, "read-error"))
+    return WYRELOG_E_IO;
+  if (g_str_equal (input->mode, "count-overflow")) {
+    *out_read = capacity + 1;
+    return WYRELOG_E_OK;
+  }
+  if (offset == length) {
+    g_assert_cmpuint (capacity, ==, 1);
+    if (g_str_equal (input->mode, "final-eof-error"))
+      return WYRELOG_E_IO;
+    if (g_str_equal (input->mode, "excess")) {
+      buffer[0] = 42;
+      *out_read = 1;
+      input->offset++;
+    }
+    return WYRELOG_E_OK;
+  }
+  g_assert_cmpuint (offset, <, length);
+  if (g_str_equal (input->mode, "truncated") && offset >= length / 2)
+    return WYRELOG_E_OK;
+  /* Deliberately exercise positive partial reads on every successful stream. */
+  *out_read = MIN (MIN (capacity, (gsize) 17003), length - offset);
+  memcpy (buffer, bytes + offset, *out_read);
+  if (g_str_equal (input->mode, "corrupt") && offset == 0)
+    buffer[0] ^= 1;
+  if (offset == 0 && g_str_equal (input->mode, "late-provision"))
+    graph_corrupt_provision (input->fixture, "zeta");
+  if (offset == 0 && g_str_equal (input->mode, "late-schema"))
+    graph_corrupt_schema (input->fixture, "zeta");
+  if (offset == 0 && g_str_equal (input->mode, "late-tenant"))
+    mutate_tenant_after_snapshot (&input->fixture->capture);
+  if (offset == 0 && g_str_equal (input->mode, "late-journal")) {
+    g_auto (WylFactOfflineRestoreJournal) desired = { 0 }, committed = { 0 };
+    WylFactOfflineRestoreStoreResult result;
+    wyl_policy_store_t *policy = input->fixture->fixture.policy;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (policy, session_operation, &desired), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&desired,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+          (policy, 1, &desired, &result, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    g_assert_cmpuint (committed.revision, ==, 2);
+  }
+  input->offset += *out_read;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+import_revalidate (gpointer data)
+{
+  ImportInput *input = data;
+  session_assert_authority (input->fixture, TRUE);
+  input->validations++;
+  if (g_str_equal (input->mode, "revalidate-before")
+      || (g_str_equal (input->mode, "revalidate-after") && input->validations == 2))
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t
+import_construction_gap (gpointer data)
+{
+  SessionFixture *f = data;
+  f->checkpoints++;
+  /* The destination snapshot already exists; quiescence has not begun. */
+  guint calls = 0;
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (f->snapshots[1],
+      session_snapshot_callback, &calls), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (calls, ==, 1);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission
+        (f->fixture.runtime, &key), ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&key);
+  if (!g_str_equal (f->mode, "coordinator/construction-reopen"))
+    graph_corrupt_provision (f, "zeta");
+  return WYRELOG_E_OK;
+}
+#endif
+
+static void
+test_graph_import (gconstpointer data)
+{
+  const gchar *mode = data;
+  g_autofree gchar *fixture_mode = g_strconcat ("coordinator/", mode, NULL);
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, fixture_mode, "zeta");
+  ImportInput input = { .fixture = &f, .mode = mode,
+                        .payload = g_ptr_array_index (f.capture.artifact_bytes, 1) };
+  WylFactOfflineRestoreInput callbacks = { import_read, import_revalidate };
+  if (g_str_equal (mode, "null-read"))
+    callbacks.read_at = NULL;
+  if (g_str_equal (mode, "null-revalidate"))
+    callbacks.revalidate = NULL;
+  WylFactGraphKey sibling = { 0 }, selected = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&sibling, "tenant-a", "alpha"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&selected, "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission
+        (f.fixture.runtime, &sibling), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (f.fixture.runtime, &sibling, &before), ==, WYRELOG_E_OK);
+  if (g_str_equal (mode, "selected-provision"))
+    graph_corrupt_provision (&f, "zeta");
+  if (g_str_equal (mode, "selected-schema"))
+    graph_corrupt_schema (&f, "zeta");
+  if (g_str_equal (mode, "sibling-provision"))
+    graph_corrupt_provision (&f, "alpha");
+  if (g_str_equal (mode, "sibling-schema"))
+    graph_corrupt_schema (&f, "alpha");
+  if (g_str_equal (mode, "unsealed"))
+    mutate_tenant_after_snapshot (&f.capture);
+  g_autofree gchar *stage_path = session_stage_path (&f, "zeta");
+  if (g_str_equal (mode, "collision")) {
+    g_assert_true (g_file_set_contents (stage_path, "recovery-owned", -1, NULL));
+    g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+  }
+  if (g_str_equal (mode, "sibling-artifact")) {
+    g_autofree gchar *path = graph_file_path (&f.fixture, "alpha", "foreign");
+    g_assert_true (g_file_set_contents (path, "keep", -1, NULL));
+  }
+  g_autoptr (GHashTable) files = session_graph_files (&f);
+  g_autofree gchar *main_path = graph_file_path (&f.fixture, "zeta", "facts.duckdb");
+  if (g_str_equal (mode, "import-historical")) {
+    g_assert_false (g_bytes_equal (input.payload, g_hash_table_lookup (files, main_path)));
+    g_assert_cmpuint (g_bytes_get_size (input.payload), !=,
+        g_bytes_get_size (g_hash_table_lookup (files, main_path)));
+    g_auto (WylFactOfflineBackupManifest) manifest = { 0 };
+    g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (f.capture.manifest,
+        &manifest), ==, WYRELOG_E_OK);
+    WylPolicyTenantAuthorityRecord *tenant = NULL;
+    g_assert_cmpint (wyl_policy_store_read_tenant_authority (f.fixture.policy,
+        "tenant-a", &tenant), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (tenant->lifecycle_generation, >, manifest.policy_generation);
+    wyl_policy_tenant_authority_record_free (tenant);
+    GStatBuf st;
+    g_assert_cmpint (g_stat (main_path, &st), ==, 0);
+#ifdef __linux__
+    g_assert_cmpuint (st.st_nlink, ==, 2);
+#endif
+    g_test_message ("backup A bytes=%" G_GSIZE_FORMAT ", current B bytes=%" G_GSIZE_FORMAT,
+        g_bytes_get_size (input.payload),
+        g_bytes_get_size (g_hash_table_lookup (files, main_path)));
+  }
+  g_autoptr (WylFactGraphRuntimeManager) empty_runtime = NULL;
+  if (g_str_equal (mode, "missing-runtime"))
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&empty_runtime), ==, WYRELOG_E_OK);
+  WylFactGraphQuiescenceToken *token = NULL;
+  if (g_str_equal (mode, "token-held"))
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce
+          (f.fixture.runtime, &selected, 0, &token), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) wrong_manifest = NULL;
+  if (g_str_equal (mode, "wrong-manifest")) {
+    g_auto (WylFactOfflineBackupManifest) manifest = { 0 };
+    g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (f.capture.manifest,
+        &manifest), ==, WYRELOG_E_OK);
+    manifest.policy_generation++;
+    g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
+        &wrong_manifest), ==, WYRELOG_E_OK);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "commit-response"))
+    wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  if (g_str_has_prefix (mode, "construction-"))
+    wyl_fact_offline_restore_import_set_checkpoint_for_test (import_construction_gap, &f);
+#endif
+  wyrelog_error_t rc = wyl_fact_offline_restore_graph_import_run
+        (f.fixture.policy, f.fixture.root, empty_runtime != NULL ? empty_runtime : f.fixture.runtime,
+          "tenant-a", g_str_equal (mode, "wrong-graph") ? "alpha" : "zeta",
+          wrong_manifest != NULL ? wrong_manifest : f.capture.manifest,
+          session_operation, g_str_equal (mode, "stale") ? 2 : 1, 0,
+          g_str_equal (mode, "null-input") ? NULL : &callbacks, &input, &f.committed);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  wyl_fact_offline_restore_import_set_checkpoint_for_test (NULL, NULL);
+  if (g_str_has_prefix (mode, "construction-"))
+    g_assert_cmpuint (f.checkpoints, ==, 1);
+#endif
+  wyl_fact_graph_quiescence_token_release (token);
+  gboolean success = g_str_equal (mode, "success")
+      || g_str_equal (mode, "construction-reopen")
+      || g_str_equal (mode, "import-historical") || g_str_has_prefix (mode, "sibling-");
+  g_assert_cmpint (rc == WYRELOG_E_OK, ==, success);
+  if (g_str_equal (mode, "token-held"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+  if (g_str_equal (mode, "late-journal"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+  if (g_str_equal (mode, "expected-main-absent"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+  if (g_str_has_prefix (mode, "null-"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_INVALID);
+  if (g_str_equal (mode, "read-error") || g_str_equal (mode, "final-eof-error")
+      || g_str_has_prefix (mode, "revalidate-"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+  if (!success)
+    g_assert_null (f.committed.graphs);
+  if (g_str_equal (mode, "commit-response")) {
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *policy_path = g_build_filename (f.fixture.root, "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &f.fixture.policy), ==, WYRELOG_E_OK);
+  }
+  g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &durable), ==, WYRELOG_E_OK);
+  gboolean bound = success || g_str_equal (mode, "commit-response");
+  g_assert_cmpuint (durable.revision, ==,
+      bound || g_str_equal (mode, "late-journal") ? 2 : 1);
+  g_assert_cmpuint (durable.graphs->len, ==, g_str_equal (mode, "tenant") ? 2 : 1);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (durable.graphs,
+          g_str_equal (mode, "tenant") ? 1 : 0);
+  g_assert_cmpstr (graph->graph_id, ==, "zeta");
+  g_assert_cmpint (artifact_identity_is_zero (&graph->staged_main_identity), ==, !bound);
+  g_assert_false (graph->copied);
+  g_assert_false (graph->checksum_verified);
+  g_assert_false (graph->identity_verified);
+  g_assert_false (graph->schema_verified);
+  g_assert_false (graph->replay_preflighted);
+  g_assert_false (durable.policy_generation_published);
+  g_assert_cmpint (durable.decision, ==, g_str_equal (mode, "late-journal")
+      ? WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK : WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  if (!bound && !g_str_equal (mode, "late-journal")) {
+    g_autoptr (GBytes) unchanged = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (unchanged, f.journal_before));
+  }
+  /* Inspect cleanup admission before the subsequent preflight can drain it. */
+  WylFactGraphRuntimeStatus selected_after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (f.fixture.runtime, &selected, &selected_after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (selected_after.admission, ==,
+      g_str_has_prefix (mode, "construction-") ? WYL_FACT_GRAPH_ADMISSION_OPEN
+      : WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&selected_after);
+  if (success)
+    assert_backup_authority (&f.fixture, 2);
+  g_autoptr (GHashTable) current = session_graph_files (&f);
+  GHashTableIter iter;
+  gpointer path, bytes;
+  g_hash_table_iter_init (&iter, files);
+  while (g_hash_table_iter_next (&iter, &path, &bytes)) {
+    GBytes *actual = g_hash_table_lookup (current, path);
+    g_assert_nonnull (actual);
+    g_assert_true (g_bytes_equal (bytes, actual));
+  }
+  if (bound) {
+    GBytes *stage = g_hash_table_lookup (current, stage_path);
+    g_assert_nonnull (stage);
+    g_assert_true (g_bytes_equal (stage, input.payload));
+    g_assert_cmpuint (input.validations, ==, 2);
+    g_assert_cmpuint (input.offset, ==, g_bytes_get_size (input.payload));
+    GStatBuf st;
+    g_assert_cmpint (g_stat (stage_path, &st), ==, 0);
+    g_assert_cmpuint (graph->staged_main_identity.domain, ==, st.st_dev);
+    g_assert_cmpuint (graph->staged_main_identity.object, ==, st.st_ino);
+  }
+  if (!success && input.validations == 0) {
+    g_assert_cmpuint (input.reads, ==, 0);
+    session_assert_files_unchanged (&f, files);
+  }
+  if (g_str_has_prefix (mode, "wrong-") || g_str_has_prefix (mode, "null-")
+      || g_str_has_prefix (mode, "selected-") || g_str_has_prefix (mode, "tenant-")
+      || g_str_has_prefix (mode, "graph-") || g_str_equal (mode, "stale")
+      || g_str_equal (mode, "unsealed") || g_str_equal (mode, "untrusted")
+      || g_str_equal (mode, "unconfirmed") || g_str_equal (mode, "tenant")
+      || g_str_equal (mode, "expected-main-absent") || g_str_equal (mode, "missing-runtime")
+      || g_str_equal (mode, "token-held") || g_str_equal (mode, "construction-gap")) {
+    g_assert_cmpuint (input.validations, ==, 0);
+    g_assert_cmpuint (input.reads, ==, 0);
+    session_assert_files_unchanged (&f, files);
+  }
+  if (g_str_equal (mode, "revalidate-before")) {
+    g_assert_cmpuint (input.reads, ==, 0);
+    session_assert_files_unchanged (&f, files);
+  }
+  if (g_str_equal (mode, "corrupt")) {
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    g_auto (WylFactOfflineRestoreJournal) retry = { 0 };
+    input.offset = 0;
+    input.mode = "success";
+    g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", "zeta",
+        f.capture.manifest, session_operation, 1, 0, &callbacks, &input, &retry), !=, WYRELOG_E_OK);
+    g_assert_null (retry.graphs);
+    session_assert_files_unchanged (&f, current);
+  }
+  if (success) {
+    /* A bound stage is recovery-owned even if the caller offers valid A again. */
+    g_auto (WylFactOfflineRestoreJournal) retry = { 0 };
+    guint reads = input.reads, validations = input.validations;
+    g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", "zeta",
+        f.capture.manifest, session_operation, 2, 0, &callbacks, &input, &retry), ==, WYRELOG_E_POLICY);
+    g_assert_null (retry.graphs);
+    g_assert_cmpuint (input.reads, ==, reads);
+    g_assert_cmpuint (input.validations, ==, validations);
+    session_assert_files_unchanged (&f, current);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    f.mode = "success";
+    f.record_preflight = TRUE;
+    g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+        session_operation, 2, 0, &f.session), ==, WYRELOG_E_OK);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 3);
+    graph = g_ptr_array_index (f.committed.graphs, 0);
+    g_assert_true (graph->replay_preflighted);
+    g_clear_pointer (&f.session, wyl_fact_offline_restore_validation_session_free);
+    session_assert_files_unchanged (&f, current);
+  }
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (f.fixture.runtime, &sibling, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.operation_generation, ==, after.operation_generation);
+  g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+  g_assert_cmpint (before.admission, ==, after.admission);
+  g_assert_cmpint (before.state, ==, after.state);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  wyl_fact_graph_key_clear (&sibling);
+  wyl_fact_graph_key_clear (&selected);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-offline-backup-source/import/invalid",
+      test_graph_import_invalid_input);
+  g_test_add_func ("/fact-offline-backup-source/import/windows-fail-closed",
+      test_graph_import_windows);
   g_test_add_func ("/fact-offline-backup-source/coordinator/invalid",
       test_graph_coordinator_invalid_input);
   g_test_add_func ("/fact-offline-backup-source/session-invalid-constructor",
@@ -2221,6 +2732,27 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
 #ifndef G_OS_WIN32
+  const gchar *import_modes[] = {
+    "success", "import-historical", "truncated", "excess", "corrupt",
+    "read-error", "revalidate-before", "revalidate-after", "count-overflow",
+    "final-eof-error", "stale", "wrong-manifest", "wrong-graph", "unsealed",
+    "expected-main-absent", "wrong-inode", "tenant-lifecycle", "tenant-reconciliation",
+    "graph-lifecycle", "graph-reconciliation", "selected-provision", "selected-schema",
+    "late-provision", "late-schema", "late-tenant", "late-journal", "collision", "missing-runtime",
+    "token-held", "sibling-provision", "sibling-schema", "sibling-artifact",
+    "untrusted", "unconfirmed", "tenant",
+    "null-input", "null-read", "null-revalidate",
+#ifdef WYL_TEST_HANDLE_SEAMS
+    "commit-response", "construction-gap", "construction-reopen",
+#endif
+  };
+  g_test_add_func ("/fact-offline-backup-source/import/authority-accessor",
+      test_graph_import_authority_accessor);
+  for (guint i = 0; i < G_N_ELEMENTS (import_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/import/",
+            import_modes[i], NULL);
+    g_test_add_data_func (path, import_modes[i], test_graph_import);
+  }
   const gchar *reject_modes[] = { "untrusted", "unconfirmed", "tenant" };
   for (guint i = 0; i < G_N_ELEMENTS (reject_modes); i++) {
     g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/coordinator/reject/",

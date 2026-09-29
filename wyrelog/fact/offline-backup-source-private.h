@@ -3,6 +3,7 @@
 
 #include <glib.h>
 
+#include "fact/graph-artifact-inventory-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "fact/runtime-private.h"
 #include "wyrelog/error.h"
@@ -24,6 +25,22 @@ typedef struct
   guint64 logical_bytes;
   guint64 physical_bytes;
 } WylFactOfflineBackupSourceArtifact;
+
+/* Captured, value-only destination evidence, not an authorization token.
+ * Consume only while retaining and successfully revalidating the source.
+ * Runtime exclusion requires a separately retained quiescence token. */
+typedef struct
+{
+  WylFactArtifactInventoryIdentity main_identity;
+  guint64 tenant_lifecycle_generation;
+  guint64 tenant_reconciliation_generation;
+  guint64 graph_lifecycle_generation;
+  guint64 graph_reconciliation_generation;
+} WylFactOfflineBackupSourceAuthority;
+
+gboolean wyl_fact_offline_backup_source_get_authority
+  (const WylFactOfflineBackupSource *source, gsize index,
+    WylFactOfflineBackupSourceAuthority *out_authority);
 
 /* The buffer is valid only for the duration of the call.  WYRELOG_E_OK
  * accepts the complete chunk; partial acceptance is not representable.
