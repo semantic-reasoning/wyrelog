@@ -393,7 +393,7 @@ wyl_fact_offline_restore_tenant_bind_provisioned_old_run
 }
 
 wyrelog_error_t
-wyl_fact_offline_restore_tenant_commit_sync_staged_first_run
+wyl_fact_offline_restore_tenant_commit_sync_staged_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
     const gchar *graph_id, guint64 expected_revision,
@@ -443,19 +443,32 @@ wyl_fact_offline_restore_tenant_commit_sync_staged_first_run
   for (guint i = 0; rc == WYRELOG_E_OK && i < journal.graphs->len; i++) {
     const WylFactOfflineRestoreJournalGraph *graph =
         g_ptr_array_index (journal.graphs, i);
+    gboolean selected_graph = g_strcmp0 (graph->graph_id, graph_id) == 0;
+    gboolean ready_to_sync = graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        && graph->next_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    gboolean selected_unknown = selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        && graph->next_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && graph->pending_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED;
+    gboolean sibling_synced = !selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
     if (graph->expected_main_absent || graph->old_provisioning_uuid == NULL
         || !graph->replay_preflighted
-        || graph->transition_state !=
-        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
-        || graph->next_op !=
-        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
-        || (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
-        ? graph->pending_op !=
-        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
-        : graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
-        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE))
+        || (!ready_to_sync && !selected_unknown && !sibling_synced))
       rc = WYRELOG_E_POLICY;
-    if (g_strcmp0 (graph->graph_id, graph_id) == 0)
+    if (selected_graph)
       selected = graph;
   }
   if (rc == WYRELOG_E_OK && selected == NULL)

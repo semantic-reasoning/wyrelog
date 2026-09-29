@@ -38,10 +38,11 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_bind_provisioned_old_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
-/* Drive the first v5 tenant COMMIT SYNC_STAGED step while every graph is
- * still READY. The UNKNOWN intent commits before file sync. A retry with
- * UNKNOWN recaptures the same stage under the tenant-wide authority. */
-wyrelog_error_t wyl_fact_offline_restore_tenant_commit_sync_staged_first_run
+/* Drive one v5 tenant COMMIT SYNC_STAGED step while every graph retains its
+ * exact READY file pair. Earlier siblings may have completed their own stage
+ * sync; their journal latch is historical and is not reconstructed from a
+ * fresh capture. UNKNOWN commits before file sync and retries recapture. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_commit_sync_staged_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
     const gchar *graph_id, guint64 expected_revision,
