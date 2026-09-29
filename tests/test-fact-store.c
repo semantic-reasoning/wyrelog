@@ -2860,12 +2860,74 @@ check_fact_forget_not_found (void)
 }
 
 static gint
+check_fact_forget_rejects_other_relation (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2110;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_policy_fact_relation_schema_options_t wrong = schema;
+  wrong.relation_name = "other";
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, &wrong, NULL)
+      != WYRELOG_E_OK)
+    return 2111;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = { {values, 1} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "keep-me", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .idempotency_key = "keep:1",
+    .op = WYL_FACT_STORE_OP_ASSERT, .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  if (wyl_fact_store_append_batch (store, &schema, &batch, NULL)
+      != WYRELOG_E_OK)
+    return 2112;
+  const wyl_fact_store_forget_options_t opts = {
+    .batch_id = "keep-me", .operator_id = "admin", .reason = "wrong relation",
+  };
+  gsize purged = 7;
+  if (wyl_fact_store_forget (store, &wrong, &opts, &purged)
+      != WYRELOG_E_NOT_FOUND || purged != 0)
+    return 2113;
+  gint64 count = 0;
+  g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (store, sql, &count) || count != 1
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 1
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 1
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_forget_intent;",
+      &count) || count != 0
+      || !count_i64 (store, "SELECT COUNT(*) FROM fact_forget_audit;",
+      &count) || count != 0)
+    return 2114;
+  if (wyl_fact_store_forget (store, &schema, &opts, &purged)
+      != WYRELOG_E_OK || purged != 1)
+    return 2115;
+  return 0;
+}
+
+static gint
 check_fact_store_forget (void)
 {
   gint rc = check_fact_forget_basic ();
   if (rc != 0)
     return rc;
   rc = check_fact_forget_not_found ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_rejects_other_relation ();
   if (rc != 0)
     return rc;
   return 0;

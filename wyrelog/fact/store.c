@@ -3547,6 +3547,43 @@ forget_intent_free (ForgetIntent *intent)
   g_free (intent);
 }
 
+/* A batch identifier is graph-wide, so the requested relation must match the
+ * durable batch identity before any forget intent or deletion is written. */
+static wyrelog_error_t
+batch_matches_relation_unlocked (wyl_fact_store_t *store,
+    const gchar *batch_id,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    gboolean *out_matches)
+{
+  *out_matches = FALSE;
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  static const gchar *sql =
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = ? "
+      "AND tenant_id = ? AND graph_id = ? AND namespace_id = ? "
+      "AND relation_name = ? AND schema_version = ?;";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state bound = duckdb_bind_varchar (stmt, 1, batch_id)
+      | duckdb_bind_varchar (stmt, 2, schema->tenant_id)
+      | duckdb_bind_varchar (stmt, 3, schema->graph_id)
+      | duckdb_bind_varchar (stmt, 4, schema->namespace_id)
+      | duckdb_bind_varchar (stmt, 5, schema->relation_name)
+      | duckdb_bind_int64 (stmt, 6, (gint64) schema->schema_version);
+  if (bound != DuckDBSuccess
+      || duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  *out_matches = duckdb_value_int64 (&result, 0, 0) == 1;
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
 /* Read the reuse-guard fingerprint (content_hash + idempotency_key) of the
  * batch row.  found=FALSE when no such batch row exists. */
 static wyrelog_error_t
@@ -4005,6 +4042,15 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
   if (rc != WYRELOG_E_OK)
     goto forget_unlock;
   if (!found) {
+    rc = WYRELOG_E_NOT_FOUND;
+    goto forget_unlock;
+  }
+  gboolean same_relation = FALSE;
+  rc = batch_matches_relation_unlocked (store, opts->batch_id, schema,
+          &same_relation);
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
+  if (!same_relation) {
     rc = WYRELOG_E_NOT_FOUND;
     goto forget_unlock;
   }
