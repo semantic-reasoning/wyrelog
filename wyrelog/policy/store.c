@@ -39432,11 +39432,14 @@ wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
   return rc;
 }
 
-wyrelog_error_t
-wyl_policy_store_tenant_restore_sync_staged_step_with_effect
+static wyrelog_error_t
+tenant_restore_step_with_effect
   (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *expected_journal,
-    const gchar *graph_id, WylPolicyTenantRestoreSyncStagedStep step,
+    const gchar *graph_id, gboolean begin,
+    WylFactArtifactMainTransitionOp operation,
+    WylFactArtifactMainTransitionState complete_state,
+    WylFactArtifactMainTransitionOp complete_next,
     WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed)
@@ -39448,9 +39451,7 @@ wyl_policy_store_tenant_restore_sync_staged_step_with_effect
   if (store == NULL || !offline_restore_record_valid (expected_journal)
       || expected_journal->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT
       || graph_id == NULL || effect == NULL || out_result == NULL
-      || out_committed == NULL
-      || step < WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN
-      || step > WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE)
+      || out_committed == NULL)
     return WYRELOG_E_INVALID;
   WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
   wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
@@ -39506,17 +39507,10 @@ wyl_policy_store_tenant_restore_sync_staged_step_with_effect
   if (rc == WYRELOG_E_OK && exact)
     rc = effect (current->journal_blob, active_uuids, effect_data);
   if (rc == WYRELOG_E_OK && exact) {
-    switch (step) {
-      case WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN:
-        rc = wyl_fact_offline_restore_journal_begin_attempt (&journal,
-                graph_id, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED);
-        break;
-      case WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE:
-        rc = wyl_fact_offline_restore_journal_complete_attempt (&journal,
-                graph_id, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY,
-                WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN, FALSE);
-        break;
-    }
+    rc = begin ? wyl_fact_offline_restore_journal_begin_attempt (&journal,
+            graph_id, operation) :
+        wyl_fact_offline_restore_journal_complete_attempt (&journal,
+            graph_id, complete_state, complete_next, FALSE);
   }
   if (rc == WYRELOG_E_OK && exact)
     rc = wyl_fact_offline_restore_journal_encode (&journal, &desired_blob);
@@ -39540,6 +39534,46 @@ wyl_policy_store_tenant_restore_sync_staged_step_with_effect
   } else if (changed)
     *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_restore_sync_staged_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreSyncStagedStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (step != WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN
+      && step != WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE)
+    return WYRELOG_E_INVALID;
+  return tenant_restore_step_with_effect (store, expected_journal, graph_id,
+             step == WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN, effect, effect_data,
+             out_result, out_committed);
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_restore_retain_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreRetainStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (step != WYL_POLICY_TENANT_RESTORE_RETAIN_BEGIN
+      && step != WYL_POLICY_TENANT_RESTORE_RETAIN_COMPLETE)
+    return WYRELOG_E_INVALID;
+  return tenant_restore_step_with_effect (store, expected_journal, graph_id,
+             step == WYL_POLICY_TENANT_RESTORE_RETAIN_BEGIN,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE,
+             effect, effect_data, out_result, out_committed);
 }
 
 static wyrelog_error_t

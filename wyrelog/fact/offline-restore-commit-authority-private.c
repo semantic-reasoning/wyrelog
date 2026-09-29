@@ -9,6 +9,18 @@
 #include "fact/root-writer-lease-private.h"
 
 #ifdef __linux__
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t (*tenant_retain_checkpoint) (const gchar *, gpointer);
+static gpointer tenant_retain_checkpoint_data;
+
+void
+wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data)
+{
+  tenant_retain_checkpoint = checkpoint;
+  tenant_retain_checkpoint_data = data;
+}
+#endif
 static wyrelog_error_t check_runtime (WylFactGraphRuntimeManager *runtime,
     const WylFactGraphKey *key);
 
@@ -230,6 +242,235 @@ tenant_sync_staged_effect (GBytes *canonical_journal,
   }
   return WYRELOG_E_POLICY;
 }
+
+typedef struct
+{
+  TenantBindEffect binding;
+  const gchar *graph_id;
+  gboolean execute;
+  gboolean pending;
+} TenantRetainEffect;
+
+static wyrelog_error_t
+tenant_retain_prove_graph (TenantBindEffect *context,
+    const WylFactOfflineRestoreJournal *journal,
+    const WylFactOfflineRestoreJournalGraph *graph,
+    TenantBindGraph *held, const gchar *active_uuid,
+    WylFactGraphProvisionedRestoreSlot slot,
+    WylFactArtifactMainTransitionRequest *out_request,
+    WylFactArtifactMainTransitionObservation *out_observation,
+    WylFactArtifactMainTransition **out_transition)
+{
+  *out_transition = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (context->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (context->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (context->lease,
+            context->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (context->runtime, &held->key);
+  g_autoptr (WylFactOfflineRestoreStageReader) reader = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_stage_reader_open (context->resolver,
+            &held->directory, context->lease, journal->operation_uuid,
+            &graph->staged_main_identity, &reader);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_stage_reader_verify_content (reader,
+            graph->logical_bytes, graph->checksum);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_stage_reader_revalidate (reader);
+  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+    .sealed = TRUE, .main_binding_live = FALSE,
+  };
+  g_autoptr (WylFactArtifactInventorySnapshot) preliminary = NULL;
+  WylFactArtifactMainTransitionObservation observed = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_posix_capture (held->provider,
+            &lifecycle, &preliminary, &observed);
+  WylFactArtifactMainTransitionRequest request = {
+    .operation_uuid = journal->operation_uuid,
+    .directory_identity = observed.directory_identity,
+    .lease_identity = observed.lease_identity,
+    .expected_main_absent = FALSE,
+    .expected_main_identity = graph->expected_main_identity,
+    .staged_main_identity = graph->staged_main_identity,
+  };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  WylFactArtifactMainTransitionObservation proof = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_posix_capture_provisioned
+          (held->provider, active_uuid, &request, slot, &lifecycle,
+            &snapshot, &proof);
+  const WylFactArtifactMainTransitionEntryEvidence *stage =
+      &proof.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  if (rc == WYRELOG_E_OK
+      && (!stage->present || stage->reparse || stage->link_count != 1
+      || stage->owner_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
+      &graph->staged_main_identity)))
+    rc = WYRELOG_E_POLICY;
+  WylFactArtifactMainTransition *transition = NULL;
+  WylFactArtifactMainTransitionResult result = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_main_transition_admit (&request, snapshot,
+            &proof, &result, &transition);
+  if (rc == WYRELOG_E_OK
+      && (transition == NULL
+      || (slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      ? result.state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+      : result.state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    *out_request = request;
+    *out_observation = proof;
+    *out_transition = transition;
+  } else
+    wyl_fact_artifact_main_transition_free (transition);
+  return rc;
+}
+
+static wyrelog_error_t
+tenant_retain_effect (GBytes *canonical_journal,
+    const GPtrArray *active_uuids, gpointer user_data)
+{
+  TenantRetainEffect *context = user_data;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_decode
+        (canonical_journal, &journal);
+  if (rc != WYRELOG_E_OK || active_uuids == NULL
+      || active_uuids->len != context->binding.graph_count
+      || journal.graphs->len != context->binding.graph_count)
+    return WYRELOG_E_POLICY;
+  if (context->execute) {
+    TenantRetainEffect preflight = *context;
+    preflight.execute = FALSE;
+    rc = tenant_retain_effect (canonical_journal, active_uuids, &preflight);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  for (guint i = 0; i < context->binding.graph_count; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, i);
+    TenantBindGraph *held = &context->binding.graphs[i];
+    const gchar *uuid = g_ptr_array_index ((GPtrArray *) active_uuids, i);
+    gboolean selected = g_strcmp0 (graph->graph_id, context->graph_id) == 0;
+    WylFactGraphProvisionedRestoreSlot slot =
+        graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
+        ? WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK
+        : WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN;
+    if (selected && context->pending) {
+      if (graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+          || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN)
+        return WYRELOG_E_POLICY;
+      WylFactArtifactTransitionPosixLifecycle lifecycle = {
+        .sealed = TRUE, .main_binding_live = FALSE,
+      };
+      g_autoptr (WylFactArtifactInventorySnapshot) preliminary = NULL;
+      WylFactArtifactMainTransitionObservation observed = { 0 };
+      rc = wyl_fact_artifact_transition_posix_capture (held->provider,
+              &lifecycle, &preliminary, &observed);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (!observed.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN].present)
+        slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
+    }
+    WylFactArtifactMainTransitionRequest request = { 0 };
+    WylFactArtifactMainTransitionObservation before = { 0 };
+    g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+    rc = tenant_retain_prove_graph (&context->binding, &journal, graph,
+            held, uuid, slot, &request, &before, &transition);
+    if (rc != WYRELOG_E_OK || !selected || !context->execute) {
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      continue;
+    }
+    if (slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN) {
+      WylFactArtifactMainTransitionResult result = { 0 };
+      rc = wyl_fact_artifact_main_transition_authorize (transition,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+              &before, &result);
+      WylFactArtifactMainTransitionEffect sync_effect =
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+      WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_artifact_transition_posix_execute_provisioned
+              (held->provider, uuid, &request, &before,
+                WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+                &sync_effect, &durability);
+      if (rc != WYRELOG_E_OK || sync_effect !=
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+          || durability.staged_file !=
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN)
+        return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
+      g_autoptr (WylFactArtifactMainTransition) synced_transition = NULL;
+      WylFactArtifactMainTransitionObservation synced = { 0 };
+      rc = tenant_retain_prove_graph (&context->binding, &journal, graph,
+              held, uuid, WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN,
+              &request, &synced, &synced_transition);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      synced.durability = durability;
+      rc = wyl_fact_artifact_main_transition_record (transition,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+              sync_effect, &synced, &result);
+      if (rc == WYRELOG_E_OK
+          && result.next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN)
+        rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_artifact_main_transition_authorize (transition,
+                WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+                &synced, &result);
+      WylFactArtifactMainTransitionEffect retain_effect =
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_artifact_transition_posix_execute_provisioned
+              (held->provider, uuid, &request, &synced,
+                WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+                &retain_effect, &durability);
+      if (rc != WYRELOG_E_OK || retain_effect !=
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
+        return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+      if (tenant_retain_checkpoint != NULL) {
+        rc = tenant_retain_checkpoint ("restore-retain-after-rename",
+                tenant_retain_checkpoint_data);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+      }
+#endif
+    }
+    g_autoptr (WylFactArtifactMainTransition) retained_transition = NULL;
+    WylFactArtifactMainTransitionObservation retained = { 0 };
+    rc = tenant_retain_prove_graph (&context->binding, &journal, graph,
+            held, uuid, WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+            &request, &retained, &retained_transition);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    WylFactArtifactMainTransitionEffect sync_effect =
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+    WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+    rc = wyl_fact_artifact_transition_posix_execute_provisioned
+          (held->provider, uuid, &request, &retained,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+            &sync_effect, &durability);
+    if (rc != WYRELOG_E_OK || sync_effect !=
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+        || durability.directory_after_retain !=
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN)
+      return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
+    g_clear_pointer (&retained_transition,
+        wyl_fact_artifact_main_transition_free);
+    rc = tenant_retain_prove_graph (&context->binding, &journal, graph,
+            held, uuid, WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+            &request, &retained, &retained_transition);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
 #endif
 
 wyrelog_error_t
@@ -392,19 +633,22 @@ wyl_fact_offline_restore_tenant_bind_provisioned_old_run
 #endif
 }
 
-wyrelog_error_t
-wyl_fact_offline_restore_tenant_commit_sync_staged_run
+static wyrelog_error_t
+tenant_commit_step_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
     const gchar *graph_id, guint64 expected_revision,
-    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+    gint64 drain_timeout_us, WylFactArtifactMainTransitionOp operation,
+    WylFactOfflineRestoreJournal *out_committed)
 {
   if (out_committed != NULL)
     wyl_fact_offline_restore_journal_clear (out_committed);
   if (policy == NULL || fact_root == NULL || *fact_root == '\0'
       || runtime == NULL || operation_uuid == NULL || graph_id == NULL
       || expected_revision == 0 || expected_revision >= G_MAXINT64
-      || out_committed == NULL)
+      || out_committed == NULL
+      || (operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN))
     return WYRELOG_E_INVALID;
 #ifndef __linux__
   (void) drain_timeout_us;
@@ -464,9 +708,30 @@ wyl_fact_offline_restore_tenant_commit_sync_staged_run
         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    gboolean ready_to_retain = graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    gboolean selected_retain_unknown = selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN;
+    gboolean sibling_retained = !selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
+        && graph->next_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
     if (graph->expected_main_absent || graph->old_provisioning_uuid == NULL
         || !graph->replay_preflighted
-        || (!ready_to_sync && !selected_unknown && !sibling_synced))
+        || (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        ? !ready_to_sync && !selected_unknown && !sibling_synced
+        : !ready_to_retain && !selected_retain_unknown
+        && !sibling_retained))
       rc = WYRELOG_E_POLICY;
     if (selected_graph)
       selected = graph;
@@ -518,21 +783,34 @@ wyl_fact_offline_restore_tenant_commit_sync_staged_run
               &item->directory, lease, operation_uuid, &capability,
               &item->provider);
   }
-  TenantSyncEffect effect = {
+  TenantSyncEffect sync_effect = {
     .binding = {
       .lease = lease, .resolver = &resolver, .runtime = runtime,
       .graphs = held, .graph_count = graph_count,
     },
     .graph_id = graph_id,
   };
+  TenantRetainEffect retain_effect = {
+    .binding = sync_effect.binding,
+    .graph_id = graph_id,
+  };
   WylPolicyOfflineRestoreStoreResult result =
       WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
   if (rc == WYRELOG_E_OK
-      && selected->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE) {
-    rc = wyl_policy_store_tenant_restore_sync_staged_step_with_effect
-          (policy, expected, graph_id,
-            WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN,
-            tenant_sync_staged_effect, &effect, &result, &committed);
+      && selected->attempt ==
+      (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      ? WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      : WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE)) {
+    if (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED)
+      rc = wyl_policy_store_tenant_restore_sync_staged_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN,
+              tenant_sync_staged_effect, &sync_effect, &result, &committed);
+    else
+      rc = wyl_policy_store_tenant_restore_retain_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_RETAIN_BEGIN,
+              tenant_retain_effect, &retain_effect, &result, &committed);
     if (rc == WYRELOG_E_OK && result !=
         WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
       rc = WYRELOG_E_BUSY;
@@ -545,12 +823,28 @@ wyl_fact_offline_restore_tenant_commit_sync_staged_run
               &journal);
     }
   }
-  effect.sync = TRUE;
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_tenant_restore_sync_staged_step_with_effect
-          (policy, expected, graph_id,
-            WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE,
-            tenant_sync_staged_effect, &effect, &result, &committed);
+  sync_effect.sync = TRUE;
+  retain_effect.execute = TRUE;
+  retain_effect.pending = TRUE;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK
+      && operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      && tenant_retain_checkpoint != NULL)
+    rc = tenant_retain_checkpoint ("restore-retain-after-begin",
+            tenant_retain_checkpoint_data);
+#endif
+  if (rc == WYRELOG_E_OK) {
+    if (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED)
+      rc = wyl_policy_store_tenant_restore_sync_staged_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE,
+              tenant_sync_staged_effect, &sync_effect, &result, &committed);
+    else
+      rc = wyl_policy_store_tenant_restore_retain_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_RETAIN_COMPLETE,
+              tenant_retain_effect, &retain_effect, &result, &committed);
+  }
   if (rc == WYRELOG_E_OK && result !=
       WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
     rc = WYRELOG_E_BUSY;
@@ -573,6 +867,30 @@ wyl_fact_offline_restore_tenant_commit_sync_staged_run
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   return rc;
 #endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_sync_staged_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  return tenant_commit_step_run (policy, fact_root, runtime, operation_uuid,
+             graph_id, expected_revision, drain_timeout_us,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED, out_committed);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_retain_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  return tenant_commit_step_run (policy, fact_root, runtime, operation_uuid,
+             graph_id, expected_revision, drain_timeout_us,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN, out_committed);
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS

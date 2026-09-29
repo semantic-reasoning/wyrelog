@@ -3226,11 +3226,15 @@ test_tenant_commit_sync_staged_first (gconstpointer data)
   session_fixture_clear (&f);
 }
 
+static wyrelog_error_t fail_retain_once (const gchar *point,
+    gpointer user_data);
+
 static void
 test_tenant_commit_sync_staged_both (gconstpointer data)
 {
   const gchar *mode = data;
-  gboolean reverse = g_str_equal (mode, "reverse");
+  gboolean reverse = g_str_equal (mode, "reverse")
+      || g_str_equal (mode, "retain-reverse");
   const gchar *first = reverse ? "zeta" : "alpha";
   const gchar *second = reverse ? "alpha" : "zeta";
   SessionFixture f = { 0 };
@@ -3336,6 +3340,77 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
     g_assert_cmpint (graph->attempt, ==,
         WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  }
+  if (g_str_has_prefix (mode, "retain-")) {
+    if (g_str_equal (mode, "retain-after-begin")
+        || g_str_equal (mode, "retain-after-rename")) {
+      const gchar *failure = g_str_equal (mode, "retain-after-begin")
+          ? "restore-retain-after-begin" : "restore-retain-after-rename";
+      wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
+        (fail_retain_once, &failure);
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_retain_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          session_operation, first, 12, 0, &f.committed), ==, WYRELOG_E_IO);
+      g_assert_null (failure);
+      g_assert_null (f.committed.graphs);
+      wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
+        (NULL, NULL);
+      g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+      g_assert_cmpint (wyl_policy_store_open (policy_path,
+          &f.fixture.policy), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+          WYRELOG_E_OK);
+      WylFactOfflineRestoreJournal pending = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (f.fixture.policy, session_operation, &pending), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpuint (pending.revision, ==, 13);
+      const WylFactOfflineRestoreJournalGraph *pending_graph =
+          g_ptr_array_index (pending.graphs, reverse ? 1 : 0);
+      g_assert_cmpint (pending_graph->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+      wyl_fact_offline_restore_journal_clear (&pending);
+      if (g_str_equal (mode, "retain-after-rename")) {
+        g_autofree gchar *name = g_strdup_printf
+              ("restore-%s.duckdb.superseded", session_operation);
+        g_autofree gchar *rollback = graph_file_path (&f.fixture, first, name);
+        g_autofree gchar *parked = graph_file_path (&f.fixture, first,
+                "parked-rollback-test");
+        g_assert_cmpint (g_rename (rollback, parked), ==, 0);
+        g_assert_true (g_file_set_contents (rollback, "foreign", -1, NULL));
+        g_assert_cmpint (g_chmod (rollback, 0600), ==, 0);
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_retain_run
+              (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+            session_operation, first, 13, 0, &f.committed), !=,
+            WYRELOG_E_OK);
+        g_assert_null (f.committed.graphs);
+        g_assert_cmpint (g_remove (rollback), ==, 0);
+        g_assert_cmpint (g_rename (parked, rollback), ==, 0);
+      }
+    }
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_retain_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, first,
+        g_str_equal (mode, "retain-after-begin")
+        || g_str_equal (mode, "retain-after-rename") ? 13 : 12,
+        0, &f.committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 14);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_retain_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, second, 14, 0, &f.committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 16);
+    for (guint i = 0; i < f.committed.graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (f.committed.graphs, i);
+      g_assert_cmpint (graph->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+      g_assert_cmpint (graph->next_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+      g_assert_cmpint (graph->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+    }
   }
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   f.journal_before = session_journal_bytes (&f);
@@ -5083,6 +5158,14 @@ main (int argc, char **argv)
       "completed-sibling-stage-content", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/stale-second",
       "stale-second", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-retain/both/forward",
+      "retain-forward", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-retain/both/reverse",
+      "retain-reverse", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-retain/after-begin",
+      "retain-after-begin", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-retain/after-rename",
+      "retain-after-rename", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-foreign",
       "sibling-foreign", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-stage-content",
