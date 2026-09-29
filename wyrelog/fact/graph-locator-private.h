@@ -391,6 +391,36 @@ wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate_in_directory
   (WylFactGraphProvisionedPair *pair,
     const WylFactGraphDirectory *directory);
+
+typedef struct WylFactGraphProvisionedRestoreWitness
+    WylFactGraphProvisionedRestoreWitness;
+typedef enum
+{
+  WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN,
+  WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+} WylFactGraphProvisionedRestoreSlot;
+
+/* Ephemeral read-only proof of the old provisioned inode across restore
+ * renames. The caller must freshly verify that provisioning_uuid is ACTIVE
+ * for the same sealed tenant/graph/store and policy generations; this locator
+ * cannot authenticate policy. It derives both names from canonical UUIDs and
+ * never supplies an fd, name or transferable authorization to its caller.
+ * READY requires main+companion; RETAINED requires rollback+companion and
+ * allows a distinct one-link new main. Reconstruct after restart and
+ * revalidate immediately before each use. Darwin and Windows fail closed. */
+wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_open
+  (WylFactGraphDirectory *directory, const gchar *provisioning_uuid,
+    const gchar *restore_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    WylFactGraphProvisionedRestoreSlot slot,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
+wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_revalidate
+  (WylFactGraphProvisionedRestoreWitness *witness,
+    const WylFactGraphDirectory *directory);
+void wyl_fact_graph_provisioned_restore_witness_free
+  (WylFactGraphProvisionedRestoreWitness *witness);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphProvisionedRestoreWitness,
+    wyl_fact_graph_provisioned_restore_witness_free)
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
     directory, WylFactGraphStage * stage);
