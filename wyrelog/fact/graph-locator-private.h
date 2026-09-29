@@ -453,6 +453,34 @@ wyrelog_error_t wyl_fact_graph_restore_post_publish_shape_open
     const WylFactArtifactInventoryIdentity *expected_new_main,
     WylFactGraphRestorePostPublishLayout layout,
     WylFactGraphProvisionedRestoreWitness **out_witness);
+typedef enum
+{
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID,
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL,
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL,
+  WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL,
+} WylFactGraphRestoreSelectedCleanupShape;
+/* The only accepted partial state has the old rollback at nlink=1 after its
+ * companion was unlinked. The new main and companion stay an exact nlink=2
+ * pair in every accepted state. This is a transient read-only observation. */
+wyrelog_error_t wyl_fact_graph_restore_selected_cleanup_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestoreSelectedCleanupShape *out_shape);
+/* Caller must hold durable selected/pending FINALIZE policy authority, the
+ * root writer lease and graph runtime quiescence. Each unlink is preceded by
+ * exact inventory proof. A failure may leave PARTIAL or TERMINAL; retry from
+ * fresh journal and shape observations. Success includes directory fsync and
+ * a final exact TERMINAL proof. */
+wyrelog_error_t wyl_fact_graph_restore_selected_cleanup_execute
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main);
 /* For a durable RESERVED row, classify the replacement basename once and
  * prove only the selected layout. A completed link may precede the policy
  * phase CAS after a crash. This is an observation, not sync evidence. */
