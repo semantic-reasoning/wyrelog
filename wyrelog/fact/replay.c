@@ -1322,8 +1322,13 @@ validate_graph_internal (wyl_policy_store_t *policy,
     const ReplayPolicyGraphSnapshot *policy_snapshot,
     WylFactArtifactNamespace *artifact_namespace,
     WylFactArtifactMutationLease *artifact_lease,
-    WylFactReplayJobContext *job_context)
+    WylFactReplayJobContext *job_context,
+    guint64 *out_candidate_batches, guint64 *out_candidate_rows)
 {
+  if (out_candidate_batches != NULL)
+    *out_candidate_batches = 0;
+  if (out_candidate_rows != NULL)
+    *out_candidate_rows = 0;
   if (policy == NULL || graph_info == NULL || graph_info->tenant_id == NULL
       || graph_info->graph_id == NULL)
     return WYRELOG_E_INVALID;
@@ -1362,6 +1367,28 @@ validate_graph_internal (wyl_policy_store_t *policy,
       if (rc == WYRELOG_E_OK)
         rc = close_rc;
     }
+    if (rc == WYRELOG_E_OK && out_candidate_batches != NULL) {
+      for (guint i = 0; i < relations->len && rc == WYRELOG_E_OK; i++) {
+        ReplayRelation *rel = g_ptr_array_index (relations, i);
+        const wyl_policy_fact_relation_schema_options_t schema = {
+          .tenant_id = graph_info->tenant_id,
+          .graph_id = graph_info->graph_id,
+          .namespace_id = rel->namespace_id,
+          .relation_name = rel->relation_name,
+          .schema_version = rel->schema_version,
+          .relation_visible = rel->relation_visible,
+          .columns = rel->columns,
+          .n_columns = rel->n_columns,
+        };
+        guint64 batches = 0, rows = 0;
+        rc = wyl_fact_store_orphan_repair_candidates (store, &schema,
+                &batches, &rows);
+        if (rc == WYRELOG_E_OK) {
+          *out_candidate_batches += batches;
+          *out_candidate_rows += rows;
+        }
+      }
+    }
   }
   g_clear_pointer (&store, wyl_fact_store_close);
   return rc;
@@ -1372,7 +1399,19 @@ wyl_fact_replay_validate_graph (wyl_policy_store_t *policy,
     const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info)
 {
   return validate_graph_internal (policy, fact_root, graph_info, NULL, NULL,
-             NULL, NULL);
+             NULL, NULL, NULL, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_replay_validate_graph_with_orphan_candidates
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    guint64 *out_candidate_batches, guint64 *out_candidate_rows)
+{
+  if (out_candidate_batches == NULL || out_candidate_rows == NULL)
+    return WYRELOG_E_INVALID;
+  return validate_graph_internal (policy, fact_root, graph_info, NULL, NULL,
+             NULL, NULL, out_candidate_batches, out_candidate_rows);
 }
 
 wyrelog_error_t
@@ -1387,7 +1426,7 @@ wyl_fact_replay_validate_graph_bounded (wyl_policy_store_t *policy,
           graph_info, job_context, &snapshot);
   if (rc == WYRELOG_E_OK)
     rc = validate_graph_internal (policy, fact_root, &snapshot.info,
-            &snapshot, NULL, NULL, job_context);
+            &snapshot, NULL, NULL, job_context, NULL, NULL);
   replay_policy_graph_snapshot_clear (&snapshot);
   return rc;
 }
@@ -1402,7 +1441,7 @@ wyl_fact_replay_validate_graph_with_artifact_lease
   if (artifact_namespace == NULL || artifact_lease == NULL)
     return WYRELOG_E_INVALID;
   return validate_graph_internal (policy, fact_root, graph_info,
-             NULL, artifact_namespace, artifact_lease, NULL);
+             NULL, artifact_namespace, artifact_lease, NULL, NULL, NULL);
 }
 
 wyrelog_error_t
@@ -1421,7 +1460,8 @@ wyl_fact_replay_validate_graph_with_artifact_lease_bounded
           graph_info, job_context, &snapshot);
   if (rc == WYRELOG_E_OK)
     rc = validate_graph_internal (policy, fact_root, &snapshot.info,
-            &snapshot, artifact_namespace, artifact_lease, job_context);
+            &snapshot, artifact_namespace, artifact_lease, job_context,
+            NULL, NULL);
   replay_policy_graph_snapshot_clear (&snapshot);
   return rc;
 }

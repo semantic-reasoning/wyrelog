@@ -4128,6 +4128,11 @@ orphan_repair_census_unlocked (wyl_fact_store_t *store,
     const gchar *table, const gchar *batch_id, gint64 *out_batches,
     gint64 *out_rows)
 {
+  gboolean repair_audit_exists = FALSE;
+  wyrelog_error_t rc = table_exists_unlocked (store,
+          "fact_orphan_repair_audit", &repair_audit_exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   g_autoptr (GString) sql = g_string_new (
     "SELECT COUNT(*), COALESCE(SUM(row_count), 0) FROM ("
     " SELECT p.__wyl_batch_id, COUNT(*) AS row_count FROM ");
@@ -4153,11 +4158,17 @@ orphan_repair_census_unlocked (wyl_fact_store_t *store,
       " AND a.tenant_id = i.tenant_id AND a.graph_id = i.graph_id "
       " AND a.operator = i.operator AND a.reason = i.reason "
       " AND a.rows_purged = 0 "
-      " AND a.created_at_us = i.completed_at_us "
-      " AND NOT EXISTS (SELECT 1 FROM fact_orphan_repair_audit r "
-      " WHERE r.original_forget_op_uuid = i.op_uuid "
-      " AND r.projection_table = ? "
-      " AND r.batch_id = p.__wyl_batch_id)) "
+      " AND a.created_at_us = i.completed_at_us ");
+  /* Existing graph databases predate the repair ledger. Read-only verify
+   * must still discover their candidates without attempting a migration. */
+  if (repair_audit_exists)
+    g_string_append (sql,
+        " AND NOT EXISTS (SELECT 1 FROM fact_orphan_repair_audit r "
+        " WHERE r.original_forget_op_uuid = i.op_uuid "
+        " AND r.projection_table = ? "
+        " AND r.batch_id = p.__wyl_batch_id) ");
+  g_string_append (sql,
+      ") "
       "GROUP BY p.__wyl_batch_id) candidates;");
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
@@ -4173,8 +4184,9 @@ orphan_repair_census_unlocked (wyl_fact_store_t *store,
           : duckdb_bind_null (stmt, 4))
       | duckdb_bind_varchar (stmt, 5, schema->tenant_id)
       | duckdb_bind_varchar (stmt, 6, schema->graph_id)
-      | duckdb_bind_varchar (stmt, 7, table)
-      | duckdb_bind_varchar (stmt, 8, table);
+      | duckdb_bind_varchar (stmt, 7, table);
+  if (repair_audit_exists)
+    bound |= duckdb_bind_varchar (stmt, 8, table);
   if (bound != DuckDBSuccess
       || duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
@@ -4215,10 +4227,13 @@ wyl_fact_store_orphan_repair_candidates (wyl_fact_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = validate_store_scope_unlocked (store, schema->tenant_id,
             schema->graph_id, FALSE);
+  gboolean exists = FALSE;
   if (rc == WYRELOG_E_OK)
+    rc = table_exists_unlocked (store, table, &exists);
+  if (rc == WYRELOG_E_OK && exists)
     rc = validate_projection_shape_unlocked (store, schema, table);
   gint64 batches = 0, rows = 0;
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK && exists)
     rc = orphan_repair_census_unlocked (store, schema, table, NULL,
             &batches, &rows);
   wyl_fact_store_connection_session_end (&session);

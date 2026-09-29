@@ -1473,6 +1473,33 @@ mutate a relation before registering its schema fail with
 `fact_schema_not_found` on the schema-backed `/facts/<tenant>/<graph>/<relation>`
 routes.
 
+### Repairing rows left by an old wrong-relation forget
+
+An older forget implementation could remove a batch and its events while
+leaving rows in the batch's actual relation projection. With a bearer granted
+`wr.fact.read`, call `GET /facts/verify?tenant=<tenant>&graph=<graph>` with the
+normal guard context. The response includes
+`orphan_repair_candidate_batches` and `orphan_repair_candidate_rows` across
+registered relation schemas. These are conservative repair candidates, not a
+count of every orphan: a candidate must have no batch or event row, exactly one
+completed zero-purge forget intent targeting another projection, and exactly
+one matching forget audit record. Ambiguous history is excluded.
+
+For each affected batch whose actual relation, namespace, and schema version
+are known, use an MFA-assured bearer granted `wr.fact.write` and send
+`POST /facts/<tenant>/<graph>/<actual-relation>:repair` with query parameters
+`tenant`, `namespace=<actual-namespace>`, `schema_version=<actual-version>`,
+and the normal guard context. The JSON body contains `batch_id`, `operator`,
+and `reason`, as for forget. The graph must be unsealed. The daemon rechecks
+the evidence under its write lease, deletes only that batch's rows from the
+actual projection, and commits a `fact_orphan_repair_audit` record with the
+original forget operation ID, authenticated actor, request ID, reason, and row
+count in the same transaction. A missing, ambiguous, or already repaired
+candidate returns HTTP 404; a sealed graph returns 409. Verify again after
+repair. A refresh failure after the durable repair is reported as a committed
+degraded mutation, so the runtime may need reconciliation even when the rows
+are gone.
+
 A sealed graph refuses all three: append, retract and forget each return `409`
 `graph_sealed`. Sealing a graph is irreversible -- there is no graph unseal
 operation, tenant unseal does not clear the graph flag, and `graph create`
