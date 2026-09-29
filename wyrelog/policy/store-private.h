@@ -3493,5 +3493,15 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_reserve
 wyrelog_error_t wyl_policy_store_graph_restore_replacement_load
   (wyl_policy_store_t *store, const gchar *operation_uuid,
     WylPolicyGraphRestoreReplacementRecord **out_record);
+/* Storage primitive for a future sealed restore driver. The caller must
+ * separately prove a durable post-PUBLISH dual filesystem witness under the
+ * root lease and quiescence before invoking this CAS. No current mode-A
+ * journal path can legally produce the required COMMIT state yet. */
+wyrelog_error_t wyl_policy_store_graph_restore_replacement_mark_companion_synced
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyGraphRestoreReplacementRecord **out_committed);
 
 G_END_DECLS;

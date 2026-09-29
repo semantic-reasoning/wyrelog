@@ -3352,6 +3352,78 @@ test_graph_restore_replacement_reservation (void)
         (fixture.policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpstr (reserved->replacement_uuid, ==, loaded->replacement_uuid);
   wyl_policy_graph_restore_replacement_record_free (loaded);
+  /* Imported historical COMMIT shape: the normal mode-A journal mutators
+   * still refuse this transition. Exercise only the dormant policy CAS. */
+  g_auto (WylFactOfflineRestoreJournal) published = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (current_blob,
+      &published), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *published_graph =
+      g_ptr_array_index (published.graphs, 0);
+  published.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  published.revision++;
+  published_graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+  published_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  published_graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  g_autoptr (GBytes) published_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&published,
+      &published_blob), ==, WYRELOG_E_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (fixture.policy),
+      "UPDATE fact_offline_restore_journals SET revision=?1,"
+      "journal_blob=?2,updated_at=unixepoch() WHERE operation_uuid=?3;",
+      -1, &update, NULL), ==, SQLITE_OK);
+  gsize published_len = 0;
+  const guint8 *published_data = g_bytes_get_data (published_blob,
+          &published_len);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, published.revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, published_data,
+      published_len, SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  sqlite3_finalize (update);
+  WylPolicyOfflineRestoreRecord *published_record = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
+      operation_uuid, &published_record), ==, WYRELOG_E_OK);
+  WylPolicyGraphRestoreReplacementRecord *synced = NULL;
+  published_record->revision--;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced), ==, WYRELOG_E_INVALID);
+  g_assert_null (synced);
+  published_record->revision++;
+  gchar *reserved_phase = reserved->phase;
+  reserved->phase = "companion_synced";
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced), ==, WYRELOG_E_OK);
+  g_assert_cmpint (policy_result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
+  g_assert_null (synced);
+  reserved->phase = reserved_phase;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced), ==, WYRELOG_E_OK);
+  g_assert_cmpint (policy_result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (synced->phase, ==, "companion_synced");
+  g_assert_cmpstr (synced->replacement_uuid, ==, reserved->replacement_uuid);
+  WylPolicyGraphRestoreReplacementRecord *synced_replay = NULL;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced_replay), ==, WYRELOG_E_OK);
+  g_assert_cmpint (policy_result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
+  g_assert_cmpstr (synced_replay->phase, ==, "companion_synced");
+  wyl_policy_graph_restore_replacement_record_free (synced_replay);
+  wyl_policy_graph_restore_replacement_record_free (synced);
+  wyl_policy_offline_restore_record_free (published_record);
   g_clear_pointer (&fixture.policy, wyl_policy_store_close);
   g_autofree gchar *policy_path = g_build_filename (fixture.root,
           "policy.db", NULL);
@@ -3363,6 +3435,19 @@ test_graph_restore_replacement_reservation (void)
   g_assert_cmpint (wyl_fact_offline_restore_replacement_load
         (fixture.policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpstr (reserved->replacement_uuid, ==, loaded->replacement_uuid);
+  g_assert_cmpstr (loaded->phase, ==, "companion_synced");
+  published_record = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
+      operation_uuid, &published_record), ==, WYRELOG_E_OK);
+  synced_replay = NULL;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced_replay), ==, WYRELOG_E_OK);
+  g_assert_cmpint (policy_result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
+  wyl_policy_graph_restore_replacement_record_free (synced_replay);
+  wyl_policy_offline_restore_record_free (published_record);
   wyl_policy_graph_restore_replacement_record_free (loaded);
   wyl_policy_graph_restore_replacement_record_free (replayed);
   wyl_policy_graph_restore_replacement_record_free (reserved);
