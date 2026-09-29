@@ -20,6 +20,9 @@ static wyrelog_error_t (*tenant_sync_retain_dir_checkpoint)
 static gpointer tenant_sync_retain_dir_checkpoint_data;
 static wyrelog_error_t (*tenant_publish_checkpoint) (const gchar *, gpointer);
 static gpointer tenant_publish_checkpoint_data;
+static wyrelog_error_t (*tenant_sync_publish_dir_checkpoint)
+  (const gchar *, gpointer);
+static gpointer tenant_sync_publish_dir_checkpoint_data;
 
 void
 wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
@@ -51,6 +54,14 @@ wyl_fact_offline_restore_tenant_commit_publish_set_checkpoint_for_test
 {
   tenant_publish_checkpoint = checkpoint;
   tenant_publish_checkpoint_data = data;
+}
+
+void
+wyl_fact_offline_restore_tenant_commit_sync_publish_dir_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data)
+{
+  tenant_sync_publish_dir_checkpoint = checkpoint;
+  tenant_sync_publish_dir_checkpoint_data = data;
 }
 #endif
 static wyrelog_error_t check_runtime (WylFactGraphRuntimeManager *runtime,
@@ -712,6 +723,7 @@ typedef struct
   const gchar *graph_id;
   gboolean execute;
   gboolean pending;
+  WylFactArtifactMainTransitionOp target;
 } TenantPublishEffect;
 
 static wyrelog_error_t
@@ -740,23 +752,26 @@ tenant_publish_effect (GBytes *canonical_journal,
     const gchar *uuid = g_ptr_array_index ((GPtrArray *) active_uuids, i);
     gboolean selected = g_strcmp0 (graph->graph_id, context->graph_id) == 0;
     gboolean published = graph->transition_state ==
-        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED;
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED
+        || graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
     if (selected && context->pending) {
       if (graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
-          || graph->pending_op !=
-          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH)
+          || graph->pending_op != context->target)
         return WYRELOG_E_POLICY;
-      WylFactArtifactTransitionPosixLifecycle lifecycle = {
-        .sealed = TRUE, .main_binding_live = FALSE,
-      };
-      g_autoptr (WylFactArtifactInventorySnapshot) preliminary = NULL;
-      WylFactArtifactMainTransitionObservation observed = { 0 };
-      rc = wyl_fact_artifact_transition_posix_capture (held->provider,
-              &lifecycle, &preliminary, &observed);
-      if (rc != WYRELOG_E_OK)
-        return rc;
-      published = observed.entries
-          [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN].present;
+      if (context->target == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH) {
+        WylFactArtifactTransitionPosixLifecycle lifecycle = {
+          .sealed = TRUE, .main_binding_live = FALSE,
+        };
+        g_autoptr (WylFactArtifactInventorySnapshot) preliminary = NULL;
+        WylFactArtifactMainTransitionObservation observed = { 0 };
+        rc = wyl_fact_artifact_transition_posix_capture (held->provider,
+                &lifecycle, &preliminary, &observed);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        published = observed.entries
+            [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN].present;
+      }
     }
     WylFactArtifactMainTransitionRequest request = { 0 };
     WylFactArtifactMainTransitionObservation observed = { 0 };
@@ -863,6 +878,11 @@ tenant_publish_effect (GBytes *canonical_journal,
         return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
       observed = after;
     }
+    if (context->target ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+        && (graph->transition_state !=
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED || !published))
+      return WYRELOG_E_POLICY;
     WylFactArtifactMainTransitionResult result = { 0 };
     rc = wyl_fact_artifact_main_transition_authorize (transition,
             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
@@ -881,9 +901,19 @@ tenant_publish_effect (GBytes *canonical_journal,
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN)
       return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
 #ifdef WYL_TEST_HANDLE_SEAMS
-    if (tenant_publish_checkpoint != NULL) {
+    if (context->target == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+        && tenant_publish_checkpoint != NULL) {
       rc = tenant_publish_checkpoint ("restore-publish-after-fsync",
               tenant_publish_checkpoint_data);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+    if (context->target ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+        && tenant_sync_publish_dir_checkpoint != NULL) {
+      rc = tenant_sync_publish_dir_checkpoint
+            ("restore-sync-publish-dir-after-fsync",
+              tenant_sync_publish_dir_checkpoint_data);
       if (rc != WYRELOG_E_OK)
         return rc;
     }
@@ -1089,7 +1119,8 @@ tenant_commit_step_run
       && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
       && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
       && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
-      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH))
+      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR))
     return WYRELOG_E_INVALID;
 #ifndef __linux__
   (void) drain_timeout_us;
@@ -1217,6 +1248,12 @@ tenant_commit_step_run
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    gboolean sibling_published_durable = !selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+        && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
     gboolean selected_publish = selected_graph
         && graph->transition_state ==
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
@@ -1229,6 +1266,21 @@ tenant_commit_step_run
         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH;
+    gboolean selected_sync_publish_dir = selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED
+        && graph->next_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    gboolean selected_sync_publish_dir_unknown = selected_graph
+        && graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED
+        && graph->next_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && graph->pending_op ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR;
     if (graph->expected_main_absent || graph->old_provisioning_uuid == NULL
         || !graph->replay_preflighted
         || (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
@@ -1245,10 +1297,15 @@ tenant_commit_step_run
         ? !selected_sync_retain_dir && !selected_sync_retain_dir_unknown
         && !sibling_synced && !sibling_retained
         && !sibling_rollback_synced && !sibling_retain_dir_synced
-        : !selected_publish && !selected_publish_unknown
+        : operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+        ? !selected_publish && !selected_publish_unknown
         && !sibling_synced && !sibling_retained
         && !sibling_rollback_synced && !sibling_retain_dir_synced
-        && !sibling_published))
+        && !sibling_published && !sibling_published_durable
+        : !selected_sync_publish_dir && !selected_sync_publish_dir_unknown
+        && !sibling_synced && !sibling_retained
+        && !sibling_rollback_synced && !sibling_retain_dir_synced
+        && !sibling_published && !sibling_published_durable))
       rc = WYRELOG_E_POLICY;
     if (selected_graph)
       selected = graph;
@@ -1319,6 +1376,7 @@ tenant_commit_step_run
   TenantPublishEffect publish_effect = {
     .binding = sync_effect.binding,
     .graph_id = graph_id,
+    .target = operation,
   };
   WylPolicyOfflineRestoreStoreResult result =
       WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
@@ -1351,10 +1409,15 @@ tenant_commit_step_run
               WYL_POLICY_TENANT_RESTORE_SYNC_RETAIN_DIR_BEGIN,
               tenant_sync_rollback_effect, &rollback_effect,
               &result, &committed);
-    else
+    else if (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH)
       rc = wyl_policy_store_tenant_restore_publish_step_with_effect
             (policy, expected, graph_id,
               WYL_POLICY_TENANT_RESTORE_PUBLISH_BEGIN,
+              tenant_publish_effect, &publish_effect, &result, &committed);
+    else
+      rc = wyl_policy_store_tenant_restore_sync_publish_dir_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_SYNC_PUBLISH_DIR_BEGIN,
               tenant_publish_effect, &publish_effect, &result, &committed);
     if (rc == WYRELOG_E_OK && result !=
         WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
@@ -1397,6 +1460,12 @@ tenant_commit_step_run
       && tenant_publish_checkpoint != NULL)
     rc = tenant_publish_checkpoint ("restore-publish-after-begin",
             tenant_publish_checkpoint_data);
+  if (rc == WYRELOG_E_OK
+      && operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+      && tenant_sync_publish_dir_checkpoint != NULL)
+    rc = tenant_sync_publish_dir_checkpoint
+          ("restore-sync-publish-dir-after-begin",
+            tenant_sync_publish_dir_checkpoint_data);
 #endif
   if (rc == WYRELOG_E_OK) {
     if (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED)
@@ -1423,10 +1492,15 @@ tenant_commit_step_run
               WYL_POLICY_TENANT_RESTORE_SYNC_RETAIN_DIR_COMPLETE,
               tenant_sync_rollback_effect, &rollback_effect,
               &result, &committed);
-    else
+    else if (operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH)
       rc = wyl_policy_store_tenant_restore_publish_step_with_effect
             (policy, expected, graph_id,
               WYL_POLICY_TENANT_RESTORE_PUBLISH_COMPLETE,
+              tenant_publish_effect, &publish_effect, &result, &committed);
+    else
+      rc = wyl_policy_store_tenant_restore_sync_publish_dir_step_with_effect
+            (policy, expected, graph_id,
+              WYL_POLICY_TENANT_RESTORE_SYNC_PUBLISH_DIR_COMPLETE,
               tenant_publish_effect, &publish_effect, &result, &committed);
   }
   if (rc == WYRELOG_E_OK && result !=
@@ -1513,6 +1587,19 @@ wyl_fact_offline_restore_tenant_commit_publish_run
   return tenant_commit_step_run (policy, fact_root, runtime, operation_uuid,
              graph_id, expected_revision, drain_timeout_us,
              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH, out_committed);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_sync_publish_dir_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  return tenant_commit_step_run (policy, fact_root, runtime, operation_uuid,
+             graph_id, expected_revision, drain_timeout_us,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
+             out_committed);
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
