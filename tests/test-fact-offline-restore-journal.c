@@ -411,6 +411,41 @@ imported_provisioned_commit_early_successors (void)
   g_autoptr (GBytes) selected_completed_blob = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode
         (&selected_completed, &selected_completed_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) policy_published = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (selected_completed_blob, &policy_published), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
+        (&selected_reloaded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
+        (&policy_published), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (policy_published.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION);
+  g_assert_true (policy_published.policy_generation_published);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&selected_completed, &policy_published));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery
+        (&policy_published), ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_autoptr (GBytes) policy_published_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&policy_published, &policy_published_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) handoff = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (policy_published_blob, &handoff), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_lifecycle_handoff
+        (&handoff), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&policy_published, &handoff));
+  g_autoptr (GBytes) handoff_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&handoff,
+      &handoff_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) handoff_reloaded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (handoff_blob,
+      &handoff_reloaded), ==, WYRELOG_E_OK);
+  g_assert_true (handoff_reloaded.lifecycle_handoff_complete);
+  handoff_reloaded.policy_generation_published = FALSE;
+  g_autoptr (GBytes) invalid_handoff = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&handoff_reloaded,
+      &invalid_handoff), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
         (&selected_reloaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&completed,
