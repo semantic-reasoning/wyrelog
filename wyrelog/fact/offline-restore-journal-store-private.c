@@ -213,11 +213,19 @@ wyl_fact_offline_restore_journal_store_cas (wyl_policy_store_t *store,
       || expected_revision >= G_MAXINT64
       || desired->revision != expected_revision + 1)
     return WYRELOG_E_INVALID;
+  if (desired->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || desired->replacement_selected_pending_cleanup)
+    return WYRELOG_E_POLICY;
   WylFactOfflineRestoreJournal current = { 0 };
   wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load (store,
           desired->operation_uuid, &current);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (current.version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || current.replacement_selected_pending_cleanup) {
+    wyl_fact_offline_restore_journal_clear (&current);
+    return WYRELOG_E_POLICY;
+  }
   if (current.revision != expected_revision) {
     *out_result = WYL_FACT_OFFLINE_RESTORE_STORE_STALE;
     *out_committed = current;

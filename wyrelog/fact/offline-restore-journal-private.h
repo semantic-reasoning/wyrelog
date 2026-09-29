@@ -11,6 +11,7 @@ G_BEGIN_DECLS
 
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION 1u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION 2u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION 3u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -175,6 +176,7 @@ typedef struct
   WylFactOfflineRestoreDecision decision;
   gboolean policy_generation_published;
   gboolean lifecycle_handoff_complete;
+  gboolean replacement_selected_pending_cleanup;
   GPtrArray *graphs;
 } WylFactOfflineRestoreJournal;
 
@@ -237,6 +239,10 @@ wyrelog_error_t wyl_fact_offline_restore_journal_complete_attempt
     WylFactArtifactMainTransitionState state,
     WylFactArtifactMainTransitionOp next_op, gboolean terminal);
 wyrelog_error_t wyl_fact_offline_restore_journal_mark_policy_published
+  (WylFactOfflineRestoreJournal *journal);
+/* Pure v2 -> v3 selection transition. Generic persistence rejects the result;
+ * only a later scoped policy handoff may commit it with replacement authority. */
+wyrelog_error_t wyl_fact_offline_restore_journal_mark_replacement_selected
   (WylFactOfflineRestoreJournal *journal);
 wyrelog_error_t wyl_fact_offline_restore_journal_mark_lifecycle_handoff
   (WylFactOfflineRestoreJournal *journal);

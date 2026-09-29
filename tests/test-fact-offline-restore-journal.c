@@ -348,6 +348,71 @@ imported_provisioned_commit_early_successors (void)
   graph->transition_state =
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
   graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  g_autoptr (GBytes) selected_source = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&completed,
+      &selected_source), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (selected_source,
+      &selected), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) unknown_selection = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (selected_source,
+      &unknown_selection), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *unknown_graph =
+      g_ptr_array_index (unknown_selection.graphs, 0);
+  unknown_graph->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  unknown_graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&unknown_selection), ==, WYRELOG_E_POLICY);
+  graph->durability_unprovable_acknowledged = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&completed), ==, WYRELOG_E_POLICY);
+  graph->durability_unprovable_acknowledged = FALSE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&selected), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selected.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+  g_assert_true (selected.replacement_selected_pending_cleanup);
+  selected.replacement_selected_pending_cleanup = FALSE;
+  g_autoptr (GBytes) invalid_selected = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &invalid_selected), ==, WYRELOG_E_INVALID);
+  selected.replacement_selected_pending_cleanup = TRUE;
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&completed, &selected));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&selected), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_autoptr (GBytes) selected_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &selected_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selected_reloaded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (selected_blob,
+      &selected_reloaded), ==, WYRELOG_E_OK);
+  g_assert_true (selected_reloaded.replacement_selected_pending_cleanup);
+  g_auto (WylFactOfflineRestoreJournal) selected_begun = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (selected_blob,
+      &selected_begun), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt
+        (&selected_begun, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE),
+      ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&selected_reloaded, &selected_begun));
+  g_autoptr (GBytes) selected_begun_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected_begun,
+      &selected_begun_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selected_completed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (selected_begun_blob, &selected_completed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_complete_attempt
+        (&selected_completed, "alpha",
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&selected_begun, &selected_completed));
+  g_autoptr (GBytes) selected_completed_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&selected_completed, &selected_completed_blob), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&selected_reloaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&completed,
       "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
       WYRELOG_E_POLICY);

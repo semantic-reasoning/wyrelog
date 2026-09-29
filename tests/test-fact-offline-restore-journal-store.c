@@ -501,6 +501,52 @@ provisioned_handoff_cas (void)
       SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
   sqlite3_finalize (update);
+  g_auto (WylFactOfflineRestoreJournal) published_for_selection = { 0 };
+  clone_journal (&imported, &published_for_selection);
+  WylFactOfflineRestoreJournalGraph *selected_graph =
+      g_ptr_array_index (published_for_selection.graphs, 0);
+  selected_graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+  selected_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  selected_graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  g_autoptr (GBytes) selection_source = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&published_for_selection, &selection_source), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (selection_source, &selected), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&selected), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&published_for_selection, &selected));
+  g_auto (WylFactOfflineRestoreJournal) refused_selection = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      published_for_selection.revision, &selected, &result,
+      &refused_selection), ==, WYRELOG_E_POLICY);
+  g_assert_null (refused_selection.graphs);
+  g_autoptr (GBytes) selection_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &selection_blob), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreRecord raw_selected = {
+    .operation_uuid = selected.operation_uuid,
+    .tenant_id = selected.tenant_id,
+    .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
+    .selected_graph_id = selected.selected_graph_id,
+    .revision = selected.revision,
+    .graph_count = 1,
+    .journal_blob = selection_blob,
+  };
+  memcpy (raw_selected.manifest_sha256, selected.manifest_sha256, 32);
+  WylPolicyOfflineRestoreStoreResult raw_result =
+      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  WylPolicyOfflineRestoreRecord *raw_committed = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_create (store,
+      &raw_selected, &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
+  g_assert_cmpint (wyl_policy_store_offline_restore_cas (store,
+      published_for_selection.revision, &raw_selected, &raw_result,
+      &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
   g_auto (WylFactOfflineRestoreJournal) begin = { 0 };
   clone_journal (&imported, &begin);
   g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&begin,

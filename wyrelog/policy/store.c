@@ -37192,6 +37192,20 @@ offline_restore_record_valid (const WylPolicyOfflineRestoreRecord *record)
 }
 
 static gboolean
+offline_restore_record_has_selected_marker
+  (const WylPolicyOfflineRestoreRecord *record)
+{
+  if (!offline_restore_record_valid (record))
+    return FALSE;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  return wyl_fact_offline_restore_journal_decode (record->journal_blob,
+             &journal) == WYRELOG_E_OK
+         && journal.version ==
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+         && journal.replacement_selected_pending_cleanup;
+}
+
+static gboolean
 offline_restore_record_equal (const WylPolicyOfflineRestoreRecord *left,
     const WylPolicyOfflineRestoreRecord *right)
 {
@@ -37417,6 +37431,8 @@ wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
   if (store == NULL || !offline_restore_record_valid (record)
       || out_result == NULL || out_committed == NULL)
     return WYRELOG_E_INVALID;
+  if (offline_restore_record_has_selected_marker (record))
+    return WYRELOG_E_POLICY;
   WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
   wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
           &fence);
@@ -37595,6 +37611,8 @@ wyl_policy_store_offline_restore_cas (wyl_policy_store_t *store,
       || desired->revision != expected_revision + 1 || out_result == NULL
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
+  if (offline_restore_record_has_selected_marker (desired))
+    return WYRELOG_E_POLICY;
   WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
   wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
           &fence);
@@ -37614,6 +37632,9 @@ wyl_policy_store_offline_restore_cas (wyl_policy_store_t *store,
   }
   if (rc == WYRELOG_E_OK)
     rc = offline_restore_claim_matches_locked (store, current);
+  if (rc == WYRELOG_E_OK
+      && offline_restore_record_has_selected_marker (current))
+    rc = WYRELOG_E_POLICY;
   if (rc != WYRELOG_E_OK) {
     wyl_policy_offline_restore_record_free (current);
     return offline_restore_finish_mutation (store, &fence, rc, FALSE);
