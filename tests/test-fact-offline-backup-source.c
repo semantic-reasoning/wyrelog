@@ -1017,6 +1017,7 @@ typedef struct
   WylFactOfflineRestoreJournal committed;
   guint writes;
   const gchar *selected_graph;
+  guint publication_callbacks;
 } SessionFixture;
 
 static wyrelog_error_t
@@ -1476,6 +1477,34 @@ session_job (WylFactReplayJobContext *context, gpointer data)
 }
 
 static wyrelog_error_t
+publication_authority_callback (const WylFactOfflineRestoreJournal *journal,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver,
+    const GPtrArray *graphs, gpointer data)
+{
+  SessionFixture *f = data;
+  f->publication_callbacks++;
+  session_assert_authority (f, TRUE);
+  g_assert_nonnull (lease);
+  g_assert_nonnull (resolver);
+  g_assert_cmpuint (graphs->len, ==, 1);
+  g_assert_cmpuint (journal->revision, ==, 3);
+  g_assert_cmpint (journal->decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  const WylFactOfflineRestorePublicationGraph *graph = g_ptr_array_index (graphs, 0);
+  g_assert_cmpstr (graph->graph_id, ==, f->selected_graph);
+  g_assert_nonnull (graph->directory);
+  g_assert_nonnull (graph->pair);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+publication_authority_job (WylFactReplayJobContext *context, gpointer data)
+{
+  SessionFixture *f = data;
+  return wyl_fact_offline_restore_validation_session_with_publication_authority
+           (f->session, context, publication_authority_callback, f);
+}
+
+static wyrelog_error_t
 session_run_worker (SessionFixture *f)
 {
   WylFactReplaySchedulerConfig config;
@@ -1490,6 +1519,57 @@ session_run_worker (SessionFixture *f)
   g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
       WYRELOG_E_OK);
   return rc;
+}
+
+static wyrelog_error_t
+publication_authority_run_worker (SessionFixture *f)
+{
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL, &scheduler),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_scheduler_submit (scheduler, "tenant-a",
+      f->selected_graph, f->cancel, publication_authority_job, f, NULL,
+      &future), ==, WYRELOG_E_OK);
+  wyrelog_error_t rc = wyl_fact_replay_future_wait (future);
+  g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+      WYRELOG_E_OK);
+  return rc;
+}
+
+static void
+test_restore_publication_authority (gconstpointer data)
+{
+  SessionFixture f = { 0 };
+  f.selected_graph = "alpha";
+  session_fixture_init_selected (&f, "success", f.selected_graph);
+  f.record_preflight = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      f.capture.manifest, session_operation, 2, 0, &f.session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 3);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  if (g_str_equal (data, "corrupt"))
+    session_corrupt_stage (&f, "alpha");
+  if (g_str_equal (data, "policy"))
+    mutate_tenant_after_snapshot (&f.capture);
+  wyrelog_error_t rc = publication_authority_run_worker (&f);
+  if (!g_str_equal (data, "success")) {
+    g_assert_cmpint (rc, !=, WYRELOG_E_OK);
+    g_assert_cmpuint (f.publication_callbacks, ==, 0);
+    session_assert_authority (&f, FALSE);
+  } else {
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.publication_callbacks, ==, 1);
+    session_assert_authority (&f, TRUE);
+  }
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  session_fixture_clear (&f);
 }
 
 static void
@@ -2788,6 +2868,12 @@ main (int argc, char **argv)
     g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/graph/", graph_modes[i], NULL);
     g_test_add_data_func (path, graph_modes[i], test_graph_scoped_session);
   }
+  g_test_add_data_func ("/fact-offline-backup-source/publication-authority/success",
+      "success", test_restore_publication_authority);
+  g_test_add_data_func ("/fact-offline-backup-source/publication-authority/corrupt",
+      "corrupt", test_restore_publication_authority);
+  g_test_add_data_func ("/fact-offline-backup-source/publication-authority/policy",
+      "policy", test_restore_publication_authority);
   g_test_add_func ("/fact-offline-backup-source/record/observational-refused",
       test_restore_observational_session_cannot_record);
   const gchar *record_modes[] = { "success", "partial", "nonprefix", "full",

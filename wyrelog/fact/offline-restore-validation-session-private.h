@@ -11,6 +11,22 @@ G_BEGIN_DECLS
 typedef struct WylFactOfflineRestoreValidationSession
     WylFactOfflineRestoreValidationSession;
 
+/* Borrowed only while the publication callback runs. The callback must not
+ * retain these handles, reenter/free the session, or treat the replay result
+ * as protection against independent filesystem writers. A publication driver
+ * must reobserve the exact transition state before each mutation. */
+typedef struct
+{
+  const gchar *graph_id;
+  WylFactGraphDirectory *directory;
+  WylFactGraphProvisionedPair *pair; /* NULL when main was absent at admission. */
+} WylFactOfflineRestorePublicationGraph;
+
+typedef wyrelog_error_t (*WylFactOfflineRestorePublicationFunc)
+  (const WylFactOfflineRestoreJournal *journal,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver,
+    const GPtrArray *graphs, gpointer user_data);
+
 /* Observational validation of a pristine all-bound tenant or graph journal.
  * Caller-established manifest authentication remains a prerequisite: neither
  * decoding nor the durable trust assertion authenticates the supplied bytes.
@@ -63,6 +79,18 @@ wyrelog_error_t wyl_fact_offline_restore_validation_session_run_and_record_prefl
   (WylFactOfflineRestoreValidationSession *session,
     WylFactReplayJobContext *job_context,
     WylFactOfflineRestoreJournal *out_committed);
+
+/* Replays the complete selected scope under retained root and runtime
+ * authority, then invokes |callback| before that authority is released.
+ * Requires all preflight records to have been durably written by a recording
+ * session. This is an internal handoff boundary, not a COMMIT decision or
+ * publication permit: the callback owns the crash protocol and fresh
+ * transition observations. Failure terminalizes the session and releases
+ * authority. Success leaves authority held until session_free. */
+wyrelog_error_t wyl_fact_offline_restore_validation_session_with_publication_authority
+  (WylFactOfflineRestoreValidationSession *session,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestorePublicationFunc callback, gpointer user_data);
 
 /* Run directly on a replay worker; caller retains session and policy through
  * return. Every call repeats replay and final observations. Cancellation is
