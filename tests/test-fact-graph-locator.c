@@ -1005,6 +1005,137 @@ test_posix_provisioned_pair_authority (void)
 }
 
 static void
+test_posix_provisioned_restore_witness (void)
+{
+#ifdef __APPLE__
+  return;
+#else
+  const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+          "facts.duckdb", NULL);
+  g_autofree gchar *rollback = g_build_filename (graph_path,
+          "restore-01890f47-3c4b-7cc2-b8c4-dc0c0c070546.duckdb.superseded",
+          NULL);
+  create_provisioned_pair (companion, main_path);
+  GStatBuf old = { 0 };
+  g_assert_cmpint (g_stat (main_path, &old), ==, 0);
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = (guint64) old.st_dev, .object = (guint64) old.st_ino,
+  };
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, exact_operation_uuid, restore_uuid, &identity,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &witness), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity wrong = identity;
+  wrong.object++;
+  WylFactGraphProvisionedRestoreWitness *rejected = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, exact_operation_uuid, restore_uuid, &wrong,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &rejected), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", restore_uuid,
+      &identity, WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN,
+      &rejected), !=, WYRELOG_E_OK);
+  g_assert_null (rejected);
+  g_assert_cmpint (g_rename (main_path, rollback), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), !=, WYRELOG_E_OK);
+  g_clear_pointer (&witness,
+      wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, exact_operation_uuid, restore_uuid, &identity,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_file_set_contents (main_path, "new", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_clear_pointer (&witness,
+      wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, exact_operation_uuid, restore_uuid, &identity,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *third = g_build_filename (graph_path, "third-link", NULL);
+  g_assert_cmpint (link (rollback, third), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (third), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *parked = g_build_filename (graph_path,
+          "parked-companion", NULL);
+  g_assert_cmpint (g_rename (companion, parked), ==, 0);
+  g_assert_true (g_file_set_contents (companion, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), !=, WYRELOG_E_OK);
+  g_assert_cmpint (g_remove (companion), ==, 0);
+  g_assert_cmpint (g_rename (parked, companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (g_chmod (rollback, 0644), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_chmod (rollback, 0600), ==, 0);
+  g_assert_cmpint (g_rename (companion, parked), ==, 0);
+  g_assert_cmpint (symlink (parked, companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), !=, WYRELOG_E_OK);
+  g_assert_cmpint (g_remove (companion), ==, 0);
+  g_assert_cmpint (g_rename (parked, companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *parked_rollback = g_build_filename (graph_path,
+          "parked-rollback", NULL);
+  g_assert_cmpint (g_rename (rollback, parked_rollback), ==, 0);
+  g_assert_true (g_file_set_contents (rollback, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (rollback, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (rollback), ==, 0);
+  g_assert_cmpint (g_rename (parked_rollback, rollback), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *parked_graph = g_strconcat (graph_path,
+          "-substituted", NULL);
+  g_assert_cmpint (g_rename (graph_path, parked_graph), ==, 0);
+  g_assert_cmpint (g_mkdir (graph_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rename (parked_graph, graph_path), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &graph), ==, WYRELOG_E_OK);
+  g_clear_pointer (&witness,
+      wyl_fact_graph_provisioned_restore_witness_free);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+#endif
+}
+
+static void
 test_posix_resolver_exact_stage_create_open_publish (void)
 {
   g_autofree gchar *root = make_root ();
@@ -1664,6 +1795,8 @@ main (int argc, char **argv)
       test_posix_resolver_open_provisioned_final_exact);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-pair-authority",
       test_posix_provisioned_pair_authority);
+  g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-witness",
+      test_posix_provisioned_restore_witness);
   g_test_add_func
     ("/fact-graph-locator/posix/provisioned-final-directory-replacement",
       test_posix_resolver_provisioned_final_rejects_directory_replacement);
