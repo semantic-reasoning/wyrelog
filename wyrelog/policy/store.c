@@ -887,6 +887,7 @@ static const gchar *const required_tables[] = {
   "fact_offline_restore_journals",
   "fact_offline_restore_tenant_claims",
   "fact_offline_restore_graph_claims",
+  "fact_graph_restore_replacements",
   "fact_namespaces",
   "fact_relation_schemas",
   "fact_relation_schema_columns",
@@ -986,6 +987,80 @@ static const gchar offline_restore_graph_claim_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_update_guard "
     "BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT "
     "RAISE(ABORT,'restore graph claims are immutable'); END;";
+
+/* A sealed restore reserves the replacement outside the ordinary one-row-per-
+ * graph provisioning table. The old ACTIVE row remains authoritative until a
+ * later atomic policy handoff. */
+static const gchar restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
+    "restore_operation_uuid TEXT PRIMARY KEY,"
+    "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
+    "AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) "
+    "AND substr(replacement_uuid,15,1)='7' AND "
+    "substr(replacement_uuid,20,1) GLOB '[89ab]' AND "
+    "length(replace(replacement_uuid,'-',''))=32 AND "
+    "replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' "
+    "AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+static const gchar restore_replacement_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_insert_guard "
+    "BEFORE INSERT ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals AS j "
+    "JOIN fact_offline_restore_graph_claims AS c ON c.operation_uuid=j.operation_uuid "
+    "WHERE j.operation_uuid=NEW.restore_operation_uuid AND j.scope='graph' "
+    "AND j.tenant_id=NEW.tenant_id AND j.selected_graph_id=NEW.graph_id "
+    "AND j.revision=NEW.journal_revision AND c.tenant_id=NEW.tenant_id "
+    "AND c.graph_id=NEW.graph_id) OR NOT EXISTS(SELECT 1 FROM tenants AS t "
+    "WHERE t.tenant_id=NEW.tenant_id AND t.lifecycle_state='sealed' "
+    "AND t.lifecycle_generation=NEW.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=NEW.tenant_reconciliation_generation) "
+    "OR NOT EXISTS(SELECT 1 FROM fact_graphs AS g WHERE "
+    "g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id "
+    "AND g.lifecycle_state='sealed' AND g.store_uuid=NEW.store_uuid "
+    "AND g.lifecycle_generation=NEW.graph_lifecycle_generation "
+    "AND g.reconciliation_generation=NEW.graph_reconciliation_generation) "
+    "THEN RAISE(ABORT,'restore replacement authority mismatch') END; END;";
+static const gchar restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified')) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+static const gchar restore_replacement_delete_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard "
+    "BEFORE DELETE ON fact_graph_restore_replacements BEGIN "
+    "SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;";
 static const gchar offline_restore_schema_ddl[] =
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_journals ("
     "operation_uuid TEXT PRIMARY KEY CHECK(typeof(operation_uuid)='text' AND length(operation_uuid)=36 AND operation_uuid=lower(operation_uuid) AND length(replace(operation_uuid,'-',''))=32 AND replace(operation_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(operation_uuid,9,1)='-' AND substr(operation_uuid,14,1)='-' AND substr(operation_uuid,15,1)='7' AND substr(operation_uuid,19,1)='-' AND substr(operation_uuid,20,1) GLOB '[89ab]' AND substr(operation_uuid,24,1)='-'),"
@@ -11188,6 +11263,72 @@ migrate_offline_restore_schema (sqlite3 *db)
   return rc == WYRELOG_E_OK ? validate_offline_restore_schema (db) : rc;
 }
 
+static wyrelog_error_t graph_provisioning_require_true
+  (sqlite3 *db, const gchar *sql);
+
+static wyrelog_error_t
+migrate_restore_replacement_schema (sqlite3 *db)
+{
+  static const struct
+  {
+    const gchar *type;
+    const gchar *name;
+    const gchar *sql;
+  } objects[] = {
+    { "table", "fact_graph_restore_replacements",
+      restore_replacement_table_sql },
+    { "trigger", "fact_graph_restore_replacement_insert_guard",
+      restore_replacement_insert_guard_sql },
+    { "trigger", "fact_graph_restore_replacement_update_guard",
+      restore_replacement_update_guard_sql },
+    { "trigger", "fact_graph_restore_replacement_delete_guard",
+      restore_replacement_delete_guard_sql },
+  };
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM sqlite_master WHERE "
+      "name=? COLLATE NOCASE;", -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  guint present = 0;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; i < G_N_ELEMENTS (objects); i++) {
+    sqlite3_reset (stmt);
+    sqlite3_clear_bindings (stmt);
+    if (bind_text (stmt, 1, objects[i].name) != WYRELOG_E_OK
+        || sqlite3_step (stmt) != SQLITE_ROW) {
+      rc = WYRELOG_E_IO;
+      break;
+    }
+    present += sqlite3_column_int (stmt, 0) != 0;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (present != 0 && present != G_N_ELEMENTS (objects))
+    return WYRELOG_E_POLICY;
+  if (present == 0)
+    for (guint i = 0; i < G_N_ELEMENTS (objects) && rc == WYRELOG_E_OK; i++)
+      rc = exec_sql (db, objects[i].sql);
+  for (guint i = 0; i < G_N_ELEMENTS (objects) && rc == WYRELOG_E_OK; i++)
+    rc = graph_authority_object_matches (db, objects[i].type,
+            objects[i].name, objects[i].sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return graph_provisioning_require_true (db,
+             "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_restore_replacements AS r "
+             "LEFT JOIN main.fact_offline_restore_journals AS j ON "
+             "j.operation_uuid=r.restore_operation_uuid "
+             "LEFT JOIN main.fact_offline_restore_graph_claims AS c ON "
+             "c.operation_uuid=r.restore_operation_uuid "
+             "LEFT JOIN main.fact_graph_provisioning AS p ON "
+             "p.op_uuid=r.old_provisioning_uuid "
+             "WHERE j.operation_uuid IS NULL OR j.scope!='graph' "
+             "OR j.tenant_id!=r.tenant_id OR j.selected_graph_id!=r.graph_id "
+             "OR c.tenant_id!=r.tenant_id OR c.graph_id!=r.graph_id "
+             "OR p.op_uuid IS NULL OR p.phase!='active' "
+             "OR p.tenant_id!=r.tenant_id OR p.graph_id!=r.graph_id "
+             "OR p.store_uuid!=r.store_uuid);");
+}
+
 static wyrelog_error_t graph_authority_migration_checkpoint
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
@@ -13741,6 +13882,23 @@ graph_authority_schema_ready:
         "RELEASE SAVEPOINT wyrelog_offline_restore_schema;");
     return rc;
   }
+
+  rc = exec_sql (store->db, "SAVEPOINT wyrelog_restore_replacement_schema;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = migrate_restore_replacement_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (store->db,
+            "RELEASE SAVEPOINT wyrelog_restore_replacement_schema;");
+  else {
+    (void) exec_sql (store->db,
+        "ROLLBACK TO SAVEPOINT wyrelog_restore_replacement_schema;");
+    (void) exec_sql (store->db,
+        "RELEASE SAVEPOINT wyrelog_restore_replacement_schema;");
+    return rc;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   /* Apply all seven inert service-authority tables, their indexes and their
    * ten immutability/append-only triggers atomically. CREATE TABLE IF NOT

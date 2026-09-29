@@ -77,6 +77,36 @@ check_store_creates_authority_schema (void)
 }
 
 static gint
+check_restore_replacement_schema_closure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9600;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;",
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 9601;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 9602;
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9603;
+  db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
+      "CREATE TRIGGER fact_graph_restore_replacement_delete_guard "
+      "BEFORE DELETE ON fact_graph_restore_replacements BEGIN SELECT 1; END;",
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 9604;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 9605;
+  return 0;
+}
+
+static gint
 check_store_reads_fact_logical_operation_status (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -7126,6 +7156,8 @@ main (void)
   gint rc;
 
   if ((rc = check_store_creates_authority_schema ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_restore_replacement_schema_closure ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_reads_fact_logical_operation_status ()) != 0)
     return wyl_test_normalize_exit_status (rc);
