@@ -1349,6 +1349,10 @@ wyl_fact_offline_restore_journal_recovery
 {
   if (!valid_journal (journal))
     return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
+  /* Tenant publication has no authority-bearing recovery driver yet. */
+  if (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT)
+    return WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY;
   if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
       && journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       && !((WylFactOfflineRestoreJournalGraph *)
