@@ -1289,8 +1289,35 @@ test_posix_restore_companion_post_publish (void)
         (&graph, exact_operation_uuid, restore_uuid, &old_identity,
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &retained), ==,
       WYRELOG_E_OK);
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) shape = NULL;
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), !=,
+      WYRELOG_E_OK);
+  g_assert_null (shape);
+  WylFactArtifactInventoryIdentity wrong_new = new_identity;
+  wrong_new.object++;
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &wrong_new,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_autofree gchar *foreign = g_build_filename (graph_path, "foreign", NULL);
   g_assert_true (g_file_set_contents (foreign, "x", -1, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
         (&resolver, &graph, lease, retained, exact_operation_uuid,
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
@@ -1298,12 +1325,65 @@ test_posix_restore_companion_post_publish (void)
   g_assert_null (dual);
   g_assert_false (g_file_test (new_companion, G_FILE_TEST_EXISTS));
   g_assert_cmpint (g_remove (foreign), ==, 0);
+  g_autofree gchar *sidecar = g_build_filename (graph_path,
+          "facts.duckdb.wal", NULL);
+  g_assert_true (g_file_set_contents (sidecar, "wal", -1, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
+  g_assert_cmpint (g_remove (sidecar), ==, 0);
+  g_autofree gchar *stage = g_build_filename (graph_path,
+          "restore-01890f47-3c4b-7cc2-b8c4-dc0c0c070546.duckdb", NULL);
+  g_assert_true (g_file_set_contents (stage, "stage", -1, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
+  g_assert_cmpint (g_remove (stage), ==, 0);
   g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
         (&resolver, &graph, lease, retained, exact_operation_uuid,
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
         (dual, &graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
+  g_autofree gchar *third = g_build_filename (graph_path, "third-link", NULL);
+  g_assert_cmpint (link (main_path, third), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
+  g_assert_cmpint (g_remove (third), ==, 0);
+  g_autofree gchar *parked_graph = g_strconcat (graph_path,
+          "-shape-parked", NULL);
+  g_assert_cmpint (g_rename (graph_path, parked_graph), ==, 0);
+  g_assert_cmpint (g_mkdir (graph_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
+  g_assert_cmpint (g_rmdir (graph_path), ==, 0);
+  g_assert_cmpint (g_rename (parked_graph, graph_path), ==, 0);
   g_clear_pointer (&dual, wyl_fact_graph_provisioned_restore_witness_free);
   g_assert_cmpint (g_remove (new_companion), ==, 0);
   g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
@@ -1333,8 +1413,28 @@ test_posix_restore_companion_post_publish (void)
       WYRELOG_E_OK);
   g_clear_pointer (&dual, wyl_fact_graph_provisioned_restore_witness_free);
   g_assert_cmpint (g_remove (new_companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), !=,
+      WYRELOG_E_OK);
+  g_assert_null (shape);
+  g_assert_cmpint (symlink (main_path, new_companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), !=,
+      WYRELOG_E_OK);
+  g_assert_null (shape);
+  g_assert_cmpint (g_remove (new_companion), ==, 0);
   g_assert_true (g_file_set_contents (new_companion, "foreign", -1, NULL));
   g_assert_cmpint (g_chmod (new_companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
         (&resolver, &graph, lease, retained, exact_operation_uuid,
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
