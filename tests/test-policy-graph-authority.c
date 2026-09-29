@@ -6550,6 +6550,7 @@ test_graph_provisioning_selected_list (void)
    * even when multiple operations name the same graph. */
   exec_ok (db, "PRAGMA foreign_keys=OFF;"
       "CREATE TABLE provisioning_fixture AS SELECT * FROM fact_graph_provisioning;"
+      "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
       "DROP TABLE fact_graph_provisioning;"
       "ALTER TABLE provisioning_fixture RENAME TO fact_graph_provisioning;");
   const gchar *tenants[] = { "tenant-a", "tenant-a", "tenant-a", "tenant-b" };

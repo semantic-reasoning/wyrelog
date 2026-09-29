@@ -992,7 +992,7 @@ static const gchar offline_restore_graph_claim_update_guard_sql[] =
 /* A sealed restore reserves the replacement outside the ordinary one-row-per-
  * graph provisioning table. The old ACTIVE row remains authoritative until a
  * later atomic policy handoff. */
-static const gchar restore_replacement_table_sql[] =
+static const gchar restore_replacement_table_pre_selected_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
     "restore_operation_uuid TEXT PRIMARY KEY,"
     "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
@@ -1019,6 +1019,34 @@ static const gchar restore_replacement_table_sql[] =
     "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
     "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+
+static const gchar restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
+    "restore_operation_uuid TEXT PRIMARY KEY,"
+    "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
+    "AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) "
+    "AND substr(replacement_uuid,15,1)='7' AND "
+    "substr(replacement_uuid,20,1) GLOB '[89ab]' AND "
+    "length(replace(replacement_uuid,'-',''))=32 AND "
+    "replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' "
+    "AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified','selected_pending_cleanup')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
 static const gchar restore_replacement_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_insert_guard "
     "BEFORE INSERT ON fact_graph_restore_replacements BEGIN "
@@ -1037,7 +1065,7 @@ static const gchar restore_replacement_insert_guard_sql[] =
     "AND g.lifecycle_generation=NEW.graph_lifecycle_generation "
     "AND g.reconciliation_generation=NEW.graph_reconciliation_generation) "
     "THEN RAISE(ABORT,'restore replacement authority mismatch') END; END;";
-static const gchar restore_replacement_update_guard_sql[] =
+static const gchar restore_replacement_update_guard_pre_selected_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
     "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
     "SELECT CASE WHEN NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
@@ -1057,6 +1085,43 @@ static const gchar restore_replacement_update_guard_sql[] =
     "OR NOT (NEW.phase=OLD.phase OR "
     "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
     "(OLD.phase='companion_synced' AND NEW.phase='verified')) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+
+static const gchar restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN OLD.phase='selected_pending_cleanup' "
+    "OR NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='selected_pending_cleanup' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='restore_selected' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0))) "
     "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
 static const gchar restore_replacement_delete_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard "
@@ -10388,7 +10453,7 @@ static const gchar fact_graph_provisioning_table_pre_windows_sql[] =
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
     ")";
 
-static const gchar fact_graph_provisioning_table_sql[] =
+static const gchar fact_graph_provisioning_table_pre_selected_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
     "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
     "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
@@ -10413,6 +10478,65 @@ static const gchar fact_graph_provisioning_table_sql[] =
     "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
     "phase TEXT NOT NULL CHECK (phase IN "
     "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "windows_operation_evidence_version INTEGER,"
+    "windows_graph_volume_serial INTEGER,"
+    "windows_graph_file_id BLOB,"
+    "windows_artifact_volume_serial INTEGER,"
+    "windows_artifact_file_id BLOB,"
+    "darwin_operation_evidence BLOB,"
+    "CHECK ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial != 0 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial != 0 AND "
+    "typeof(windows_artifact_file_id)='blob' AND "
+    "length(windows_artifact_file_id)=16)),"
+    "CHECK (darwin_operation_evidence IS NULL OR ("
+    "typeof(darwin_operation_evidence)='blob' AND "
+    "length(darwin_operation_evidence)=56)),"
+    "CHECK (darwin_operation_evidence IS NULL OR "
+    "windows_operation_evidence_version IS NULL),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fact_graph_provisioning_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded','restore_selected')) ,"
     "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
     "attempt BETWEEN 0 AND 9223372036854775807),"
     "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
@@ -10538,7 +10662,7 @@ static const gchar fact_graph_provisioning_insert_guard_windows_sql[] =
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
-static const gchar fact_graph_provisioning_insert_guard_sql[] =
+static const gchar fact_graph_provisioning_insert_guard_pre_selected_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
     "BEFORE INSERT ON fact_graph_provisioning BEGIN "
     "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
@@ -10558,9 +10682,94 @@ static const gchar fact_graph_provisioning_insert_guard_sql[] =
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
+static const gchar fact_graph_provisioning_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))) OR "
+    "(NEW.phase='restore_selected' AND g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_graph_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.scope='graph' AND j.tenant_id=NEW.tenant_id "
+    "AND j.selected_graph_id=NEW.graph_id "
+    "AND j.revision>r.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+static const gchar fact_graph_provisioning_update_guard_pre_selected_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_update_guard "
+    "BEFORE UPDATE ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.updated_at<OLD.updated_at "
+    "THEN RAISE(ABORT,'provisioning updated_at regression') END; "
+    "SELECT CASE WHEN NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "THEN RAISE(ABORT,'invalid provisioning retry attempt') END; "
+    "SELECT CASE WHEN NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase IN ('staged','degraded')) OR "
+    "(OLD.phase='staged' AND NEW.phase IN ('published','degraded')) OR "
+    "(OLD.phase='published' AND NEW.phase IN ('verified','degraded')) OR "
+    "(OLD.phase='verified' AND NEW.phase IN ('active','degraded'))) "
+    "THEN RAISE(ABORT,'illegal provisioning phase transition') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    /* Terminal records are historical evidence.  Their identity stays
+     * immutable, but later normal graph transitions must not invalidate
+     * completed provisioning.  A terminal phase transition itself remains
+     * exact; only same-phase preservation uses this monotonic predicate. */
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase=NEW.phase AND g.lifecycle_state!='legacy_unclassified' AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation>=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation>=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase!=NEW.phase AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 static const gchar fact_graph_provisioning_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_update_guard "
     "BEFORE UPDATE ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN OLD.phase='restore_selected' OR NEW.phase='restore_selected' "
+    "THEN RAISE(ABORT,'restore selection is recovery owned') END; "
     "SELECT CASE WHEN NEW.updated_at<OLD.updated_at "
     "THEN RAISE(ABORT,'provisioning updated_at regression') END; "
     "SELECT CASE WHEN NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
@@ -11270,18 +11479,91 @@ static wyrelog_error_t graph_provisioning_require_true
 /* b0faddd1 installed the same table with >0 for this one generation. A
  * normally sealed graph can still have reconciliation generation zero. */
 static gchar *
-restore_replacement_pre_zero_table_sql (void)
+restore_replacement_pre_zero_table_sql (const gchar *table_sql)
 {
   const gchar *needle =
       "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0)";
   const gchar *previous =
       "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>0)";
-  const gchar *at = strstr (restore_replacement_table_sql, needle);
+  const gchar *at = strstr (table_sql, needle);
   if (at == NULL)
     return NULL;
-  g_autofree gchar *prefix = g_strndup (restore_replacement_table_sql,
-          at - restore_replacement_table_sql);
+  g_autofree gchar *prefix = g_strndup (table_sql, at - table_sql);
   return g_strconcat (prefix, previous, at + strlen (needle), NULL);
+}
+
+static wyrelog_error_t
+restore_replacement_validate_selected_journals (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT r.restore_operation_uuid,r.tenant_id,r.graph_id,"
+      "r.old_provisioning_uuid,r.store_uuid,"
+      "r.tenant_lifecycle_generation,r.tenant_reconciliation_generation,"
+      "r.graph_lifecycle_generation,r.graph_reconciliation_generation,"
+      "r.journal_revision,j.revision,j.journal_blob "
+      "FROM main.fact_graph_restore_replacements AS r "
+      "JOIN main.fact_offline_restore_journals AS j "
+      "ON j.operation_uuid=r.restore_operation_uuid "
+      "WHERE r.phase='selected_pending_cleanup';",
+      -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  int step;
+  while ((step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    if (sqlite3_column_type (stmt, 11) != SQLITE_BLOB
+        || sqlite3_column_bytes (stmt, 11) <= 0) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    g_autoptr (GBytes) blob = g_bytes_new (sqlite3_column_blob (stmt, 11),
+            sqlite3_column_bytes (stmt, 11));
+    g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+    g_autoptr (GBytes) canonical = NULL;
+    if (wyl_fact_offline_restore_journal_decode (blob, &journal)
+        != WYRELOG_E_OK
+        || wyl_fact_offline_restore_journal_encode (&journal, &canonical)
+        != WYRELOG_E_OK || !g_bytes_equal (blob, canonical)
+        || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+        || !journal.replacement_selected_pending_cleanup
+        || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        || journal.graphs == NULL || journal.graphs->len != 1
+        || journal.revision != (guint64) sqlite3_column_int64 (stmt, 10)
+        || journal.revision <= (guint64) sqlite3_column_int64 (stmt, 9)
+        || g_strcmp0 (journal.operation_uuid,
+        (const gchar *) sqlite3_column_text (stmt, 0)) != 0
+        || g_strcmp0 (journal.tenant_id,
+        (const gchar *) sqlite3_column_text (stmt, 1)) != 0
+        || g_strcmp0 (journal.selected_graph_id,
+        (const gchar *) sqlite3_column_text (stmt, 2)) != 0
+        || journal.destination_tenant_lifecycle_generation
+        != (guint64) sqlite3_column_int64 (stmt, 5)
+        || journal.destination_tenant_reconciliation_generation
+        != (guint64) sqlite3_column_int64 (stmt, 6)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, 0);
+    if (g_strcmp0 (graph->graph_id,
+        (const gchar *) sqlite3_column_text (stmt, 2)) != 0
+        || g_strcmp0 (graph->old_provisioning_uuid,
+        (const gchar *) sqlite3_column_text (stmt, 3)) != 0
+        || g_strcmp0 (graph->store_uuid,
+        (const gchar *) sqlite3_column_text (stmt, 4)) != 0
+        || graph->destination_lifecycle_generation
+        != (guint64) sqlite3_column_int64 (stmt, 7)
+        || graph->destination_reconciliation_generation
+        != (guint64) sqlite3_column_int64 (stmt, 8)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+  }
+  if (step != SQLITE_DONE && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -11328,14 +11610,27 @@ migrate_restore_replacement_schema (sqlite3 *db)
             objects[0].name, objects[0].sql);
     if (table_rc != WYRELOG_E_OK) {
       g_autofree gchar *predecessor =
-          restore_replacement_pre_zero_table_sql ();
-      if (predecessor == NULL
-          || graph_authority_object_matches (db, "table", objects[0].name,
-          predecessor) != WYRELOG_E_OK)
+          restore_replacement_pre_zero_table_sql
+            (restore_replacement_table_pre_selected_sql);
+      g_autofree gchar *pre_zero_selected =
+          restore_replacement_pre_zero_table_sql
+            (restore_replacement_table_sql);
+      gboolean old_table = graph_authority_object_matches (db, "table",
+              objects[0].name, restore_replacement_table_pre_selected_sql)
+          == WYRELOG_E_OK;
+      gboolean pre_zero_table = predecessor != NULL
+          && graph_authority_object_matches (db, "table", objects[0].name,
+              predecessor) == WYRELOG_E_OK;
+      gboolean pre_zero_selected_table = pre_zero_selected != NULL
+          && graph_authority_object_matches (db, "table", objects[0].name,
+              pre_zero_selected) == WYRELOG_E_OK;
+      if (!old_table && !pre_zero_table && !pre_zero_selected_table)
         return table_rc;
       for (guint i = 1; i < G_N_ELEMENTS (objects); i++) {
         rc = graph_authority_object_matches (db, objects[i].type,
-                objects[i].name, objects[i].sql);
+                objects[i].name, i == 2 && !pre_zero_selected_table ?
+                restore_replacement_update_guard_pre_selected_sql :
+                objects[i].sql);
         if (rc != WYRELOG_E_OK)
           return rc;
       }
@@ -11348,6 +11643,7 @@ migrate_restore_replacement_schema (sqlite3 *db)
       if (rc != WYRELOG_E_OK)
         return rc;
       rc = exec_sql (db,
+              "DROP TRIGGER fact_graph_provisioning_insert_guard;"
               "DROP TRIGGER fact_graph_restore_replacement_insert_guard;"
               "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
               "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
@@ -11362,6 +11658,8 @@ migrate_restore_replacement_schema (sqlite3 *db)
                 "DROP TABLE fact_graph_restore_replacements_pre_recon_zero;");
       for (guint i = 1; i < G_N_ELEMENTS (objects) && rc == WYRELOG_E_OK; i++)
         rc = exec_sql (db, objects[i].sql);
+      if (rc == WYRELOG_E_OK)
+        rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
       if (rc != WYRELOG_E_OK)
         return rc;
     }
@@ -11374,20 +11672,46 @@ migrate_restore_replacement_schema (sqlite3 *db)
             objects[i].name, objects[i].sql);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return graph_provisioning_require_true (db,
-             "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_restore_replacements AS r "
-             "LEFT JOIN main.fact_offline_restore_journals AS j ON "
-             "j.operation_uuid=r.restore_operation_uuid "
-             "LEFT JOIN main.fact_offline_restore_graph_claims AS c ON "
-             "c.operation_uuid=r.restore_operation_uuid "
-             "LEFT JOIN main.fact_graph_provisioning AS p ON "
-             "p.op_uuid=r.old_provisioning_uuid "
-             "WHERE j.operation_uuid IS NULL OR j.scope!='graph' "
-             "OR j.tenant_id!=r.tenant_id OR j.selected_graph_id!=r.graph_id "
-             "OR c.tenant_id!=r.tenant_id OR c.graph_id!=r.graph_id "
-             "OR p.op_uuid IS NULL OR p.phase!='active' "
-             "OR p.tenant_id!=r.tenant_id OR p.graph_id!=r.graph_id "
-             "OR p.store_uuid!=r.store_uuid);");
+  rc = graph_provisioning_require_true (db,
+          "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_restore_replacements AS r "
+          "LEFT JOIN main.fact_offline_restore_journals AS j ON "
+          "j.operation_uuid=r.restore_operation_uuid "
+          "LEFT JOIN main.fact_offline_restore_graph_claims AS c ON "
+          "c.operation_uuid=r.restore_operation_uuid "
+          "LEFT JOIN main.fact_graph_provisioning AS p ON "
+          "p.op_uuid=r.old_provisioning_uuid "
+          "LEFT JOIN main.fact_graph_provisioning AS selected ON "
+          "selected.op_uuid=r.replacement_uuid "
+          "WHERE j.operation_uuid IS NULL OR j.scope!='graph' "
+          "OR j.tenant_id!=r.tenant_id OR j.selected_graph_id!=r.graph_id "
+          "OR c.tenant_id!=r.tenant_id OR c.graph_id!=r.graph_id "
+          "OR (r.phase!='selected_pending_cleanup' AND ("
+          "p.op_uuid IS NULL OR p.phase!='active' "
+          "OR p.tenant_id!=r.tenant_id OR p.graph_id!=r.graph_id "
+          "OR p.store_uuid!=r.store_uuid)) "
+          "OR (r.phase='selected_pending_cleanup' AND ("
+          "p.op_uuid IS NOT NULL OR selected.op_uuid IS NULL "
+          "OR selected.phase!='restore_selected' "
+          "OR selected.tenant_id!=r.tenant_id "
+          "OR selected.graph_id!=r.graph_id "
+          "OR selected.store_uuid!=r.store_uuid "
+          "OR instr(CAST(j.journal_blob AS TEXT),"
+          "'version=3' || char(10))=0 "
+          "OR instr(CAST(j.journal_blob AS TEXT),"
+          "'replacement_selected=1' || char(10))=0)));");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = graph_provisioning_require_true (db,
+          "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_provisioning AS p "
+          "LEFT JOIN main.fact_graph_restore_replacements AS r ON "
+          "r.replacement_uuid=p.op_uuid "
+          "WHERE p.phase='restore_selected' AND ("
+          "r.replacement_uuid IS NULL "
+          "OR r.phase!='selected_pending_cleanup' "
+          "OR r.tenant_id!=p.tenant_id OR r.graph_id!=p.graph_id "
+          "OR r.store_uuid!=p.store_uuid));");
+  return rc == WYRELOG_E_OK ?
+         restore_replacement_validate_selected_journals (db) : rc;
 }
 
 static wyrelog_error_t graph_authority_migration_checkpoint
@@ -11442,6 +11766,7 @@ typedef enum
   WYL_PROVISIONING_SCHEMA_ABSENT,
   WYL_PROVISIONING_SCHEMA_PRE_WINDOWS,
   WYL_PROVISIONING_SCHEMA_WINDOWS,
+  WYL_PROVISIONING_SCHEMA_PRE_SELECTED,
   WYL_PROVISIONING_SCHEMA_CANONICAL,
 } WylProvisioningSchemaKind;
 
@@ -11471,15 +11796,19 @@ graph_provisioning_schema_kind (sqlite3 *db,
       graph_authority_canonical_sql (fact_graph_provisioning_table_pre_windows_sql);
   g_autofree gchar *windows =
       graph_authority_canonical_sql (fact_graph_provisioning_table_windows_sql);
+  g_autofree gchar *pre_selected =
+      graph_authority_canonical_sql (fact_graph_provisioning_table_pre_selected_sql);
   g_autofree gchar *canonical =
       graph_authority_canonical_sql (fact_graph_provisioning_table_sql);
   if (normalized == NULL || pre_windows == NULL || windows == NULL
-      || canonical == NULL)
+      || pre_selected == NULL || canonical == NULL)
     return WYRELOG_E_NOMEM;
   if (g_strcmp0 (normalized, pre_windows) == 0)
     *out_kind = WYL_PROVISIONING_SCHEMA_PRE_WINDOWS;
   else if (g_strcmp0 (normalized, windows) == 0)
     *out_kind = WYL_PROVISIONING_SCHEMA_WINDOWS;
+  else if (g_strcmp0 (normalized, pre_selected) == 0)
+    *out_kind = WYL_PROVISIONING_SCHEMA_PRE_SELECTED;
   else if (g_strcmp0 (normalized, canonical) == 0)
     *out_kind = WYL_PROVISIONING_SCHEMA_CANONICAL;
   else
@@ -11598,9 +11927,9 @@ graph_provisioning_external_reference_status (sqlite3 *db,
 {
   sqlite3_stmt *stmt = NULL;
   static const gchar *queries[] = {
-    "SELECT tbl_name,sql FROM main.sqlite_schema WHERE "
+    "SELECT tbl_name,name,sql FROM main.sqlite_schema WHERE "
     "type IN ('trigger','view') AND sql IS NOT NULL;",
-    "SELECT tbl_name,sql FROM temp.sqlite_schema WHERE "
+    "SELECT tbl_name,name,sql FROM temp.sqlite_schema WHERE "
     "type IN ('trigger','view') AND sql IS NOT NULL;",
   };
   *out_referenced = FALSE;
@@ -11610,9 +11939,19 @@ graph_provisioning_external_reference_status (sqlite3 *db,
     int step;
     while ((step = sqlite3_step (stmt)) == SQLITE_ROW) {
       const gchar *table = (const gchar *) sqlite3_column_text (stmt, 0);
-      const gchar *sql = (const gchar *) sqlite3_column_text (stmt, 1);
+      const gchar *name = (const gchar *) sqlite3_column_text (stmt, 1);
+      const gchar *sql = (const gchar *) sqlite3_column_text (stmt, 2);
       if (i == 0
           && g_ascii_strcasecmp (table, "fact_graph_provisioning") == 0)
+        continue;
+      /* This owned trigger verifies the new selected provisioning row. Its
+       * exact SQL is pinned before rebuilding the referenced table. */
+      if (i == 0 && g_strcmp0 (table,
+          "fact_graph_restore_replacements") == 0
+          && g_strcmp0 (name,
+          "fact_graph_restore_replacement_update_guard") == 0
+          && graph_authority_object_matches (db, "trigger", name,
+          restore_replacement_update_guard_sql) == WYRELOG_E_OK)
         continue;
       if (graph_provisioning_sql_references_target (sql)) {
         *out_referenced = TRUE;
@@ -11710,16 +12049,30 @@ graph_provisioning_preflight (sqlite3 *db,
   const gchar *insert_guard_sql =
       *out_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
       fact_graph_provisioning_insert_guard_sql :
+      *out_kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED ?
+      fact_graph_provisioning_insert_guard_pre_selected_sql :
       fact_graph_provisioning_insert_guard_windows_sql;
+  gboolean update_guard_matches = graph_authority_object_matches (db,
+          "trigger", "fact_graph_provisioning_update_guard",
+          *out_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
+          fact_graph_provisioning_update_guard_sql :
+          fact_graph_provisioning_update_guard_pre_selected_sql)
+      == WYRELOG_E_OK;
+  /* Older-table fixtures can carry the already upgraded guard; both exact
+   * definitions still refuse restore selection on those table shapes. */
+  if (!update_guard_matches
+      && (*out_kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS
+      || *out_kind == WYL_PROVISIONING_SCHEMA_WINDOWS))
+    update_guard_matches = graph_authority_object_matches (db,
+            "trigger", "fact_graph_provisioning_update_guard",
+            fact_graph_provisioning_update_guard_sql) == WYRELOG_E_OK;
   if ((rc = graph_authority_object_matches (db, "trigger",
       "fact_graph_provisioning_immutable", immutable_sql)) != WYRELOG_E_OK
       || (rc = graph_authority_object_matches (db, "trigger",
       "fact_graph_provisioning_insert_guard",
       insert_guard_sql)) != WYRELOG_E_OK
-      || (rc = graph_authority_object_matches (db, "trigger",
-      "fact_graph_provisioning_update_guard",
-      fact_graph_provisioning_update_guard_sql)) != WYRELOG_E_OK)
-    return rc;
+      || !update_guard_matches)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
 
   rc = graph_provisioning_require_true (db,
           "SELECT (SELECT count(*) FROM "
@@ -11970,6 +12323,14 @@ graph_provisioning_predecessor_rows_sql (WylProvisioningSchemaKind kind)
            "expected_lifecycle_generation,expected_reconciliation_generation,"
            "phase,attempt,created_at,updated_at FROM "
            "main.fact_graph_provisioning ORDER BY rowid;";
+  if (kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED)
+    return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+           "expected_lifecycle_generation,expected_reconciliation_generation,"
+           "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+           "windows_graph_volume_serial,windows_graph_file_id,"
+           "windows_artifact_volume_serial,windows_artifact_file_id,"
+           "darwin_operation_evidence FROM main.fact_graph_provisioning "
+           "ORDER BY rowid;";
   return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
          "expected_lifecycle_generation,expected_reconciliation_generation,"
          "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
@@ -11986,6 +12347,8 @@ graph_provisioning_expected_canonical_rows_sql (WylProvisioningSchemaKind kind)
            "expected_lifecycle_generation,expected_reconciliation_generation,"
            "phase,attempt,created_at,updated_at,NULL,NULL,NULL,NULL,NULL,NULL FROM "
            "main.fact_graph_provisioning ORDER BY rowid;";
+  if (kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED)
+    return graph_provisioning_predecessor_rows_sql (kind);
   return "SELECT rowid,op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
          "expected_lifecycle_generation,expected_reconciliation_generation,"
          "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
@@ -12242,6 +12605,15 @@ rebuild_graph_provisioning_schema (wyl_policy_store_t *store,
       "NULL AS windows_graph_volume_serial,NULL AS windows_graph_file_id,"
       "NULL AS windows_artifact_volume_serial,NULL AS windows_artifact_file_id,"
       "NULL AS darwin_operation_evidence FROM main.fact_graph_provisioning;" :
+      kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED ?
+      "CREATE TEMP TABLE wyrelog_fact_graph_provisioning_rebuild AS SELECT "
+      "rowid AS wyrelog_preserved_rowid,"
+      "op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at,windows_operation_evidence_version,"
+      "windows_graph_volume_serial,windows_graph_file_id,"
+      "windows_artifact_volume_serial,windows_artifact_file_id,"
+      "darwin_operation_evidence FROM main.fact_graph_provisioning;" :
       "CREATE TEMP TABLE wyrelog_fact_graph_provisioning_rebuild AS SELECT "
       "rowid AS wyrelog_preserved_rowid,"
       "op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
@@ -12411,7 +12783,7 @@ validate_graph_authority_rows (sqlite3 *db)
     "expected_lifecycle_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
     "typeof(expected_reconciliation_generation)!='integer' OR "
     "expected_reconciliation_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
-    "phase NOT IN ('reserved','staged','published','verified','active','degraded') OR "
+    "phase NOT IN ('reserved','staged','published','verified','active','degraded','restore_selected') OR "
     "typeof(attempt)!='integer' OR attempt NOT BETWEEN 0 AND 9223372036854775807 OR "
     "typeof(created_at)!='integer' OR created_at NOT BETWEEN 0 AND 9223372036854775807 OR "
     "typeof(updated_at)!='integer' OR updated_at NOT BETWEEN 0 AND 9223372036854775807 OR "
@@ -12444,7 +12816,11 @@ validate_graph_authority_rows (sqlite3 *db)
     "AND g.lifecycle_state!='legacy_unclassified' AND "
     "fact_graph_provisioning.expected_lifecycle_generation<9223372036854775807 AND "
     "g.lifecycle_generation>=fact_graph_provisioning.expected_lifecycle_generation+1 AND "
-    "g.reconciliation_generation>=fact_graph_provisioning.expected_reconciliation_generation))));",
+    "g.reconciliation_generation>=fact_graph_provisioning.expected_reconciliation_generation) OR "
+    "(fact_graph_provisioning.phase='restore_selected' "
+    "AND g.lifecycle_state='sealed' AND t.lifecycle_state='sealed' "
+    "AND g.lifecycle_generation=fact_graph_provisioning.expected_lifecycle_generation "
+    "AND g.reconciliation_generation=fact_graph_provisioning.expected_reconciliation_generation))));",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (validation_queries); i++) {
     sqlite3_stmt *stmt = NULL;
@@ -13734,7 +14110,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
     return rc;
   }
   if (provisioning_kind == WYL_PROVISIONING_SCHEMA_PRE_WINDOWS
-      || provisioning_kind == WYL_PROVISIONING_SCHEMA_WINDOWS) {
+      || provisioning_kind == WYL_PROVISIONING_SCHEMA_WINDOWS
+      || provisioning_kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED) {
     if (!sqlite3_get_autocommit (store->db)) {
       g_rec_mutex_unlock (&store->graph_authority_mutex);
       return WYRELOG_E_BUSY;
@@ -20819,7 +21196,8 @@ static const gchar *
 graph_provisioning_phase_name (WylPolicyGraphProvisioningPhase phase)
 {
   static const gchar *const names[] = {
-    "reserved", "staged", "published", "verified", "active", "degraded"
+    "reserved", "staged", "published", "verified", "active", "degraded",
+    "restore_selected"
   };
   return phase >= 0 && phase < G_N_ELEMENTS (names) ? names[phase] : NULL;
 }
@@ -20834,7 +21212,7 @@ static gboolean
 graph_provisioning_phase_parse (const gchar *value,
     WylPolicyGraphProvisioningPhase *out_phase)
 {
-  for (gint i = 0; i < 6; i++) {
+  for (gint i = 0; i <= WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED; i++) {
     if (g_strcmp0 (value, graph_provisioning_phase_name (i)) == 0) {
       *out_phase = (WylPolicyGraphProvisioningPhase) i;
       return TRUE;
@@ -37992,7 +38370,8 @@ restore_replacement_from_row (sqlite3_stmt *stmt,
       && g_strcmp0 (r->companion_basename, derived) == 0
       && (g_str_equal (r->phase, "reserved")
       || g_str_equal (r->phase, "companion_synced")
-      || g_str_equal (r->phase, "verified"));
+      || g_str_equal (r->phase, "verified")
+      || g_str_equal (r->phase, "selected_pending_cleanup"));
   if (!valid) {
     wyl_policy_graph_restore_replacement_record_free (r);
     return WYRELOG_E_POLICY;
