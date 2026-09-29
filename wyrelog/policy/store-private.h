@@ -3583,6 +3583,19 @@ wyrelog_error_t wyl_policy_store_tenant_restore_sync_rollback_step_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+typedef enum
+{
+  WYL_POLICY_TENANT_RESTORE_SYNC_RETAIN_DIR_BEGIN = 1,
+  WYL_POLICY_TENANT_RESTORE_SYNC_RETAIN_DIR_COMPLETE,
+} WylPolicyTenantRestoreSyncRetainDirStep;
+wyrelog_error_t wyl_policy_store_tenant_restore_sync_retain_dir_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreSyncRetainDirStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Atomically select an imported graph replacement after a caller-held root
  * lease and runtime quiescence prove the exact dual filesystem shape. The
  * callback runs inside the policy writer transaction and must not reenter the
