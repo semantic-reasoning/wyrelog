@@ -3553,6 +3553,21 @@ wyrelog_error_t wyl_policy_store_tenant_restore_sync_staged_step_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* v5 COMMIT RETAIN records UNKNOWN before rename and completes only after
+ * the callback proves the exact retained shape and directory durability. */
+typedef enum
+{
+  WYL_POLICY_TENANT_RESTORE_RETAIN_BEGIN = 1,
+  WYL_POLICY_TENANT_RESTORE_RETAIN_COMPLETE,
+} WylPolicyTenantRestoreRetainStep;
+wyrelog_error_t wyl_policy_store_tenant_restore_retain_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreRetainStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Atomically select an imported graph replacement after a caller-held root
  * lease and runtime quiescence prove the exact dual filesystem shape. The
  * callback runs inside the policy writer transaction and must not reenter the
