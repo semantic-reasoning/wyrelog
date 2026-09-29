@@ -349,12 +349,17 @@ if get_option('enable_fact_store').allowed() and \
       + fact_test_support_deps,
   )
   test('fact-offline-backup-source', test_offline_backup_source,
-    args : ['-x', '/fact-offline-backup-source/coordinator'],
+    args : ['-x', '/fact-offline-backup-source/coordinator',
+            '-x', '/fact-offline-backup-source/import'],
     timeout : 120,
   )
   test('fact-offline-restore-graph-coordinator', test_offline_backup_source,
     args : ['-r', '/fact-offline-backup-source/coordinator'],
     timeout : 120,
+  )
+  test('fact-offline-restore-graph-import', test_offline_backup_source,
+    args : ['-r', '/fact-offline-backup-source/import'],
+    timeout : 240,
   )
 endif
 

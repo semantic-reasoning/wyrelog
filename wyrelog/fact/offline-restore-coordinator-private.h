@@ -46,4 +46,54 @@ wyrelog_error_t wyl_fact_offline_restore_graph_stage_run
     const gchar *operation_uuid, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Borrowed, authenticated backup input. read_at may return a positive short
+ * read; OK with zero bytes means EOF. It must never write more than capacity.
+ * revalidate proves the caller's retained source/provenance binding. Neither
+ * callback may reenter this coordinator or free its borrowed arguments. */
+typedef struct
+{
+  wyrelog_error_t (*read_at) (guint64 offset, guint8 *buffer, gsize capacity,
+      gsize *out_read, gpointer user_data);
+  wyrelog_error_t (*revalidate) (gpointer user_data);
+} WylFactOfflineRestoreInput;
+
+/* Imports external backup bytes, never the destination main's contents.
+ * Requires a pristine confirmed/authenticated singleton journal at revision 1,
+ * an existing provisioned main, and an existing selected runtime entry. The
+ * historical source generation and file size may differ from the destination;
+ * all destination generations, main identity, store identity and schema must
+ * match the journal. Windows fails closed before filesystem/input access.
+ *
+ * Retains root authority, destination reader guard and selected quiescence.
+ * Only after fresh admission checks does it call input or create a stage.
+ * Input is bounded to the manifest length plus one EOF byte; checksum,
+ * readback, flush and exact identity-binding CAS use the journal-stage API.
+ * Success returns revision 2, no verification flags or COMMIT/publication.
+ * The coordinator never explicitly opens admission or unseals policy.
+ * Quiescence release restores admission as observed at acquisition: a
+ * concurrent reopen before acquisition can leave admission OPEN on cleanup.
+ * No sibling runtime is touched.
+ *
+ * Source/destination checks immediately precede finish, not an atomic policy
+ * transaction with CAS. Retained guards do not freeze independent policy or
+ * external filesystem writers; destination revalidation does not rescan all
+ * newly introduced sidecars or hash main contents. Caller must authenticate
+ * provenance before invocation; durable trust markers are assertions only.
+ * Failure clears output but preserves recovery-owned stages; ambiguous CAS
+ * requires reload through a healthy handle. Bound/orphan retries never
+ * overwrite. out_committed must be zero-initialized or previously cleared. */
+wyrelog_error_t wyl_fact_offline_restore_graph_import_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    const gchar *graph_id, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, const WylFactOfflineRestoreInput *input,
+    gpointer input_data, WylFactOfflineRestoreJournal *out_committed);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+/* Construction-to-quiescence race seam; no destination capability escapes. */
+void wyl_fact_offline_restore_import_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (gpointer), gpointer user_data);
+#endif
+
 G_END_DECLS

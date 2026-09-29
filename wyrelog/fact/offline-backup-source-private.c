@@ -37,6 +37,7 @@ typedef struct
   gboolean sealed_compatibility;
   guint64 logical_bytes;
   guint64 physical_bytes;
+  WylFactArtifactInventoryIdentity main_identity;
   WylFactArtifactNamespace *namespace_;
   WylFactArtifactMutationLease *reader_guard;
 } OfflineBackupGraph;
@@ -429,6 +430,7 @@ open_graph_source (WylFactOfflineBackupSource *source,
   if (rc == WYRELOG_E_OK) {
     graph->logical_bytes = main_evidence.logical_bytes;
     graph->physical_bytes = main_evidence.allocated_bytes;
+    graph->main_identity = main_evidence.identity;
 #ifndef G_OS_WIN32
     if (source->selected_graph_id != NULL) {
       graph->provisioning_uuid = g_steal_pointer (&operation_uuid);
@@ -702,6 +704,26 @@ wyl_fact_offline_backup_source_get (const WylFactOfflineBackupSource *source,
   out_artifact->schema_digest = graph->schema_digest;
   out_artifact->logical_bytes = graph->logical_bytes;
   out_artifact->physical_bytes = graph->physical_bytes;
+  return TRUE;
+}
+
+gboolean
+wyl_fact_offline_backup_source_get_authority
+  (const WylFactOfflineBackupSource *source, gsize index,
+    WylFactOfflineBackupSourceAuthority *out_authority)
+{
+  if (out_authority != NULL)
+    memset (out_authority, 0, sizeof *out_authority);
+  if (source == NULL || out_authority == NULL || index >= source->graphs->len)
+    return FALSE;
+  const OfflineBackupGraph *graph = g_ptr_array_index (source->graphs, index);
+  *out_authority = (WylFactOfflineBackupSourceAuthority) {
+    .main_identity = graph->main_identity,
+    .tenant_lifecycle_generation = source->tenant_lifecycle_generation,
+    .tenant_reconciliation_generation = source->tenant_reconciliation_generation,
+    .graph_lifecycle_generation = graph->lifecycle_generation,
+    .graph_reconciliation_generation = graph->reconciliation_generation,
+  };
   return TRUE;
 }
 
