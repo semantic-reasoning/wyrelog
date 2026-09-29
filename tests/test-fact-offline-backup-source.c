@@ -3238,6 +3238,28 @@ fail_companion_linked_once (const gchar *point, gpointer user_data)
   }
   return WYRELOG_E_OK;
 }
+
+static wyrelog_error_t
+fail_sync_staged_after_begin_once (const gchar *point, gpointer user_data)
+{
+  gboolean *fired = user_data;
+  if (!*fired && g_strcmp0 (point, "restore-sync-staged-after-begin") == 0) {
+    *fired = TRUE;
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+fail_sync_staged_after_fsync_once (const gchar *point, gpointer user_data)
+{
+  gboolean *fired = user_data;
+  if (!*fired && g_strcmp0 (point, "restore-sync-staged-after-fsync") == 0) {
+    *fired = TRUE;
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
 #endif
 
 typedef struct
@@ -3489,10 +3511,91 @@ test_graph_restore_replacement_reservation (void)
       ==, WYRELOG_E_OK);
   g_auto (WylFactOfflineRestoreJournal) early_result = { 0 };
   import_restore_journal_for_test (fixture.policy, &early);
+#ifdef __linux__
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean began_before_failure = FALSE;
+  wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+    (fail_sync_staged_after_begin_once, &began_before_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      early.revision, 0, &early_result), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_true (began_before_failure);
+  g_assert_null (early_result.graphs);
+  g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &pending), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *pending_graph = g_ptr_array_index
+        (pending.graphs, 0);
+  g_assert_cmpint (pending_graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+  g_assert_cmpint (pending_graph->pending_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED);
+  g_autofree gchar *parked_stage = graph_file_path (&fixture, "alpha",
+          "parked-restore-stage");
+  g_assert_cmpint (g_rename (stage_path, parked_stage), ==, 0);
+  g_assert_true (g_file_set_contents (stage_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      pending.revision, 0, &early_result), !=, WYRELOG_E_OK);
+  g_assert_null (early_result.graphs);
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  g_assert_cmpint (g_rename (parked_stage, stage_path), ==, 0);
+  g_autofree gchar *old_companion_basename = g_strdup_printf
+        ("provision-%s.sqlite", old_uuid);
+  g_autofree gchar *old_companion = graph_file_path (&fixture, "alpha",
+          old_companion_basename);
+  g_autofree gchar *parked_companion = graph_file_path (&fixture, "alpha",
+          "parked-old-companion");
+  g_assert_cmpint (g_rename (old_companion, parked_companion), ==, 0);
+  g_assert_true (g_file_set_contents (old_companion, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (old_companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      pending.revision, 0, &early_result), !=, WYRELOG_E_OK);
+  g_assert_null (early_result.graphs);
+  g_assert_cmpint (g_remove (old_companion), ==, 0);
+  g_assert_cmpint (g_rename (parked_companion, old_companion), ==, 0);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      pending.revision, 0, &early_result), !=, WYRELOG_E_OK);
+  g_assert_null (early_result.graphs);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  gboolean synced_before_failure = FALSE;
+  wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+    (fail_sync_staged_after_fsync_once, &synced_before_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      pending.revision, 0, &early_result), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_true (synced_before_failure);
+  g_assert_null (early_result.graphs);
+#endif
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+#ifdef WYL_TEST_HANDLE_SEAMS
+      pending.revision, 0, &early_result), ==, WYRELOG_E_OK);
+#else
+      early.revision, 0, &early_result), ==, WYRELOG_E_OK);
+#endif
+  WylFactOfflineRestoreJournalGraph *early_graph = g_ptr_array_index
+        (early_result.graphs, 0);
+  g_assert_cmpint (early_graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+  g_assert_cmpint (early_graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
+#else
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
         (fixture.policy, early.revision, &early_begin, &result,
       &early_result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+#endif
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&early_result),
       ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
   /* Imported historical durable COMMIT shape for companion recovery. */
