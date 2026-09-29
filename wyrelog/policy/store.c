@@ -1185,6 +1185,43 @@ static const gchar restore_replacement_delete_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard "
     "BEFORE DELETE ON fact_graph_restore_replacements BEGIN "
     "SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;";
+/* One tenant operation reserves one replacement per graph. Its rows remain
+ * separate from the graph-scope replacement authority above. */
+static const gchar tenant_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_tenant_restore_replacements ("
+    "restore_operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,"
+    "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL UNIQUE,"
+    "old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase='reserved'),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "PRIMARY KEY(restore_operation_uuid,graph_id),"
+    "CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+static const gchar tenant_restore_replacement_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_tenant_restore_replacement_insert_guard "
+    "BEFORE INSERT ON fact_tenant_restore_replacements BEGIN "
+    "SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals AS j "
+    "JOIN fact_offline_restore_tenant_claims AS c ON c.operation_uuid=j.operation_uuid "
+    "AND c.tenant_id=j.tenant_id WHERE j.operation_uuid=NEW.restore_operation_uuid "
+    "AND j.tenant_id=NEW.tenant_id AND j.scope='tenant' "
+    "AND j.revision=NEW.journal_revision) THEN "
+    "RAISE(ABORT,'invalid tenant restore replacement') END; END;";
+static const gchar tenant_restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_tenant_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_tenant_restore_replacements BEGIN "
+    "SELECT RAISE(ABORT,'tenant restore replacement is immutable'); END;";
+static const gchar tenant_restore_replacement_delete_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_tenant_restore_replacement_delete_guard "
+    "BEFORE DELETE ON fact_tenant_restore_replacements BEGIN "
+    "SELECT RAISE(ABORT,'tenant restore replacement is recovery owned'); END;";
 static const gchar offline_restore_schema_ddl[] =
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_journals ("
     "operation_uuid TEXT PRIMARY KEY CHECK(typeof(operation_uuid)='text' AND length(operation_uuid)=36 AND operation_uuid=lower(operation_uuid) AND length(replace(operation_uuid,'-',''))=32 AND replace(operation_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(operation_uuid,9,1)='-' AND substr(operation_uuid,14,1)='-' AND substr(operation_uuid,15,1)='7' AND substr(operation_uuid,19,1)='-' AND substr(operation_uuid,20,1) GLOB '[89ab]' AND substr(operation_uuid,24,1)='-'),"
@@ -11920,6 +11957,58 @@ migrate_restore_replacement_schema (sqlite3 *db)
          restore_replacement_validate_selected_journals (db) : rc;
 }
 
+static wyrelog_error_t
+migrate_tenant_restore_replacement_schema (sqlite3 *db)
+{
+  static const struct
+  {
+    const gchar *type;
+    const gchar *name;
+    const gchar *sql;
+  } objects[] = {
+    { "table", "fact_tenant_restore_replacements",
+      tenant_restore_replacement_table_sql },
+    { "trigger", "fact_tenant_restore_replacement_insert_guard",
+      tenant_restore_replacement_insert_guard_sql },
+    { "trigger", "fact_tenant_restore_replacement_update_guard",
+      tenant_restore_replacement_update_guard_sql },
+    { "trigger", "fact_tenant_restore_replacement_delete_guard",
+      tenant_restore_replacement_delete_guard_sql },
+  };
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT count(*) FROM main.sqlite_master WHERE name=? COLLATE NOCASE;",
+          &stmt);
+  guint present = 0;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++) {
+    sqlite3_reset (stmt);
+    sqlite3_clear_bindings (stmt);
+    if (bind_text (stmt, 1, objects[i].name) != WYRELOG_E_OK
+        || sqlite3_step (stmt) != SQLITE_ROW)
+      rc = WYRELOG_E_IO;
+    else
+      present += sqlite3_column_int (stmt, 0) != 0;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (present != 0 && present != G_N_ELEMENTS (objects))
+    return WYRELOG_E_POLICY;
+  if (present == 0) {
+    for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
+      rc = exec_sql (db, objects[i].sql);
+  }
+  for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
+    rc = graph_authority_object_matches (db, objects[i].type,
+            objects[i].name, objects[i].sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* There is no production tenant reservation writer until the full vector
+   * and journal can be committed together. Reject foreign rows on reopen. */
+  return graph_provisioning_require_true (db,
+             "SELECT NOT EXISTS(SELECT 1 FROM main.fact_tenant_restore_replacements);");
+}
+
 static wyrelog_error_t graph_authority_migration_checkpoint
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
@@ -14560,6 +14649,24 @@ graph_authority_schema_ready:
         "ROLLBACK TO SAVEPOINT wyrelog_restore_replacement_schema;");
     (void) exec_sql (store->db,
         "RELEASE SAVEPOINT wyrelog_restore_replacement_schema;");
+    return rc;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = exec_sql (store->db,
+          "SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = migrate_tenant_restore_replacement_schema (store->db);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (store->db,
+            "RELEASE SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
+  else {
+    (void) exec_sql (store->db,
+        "ROLLBACK TO SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
+    (void) exec_sql (store->db,
+        "RELEASE SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
     return rc;
   }
   if (rc != WYRELOG_E_OK)
