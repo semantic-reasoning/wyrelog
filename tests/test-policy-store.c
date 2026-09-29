@@ -107,6 +107,51 @@ check_restore_replacement_schema_closure (void)
 }
 
 static gint
+check_restore_replacement_zero_reconciliation_migration (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9610;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, "SELECT sql FROM sqlite_schema WHERE "
+      "(type='table' AND name='fact_graph_restore_replacements') OR "
+      "(type='trigger' AND tbl_name='fact_graph_restore_replacements') "
+      "ORDER BY type,name;", -1, &stmt, NULL) != SQLITE_OK)
+    return 9611;
+  g_autoptr (GPtrArray) sql = g_ptr_array_new_with_free_func (g_free);
+  int step;
+  while ((step = sqlite3_step (stmt)) == SQLITE_ROW)
+    g_ptr_array_add (sql, g_strdup ((const gchar *) sqlite3_column_text
+          (stmt, 0)));
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_DONE || sql->len != 4)
+    return 9612;
+  const gchar *current = g_ptr_array_index (sql, 0);
+  const gchar *needle = "graph_reconciliation_generation>=0";
+  const gchar *at = strstr (current, needle);
+  if (at == NULL)
+    return 9613;
+  g_autofree gchar *prefix = g_strndup (current, at - current);
+  g_autofree gchar *predecessor = g_strconcat (prefix,
+          "graph_reconciliation_generation>0", at + strlen (needle), NULL);
+  if (sqlite3_exec (db,
+      "DROP TABLE fact_graph_restore_replacements;", NULL, NULL,
+      NULL) != SQLITE_OK
+      || sqlite3_exec (db, predecessor, NULL, NULL, NULL) != SQLITE_OK)
+    return 9614;
+  for (guint i = 1; i < sql->len; i++)
+    if (sqlite3_exec (db, g_ptr_array_index (sql, i), NULL, NULL,
+        NULL) != SQLITE_OK)
+      return 9615;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9616;
+  return 0;
+}
+
+static gint
 check_store_reads_fact_logical_operation_status (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -7158,6 +7203,8 @@ main (void)
   if ((rc = check_store_creates_authority_schema ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_replacement_schema_closure ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_restore_replacement_zero_reconciliation_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_reads_fact_logical_operation_status ()) != 0)
     return wyl_test_normalize_exit_status (rc);

@@ -403,7 +403,6 @@ wyl_fact_offline_restore_journal_init (WylFactOfflineRestoreJournal *journal,
     const WylFactOfflineRestoreTargetGraph *target = find_target
           (destination_graphs, artifact->graph_id);
     if (target == NULL || target->lifecycle_generation == 0
-        || target->reconciliation_generation == 0
         || (target->expected_main_absent
             ? !identity_is_zero (&target->expected_main_identity)
             : !identity_is_valid (&target->expected_main_identity))) {
@@ -526,7 +525,6 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
         || !bounded_text (graph->checksum)
         || graph->format_version == 0 || graph->path_encoding_version == 0
         || graph->destination_lifecycle_generation == 0
-        || graph->destination_reconciliation_generation == 0
         || graph->transition_state <= WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_INVALID
         || graph->transition_state >= WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_COUNT
         || graph->next_op >= WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_COUNT
@@ -952,9 +950,9 @@ can_advance_revision (const WylFactOfflineRestoreJournal *journal)
 {
   if (journal == NULL || journal->revision == G_MAXUINT64)
     return FALSE;
-  /* Graph-local mode-A COMMIT records remain readable for diagnosis, but
-   * policy cannot yet reserve the replacement pair, so every successor is
-   * unsafe even when the old provisioning UUID is bound. */
+  /* Graph-local mode-A COMMIT records remain readable for diagnosis. The
+   * reservation exists, but publication and lifecycle handoff are not yet
+   * implemented, so every successor stays closed. */
   return !(journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
          && journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
          && journal->graphs != NULL && journal->graphs->len == 1

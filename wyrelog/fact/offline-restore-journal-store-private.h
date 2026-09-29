@@ -40,4 +40,16 @@ wyrelog_error_t wyl_fact_offline_restore_journal_store_list
 wyrelog_error_t wyl_fact_offline_restore_journal_store_validate
   (wyl_policy_store_t *store);
 
+/* Reserve the replacement identity for a decoded v2 graph mode-A journal.
+ * The policy store rechecks the exact encoded snapshot under its writer lock. */
+wyrelog_error_t wyl_fact_offline_restore_replacement_reserve
+  (wyl_policy_store_t *store, const WylFactOfflineRestoreJournal *journal,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylPolicyGraphRestoreReplacementRecord **out_record);
+/* Historical lookup only. A later effect must recheck sealed and ACTIVE
+ * authority in its own transaction before using this record. */
+wyrelog_error_t wyl_fact_offline_restore_replacement_load
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    WylPolicyGraphRestoreReplacementRecord **out_record);
+
 G_END_DECLS
