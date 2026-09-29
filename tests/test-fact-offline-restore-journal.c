@@ -564,7 +564,7 @@ decision_barrier_and_recovery (void)
   g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
       WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
-      WYL_FACT_OFFLINE_RESTORE_RECOVERY_CONTINUE_COMMIT);
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
   g_autoptr (GBytes) before_rejection = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode
         (&journal, &before_rejection), ==, WYRELOG_E_OK);
@@ -608,6 +608,8 @@ decision_barrier_and_recovery (void)
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
 
   complete_step (&journal, "zeta",
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
@@ -626,17 +628,17 @@ decision_barrier_and_recovery (void)
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE);
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
-      WYL_FACT_OFFLINE_RESTORE_RECOVERY_POLICY_CAS);
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
   g_assert_cmpint (wyl_fact_offline_restore_journal_mark_lifecycle_handoff
         (&journal), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
         (&journal), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
-      WYL_FACT_OFFLINE_RESTORE_RECOVERY_LIFECYCLE_HANDOFF);
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
   g_assert_cmpint (wyl_fact_offline_restore_journal_mark_lifecycle_handoff
         (&journal), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
-      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
   wyl_fact_offline_restore_journal_clear (&journal);
 }
 
