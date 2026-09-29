@@ -26,6 +26,176 @@
 #error "WYL_TEST_SQLITE_SCHEMA_PATH must be defined by the build."
 #endif
 
+/* Exact released schema immediately before restore selection. */
+static const gchar fixture_pre_selected_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
+    "restore_operation_uuid TEXT PRIMARY KEY,"
+    "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
+    "AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) "
+    "AND substr(replacement_uuid,15,1)='7' AND "
+    "substr(replacement_uuid,20,1) GLOB '[89ab]' AND "
+    "length(replace(replacement_uuid,'-',''))=32 AND "
+    "replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' "
+    "AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+
+static const gchar fixture_pre_selected_restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified')) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+
+static const gchar fixture_pre_selected_fact_graph_provisioning_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "windows_operation_evidence_version INTEGER,"
+    "windows_graph_volume_serial INTEGER,"
+    "windows_graph_file_id BLOB,"
+    "windows_artifact_volume_serial INTEGER,"
+    "windows_artifact_file_id BLOB,"
+    "darwin_operation_evidence BLOB,"
+    "CHECK ((windows_operation_evidence_version IS NULL AND "
+    "windows_graph_volume_serial IS NULL AND windows_graph_file_id IS NULL AND "
+    "windows_artifact_volume_serial IS NULL AND windows_artifact_file_id IS NULL) OR "
+    "(typeof(windows_operation_evidence_version)='integer' AND "
+    "windows_operation_evidence_version BETWEEN 1 AND 9223372036854775807 AND "
+    "typeof(windows_graph_volume_serial)='integer' AND "
+    "windows_graph_volume_serial != 0 AND "
+    "typeof(windows_graph_file_id)='blob' AND length(windows_graph_file_id)=16 AND "
+    "typeof(windows_artifact_volume_serial)='integer' AND "
+    "windows_artifact_volume_serial != 0 AND "
+    "typeof(windows_artifact_file_id)='blob' AND "
+    "length(windows_artifact_file_id)=16)),"
+    "CHECK (darwin_operation_evidence IS NULL OR ("
+    "typeof(darwin_operation_evidence)='blob' AND "
+    "length(darwin_operation_evidence)=56)),"
+    "CHECK (darwin_operation_evidence IS NULL OR "
+    "windows_operation_evidence_version IS NULL),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fixture_pre_selected_fact_graph_provisioning_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+static const gchar fixture_pre_selected_fact_graph_provisioning_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_update_guard "
+    "BEFORE UPDATE ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.updated_at<OLD.updated_at "
+    "THEN RAISE(ABORT,'provisioning updated_at regression') END; "
+    "SELECT CASE WHEN NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "THEN RAISE(ABORT,'invalid provisioning retry attempt') END; "
+    "SELECT CASE WHEN NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase IN ('staged','degraded')) OR "
+    "(OLD.phase='staged' AND NEW.phase IN ('published','degraded')) OR "
+    "(OLD.phase='published' AND NEW.phase IN ('verified','degraded')) OR "
+    "(OLD.phase='verified' AND NEW.phase IN ('active','degraded'))) "
+    "THEN RAISE(ABORT,'illegal provisioning phase transition') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    /* Terminal records are historical evidence.  Their identity stays
+     * immutable, but later normal graph transitions must not invalidate
+     * completed provisioning.  A terminal phase transition itself remains
+     * exact; only same-phase preservation uses this monotonic predicate. */
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase=NEW.phase AND g.lifecycle_state!='legacy_unclassified' AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation>=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation>=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase!=NEW.phase AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+
 static gboolean
 pragma_integer_equals (sqlite3 *db, const gchar *sql, gint expected)
 {
@@ -990,6 +1160,132 @@ make_fact_graph_options (const gchar *tenant_id, const gchar *graph_id,
     .n_queries = n_queries,
   };
   return opts;
+}
+
+static gchar *
+schema_sql_for_name (sqlite3 *db, const gchar *name)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM main.sqlite_schema WHERE name=?1;", -1, &stmt,
+      NULL) != SQLITE_OK)
+    return NULL;
+  gchar *sql = NULL;
+  if (sqlite3_bind_text (stmt, 1, name, -1, SQLITE_TRANSIENT) == SQLITE_OK
+      && sqlite3_step (stmt) == SQLITE_ROW)
+    sql = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+  return sql;
+}
+
+static gint
+check_restore_selected_predecessor_migration (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-restore-schema-XXXXXX", &error);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  if (root == NULL || wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 9620;
+  const wyl_policy_fact_graph_column_t columns[] = { { "subject", "symbol" } };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    { "site.node", columns, G_N_ELEMENTS (columns) },
+  };
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-old", root, relations,
+          G_N_ELEMENTS (relations), NULL, 0);
+  gchar op_uuid[WYL_ID_STRING_BUF] = { 0 };
+  if (wyl_policy_store_create_fact_graph_provisioning (store, &opts, NULL,
+      op_uuid) != WYRELOG_E_OK)
+    return 9621;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autofree gchar *immutable = schema_sql_for_name (db,
+          "fact_graph_provisioning_immutable");
+  g_autofree gchar *replacement_insert = schema_sql_for_name (db,
+          "fact_graph_restore_replacement_insert_guard");
+  g_autofree gchar *replacement_delete = schema_sql_for_name (db,
+          "fact_graph_restore_replacement_delete_guard");
+  if (immutable == NULL || replacement_insert == NULL
+      || replacement_delete == NULL)
+    return 9622;
+  if (sqlite3_exec (db,
+      "PRAGMA foreign_keys=OFF;"
+      "CREATE TEMP TABLE restore_schema_rows AS SELECT * FROM fact_graph_provisioning;"
+      "DROP TRIGGER fact_graph_provisioning_immutable;"
+      "DROP TRIGGER fact_graph_provisioning_insert_guard;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;"
+      "DROP TABLE fact_graph_provisioning;"
+      "DROP TRIGGER fact_graph_restore_replacement_insert_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
+      "DROP TABLE fact_graph_restore_replacements;",
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, fixture_pre_selected_fact_graph_provisioning_table_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, immutable, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      fixture_pre_selected_fact_graph_provisioning_insert_guard_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      fixture_pre_selected_fact_graph_provisioning_update_guard_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      "INSERT INTO fact_graph_provisioning SELECT * FROM restore_schema_rows;"
+      "DROP TABLE restore_schema_rows;", NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, fixture_pre_selected_restore_replacement_table_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, replacement_insert, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      fixture_pre_selected_restore_replacement_update_guard_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, replacement_delete, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, "PRAGMA foreign_keys=ON;", NULL, NULL, NULL)
+      != SQLITE_OK)
+    return 9623;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9624;
+  gint count = 0;
+  if (count_rows (store, "SELECT COUNT(*) FROM fact_graph_provisioning "
+      "WHERE tenant_id='tenant-a' AND graph_id='graph-old' AND "
+      "phase='reserved';", &count) != 0 || count != 1)
+    return 9625;
+  g_autofree gchar *provisioning_sql = schema_sql_for_name (db,
+          "fact_graph_provisioning");
+  g_autofree gchar *replacement_sql = schema_sql_for_name (db,
+          "fact_graph_restore_replacements");
+  if (provisioning_sql == NULL || replacement_sql == NULL
+      || strstr (provisioning_sql, "'restore_selected'") == NULL
+      || strstr (replacement_sql, "'selected_pending_cleanup'") == NULL)
+    return 9626;
+  int selected_rc = sqlite3_exec (db,
+          "UPDATE fact_graph_provisioning SET phase='restore_selected' "
+          "WHERE tenant_id='tenant-a' AND graph_id='graph-old';",
+          NULL, NULL, NULL);
+  if ((selected_rc & 0xff) != SQLITE_CONSTRAINT)
+    return 9627;
+  if (count_rows (store, "SELECT COUNT(*) FROM fact_graph_provisioning "
+      "WHERE tenant_id='tenant-a' AND graph_id='graph-old' AND "
+      "phase='reserved';", &count) != 0 || count != 1)
+    return 9628;
+  int insert_rc = sqlite3_exec (db,
+          "INSERT INTO fact_graph_provisioning(op_uuid,tenant_id,graph_id,"
+          "store_uuid,stage_basename,expected_lifecycle_generation,"
+          "expected_reconciliation_generation,phase,attempt,created_at,updated_at) "
+          "SELECT '00000000-0000-7000-8000-000000000001',tenant_id,graph_id,"
+          "store_uuid,'provision-00000000-0000-7000-8000-000000000001.sqlite',"
+          "expected_lifecycle_generation,expected_reconciliation_generation,"
+          "'restore_selected',0,unixepoch(),unixepoch() "
+          "FROM fact_graph_provisioning WHERE tenant_id='tenant-a' "
+          "AND graph_id='graph-old';", NULL, NULL, NULL);
+  if ((insert_rc & 0xff) != SQLITE_CONSTRAINT
+      || strstr (sqlite3_errmsg (db), "provisioning authority mismatch") == NULL)
+    return 9629;
+  return 0;
 }
 
 static gint
@@ -7205,6 +7501,8 @@ main (void)
   if ((rc = check_restore_replacement_schema_closure ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_replacement_zero_reconciliation_migration ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_restore_selected_predecessor_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_store_reads_fact_logical_operation_status ()) != 0)
     return wyl_test_normalize_exit_status (rc);
