@@ -3229,6 +3229,16 @@ test_tenant_commit_sync_staged_first (gconstpointer data)
 static wyrelog_error_t fail_retain_once (const gchar *point,
     gpointer user_data);
 
+static wyrelog_error_t
+tenant_reserve_test_effect (GBytes *journal, const GPtrArray *uuids,
+    gpointer user_data)
+{
+  g_assert_nonnull (journal);
+  g_assert_cmpuint (uuids->len, ==, 2);
+  (*(guint *) user_data)++;
+  return WYRELOG_E_OK;
+}
+
 static void
 test_tenant_commit_sync_staged_both (gconstpointer data)
 {
@@ -3773,6 +3783,98 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                   WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
               g_assert_cmpint (graph->attempt, ==,
                   WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+            }
+            if (g_str_equal (mode,
+                "retain-sync-dir-publish-sync-reserve")) {
+              WylPolicyOfflineRestoreRecord *raw = NULL, *reserved = NULL;
+              WylPolicyOfflineRestoreStoreResult result = 0;
+              guint calls = 0;
+              g_assert_cmpint (wyl_policy_store_offline_restore_load
+                    (f.fixture.policy, session_operation, &raw), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "CREATE TEMP TRIGGER fail_second_tenant_"
+                  "reservation BEFORE INSERT ON fact_tenant_restore_replacements "
+                  "WHEN NEW.graph_id='zeta' BEGIN SELECT RAISE(ABORT,"
+                  "'injected second reservation failure'); END;",
+                  NULL, NULL, NULL), ==, SQLITE_OK);
+              g_assert_cmpint (wyl_policy_store_tenant_restore_reserve_replacements_with_effect
+                    (f.fixture.policy, raw, tenant_reserve_test_effect,
+                  &calls, &result, &reserved), !=, WYRELOG_E_OK);
+              g_assert_null (reserved);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "DROP TRIGGER fail_second_tenant_reservation;",
+                  NULL, NULL, NULL), ==, SQLITE_OK);
+              sqlite3_stmt *count_rows = NULL;
+              g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                    (f.fixture.policy), "SELECT COUNT(*) FROM "
+                  "fact_tenant_restore_replacements;", -1, &count_rows,
+                  NULL), ==, SQLITE_OK);
+              g_assert_cmpint (sqlite3_step (count_rows), ==, SQLITE_ROW);
+              g_assert_cmpint (sqlite3_column_int (count_rows, 0), ==, 0);
+              sqlite3_finalize (count_rows);
+              WylPolicyOfflineRestoreRecord *after_failure = NULL;
+              g_assert_cmpint (wyl_policy_store_offline_restore_load
+                    (f.fixture.policy, session_operation, &after_failure), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (after_failure->revision, ==, 32);
+              wyl_policy_offline_restore_record_free (after_failure);
+              g_assert_cmpint (wyl_policy_store_tenant_restore_reserve_replacements_with_effect
+                    (f.fixture.policy, raw, tenant_reserve_test_effect,
+                  &calls, &result, &reserved), ==, WYRELOG_E_OK);
+              g_assert_cmpint (result, ==,
+                  WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+              g_assert_cmpuint (calls, ==, 2);
+              g_assert_nonnull (reserved);
+              g_assert_cmpuint (reserved->revision, ==, 33);
+              wyl_policy_offline_restore_record_free (reserved);
+              reserved = NULL;
+              g_assert_cmpint (wyl_policy_store_tenant_restore_reserve_replacements_with_effect
+                    (f.fixture.policy, raw, tenant_reserve_test_effect,
+                  &calls, &result, &reserved), ==, WYRELOG_E_OK);
+              g_assert_cmpint (result, ==,
+                  WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
+              g_assert_cmpuint (calls, ==, 2);
+              wyl_policy_offline_restore_record_free (raw);
+              g_assert_null (reserved);
+              g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+              g_assert_cmpint (wyl_policy_store_open (policy_path,
+                  &f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_policy_store_create_schema
+                    (f.fixture.policy), ==, WYRELOG_E_OK);
+              g_auto (WylFactOfflineRestoreJournal) reloaded = { 0 };
+              g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                    (f.fixture.policy, session_operation, &reloaded), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (reloaded.version, ==,
+                  WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+              g_assert_cmpuint (reloaded.revision, ==, 33);
+              sqlite3_stmt *guard_sql = NULL;
+              g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                    (f.fixture.policy), "SELECT sql FROM sqlite_master WHERE "
+                  "name='fact_tenant_restore_replacement_delete_guard';",
+                  -1, &guard_sql, NULL), ==, SQLITE_OK);
+              g_assert_cmpint (sqlite3_step (guard_sql), ==, SQLITE_ROW);
+              g_autofree gchar *recreate_guard = g_strdup
+                    ((const gchar *) sqlite3_column_text (guard_sql, 0));
+              sqlite3_finalize (guard_sql);
+              g_assert_nonnull (recreate_guard);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "DROP TRIGGER "
+                  "fact_tenant_restore_replacement_delete_guard;",
+                  NULL, NULL, NULL), ==, SQLITE_OK);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "DELETE FROM "
+                  "fact_tenant_restore_replacements WHERE graph_id='zeta';",
+                  NULL, NULL, NULL), ==, SQLITE_OK);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), recreate_guard,
+                  NULL, NULL, NULL), ==, SQLITE_OK);
+              g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+              g_assert_cmpint (wyl_policy_store_open (policy_path,
+                  &f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_policy_store_create_schema
+                    (f.fixture.policy), ==, WYRELOG_E_POLICY);
             }
           }
         }
@@ -5571,6 +5673,8 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-after-fsync", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-publish-dir/interleaved",
       "retain-sync-dir-publish-sync-interleaved", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/both",
+      "retain-sync-dir-publish-sync-reserve", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-foreign",
       "sibling-foreign", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-stage-content",
