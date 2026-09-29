@@ -89,6 +89,15 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_commit_sync_publish_dir_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Reserve every replacement UUID after all tenant graphs have durable
+ * post-publish shapes. Proves each proposed companion name is absent under
+ * the root lease and all graph quiescence, then commits one v6 policy image. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_reserve_replacements_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Linux-only, read-only inspection of an imported durable graph mode-A COMMIT
  * state. All lease, resolver, directory, runtime and witness handles remain
  * private and are released on return. Normal mode-A COMMIT admission and
@@ -191,6 +200,9 @@ void wyl_fact_offline_restore_tenant_commit_publish_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_tenant_commit_sync_publish_dir_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+void wyl_fact_offline_restore_tenant_reserve_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, const gchar *, gpointer),
+    gpointer data);
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test

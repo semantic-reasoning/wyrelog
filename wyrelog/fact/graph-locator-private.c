@@ -3171,6 +3171,27 @@ wyl_fact_graph_restore_tenant_post_publish_shape_open
 }
 
 wyrelog_error_t
+wyl_fact_graph_restore_tenant_reserved_post_publish_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main)
+{
+  wyrelog_error_t rc = wyl_fact_graph_restore_tenant_post_publish_shape_open
+        (resolver, directory, lease, old_provisioning_uuid, restore_uuid,
+          expected_old_main, expected_new_main);
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_post_publish_shape_open (resolver, directory,
+            lease, old_provisioning_uuid, restore_uuid, replacement_uuid,
+            expected_old_main, expected_new_main,
+            WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &witness);
+  g_clear_pointer (&witness, wyl_fact_graph_provisioned_restore_witness_free);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_graph_restore_post_publish_reserved_shape_open
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,

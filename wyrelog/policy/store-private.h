@@ -3540,10 +3540,13 @@ wyrelog_error_t wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
 /* Atomically bind the complete tenant replacement UUID vector and its
  * reservation rows. The callback proves every post-publish filesystem shape
  * while the caller holds the root lease and all graph quiescence tokens. */
+typedef wyrelog_error_t (*WylPolicyTenantRestoreReservationEffectFunc)
+  (GBytes *canonical_journal, const GPtrArray *active_provisioning_uuids,
+    const GPtrArray *replacement_uuids, gpointer user_data);
 wyrelog_error_t wyl_policy_store_tenant_restore_reserve_replacements_with_effect
   (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *expected_journal,
-    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyTenantRestoreReservationEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
