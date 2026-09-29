@@ -3537,6 +3537,22 @@ wyrelog_error_t wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* Typed v5 COMMIT SYNC_STAGED journal step. BEGIN durably records UNKNOWN
+ * before any effect. COMPLETE runs its proof/effect callback inside a fresh
+ * fenced policy transaction and advances only after proven durability. */
+typedef enum
+{
+  WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_BEGIN = 1,
+  WYL_POLICY_TENANT_RESTORE_SYNC_STAGED_COMPLETE,
+} WylPolicyTenantRestoreSyncStagedStep;
+wyrelog_error_t wyl_policy_store_tenant_restore_sync_staged_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreSyncStagedStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Atomically select an imported graph replacement after a caller-held root
  * lease and runtime quiescence prove the exact dual filesystem shape. The
  * callback runs inside the policy writer transaction and must not reenter the
