@@ -484,6 +484,20 @@ tenant_bound_generic_writer_denied (void)
   g_assert_cmpint (wyl_policy_store_offline_restore_cas (store, 1, &raw,
       &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
   g_assert_null (raw_committed);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
+        (&bound), ==, WYRELOG_E_OK);
+  g_clear_pointer (&blob, g_bytes_unref);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&bound,
+      &blob), ==, WYRELOG_E_OK);
+  raw.journal_blob = blob;
+  raw.revision = bound.revision;
+  g_assert_cmpint (wyl_policy_store_offline_restore_create (store, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
+  g_assert_cmpint (wyl_policy_store_offline_restore_cas (store,
+      bound.revision - 1, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
   g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (store,
       OP_A, &durable), ==, WYRELOG_E_OK);
