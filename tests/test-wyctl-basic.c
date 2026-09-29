@@ -1506,6 +1506,7 @@ typedef struct
   guint response_status;
   guint delay_us;
   gboolean stall_body;
+  const gchar *create_path_before_response;
   gchar *request;
 } PolicyCheckServer;
 
@@ -1549,6 +1550,9 @@ policy_check_server_thread (gpointer data)
   }
   buffer[filled] = '\0';
   server->request = g_strdup (buffer);
+  if (server->create_path_before_response != NULL)
+    g_assert_true (g_file_set_contents (server->create_path_before_response,
+        "existing token", -1, NULL));
   if (server->delay_us > 0 && !server->stall_body)
     g_usleep (server->delay_us);
 
@@ -3665,11 +3669,113 @@ test_login_reports_remote_error (void)
   remove_dir_recursive (dir);
 }
 
+static void
+test_login_existing_output_prevents_request (gconstpointer data)
+{
+  gboolean existing_access = GPOINTER_TO_INT (data) != 0;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-login-existing-XXXXXX",
+          NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  const gchar *existing_path = existing_access ? access_path : refresh_path;
+  const gchar *other_path = existing_access ? refresh_path : access_path;
+  g_assert_true (g_file_set_contents (existing_path, "existing token", -1,
+      NULL));
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel, .response_status = 403,
+    .response_body = "{\"error\":\"login_denied\"}",
+  };
+  GThread *thread = g_thread_new ("login-existing",
+          policy_check_server_thread, &server);
+  gchar *argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url,
+                    "auth", "login", "--subject", "alice", "--skip-mfa",
+                    "--tenant", "__wr_default", "--token-output", access_path,
+                    "--refresh-token-output", refresh_path, NULL };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (argv, &out, &err, &status);
+  stop_test_server (thread, cancel);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_autofree gchar *expected = g_strdup_printf (
+    "wyctl: --%s already exists: %s\n",
+    existing_access ? "token-output" : "refresh-token-output",
+    existing_path);
+  g_assert_cmpstr (err, ==, expected);
+  g_assert_null (server.request);
+  g_assert_false (g_file_test (other_path, G_FILE_TEST_EXISTS));
+  remove_dir_recursive (dir);
+}
+
+static void
+test_login_raced_output_reports_collision (gconstpointer data)
+{
+  gboolean collide_access = GPOINTER_TO_INT (data) != 0;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-login-race-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *access_path = g_build_filename (dir, "access", NULL);
+  g_autofree gchar *refresh_path = g_build_filename (dir, "refresh", NULL);
+  const gchar *collision_path = collide_access ? access_path : refresh_path;
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel,
+    .response_body = "{\"session_token\":\"session\","
+        "\"access_token\":\"new-access\","
+        "\"refresh_token\":\"new-refresh\","
+        "\"username\":\"alice\","
+        "\"tenant\":\"__wr_default\","
+        "\"principal_state\":\"authenticated\","
+        "\"session_state\":\"active\"}",
+    .create_path_before_response = collision_path,
+  };
+  GThread *thread = g_thread_new ("login-race", policy_check_server_thread,
+          &server);
+  gchar *argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url,
+                    "--timeout-ms", "1000", "auth", "login", "--subject",
+                    "alice", "--skip-mfa", "--tenant", "__wr_default",
+                    "--token-output", access_path, "--refresh-token-output",
+                    refresh_path, NULL };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint status = 0;
+  run_child (argv, &out, &err, &status);
+  stop_test_server (thread, cancel);
+  g_assert_true (WIFEXITED (status));
+  g_assert_cmpint (WEXITSTATUS (status), ==, 1);
+  g_assert_cmpstr (out, ==, "");
+  assert_child_stderr_has (err, "output already exists:");
+  assert_child_stderr_has (err, collision_path);
+  assert_child_stderr_has (err, "server logout was attempted");
+  g_assert_nonnull (server.request);
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+      "POST /auth/login?"));
+  g_assert_false (g_file_test (collide_access ? refresh_path : access_path,
+      G_FILE_TEST_EXISTS));
+  remove_dir_recursive (dir);
+  g_free (server.request);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/wyctl/login-remote-error", test_login_reports_remote_error);
+  g_test_add_data_func ("/wyctl/login-existing-access-preflight",
+      GINT_TO_POINTER (1), test_login_existing_output_prevents_request);
+  g_test_add_data_func ("/wyctl/login-existing-refresh-preflight",
+      GINT_TO_POINTER (0), test_login_existing_output_prevents_request);
+  g_test_add_data_func ("/wyctl/login-raced-access-collision",
+      GINT_TO_POINTER (1), test_login_raced_output_reports_collision);
+  g_test_add_data_func ("/wyctl/login-raced-refresh-collision",
+      GINT_TO_POINTER (0), test_login_raced_output_reports_collision);
 
   static const gchar *settings_cases[] = {
     "missing", "missing-key", "wrong-type", "uint-missing", "uint-wrong",

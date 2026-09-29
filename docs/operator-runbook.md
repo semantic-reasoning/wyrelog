@@ -1343,6 +1343,13 @@ for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
 done
 ```
 
+`auth login` checks both token output paths before contacting the daemon. If
+either path already exists, it exits 2 and names that path; use distinct,
+unused filenames for another tenant. An output can still appear after this
+check. In that case protected publication refuses to replace it, attempts
+server logout, and reports which file collided. If publication reports
+uncertain durability, inspect both token files before another login.
+
 A granted permission is dormant until it is armed. Before the loop above,
 `wyctl --daemon-url "$BASE_URL" policy explain --user alice --permission
 wr.graph.manage --resource "$TENANT" --access-token-file "$TOKEN"` prints

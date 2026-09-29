@@ -35,6 +35,9 @@ typedef enum
   WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY,
   WYCTL_TOKEN_FILE_WINDOWS_ACL_UNAVAILABLE,
   WYCTL_TOKEN_FILE_DURABILITY_UNCERTAIN,
+  WYCTL_TOKEN_FILE_ALREADY_EXISTS,
+  WYCTL_TOKEN_FILE_UNSAFE_PARENT,
+  WYCTL_TOKEN_FILE_PERMISSION_DENIED,
 } WyctlTokenFileStatus;
 
 /* Open the token file safely and copy its bytes into *out_token.
@@ -58,12 +61,17 @@ WyctlTokenFileStatus wyctl_token_file_read (const gchar * path,
 void wyctl_token_file_free_sensitive (gchar * value, gsize capacity);
 
 /* Create a protected, no-replace bearer-token destination. */
+/* Check the destination without following its final component. OK means it
+ * was absent at the time of the check; the protected writer still enforces
+ * no-replace when it creates the file. */
+WyctlTokenFileStatus wyctl_token_file_check_available (const gchar * path);
 WyctlTokenFileStatus wyctl_token_file_write_protected (const gchar * path,
     const gchar * token, gsize token_len);
 WyctlTokenFileStatus wyctl_token_file_write_pair_protected (
   const gchar * refresh_path, const gchar * refresh_token,
   gsize refresh_token_len, const gchar * access_path,
-  const gchar * access_token, gsize access_token_len);
+  const gchar * access_token, gsize access_token_len,
+  const gchar ** failed_path);
 
 /* Replace a previously validated protected token file atomically. A
  * durability-uncertain result means the namespace replacement happened but
