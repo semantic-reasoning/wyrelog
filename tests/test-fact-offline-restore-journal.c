@@ -283,6 +283,79 @@ admission_is_fail_closed (void)
 }
 
 static void
+imported_provisioned_commit_early_successors (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (FALSE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity stage = identity (201);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+        (&journal, "alpha", &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+        (&journal, "alpha"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_provisioned_old
+        (&journal, "alpha", OLD_PROVISION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_POLICY);
+  journal.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (journal.graphs, 0);
+  graph->durability_unprovable_acknowledged = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED), ==,
+      WYRELOG_E_POLICY);
+  graph->durability_unprovable_acknowledged = FALSE;
+  g_autoptr (GBytes) before = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &before), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) begun = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (before,
+      &begun), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&begun,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED), ==,
+      WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&journal, &begun));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&begun), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_autoptr (GBytes) begun_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&begun,
+      &begun_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) completed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (begun_blob,
+      &completed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_complete_attempt
+        (&completed, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN, FALSE), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&begun, &completed));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&completed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&completed,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_complete_attempt
+        (&completed, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE, FALSE), ==,
+      WYRELOG_E_OK);
+  graph = g_ptr_array_index (completed.graphs, 0);
+  graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+  graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&completed,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&completed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+}
+
+static void
 complete_step (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     WylFactArtifactMainTransitionOp operation,
     WylFactArtifactMainTransitionState state,
@@ -606,6 +679,8 @@ main (int argc, char **argv)
       round_trip_and_scope);
   g_test_add_func ("/fact/offline-restore/provisioned-handoff-binding",
       provisioned_handoff_binding);
+  g_test_add_func ("/fact/offline-restore/imported-provisioned-early-commit",
+      imported_provisioned_commit_early_successors);
   g_test_add_func ("/fact/offline-restore/admission",
       admission_is_fail_closed);
   g_test_add_func ("/fact/offline-restore/decision-recovery",

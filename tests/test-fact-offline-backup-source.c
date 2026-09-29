@@ -3265,6 +3265,31 @@ probe_companion_policy_fence
 }
 
 static void
+import_restore_journal_for_test (wyl_policy_store_t *policy,
+    const WylFactOfflineRestoreJournal *journal)
+{
+  g_autoptr (GBytes) blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (journal,
+      &blob), ==, WYRELOG_E_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (policy),
+      "UPDATE fact_offline_restore_journals SET revision=?1,"
+      "journal_blob=?2,updated_at=unixepoch() WHERE operation_uuid=?3;",
+      -1, &update, NULL), ==, SQLITE_OK);
+  gsize length = 0;
+  const guint8 *data = g_bytes_get_data (blob, &length);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, journal->revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, data, length,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, journal->operation_uuid,
+      -1, SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (wyl_policy_store_get_db (policy)), ==, 1);
+  sqlite3_finalize (update);
+}
+
+static void
 test_graph_restore_replacement_reservation (void)
 {
   BackupFixture fixture = { 0 };
@@ -3448,15 +3473,36 @@ test_graph_restore_replacement_reservation (void)
         (fixture.policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpstr (reserved->replacement_uuid, ==, loaded->replacement_uuid);
   wyl_policy_graph_restore_replacement_record_free (loaded);
-  /* Imported historical COMMIT shape: the normal mode-A journal mutators
-   * still refuse this transition. Exercise only the dormant policy CAS. */
+  g_auto (WylFactOfflineRestoreJournal) early = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (current_blob,
+      &early), ==, WYRELOG_E_OK);
+  early.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  early.revision++;
+  g_autoptr (GBytes) early_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&early,
+      &early_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) early_begin = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (early_blob,
+      &early_begin), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt
+        (&early_begin, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED),
+      ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) early_result = { 0 };
+  import_restore_journal_for_test (fixture.policy, &early);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (fixture.policy, early.revision, &early_begin, &result,
+      &early_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&early_result),
+      ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  /* Imported historical durable COMMIT shape for companion recovery. */
   g_auto (WylFactOfflineRestoreJournal) published = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_decode (current_blob,
       &published), ==, WYRELOG_E_OK);
   WylFactOfflineRestoreJournalGraph *published_graph =
       g_ptr_array_index (published.graphs, 0);
   published.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
-  published.revision++;
+  published.revision = early_result.revision + 1;
   published_graph->transition_state =
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
   published_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
@@ -3468,22 +3514,7 @@ test_graph_restore_replacement_reservation (void)
   g_autoptr (GBytes) published_blob = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&published,
       &published_blob), ==, WYRELOG_E_OK);
-  sqlite3_stmt *update = NULL;
-  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (fixture.policy),
-      "UPDATE fact_offline_restore_journals SET revision=?1,"
-      "journal_blob=?2,updated_at=unixepoch() WHERE operation_uuid=?3;",
-      -1, &update, NULL), ==, SQLITE_OK);
-  gsize published_len = 0;
-  const guint8 *published_data = g_bytes_get_data (published_blob,
-          &published_len);
-  g_assert_cmpint (sqlite3_bind_int64 (update, 1, published.revision), ==,
-      SQLITE_OK);
-  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, published_data,
-      published_len, SQLITE_TRANSIENT), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_bind_text (update, 3, operation_uuid, -1,
-      SQLITE_TRANSIENT), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
-  sqlite3_finalize (update);
+  import_restore_journal_for_test (fixture.policy, &published);
 #ifdef __linux__
   /* Synthetic imported COMMIT: normal mode-A admission still refuses it. */
   g_autofree gchar *rollback_basename = g_strdup_printf

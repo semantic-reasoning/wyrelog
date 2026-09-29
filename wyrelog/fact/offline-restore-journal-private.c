@@ -950,14 +950,25 @@ can_advance_revision (const WylFactOfflineRestoreJournal *journal)
 {
   if (journal == NULL || journal->revision == G_MAXUINT64)
     return FALSE;
-  /* Graph-local mode-A COMMIT records remain readable for diagnosis. The
-   * reservation exists, but publication and lifecycle handoff are not yet
-   * implemented, so every successor stays closed. */
-  return !(journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
-         && journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
-         && journal->graphs != NULL && journal->graphs->len == 1
-         && !((WylFactOfflineRestoreJournalGraph *)
-         g_ptr_array_index (journal->graphs, 0))->expected_main_absent);
+  if (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || journal->graphs == NULL || journal->graphs->len != 1)
+    return TRUE;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal->graphs, 0);
+  if (graph->expected_main_absent)
+    return TRUE;
+  /* An imported v2 replacement may advance its journaled filesystem
+   * transition. FINALIZE and later policy/lifecycle transitions remain closed. */
+  return journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+         && !graph->durability_unprovable_acknowledged
+         && (graph->transition_state ==
+         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+         || graph->transition_state ==
+         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
+         || graph->transition_state ==
+         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED)
+         && graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
 }
 
 wyrelog_error_t
@@ -1246,8 +1257,14 @@ wyl_fact_offline_restore_journal_recovery
   if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
       && journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       && !((WylFactOfflineRestoreJournalGraph *)
-      g_ptr_array_index (journal->graphs, 0))->expected_main_absent)
-    return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
+      g_ptr_array_index (journal->graphs, 0))->expected_main_absent) {
+    if (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION)
+      return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
+    /* The generic recovery classifier has no reservation or filesystem
+     * authority. The dedicated companion runner handles durable publication;
+     * early states still await a journal-backed transition driver. */
+    return WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY;
+  }
   for (guint i = 0; i < journal->graphs->len; i++) {
     WylFactOfflineRestoreJournalGraph *graph =
         g_ptr_array_index (journal->graphs, i);
