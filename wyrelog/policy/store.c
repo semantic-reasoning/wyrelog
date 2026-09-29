@@ -37811,6 +37811,19 @@ offline_restore_record_has_selected_marker
 }
 
 static gboolean
+offline_restore_record_has_tenant_binding
+  (const WylPolicyOfflineRestoreRecord *record)
+{
+  if (!offline_restore_record_valid (record))
+    return FALSE;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  return wyl_fact_offline_restore_journal_decode (record->journal_blob,
+             &journal) == WYRELOG_E_OK
+         && journal.version ==
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION;
+}
+
+static gboolean
 offline_restore_record_equal (const WylPolicyOfflineRestoreRecord *left,
     const WylPolicyOfflineRestoreRecord *right)
 {
@@ -38036,7 +38049,8 @@ wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
   if (store == NULL || !offline_restore_record_valid (record)
       || out_result == NULL || out_committed == NULL)
     return WYRELOG_E_INVALID;
-  if (offline_restore_record_has_selected_marker (record))
+  if (offline_restore_record_has_selected_marker (record)
+      || offline_restore_record_has_tenant_binding (record))
     return WYRELOG_E_POLICY;
   WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
   wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
@@ -38216,7 +38230,8 @@ wyl_policy_store_offline_restore_cas (wyl_policy_store_t *store,
       || desired->revision != expected_revision + 1 || out_result == NULL
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-  if (offline_restore_record_has_selected_marker (desired))
+  if (offline_restore_record_has_selected_marker (desired)
+      || offline_restore_record_has_tenant_binding (desired))
     return WYRELOG_E_POLICY;
   WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
   wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
@@ -38239,6 +38254,9 @@ wyl_policy_store_offline_restore_cas (wyl_policy_store_t *store,
     rc = offline_restore_claim_matches_locked (store, current);
   if (rc == WYRELOG_E_OK
       && offline_restore_record_has_selected_marker (current))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && offline_restore_record_has_tenant_binding (current))
     rc = WYRELOG_E_POLICY;
   if (rc != WYRELOG_E_OK) {
     wyl_policy_offline_restore_record_free (current);

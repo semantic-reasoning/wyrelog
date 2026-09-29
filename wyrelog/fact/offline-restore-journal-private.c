@@ -489,7 +489,8 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       || (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
       && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
       && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
-      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION)
       || journal->revision == 0 || !canonical_uuid (journal->operation_uuid)
       || !bounded_text (journal->tenant_id) || journal->graphs == NULL
       || journal->source_tenant_lifecycle_generation == 0
@@ -504,6 +505,11 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       || journal->graphs->len != 1))
       || (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
       && journal->selected_graph_id != NULL)
+      || (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      && (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK
+      || journal->policy_generation_published
+      || journal->lifecycle_handoff_complete))
       || journal->confirmation > WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
       || journal->manifest_trust
       > WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
@@ -512,7 +518,8 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       && journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT)
       || (journal->lifecycle_handoff_complete
       && !journal->policy_generation_published)
-      || (journal->version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || ((journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
       ? !journal->replacement_selected_pending_cleanup
       || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
@@ -581,11 +588,33 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
         || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
         && !has_old)
         || (has_old
-        && (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
-        || graph->expected_main_absent
+        && (graph->expected_main_absent
+        || (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION)
         || !canonical_uuid (graph->old_provisioning_uuid)
         || graph->old_provisioning_uuid[14] != '7')))
       return FALSE;
+    if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+        && (!graph->replay_preflighted
+        || (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+        && (graph->transition_state
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE))
+        || (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        && !graph->expected_main_absent && !has_old)))
+      return FALSE;
+    if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+        && has_old) {
+      for (guint previous = 0; previous < i; previous++) {
+        const WylFactOfflineRestoreJournalGraph *other =
+            g_ptr_array_index (journal->graphs, previous);
+        if (g_strcmp0 (graph->old_provisioning_uuid,
+            other->old_provisioning_uuid) == 0)
+          return FALSE;
+      }
+    }
     if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
         && (journal->graphs->len != 1 || graph->expected_main_absent
         || graph->durability_unprovable_acknowledged
@@ -696,7 +725,8 @@ wyl_fact_offline_restore_journal_encode
       journal->confirmation, journal->manifest_trust, journal->decision,
       journal->policy_generation_published, journal->lifecycle_handoff_complete,
       journal->graphs->len);
-  if (journal->version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
     g_string_append_printf (text, "replacement_selected=%u\n",
         journal->replacement_selected_pending_cleanup);
   for (guint i = 0; i < journal->graphs->len; i++) {
@@ -947,7 +977,8 @@ wyl_fact_offline_restore_journal_decode
   out_journal->policy_generation_published = policy_published;
   out_journal->lifecycle_handoff_complete = handoff;
   guint graph_start = 17;
-  if (valid && version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION) {
+  if (valid && (version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)) {
     valid = line_value (lines, graph_start, "replacement_selected", &value)
         && parse_bool (value,
             &out_journal->replacement_selected_pending_cleanup);
@@ -1058,6 +1089,40 @@ wyl_fact_offline_restore_journal_bind_provisioned_old
 }
 
 wyrelog_error_t
+wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const gchar *old_uuid)
+{
+  WylFactOfflineRestoreJournalGraph *graph = find_graph (journal, graph_id);
+  if (graph == NULL || !valid_journal (journal)
+      || !can_advance_revision (journal)
+      || (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION)
+      || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || graph->expected_main_absent || graph->old_provisioning_uuid != NULL
+      || !canonical_uuid (old_uuid) || old_uuid[14] != '7')
+    return WYRELOG_E_POLICY;
+  for (guint i = 0; i < journal->graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *current =
+        g_ptr_array_index (journal->graphs, i);
+    if (!current->replay_preflighted
+        || current->transition_state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || current->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || current->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || current->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || g_strcmp0 (current->old_provisioning_uuid, old_uuid) == 0)
+      return WYRELOG_E_POLICY;
+  }
+  graph->old_provisioning_uuid = g_strdup (old_uuid);
+  if (graph->old_provisioning_uuid == NULL)
+    return WYRELOG_E_NOMEM;
+  journal->version = WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION;
+  journal->revision++;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_journal_bind_staged_identity
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const WylFactArtifactInventoryIdentity *identity)
@@ -1122,6 +1187,10 @@ wyl_fact_offline_restore_journal_decide (WylFactOfflineRestoreJournal *journal,
     for (guint i = 0; i < journal->graphs->len; i++) {
       WylFactOfflineRestoreJournalGraph *graph =
           g_ptr_array_index (journal->graphs, i);
+      if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+          && !graph->expected_main_absent
+          && graph->old_provisioning_uuid == NULL)
+        return WYRELOG_E_POLICY;
       if (!graph->copied || !graph->checksum_verified
           || !graph->identity_verified || !graph->schema_verified
           || !graph->replay_preflighted
@@ -1129,6 +1198,9 @@ wyl_fact_offline_restore_journal_decide (WylFactOfflineRestoreJournal *journal,
         return WYRELOG_E_POLICY;
     }
   }
+  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      && decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK)
+    return WYRELOG_E_POLICY;
   journal->decision = decision;
   if (decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK) {
     for (guint i = 0; i < journal->graphs->len; i++) {
@@ -1468,6 +1540,15 @@ successor_bind_handoff (WylFactOfflineRestoreJournal *journal, gpointer data)
 }
 
 static wyrelog_error_t
+successor_bind_tenant_handoff (WylFactOfflineRestoreJournal *journal,
+    gpointer data)
+{
+  HandoffSuccessor *bind = data;
+  return wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+           (journal, bind->graph_id, bind->old_uuid);
+}
+
+static wyrelog_error_t
 successor_decide (WylFactOfflineRestoreJournal *journal, gpointer data)
 {
   return wyl_fact_offline_restore_journal_decide
@@ -1567,6 +1648,9 @@ wyl_fact_offline_restore_journal_is_legal_successor
         || (handoff.old_uuid != NULL
         && successor_from_candidate (current_bytes, desired,
         successor_bind_handoff, &handoff))
+        || (handoff.old_uuid != NULL
+        && successor_from_candidate (current_bytes, desired,
+        successor_bind_tenant_handoff, &handoff))
         || successor_from_candidate (current_bytes, desired,
         successor_preflight, graph->graph_id))
       return TRUE;

@@ -7,6 +7,7 @@
 
 #define OP "018f22d0-7b6d-7a5b-8c31-123456789abc"
 #define OLD_PROVISION "018f22d0-7b6d-7a5b-8c31-123456789abd"
+#define SECOND_PROVISION "018f22d0-7b6d-7a5b-8c31-123456789abe"
 
 static WylFactArtifactInventoryIdentity
 identity (guint64 object)
@@ -218,6 +219,95 @@ provisioned_handoff_binding (void)
   wyl_fact_offline_restore_journal_clear (&decoded);
   wyl_fact_offline_restore_journal_clear (&original);
   wyl_fact_offline_restore_journal_clear (&journal);
+}
+
+static void
+tenant_provisioned_binding (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  WylFactOfflineRestoreTargetGraph *zeta = g_ptr_array_index (targets, 1);
+  zeta->expected_main_absent = FALSE;
+  zeta->expected_main_identity = identity (102);
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) legacy = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &legacy), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity alpha_stage = identity (201);
+  WylFactArtifactInventoryIdentity zeta_stage = identity (202);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+        (&journal, "alpha", &alpha_stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+        (&journal, "alpha"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&journal, "alpha", OLD_PROVISION), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+        (&journal, "zeta", &zeta_stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+        (&journal, "zeta"), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) prebind = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &prebind), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) before = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (prebind,
+      &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&journal, "alpha", OLD_PROVISION), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&before, &journal));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) partial = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &partial), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) resumed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (partial,
+      &resumed), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) reencoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&resumed,
+      &reencoded), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (partial, reencoded));
+  resumed.scope = WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH;
+  g_autoptr (GBytes) invalid = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&resumed,
+      &invalid), ==, WYRELOG_E_INVALID);
+  resumed.scope = WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT;
+  resumed.policy_generation_published = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&resumed,
+      &invalid), ==, WYRELOG_E_INVALID);
+  resumed.policy_generation_published = FALSE;
+  WylFactOfflineRestoreJournalGraph *resumed_zeta =
+      g_ptr_array_index (resumed.graphs, 1);
+  resumed_zeta->old_provisioning_uuid = g_strdup (OLD_PROVISION);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&resumed,
+      &invalid), ==, WYRELOG_E_INVALID);
+  g_clear_pointer (&resumed_zeta->old_provisioning_uuid, g_free);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&resumed, "alpha", OLD_PROVISION), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&resumed, "zeta", OLD_PROVISION), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+        (&resumed, "zeta", SECOND_PROVISION), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&journal, &resumed));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&resumed,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&resumed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_autoptr (GBytes) complete = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&resumed,
+      &complete), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) decoded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (complete,
+      &decoded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (decoded.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION);
 }
 
 static void
@@ -781,6 +871,8 @@ main (int argc, char **argv)
       round_trip_and_scope);
   g_test_add_func ("/fact/offline-restore/provisioned-handoff-binding",
       provisioned_handoff_binding);
+  g_test_add_func ("/fact/offline-restore/tenant-provisioned-binding",
+      tenant_provisioned_binding);
   g_test_add_func ("/fact/offline-restore/imported-provisioned-early-commit",
       imported_provisioned_commit_early_successors);
   g_test_add_func ("/fact/offline-restore/admission",
