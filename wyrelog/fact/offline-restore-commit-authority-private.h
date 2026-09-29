@@ -109,6 +109,16 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalize_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Promote a durably FINALIZED selected graph after proving the exact terminal
+ * namespace under the root lease and graph quiescence. The terminal proof is
+ * repeated inside the fenced policy transaction. On an ambiguous commit
+ * response the caller must reopen policy and observe the full tuple. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_promote_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
