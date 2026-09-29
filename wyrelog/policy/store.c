@@ -1187,7 +1187,7 @@ static const gchar restore_replacement_delete_guard_sql[] =
     "SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;";
 /* One tenant operation reserves one replacement per graph. Its rows remain
  * separate from the graph-scope replacement authority above. */
-static const gchar tenant_restore_replacement_table_sql[] =
+static const gchar tenant_restore_replacement_table_pre_companion_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_tenant_restore_replacements ("
     "restore_operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,"
     "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL UNIQUE,"
@@ -1199,6 +1199,24 @@ static const gchar tenant_restore_replacement_table_sql[] =
     "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
     "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
     "phase TEXT NOT NULL CHECK(phase='reserved'),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "PRIMARY KEY(restore_operation_uuid,graph_id),"
+    "CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+static const gchar tenant_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_tenant_restore_replacements ("
+    "restore_operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,"
+    "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL UNIQUE,"
+    "old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced')),"
     "created_at INTEGER NOT NULL CHECK(created_at>=0),"
     "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
     "PRIMARY KEY(restore_operation_uuid,graph_id),"
@@ -12028,8 +12046,10 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
           (sqlite3_int64) journal.revision
           || g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 10),
           basename) != 0
-          || g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
-          "reserved") != 0)
+          || (g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
+          "reserved") != 0
+          && g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
+          "companion_synced") != 0))
         rc = WYRELOG_E_POLICY;
     }
     if (rc == WYRELOG_E_OK && row_step != SQLITE_DONE)
@@ -12096,6 +12116,35 @@ migrate_tenant_restore_replacement_schema (sqlite3 *db)
     return WYRELOG_E_POLICY;
   if (present == 0) {
     for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
+      rc = exec_sql (db, objects[i].sql);
+  } else if (graph_authority_object_matches (db, "table", objects[0].name,
+      objects[0].sql) != WYRELOG_E_OK) {
+    rc = graph_authority_object_matches (db, "table", objects[0].name,
+            tenant_restore_replacement_table_pre_companion_sql);
+    if (rc == WYRELOG_E_OK)
+      rc = graph_authority_object_matches (db, "trigger", objects[2].name,
+              tenant_restore_replacement_update_guard_sql);
+    for (guint i = 1; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++) {
+      if (i == 2)
+        continue;
+      rc = graph_authority_object_matches (db, objects[i].type,
+              objects[i].name, objects[i].sql);
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db,
+              "DROP TRIGGER fact_tenant_restore_replacement_insert_guard;"
+              "DROP TRIGGER fact_tenant_restore_replacement_update_guard;"
+              "DROP TRIGGER fact_tenant_restore_replacement_delete_guard;"
+              "ALTER TABLE fact_tenant_restore_replacements RENAME TO "
+              "fact_tenant_restore_replacements_pre_companion;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, tenant_restore_replacement_table_sql);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db,
+              "INSERT INTO fact_tenant_restore_replacements SELECT * FROM "
+              "fact_tenant_restore_replacements_pre_companion;"
+              "DROP TABLE fact_tenant_restore_replacements_pre_companion;");
+    for (guint i = 1; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
       rc = exec_sql (db, objects[i].sql);
   }
   for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)

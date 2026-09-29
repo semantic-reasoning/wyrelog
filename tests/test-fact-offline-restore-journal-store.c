@@ -1143,6 +1143,54 @@ tenant_replacement_schema_is_atomic (void)
   g_assert_cmpint (row_count (store, "fact_tenant_restore_replacements"),
       ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3_stmt *definitions = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "SELECT name,sql FROM sqlite_master WHERE name IN ("
+      "'fact_tenant_restore_replacements',"
+      "'fact_tenant_restore_replacement_insert_guard',"
+      "'fact_tenant_restore_replacement_delete_guard');",
+      -1, &definitions, NULL), ==, SQLITE_OK);
+  g_autofree gchar *table_sql = NULL;
+  g_autofree gchar *insert_sql = NULL;
+  g_autofree gchar *delete_sql = NULL;
+  while (sqlite3_step (definitions) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (definitions, 0);
+    gchar *copy = g_strdup ((const gchar *) sqlite3_column_text
+              (definitions, 1));
+    if (g_strcmp0 (name, "fact_tenant_restore_replacements") == 0)
+      table_sql = copy;
+    else if (g_strcmp0 (name,
+        "fact_tenant_restore_replacement_insert_guard") == 0)
+      insert_sql = copy;
+    else
+      delete_sql = copy;
+  }
+  sqlite3_finalize (definitions);
+  g_assert_nonnull (table_sql);
+  g_assert_nonnull (insert_sql);
+  g_assert_nonnull (delete_sql);
+  g_auto (GStrv) parts = g_strsplit (table_sql,
+          "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced'))",
+          2);
+  g_assert_nonnull (parts[1]);
+  g_autofree gchar *predecessor = g_strdup_printf
+        ("%sphase TEXT NOT NULL CHECK(phase='reserved')%s",
+          parts[0], parts[1]);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      "DROP TABLE fact_tenant_restore_replacements;", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      predecessor, NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      insert_sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      "CREATE TRIGGER fact_tenant_restore_replacement_update_guard "
+      "BEFORE UPDATE ON fact_tenant_restore_replacements BEGIN "
+      "SELECT RAISE(ABORT,'tenant restore replacement is immutable'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      delete_sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
       "DROP TRIGGER fact_tenant_restore_replacement_delete_guard;",
       NULL, NULL, NULL), ==, SQLITE_OK);

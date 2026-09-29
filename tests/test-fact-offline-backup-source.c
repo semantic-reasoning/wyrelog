@@ -3873,6 +3873,18 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
               g_assert_cmpuint (reloaded.version, ==,
                   WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
               g_assert_cmpuint (reloaded.revision, ==, 33);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "UPDATE "
+                  "fact_tenant_restore_replacements SET "
+                  "phase='companion_synced',updated_at=unixepoch() "
+                  "WHERE graph_id='alpha';", NULL, NULL, NULL), ==,
+                  SQLITE_CONSTRAINT_TRIGGER);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "UPDATE "
+                  "fact_tenant_restore_replacements SET "
+                  "old_provisioning_uuid='018f22d0-7b6d-7a5b-8c31-123456789ac9' "
+                  "WHERE graph_id='alpha';", NULL, NULL, NULL), ==,
+                  SQLITE_CONSTRAINT_TRIGGER);
               sqlite3_stmt *guard_sql = NULL;
               g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
                     (f.fixture.policy), "SELECT sql FROM sqlite_master WHERE "
