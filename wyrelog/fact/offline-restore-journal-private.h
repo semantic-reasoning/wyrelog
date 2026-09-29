@@ -13,6 +13,7 @@ G_BEGIN_DECLS
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION 2u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION 3u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION 4u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION 5u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -218,6 +219,9 @@ wyrelog_error_t wyl_fact_offline_restore_journal_bind_staged_identity
  * this pure mutator does not prove those external facts. COMMIT stays closed
  * until replacement publication and lifecycle handoff are implemented. */
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_provisioned_old
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const gchar *old_uuid);
+wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const gchar *old_uuid);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide

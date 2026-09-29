@@ -410,6 +410,64 @@ storage_contract (void)
 }
 
 static void
+tenant_bound_generic_writer_denied (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant
+        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
+  init_journal (&initial, OP_A);
+  WylFactOfflineRestoreStoreResult result = 0;
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create
+        (store, &initial, &result, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+
+  g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
+  clone_journal (&initial, &bound);
+  bound.version = WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION;
+  bound.revision++;
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (bound.graphs, 0);
+  graph->staged_main_identity.domain = 1;
+  graph->staged_main_identity.object = 201;
+  graph->copied = TRUE;
+  graph->checksum_verified = TRUE;
+  graph->identity_verified = TRUE;
+  graph->schema_verified = TRUE;
+  graph->replay_preflighted = TRUE;
+  g_autoptr (GBytes) blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&bound,
+      &blob), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreRecord raw = {
+    .operation_uuid = bound.operation_uuid,
+    .tenant_id = bound.tenant_id,
+    .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT,
+    .revision = bound.revision,
+    .graph_count = bound.graphs->len,
+    .journal_blob = blob,
+  };
+  memcpy (raw.manifest_sha256, bound.manifest_sha256, 32);
+  WylPolicyOfflineRestoreStoreResult raw_result =
+      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  WylPolicyOfflineRestoreRecord *raw_committed = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_create (store, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
+  g_assert_cmpint (wyl_policy_store_offline_restore_cas (store, 1, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
+  g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (store,
+      OP_A, &durable), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (durable.version, ==, WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION);
+  g_assert_cmpuint (durable.revision, ==, 1);
+}
+
+static void
 provisioned_handoff_cas (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1058,6 +1116,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/offline-restore-journal-store/contract",
       storage_contract);
+  g_test_add_func ("/fact/offline-restore-journal-store/tenant-bound-generic-denied",
+      tenant_bound_generic_writer_denied);
   g_test_add_func ("/fact/offline-restore-journal-store/provisioned-handoff-cas",
       provisioned_handoff_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/not-applied-retry",
