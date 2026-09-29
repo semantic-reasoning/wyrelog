@@ -614,3 +614,64 @@ fail:
   release_authority (session);
   return rc;
 }
+
+wyrelog_error_t
+wyl_fact_offline_restore_validation_session_with_publication_authority
+  (WylFactOfflineRestoreValidationSession *session,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestorePublicationFunc callback, gpointer user_data)
+{
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+#ifndef G_OS_WIN32
+  g_autoptr (GPtrArray) borrowed = NULL;
+#endif
+  if (session->terminal || !session->record_preflight
+      || job_context == NULL || callback == NULL)
+    goto fail;
+#ifdef G_OS_WIN32
+  rc = WYRELOG_E_POLICY;
+#else
+  for (guint i = 0; i < session->journal.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (session->journal.graphs, i);
+    if (!graph->copied || !graph->checksum_verified
+        || !graph->identity_verified || !graph->schema_verified
+        || !graph->replay_preflighted) {
+      rc = WYRELOG_E_POLICY;
+      goto fail;
+    }
+  }
+
+  /* Historical journal flags alone cannot authorize publication. Replay and
+   * reobserve the entire selected scope while the session still owns every
+   * graph's quiescence token and the exclusive root lease. */
+  WylFactOfflineRestoreValidationResult validation = { 0 };
+  rc = wyl_fact_offline_restore_validation_session_run (session, job_context,
+          &validation);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_current (session, job_context, &validation);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
+
+  borrowed = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < session->graphs->len; i++) {
+    ValidationGraph *graph = g_ptr_array_index (session->graphs, i);
+    WylFactOfflineRestorePublicationGraph *view =
+        g_new0 (WylFactOfflineRestorePublicationGraph, 1);
+    view->graph_id = graph->key.graph_id;
+    view->directory = &graph->directory;
+    view->pair = graph->pair;
+    g_ptr_array_add (borrowed, view);
+  }
+  rc = callback (&session->journal, session->lease, &session->resolver,
+          borrowed, user_data);
+  if (rc == WYRELOG_E_OK)
+    return rc;
+#endif
+fail:
+  session->terminal = TRUE;
+  release_authority (session);
+  return rc;
+}
