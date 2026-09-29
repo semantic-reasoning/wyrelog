@@ -90,6 +90,15 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_publish_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Select the imported replacement in one sealed policy transaction after
+ * proving the exact dual companion shape under the root lease. Leaves both
+ * file pairs in place for selected-authority cleanup. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_select_replacement_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);

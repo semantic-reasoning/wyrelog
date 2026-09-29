@@ -4059,6 +4059,56 @@ test_graph_restore_replacement_reservation (void)
   wyl_policy_graph_restore_replacement_record_free (synced_replay);
   wyl_policy_offline_restore_record_free (published_record);
   wyl_policy_graph_restore_replacement_record_free (loaded);
+#ifdef __linux__
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision + 1, 0, &selected), !=, WYRELOG_E_OK);
+  g_assert_true (g_file_set_contents (foreign_path, "foreign", -1, NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &selected), !=, WYRELOG_E_OK);
+  g_assert_cmpint (g_remove (foreign_path), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &selected), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selected.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+  g_assert_true (selected.replacement_selected_pending_cleanup);
+  g_assert_true (g_file_test (main_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_true (g_file_test (rollback_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
+  g_autoptr (GPtrArray) selected_rows = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture.policy, "tenant-a", "alpha", &selected_rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (selected_rows->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *selected_row =
+      g_ptr_array_index (selected_rows, 0);
+  g_assert_cmpint (selected_row->phase, ==,
+      WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED);
+  g_assert_cmpstr (selected_row->op_uuid, ==, reserved->replacement_uuid);
+  WylPolicyGraphRestoreReplacementRecord *selected_replacement = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture.policy, operation_uuid, &selected_replacement), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (selected_replacement->phase, ==,
+      "selected_pending_cleanup");
+  wyl_policy_graph_restore_replacement_record_free (selected_replacement);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) reopened_selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &reopened_selected), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (reopened_selected.revision, ==, selected.revision);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &reopened_selected), !=, WYRELOG_E_OK);
+#endif
   wyl_policy_graph_restore_replacement_record_free (replayed);
   wyl_policy_graph_restore_replacement_record_free (reserved);
   wyl_policy_graph_authority_record_free (authority);
