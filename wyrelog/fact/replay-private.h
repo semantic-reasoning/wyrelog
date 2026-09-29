@@ -100,6 +100,12 @@ wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
 wyrelog_error_t wyl_fact_replay_validate_graph
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info);
+/* Graph validation plus a conservative count of historical wrong-projection
+ * forget repair candidates across registered relation schemas. */
+wyrelog_error_t wyl_fact_replay_validate_graph_with_orphan_candidates
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    guint64 *out_candidate_batches, guint64 *out_candidate_rows);
 wyrelog_error_t wyl_fact_replay_validate_graph_bounded
   (wyl_policy_store_t * policy, const gchar * fact_root,
     const wyl_policy_fact_graph_info_t * graph_info,

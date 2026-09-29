@@ -16,13 +16,14 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay-store-private.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (54, 389, 4, 3),
+    "wyrelog/fact/store.c": (58, 441, 4, 3),
     "wyrelog/fact/compound.c": (0, 63, 8, 0),
     "wyrelog/fact/replay.c": (0, 0, 0, 0),
     "wyrelog/fact/replay-store-private.c": (0, 21, 3, 0),
 }
 EXPECTED_RAW_MEMBER_FUNCTIONS = {
     "wyrelog/fact/store.c": {
+        "batch_matches_relation_unlocked": 1,
         "complete_forget_intent_unlocked": 2,
         "count_projection_rows_unlocked": 1,
         "existing_batch_matches_unlocked": 1,
@@ -40,6 +41,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "migrate_fact_batches_logical_bytes_unlocked": 5,
         "migrate_forget_intent_state_check_unlocked": 3,
         "next_sequence_unlocked": 1,
+        "orphan_repair_census_unlocked": 1,
         "prepared_delete_batch_unlocked": 1,
         "reject_audit_database_unlocked": 1,
         "rename_metadata_value_column_once_unlocked": 1,
@@ -57,6 +59,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "wyl_fact_store_open": 4,
         "wyl_fact_store_open_identified": 4,
         "wyl_fact_store_retract_by_batch_id": 1,
+        "wyl_fact_store_repair_orphaned_forget": 2,
         "wyl_fact_store_transaction_begin": 1,
         "wyl_fact_store_transaction_finish": 1,
     },
@@ -85,6 +88,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
     },
     "wyrelog/fact/store.c": {
         "append_value": 4,
+        "batch_matches_relation_unlocked": 14,
         "bind_optional_varchar": 2,
         "complete_forget_intent_unlocked": 19,
         "count_projection_rows_unlocked": 10,
@@ -107,6 +111,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "next_sequence_unlocked": 4,
         "open_duckdb_identified": 6,
         "open_duckdb_with_thread_budget": 6,
+        "orphan_repair_census_unlocked": 19,
         "prepared_delete_batch_unlocked": 6,
         "read_projection_value": 6,
         "reject_audit_database_unlocked": 7,
@@ -121,6 +126,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "wyl_fact_store_open": 2,
         "wyl_fact_store_open_identified": 2,
         "wyl_fact_store_retract_by_batch_id": 11,
+        "wyl_fact_store_repair_orphaned_forget": 19,
         "wyl_fact_store_test_query_int64": 4,
         "wyl_fact_store_test_query_text": 5,
     },
@@ -163,6 +169,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "wyl_fact_replay_publish_graph_closed_and_open",
     "wyl_fact_replay_refresh_graph_publication",
     "wyl_fact_replay_validate_graph",
+    "wyl_fact_replay_validate_graph_with_orphan_candidates",
     "open_graph_engine_with_artifact_lease",
     "refresh_graph_closed_internal",
     "validate_graph_internal",
@@ -195,6 +202,7 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "wyl_fact_replay_publish_graph_closed_and_open",
         "wyl_fact_replay_refresh_graph_publication",
         "wyl_fact_replay_validate_graph",
+        "wyl_fact_replay_validate_graph_with_orphan_candidates",
         "open_graph_engine_with_artifact_lease",
         "replay_store_with_snapshot",
         "refresh_graph_closed_internal",
@@ -699,7 +707,7 @@ def validate(files: dict[str, str]) -> None:
                         f"connection session pointer forwarded to helper: {path}: {name}"
                     )
     expected_calls = {
-        "wyrelog/fact/store.c": (16, 4, 20),
+        "wyrelog/fact/store.c": (18, 4, 22),
         "wyrelog/fact/compound.c": (3, 3, 5),
         "wyrelog/fact/replay.c": (2, 0, 2),
         "wyrelog/fact/replay-store-private.c": (1, 1, 1),
@@ -726,6 +734,8 @@ def validate(files: dict[str, str]) -> None:
             "wyl_fact_store_retract_by_batch_id",
             "wyl_fact_store_count_projection_batch_rows",
             "wyl_fact_store_forget (",
+            "wyl_fact_store_orphan_repair_candidates",
+            "wyl_fact_store_repair_orphaned_forget",
             "wyl_fact_store_forget_pending_count",
             "wyl_fact_store_forget_reconcile (wyl_fact_store_t *store",
         ),

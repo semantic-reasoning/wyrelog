@@ -233,6 +233,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.graph.manage",
     "wr.schema.manage",
     "wr.fact.write",
+    "wr.fact.read",
     "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
@@ -3326,6 +3327,126 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *forget_query = g_strdup_printf
         ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
           FACT_GUARD);
+  g_autofree gchar *verify_query = g_strdup_printf
+        ("tenant=%s&graph=orders&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "GET", base_url, "/facts/verify", verify_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"orphan_repair_candidate_batches\":0") == NULL
+      || strstr (body, "\"orphan_repair_candidate_rows\":0") == NULL)
+    return 2136;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:repair", forget_query,
+          admin_token,
+          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
+          "\"reason\":\"no orphan\"}", &status, &body);
+  if (rc != 0 || status != 404
+      || strstr (body, "fact_orphan_repair_candidate_not_found") == NULL)
+    return 2137;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:repair", forget_query,
+          deny_token,
+          "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
+          "\"reason\":\"denied\"}", &status, &body);
+  if (rc != 0 || status != 403)
+    return 2138;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *orphan_append_query = g_strdup_printf (
+    "tenant=%s&namespace=shop&schema_version=1&batch_id=orphan-http&"
+    "idempotency_key=orphan-http&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:append", orphan_append_query,
+          admin_token, "order_id\tamount\norphan-http\t23\n", &status,
+          &body);
+  if (rc != 0 || status != 200)
+    return 2140;
+  {
+    WylFactGraphLocator locator = { 0 };
+    if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, "orders")
+        != WYRELOG_E_OK)
+      return 2141;
+    g_autofree gchar *graph_path =
+        wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+    wyl_fact_graph_locator_clear (&locator);
+    g_autofree gchar *db_path = g_build_filename (graph_path,
+            "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) orphan_store = NULL;
+    if (wyl_fact_store_open (db_path, &orphan_store) != WYRELOG_E_OK)
+      return 2142;
+    const gchar *old_sql =
+        "INSERT INTO fact_forget_intent (op_uuid, batch_id, tenant_id, "
+        "graph_id, namespace_id, relation_name, schema_version, "
+        "projection_table, content_hash, idempotency_key, operator, reason, "
+        "rows_purged, state, created_at_us, completed_at_us) "
+        "SELECT 'orphan-http-op', batch_id, tenant_id, graph_id, "
+        "'other-ns', 'other', 2, 'old-wrong-projection', content_hash, "
+        "idempotency_key, 'old-admin', 'old wrong relation', 0, "
+        "'COMPLETED', 100, 101 FROM fact_batches "
+        "WHERE batch_id = 'orphan-http';"
+        "INSERT INTO fact_forget_audit (id, batch_id, tenant_id, graph_id, "
+        "operator, reason, rows_purged, created_at_us) "
+        "VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
+        "'orphan-http', '__wr_default', 'orders', 'old-admin', "
+        "'old wrong relation', 0, 101);"
+        "DELETE FROM fact_event_log WHERE batch_id = 'orphan-http';"
+        "DELETE FROM fact_batches WHERE batch_id = 'orphan-http';"
+        "DROP TABLE fact_orphan_repair_audit;";
+    if (wyl_fact_store_test_exec_sql (orphan_store, old_sql) != WYRELOG_E_OK)
+      return 2143;
+  }
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/facts/verify", verify_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"orphan_repair_candidate_batches\":1") == NULL
+      || strstr (body, "\"orphan_repair_candidate_rows\":1") == NULL)
+    return 2144;
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *repair_request_id = NULL;
+  rc = send_raw_with_request_id (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:repair", forget_query,
+          admin_token,
+          "{\"batch_id\":\"orphan-http\",\"operator\":\"repair-admin\","
+          "\"reason\":\"repair old defect\"}", &status, &body,
+          &repair_request_id, NULL);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"rows_purged\":1") == NULL
+      || !is_request_id_shape (repair_request_id))
+    return 2145;
+  {
+    WylFactGraphLocator locator = { 0 };
+    if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, "orders")
+        != WYRELOG_E_OK)
+      return 2147;
+    g_autofree gchar *graph_path =
+        wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+    wyl_fact_graph_locator_clear (&locator);
+    g_autofree gchar *db_path = g_build_filename (graph_path,
+            "facts.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) audit_store = NULL;
+    if (wyl_fact_store_open (db_path, &audit_store) != WYRELOG_E_OK)
+      return 2148;
+    g_autofree gchar *audit_sql = g_strdup_printf (
+      "SELECT COUNT(*) FROM fact_orphan_repair_audit "
+      "WHERE batch_id = 'orphan-http' AND rows_purged = 1 "
+      "AND original_forget_op_uuid = 'orphan-http-op' "
+      "AND actor_subject_id = 'facts-admin' AND request_id = '%s';",
+      repair_request_id);
+    gint64 audit_count = 0;
+    if (!count_i64 (audit_store, audit_sql, &audit_count)
+        || audit_count != 1)
+      return 2149;
+  }
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "GET", base_url, "/facts/verify", verify_query,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200
+      || strstr (body, "\"orphan_repair_candidate_batches\":0") == NULL
+      || strstr (body, "\"orphan_repair_candidate_rows\":0") == NULL)
+    return 2146;
+  g_clear_pointer (&body, g_free);
   g_autofree gchar *forget_request_id = NULL;
   rc = send_raw_with_request_id (session, "DELETE", base_url,
           "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
@@ -3497,6 +3618,15 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         body != NULL ? body : "(null)");
     return 409;
   }
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+          "/facts/__wr_default/orders/orders:repair", forget_query,
+          admin_token,
+          "{\"batch_id\":\"batch-7\",\"operator\":\"admin\","
+          "\"reason\":\"sealed\"}", &status, &body);
+  if (rc != 0 || status != 409
+      || strstr (body, "\"graph_sealed\"") == NULL)
+    return 2139;
 #ifdef WYL_HAS_AUDIT
   /* A refused hard delete against a sealed graph is a security-relevant
    * occurrence and left no trace.  It is emitted, unlike the other refusals

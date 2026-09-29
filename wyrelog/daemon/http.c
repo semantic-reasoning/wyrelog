@@ -12686,9 +12686,10 @@ facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
   wyrelog_error_t rc = lookup_fact_graph (policy, tenant, graph, &lookup);
   if (rc == WYRELOG_E_OK && !lookup.found)
     rc = WYRELOG_E_NOT_FOUND;
+  guint64 orphan_batches = 0, orphan_rows = 0;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_replay_validate_graph (policy, ctx->fact_root,
-            &lookup.info);
+    rc = wyl_fact_replay_validate_graph_with_orphan_candidates (policy,
+            ctx->fact_root, &lookup.info, &orphan_batches, &orphan_rows);
   if (rc == WYRELOG_E_NOT_FOUND) {
     graph_lookup_clear (&lookup);
     set_json_error (msg, 404, "graph_not_found");
@@ -12710,6 +12711,10 @@ facts_verify_handler (SoupServer *server, SoupServerMessage *msg,
   append_json_string (body, tenant);
   g_string_append (body, ",\"graph_id\":");
   append_json_string (body, graph);
+  g_string_append_printf (body,
+      ",\"orphan_repair_candidate_batches\":%" G_GUINT64_FORMAT
+      ",\"orphan_repair_candidate_rows\":%" G_GUINT64_FORMAT,
+      orphan_batches, orphan_rows);
   g_string_append_c (body, '}');
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
@@ -13167,6 +13172,7 @@ typedef enum
   FACT_HTTP_OP_APPEND = 0,
   FACT_HTTP_OP_RETRACT,
   FACT_HTTP_OP_FORGET,
+  FACT_HTTP_OP_REPAIR,
 } fact_http_op_t;
 
 #ifdef WYL_HAS_FACT_STORE
@@ -13344,6 +13350,9 @@ parse_fact_op_path (const gchar *path, gchar **out_tenant,
   } else if (g_str_has_suffix (parts[2], ":forget")) {
     op = FACT_HTTP_OP_FORGET;
     suffix = ":forget";
+  } else if (g_str_has_suffix (parts[2], ":repair")) {
+    op = FACT_HTTP_OP_REPAIR;
+    suffix = ":repair";
   } else {
     return FALSE;
   }
@@ -13842,10 +13851,10 @@ set_fact_quota_reconciling_json (SoupServerMessage *msg, const gchar *batch_id,
  * distinction set_fact_audit_failed_json makes on the append branch. */
 static void
 set_fact_forget_audit_failed_json (SoupServerMessage *msg, gsize rows_purged,
-    const wyl_fact_mutation_outcome_t *outcome)
+    const wyl_fact_mutation_outcome_t *outcome, const gchar *error_code)
 {
   wyrelog_error_t cleanup_rc = wyl_daemon_policy_write_finalize_for_response
-        (msg, 500, "fact_forget_audit_failed");
+        (msg, 500, error_code);
   if (cleanup_rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "policy_write_cleanup_failed");
     return;
@@ -13854,7 +13863,7 @@ set_fact_forget_audit_failed_json (SoupServerMessage *msg, gsize rows_purged,
   const gchar *class_name =
       wyl_fact_mutation_class_name (outcome->mutation_class);
   g_autoptr (GString) body = g_string_new ("{\"ok\":false,\"error\":");
-  append_json_string (body, "fact_forget_audit_failed");
+  append_json_string (body, error_code);
   /* The rows really are gone.  A client told otherwise would retry a hard
    * delete that already succeeded. */
   g_string_append (body, ",\"purged\":true,\"rows_purged\":");
@@ -13923,7 +13932,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  /* :forget uses DELETE; :append/:retract use POST. */
+  /* :forget uses DELETE; :append/:retract/:repair use POST. */
   if (op == FACT_HTTP_OP_FORGET) {
     if (g_strcmp0 (method, "DELETE") != 0) {
       set_json_error (msg, 405, "method_not_allowed");
@@ -13939,8 +13948,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   if (!query_tenant_matches (msg, query, tenant))
     return;
 
-  /* --- :forget branch --- */
-  if (op == FACT_HTTP_OP_FORGET) {
+  /* --- :forget and :repair branch --- */
+  if (op == FACT_HTTP_OP_FORGET || op == FACT_HTTP_OP_REPAIR) {
     const gchar *namespace_id =
         lookup_required_query_string (query, "namespace");
     guint32 schema_version = 0;
@@ -13981,7 +13990,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     rc = wyl_daemon_policy_write_acquire (ctx, msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET, &write);
     if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, "fact_forget_failed");
+      set_json_error (msg, 500, op == FACT_HTTP_OP_REPAIR ?
+          "fact_orphan_repair_failed" : "fact_forget_failed");
       return;
     }
 
@@ -14028,7 +14038,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
        * mistake as reporting a committed batch failed, one refusal class
        * over. */
       (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "",
-          tenant, graph, "fact_forget", batch_id, "refused_sealed",
+          tenant, graph,
+          op == FACT_HTTP_OP_REPAIR ? "fact_orphan_repair" : "fact_forget",
+          batch_id, "refused_sealed",
           request_id);
       graph_lookup_clear (&lookup);
       set_json_error (msg, 409, "graph_sealed");
@@ -14083,7 +14095,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     gsize rows_purged = 0;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_create_schema (fact_store);
-    if (rc == WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_OK && op == FACT_HTTP_OP_REPAIR) {
+      guint64 repaired_rows = 0;
+      rc = wyl_fact_store_repair_orphaned_forget (fact_store, &schema,
+              batch_id, operator_id, reason, actor, request_id,
+              &repaired_rows);
+      rows_purged = (gsize) repaired_rows;
+    } else if (rc == WYRELOG_E_OK) {
       const wyl_fact_store_forget_options_t fopts = {
         .batch_id = batch_id,
         .authenticated_actor_subject_id = actor,
@@ -14128,11 +14146,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     schema_columns_clear (schema_columns, n_loaded);
     if (rc == WYRELOG_E_NOT_FOUND) {
-      set_json_error (msg, 404, "fact_batch_not_found");
+      set_json_error (msg, 404, op == FACT_HTTP_OP_REPAIR ?
+          "fact_orphan_repair_candidate_not_found" : "fact_batch_not_found");
       return;
     }
     if (rc != WYRELOG_E_OK) {
-      set_json_error (msg, 500, "fact_forget_failed");
+      set_json_error (msg, 500, op == FACT_HTTP_OP_REPAIR ?
+          "fact_orphan_repair_failed" : "fact_forget_failed");
       return;
     }
     const gchar *forget_request_id = request_id;
@@ -14142,10 +14162,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
      * same mistake here would report a completed hard delete as failed, which
      * is worse -- the rows are gone either way and only the answer changes. */
     wyrelog_error_t forget_audit_rc = emit_fact_lifecycle_audit (ctx,
-            actor != NULL ? actor : "", tenant, graph, "fact_forget",
+            actor != NULL ? actor : "", tenant, graph,
+            op == FACT_HTTP_OP_REPAIR ? "fact_orphan_repair" : "fact_forget",
             batch_id, "purged", forget_request_id);
     if (forget_audit_rc != WYRELOG_E_OK) {
-      set_fact_forget_audit_failed_json (msg, rows_purged, &outcome);
+      set_fact_forget_audit_failed_json (msg, rows_purged, &outcome,
+          op == FACT_HTTP_OP_REPAIR ? "fact_orphan_repair_audit_failed" :
+          "fact_forget_audit_failed");
       return;
     }
     set_fact_forget_json (msg, rows_purged, &outcome);
