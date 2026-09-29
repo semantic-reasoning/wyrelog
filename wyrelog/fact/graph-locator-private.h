@@ -435,13 +435,16 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_dual_witness_open
     WylFactGraphProvisionedRestoreWitness **out_witness);
 typedef enum
 {
+  WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID,
   WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK,
   WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION,
 } WylFactGraphRestorePostPublishLayout;
 /* Read-only exact namespace proof under the retained root writer lease.
  * The caller selects the required layout from durable policy/journal state;
  * this function never infers phase, durability or policy authority. The
- * witness is ephemeral and must be revalidated before a later effect. */
+ * observation is ephemeral. Before a later effect, reopen the exact shape
+ * under the lease and quiescence; witness-only revalidation does not prove
+ * that the bounded namespace has remained closed. */
 wyrelog_error_t wyl_fact_graph_restore_post_publish_shape_open
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
@@ -449,6 +452,17 @@ wyrelog_error_t wyl_fact_graph_restore_post_publish_shape_open
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main,
     WylFactGraphRestorePostPublishLayout layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
+/* For a durable RESERVED row, classify the replacement basename once and
+ * prove only the selected layout. A completed link may precede the policy
+ * phase CAS after a crash. This is an observation, not sync evidence. */
+wyrelog_error_t wyl_fact_graph_restore_post_publish_reserved_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout *out_layout,
     WylFactGraphProvisionedRestoreWitness **out_witness);
 /* Linux post-PUBLISH effect. The caller supplies a durable COMMIT/PUBLISHED
  * reservation and keeps the root writer lease; this helper cannot establish
