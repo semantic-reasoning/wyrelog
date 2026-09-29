@@ -2889,8 +2889,8 @@ wyl_fact_graph_restore_post_publish_reserved_shape_open
 #endif
 }
 
-wyrelog_error_t
-wyl_fact_graph_restore_companion_link_post_publish
+static wyrelog_error_t
+restore_companion_link_post_publish
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease,
     WylFactGraphProvisionedRestoreWitness *retained_old,
@@ -2898,13 +2898,17 @@ wyl_fact_graph_restore_companion_link_post_publish
     const gchar *replacement_uuid,
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout layout,
     WylFactGraphProvisionedRestoreWitness **out_witness)
 {
   if (out_witness != NULL)
     *out_witness = NULL;
   if (resolver == NULL || directory == NULL || lease == NULL
       || out_witness == NULL || expected_old_main == NULL
-      || expected_new_main == NULL)
+      || expected_new_main == NULL
+      || (layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID
+      && layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK
+      && layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION))
     return WYRELOG_E_INVALID;
 #if !defined(__linux__) || defined(G_OS_WIN32)
   (void) retained_old;
@@ -2939,16 +2943,18 @@ wyl_fact_graph_restore_companion_link_post_publish
     rc = restore_post_publish_authority (resolver, directory, lease);
   gint main_fd = -1;
   g_autoptr (WylFactGraphProvisionedRestoreWitness) dual = NULL;
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK
+      && layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK)
     rc = wyl_fact_graph_provisioned_restore_dual_witness_open (directory,
             old_provisioning_uuid, restore_uuid, replacement_uuid,
             expected_old_main, expected_new_main, &dual);
-  gboolean replay = rc == WYRELOG_E_OK;
+  gboolean replay = rc == WYRELOG_E_OK
+      && layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK;
   if (replay)
     rc = restore_post_publish_inventory (directory, names.rollback,
             old_companion, new_companion, expected_old_main,
             expected_new_main, TRUE, &main_fd);
-  else {
+  else if (layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION) {
     rc = retained_old == NULL
         ? WYRELOG_E_POLICY
         : wyl_fact_graph_provisioned_restore_witness_revalidate
@@ -3012,6 +3018,43 @@ wyl_fact_graph_restore_companion_link_post_publish
     *out_witness = g_steal_pointer (&dual);
   return rc;
 #endif
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_companion_link_post_publish
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedRestoreWitness *retained_old,
+    const gchar *old_provisioning_uuid, const gchar *restore_uuid,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  return restore_companion_link_post_publish (resolver, directory, lease,
+             retained_old, old_provisioning_uuid, restore_uuid,
+             replacement_uuid, expected_old_main, expected_new_main,
+             WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID, out_witness);
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_companion_link_post_publish_for_layout
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedRestoreWitness *retained_old,
+    const gchar *old_provisioning_uuid, const gchar *restore_uuid,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (layout == WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID)
+    return WYRELOG_E_INVALID;
+  return restore_companion_link_post_publish (resolver, directory, lease,
+             retained_old, old_provisioning_uuid, restore_uuid,
+             replacement_uuid, expected_old_main, expected_new_main,
+             layout, out_witness);
 }
 
 wyrelog_error_t
@@ -3357,6 +3400,25 @@ wyl_fact_graph_restore_post_publish_reserved_shape_open
   (void) expected_old_main;
   (void) expected_new_main;
   return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_companion_link_post_publish_for_layout
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedRestoreWitness *retained_old,
+    const gchar *old_provisioning_uuid, const gchar *restore_uuid,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  (void) layout;
+  return wyl_fact_graph_restore_companion_link_post_publish (resolver,
+             directory, lease, retained_old, old_provisioning_uuid,
+             restore_uuid, replacement_uuid, expected_old_main,
+             expected_new_main, out_witness);
 }
 
 wyrelog_error_t

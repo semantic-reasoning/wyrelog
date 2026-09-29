@@ -1393,6 +1393,21 @@ test_posix_restore_companion_post_publish (void)
         (&resolver, &graph, lease, retained, exact_operation_uuid,
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
       WYRELOG_E_OK);
+  WylFactGraphProvisionedRestoreWitness *strict = NULL;
+  g_assert_cmpint
+    (wyl_fact_graph_restore_companion_link_post_publish_for_layout
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &strict), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (strict);
+  g_assert_cmpint
+    (wyl_fact_graph_restore_companion_link_post_publish_for_layout
+        (&resolver, &graph, lease, NULL, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &strict), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&strict, wyl_fact_graph_provisioned_restore_witness_free);
   g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
         (dual, &graph), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open

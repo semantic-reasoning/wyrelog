@@ -38,4 +38,22 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_inspect
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactGraphCommitInspectionFunc callback, gpointer user_data);
 
+/* Recover the companion of an already durable imported graph mode-A
+ * COMMIT/PUBLISHED_DURABLE journal. The scoped policy transaction pins the
+ * checked authority while the exact A/B filesystem effect and sync run.
+ * Success returns an owned companion_synced row; any failure empties output.
+ * A failed policy commit may leave the exact dual filesystem shape in place,
+ * so retry must reload both durable records and reobserve the full shape.
+ * This does not admit COMMIT, finalize, publish policy generations or unseal. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_companion_recover
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylPolicyGraphRestoreReplacementRecord **out_committed);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+#endif
+
 G_END_DECLS
