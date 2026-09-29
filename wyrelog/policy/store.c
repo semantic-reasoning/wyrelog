@@ -38529,12 +38529,13 @@ wyl_policy_store_graph_restore_replacement_sync_with_effect
              expected_journal, effect, effect_data, out_result, out_committed);
 }
 
-wyrelog_error_t
-wyl_policy_store_graph_restore_retain_with_effect
+static wyrelog_error_t
+graph_restore_early_commit_with_effect
   (wyl_policy_store_t *store,
     const WylPolicyGraphRestoreReplacementRecord *expected,
     const WylPolicyOfflineRestoreRecord *pending,
     const WylPolicyOfflineRestoreRecord *completed,
+    WylFactArtifactMainTransitionOp operation,
     WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result)
 {
@@ -38566,18 +38567,30 @@ wyl_policy_store_graph_restore_retain_with_effect
       g_ptr_array_index (before.graphs, 0);
   const WylFactOfflineRestoreJournalGraph *after_graph =
       g_ptr_array_index (after.graphs, 0);
-  if (before.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+  gboolean retain = operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN;
+  gboolean sync_rollback = operation ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE;
+  gboolean sync_dir = operation ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR;
+  WylFactArtifactMainTransitionState before_state = retain
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED;
+  WylFactArtifactMainTransitionOp after_next = retain
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+    : sync_rollback
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH;
+  if ((!retain && !sync_rollback && !sync_dir)
+      || before.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
       || before.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       || before.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
-      || before_graph->transition_state !=
-      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
-      || before_graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
-      || before_graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      || before_graph->transition_state != before_state
+      || before_graph->next_op != operation
+      || before_graph->pending_op != operation
       || before_graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
       || after_graph->transition_state !=
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
-      || after_graph->next_op !=
-      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+      || after_graph->next_op != after_next
       || after_graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
       || after_graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED)
     return WYRELOG_E_POLICY;
@@ -38663,4 +38676,35 @@ wyl_policy_store_graph_restore_retain_with_effect
   if (rc == WYRELOG_E_OK)
     *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_retain_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  return graph_restore_early_commit_with_effect (store, expected, pending,
+             completed, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+             effect, effect_data, out_result);
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_sync_retained_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    guint operation,
+    WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  if (operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR)
+    return WYRELOG_E_INVALID;
+  return graph_restore_early_commit_with_effect (store, expected, pending,
+             completed, operation, effect, effect_data, out_result);
 }
