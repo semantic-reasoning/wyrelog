@@ -1134,6 +1134,22 @@ encrypted_rollback_failure (void)
 }
 #endif
 
+static void
+tenant_replacement_schema_is_atomic (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (row_count (store, "fact_tenant_restore_replacements"),
+      ==, 0);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      "DROP TRIGGER fact_tenant_restore_replacement_delete_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1142,6 +1158,8 @@ main (int argc, char **argv)
       storage_contract);
   g_test_add_func ("/fact/offline-restore-journal-store/tenant-bound-generic-denied",
       tenant_bound_generic_writer_denied);
+  g_test_add_func ("/fact/offline-restore-journal-store/tenant-replacement-schema",
+      tenant_replacement_schema_is_atomic);
   g_test_add_func ("/fact/offline-restore-journal-store/provisioned-handoff-cas",
       provisioned_handoff_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/not-applied-retry",
