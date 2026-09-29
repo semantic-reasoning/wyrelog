@@ -3322,9 +3322,18 @@ import_restore_journal_for_test (wyl_policy_store_t *policy,
   sqlite3_finalize (update);
 }
 
-static void
-test_graph_restore_replacement_reservation (void)
+static wyrelog_error_t
+selected_promotion_shape_for_test
+  (const WylPolicyGraphRestoreReplacementRecord *current, gpointer data)
 {
+  g_assert_cmpstr (current->phase, ==, "selected_pending_cleanup");
+  return *(const gboolean *) data ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+test_graph_restore_replacement_reservation (gconstpointer data)
+{
+  gboolean ambiguous_commit = g_strcmp0 (data, "commit-response") == 0;
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "restore-replacement-XXXXXX");
   create_tenant (&fixture);
@@ -3367,11 +3376,18 @@ test_graph_restore_replacement_reservation (void)
   WylFactOfflineBackupManifest manifest = { 0 };
   g_assert_cmpint (wyl_fact_offline_backup_manifest_init (&manifest,
       "tenant-a", 1), ==, WYRELOG_E_OK);
+  WylPolicyFactBackupSnapshot *schema_snapshot = NULL;
+  g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot
+        (fixture.policy, "tenant-a", "alpha", &schema_snapshot), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (schema_snapshot->graphs->len, ==, 1);
+  const WylPolicyFactBackupGraphSnapshot *schema_graph =
+      g_ptr_array_index (schema_snapshot->graphs, 0);
   WylFactOfflineBackupArtifact artifact = {
     .graph_id = "alpha", .store_uuid = authority->store_uuid,
     .format_version = authority->format_version,
     .path_encoding_version = authority->path_encoding_version,
-    .schema_digest = "schema-alpha", .logical_bytes = 10,
+    .schema_digest = schema_graph->active_schema_digest, .logical_bytes = 10,
     .physical_bytes = 4096, .checksum = "sha256:alpha",
   };
   g_assert_cmpint (wyl_fact_offline_backup_manifest_add (&manifest,
@@ -3380,6 +3396,7 @@ test_graph_restore_replacement_reservation (void)
   g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
       &manifest_bytes), ==, WYRELOG_E_OK);
   wyl_fact_offline_backup_manifest_clear (&manifest);
+  wyl_policy_fact_backup_snapshot_free (schema_snapshot);
   g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
         ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
   WylFactOfflineRestoreTargetGraph *target = g_new0
@@ -4168,57 +4185,59 @@ test_graph_restore_replacement_reservation (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
       WYRELOG_E_OK);
-  /* Exercise the schema-only handoff contract with one test-owned SQL
-   * transaction.  The production publisher is a separate recovery step. */
+  WylPolicyGraphRestoreReplacementRecord *promote_row = NULL;
+  WylPolicyOfflineRestoreRecord *promote_journal = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture.policy, operation_uuid, &promote_row), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
+      operation_uuid, &promote_journal), ==, WYRELOG_E_OK);
   sqlite3 *promotion_db = wyl_policy_store_get_db (fixture.policy);
   g_assert_cmpint (sqlite3_exec (promotion_db,
       "UPDATE fact_graph_provisioning SET phase='active' "
       "WHERE phase='restore_selected';", NULL, NULL, NULL), !=, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (promotion_db, "BEGIN IMMEDIATE;",
-      NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
-        (&finalized), ==, WYRELOG_E_OK);
-  import_restore_journal_for_test (fixture.policy, &finalized);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "UPDATE fact_graph_provisioning SET phase='active' "
-      "WHERE phase='restore_selected';", NULL, NULL, NULL), !=, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "UPDATE fact_graphs SET lifecycle_state='active',sealed=0,"
-      "lifecycle_generation=lifecycle_generation+1 "
-      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
-      NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "UPDATE fact_graph_restore_replacements SET phase='verified' "
-      "WHERE phase='selected_pending_cleanup' AND tenant_id='tenant-a' "
-      "AND graph_id='alpha';", NULL, NULL, NULL), !=, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "UPDATE fact_graph_provisioning SET phase='active' "
-      "WHERE phase='restore_selected' AND tenant_id='tenant-a' "
-      "AND graph_id='alpha';"
-      "UPDATE fact_graph_restore_replacements SET phase='verified' "
-      "WHERE phase='selected_pending_cleanup' AND tenant_id='tenant-a' "
-      "AND graph_id='alpha';"
-      "UPDATE tenants SET lifecycle_state='unsealing',"
-      "lifecycle_generation=lifecycle_generation+1 "
-      "WHERE tenant_id='tenant-a';"
-      "UPDATE tenants SET lifecycle_state='active',sealed=0,"
-      "sealed_generation=sealed_generation+1,"
-      "lifecycle_generation=lifecycle_generation+1 "
-      "WHERE tenant_id='tenant-a';", NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_lifecycle_handoff
-        (&finalized), ==, WYRELOG_E_OK);
-  import_restore_journal_for_test (fixture.policy, &finalized);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "DELETE FROM fact_offline_restore_graph_claims "
-      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
-      NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (promotion_db, "COMMIT;", NULL, NULL,
-      NULL), ==, SQLITE_OK);
+  gboolean reject_shape = TRUE;
+  WylPolicyOfflineRestoreStoreResult promotion_result =
+      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_selected_promote_with_effect
+        (fixture.policy, promote_row, promote_journal,
+      selected_promotion_shape_for_test, &reject_shape,
+      &promotion_result), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  reject_shape = FALSE;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (ambiguous_commit)
+    wyl_policy_store_offline_restore_fail_once (fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+#endif
+  wyrelog_error_t promote_rc =
+      wyl_policy_store_graph_restore_selected_promote_with_effect
+        (fixture.policy, promote_row, promote_journal,
+          selected_promotion_shape_for_test, &reject_shape,
+          &promotion_result);
+  if (ambiguous_commit)
+    g_assert_cmpint (promote_rc, ==, WYRELOG_E_IO);
+  else {
+    g_assert_cmpint (promote_rc, ==, WYRELOG_E_OK);
+    g_assert_cmpint (promotion_result, ==,
+        WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  }
   g_clear_pointer (&fixture.policy, wyl_policy_store_close);
   g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
       WYRELOG_E_OK);
+  promotion_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_selected_promote_with_effect
+        (fixture.policy, promote_row, promote_journal,
+      selected_promotion_shape_for_test, &reject_shape,
+      &promotion_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (promotion_result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
+  wyl_policy_offline_restore_record_free (promote_journal);
+  wyl_policy_graph_restore_replacement_record_free (promote_row);
   sqlite3 *reopened_db = wyl_policy_store_get_db (fixture.policy);
   g_assert_cmpint (sqlite3_exec (reopened_db, "BEGIN IMMEDIATE;",
       NULL, NULL, NULL), ==, SQLITE_OK);
@@ -4397,8 +4416,13 @@ main (int argc, char **argv)
         test_restore_validation_session_constructor_rejects);
   }
 #endif
-  g_test_add_func ("/fact-offline-backup-source/restore-replacement",
-      test_graph_restore_replacement_reservation);
+  g_test_add_data_func ("/fact-offline-backup-source/restore-replacement",
+      NULL, test_graph_restore_replacement_reservation);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-replacement-commit-response",
+      "commit-response", test_graph_restore_replacement_reservation);
+#endif
   g_test_add_func ("/fact-offline-backup-source/multi-graph-copy",
       test_multi_graph_copy_and_lease_lifetime);
   g_test_add_func ("/fact-offline-backup-source/empty-active",
