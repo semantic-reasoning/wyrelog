@@ -57,6 +57,14 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_commit_retain_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Drive one v5 tenant COMMIT rollback-file fsync under full tenant authority.
+ * UNKNOWN retries the exact retained inode and leaves output empty on error. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_commit_sync_rollback_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
+
 /* Linux-only, read-only inspection of an imported durable graph mode-A COMMIT
  * state. All lease, resolver, directory, runtime and witness handles remain
  * private and are released on return. Normal mode-A COMMIT admission and
@@ -150,6 +158,8 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_promote_run
 
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+void wyl_fact_offline_restore_tenant_commit_sync_rollback_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
