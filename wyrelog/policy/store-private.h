@@ -3555,6 +3555,19 @@ wyrelog_error_t wyl_policy_store_graph_restore_selected_finalize_with_effect
     WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Publish a selected FINALIZED graph in one fenced transaction. The callback
+ * must prove the terminal namespace shape while the caller holds the root
+ * writer lease and graph quiescence; it must not mutate files or reenter the
+ * store. The writer rechecks canonical journal, claim, sealed authority and
+ * schema digest before advancing both lifecycle generations and releasing
+ * the claim. A commit-response error requires fresh full-tuple observation. */
+wyrelog_error_t wyl_policy_store_graph_restore_selected_promote_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *finalized,
+    WylPolicyGraphRestoreSelectionEffectFunc terminal_shape_check,
+    gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result);
+
 /* Complete a pending graph COMMIT RETAIN only after the callback proves the
  * exact retained filesystem shape. The effect runs under the policy writer
  * transaction and must not reenter the policy store. */
