@@ -258,6 +258,22 @@ wyrelog_error_t wyl_fact_store_forget (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_forget_options_t * opts, gsize * out_rows_purged);
 
+/* Count only orphan rows backed by one completed zero-purge wrong-relation
+ * forget and its matching audit record. Ambiguous history is excluded. */
+wyrelog_error_t wyl_fact_store_orphan_repair_candidates
+  (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    guint64 *out_batches, guint64 *out_rows);
+
+/* Repair one proven candidate. The delete and repair audit commit together.
+ * A missing or ambiguous candidate returns NOT_FOUND without mutation. */
+wyrelog_error_t wyl_fact_store_repair_orphaned_forget
+  (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, const gchar *operator_id, const gchar *reason,
+    const gchar *authenticated_actor_subject_id, const gchar *request_id,
+    guint64 *out_rows_purged);
+
 /*
  * What a reconciliation pass did with the intents it loaded (#869 U2).
  *

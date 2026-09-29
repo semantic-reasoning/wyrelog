@@ -2159,7 +2159,22 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
              * stores only identifiers and the fingerprint, never fact content.
              */
             "CREATE TABLE IF NOT EXISTS fact_forget_intent ("
-            FACT_FORGET_INTENT_COLUMNS ");");
+            FACT_FORGET_INTENT_COLUMNS ");"
+            "CREATE TABLE IF NOT EXISTS fact_orphan_repair_audit ("
+            "  op_uuid VARCHAR PRIMARY KEY,"
+            "  batch_id VARCHAR NOT NULL,"
+            "  tenant_id VARCHAR NOT NULL,"
+            "  graph_id VARCHAR NOT NULL,"
+            "  projection_table VARCHAR NOT NULL,"
+            "  original_forget_op_uuid VARCHAR NOT NULL,"
+            "  operator VARCHAR NOT NULL,"
+            "  reason VARCHAR NOT NULL,"
+            "  rows_purged BIGINT NOT NULL,"
+            "  created_at_us BIGINT NOT NULL,"
+            "  actor_subject_id VARCHAR,"
+            "  request_id VARCHAR,"
+            "  UNIQUE (original_forget_op_uuid, projection_table, batch_id)"
+            ");");
   if (rc == WYRELOG_E_OK) {
     WylFactStoreTransaction migration = { 0 };
     rc = wyl_fact_store_transaction_begin (&session,
@@ -4100,6 +4115,212 @@ wyl_fact_store_forget (wyl_fact_store_t *store,
 
 forget_unlock:
   forget_intent_clear (&intent);
+  wyl_fact_store_connection_session_end (&session);
+  return rc;
+}
+
+/* Deliberately conservative: a missing batch alone is not evidence of the
+ * historical bug. The original operation wrote the audit row and completed
+ * timestamp in one transaction, using the same timestamp for both. */
+static wyrelog_error_t
+orphan_repair_census_unlocked (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *table, const gchar *batch_id, gint64 *out_batches,
+    gint64 *out_rows)
+{
+  g_autoptr (GString) sql = g_string_new (
+    "SELECT COUNT(*), COALESCE(SUM(row_count), 0) FROM ("
+    " SELECT p.__wyl_batch_id, COUNT(*) AS row_count FROM ");
+  append_duckdb_identifier (sql, table);
+  g_string_append (sql,
+      " p WHERE p.__wyl_tenant_id = ? AND p.__wyl_graph_id = ? "
+      "AND (? IS NULL OR p.__wyl_batch_id = ?) "
+      "AND NOT EXISTS (SELECT 1 FROM fact_batches b "
+      " WHERE b.batch_id = p.__wyl_batch_id) "
+      "AND NOT EXISTS (SELECT 1 FROM fact_event_log e "
+      " WHERE e.batch_id = p.__wyl_batch_id) "
+      "AND (SELECT COUNT(*) FROM fact_forget_intent i "
+      " WHERE i.batch_id = p.__wyl_batch_id) = 1 "
+      "AND (SELECT COUNT(*) FROM fact_forget_audit a "
+      " WHERE a.batch_id = p.__wyl_batch_id) = 1 "
+      "AND EXISTS (SELECT 1 FROM fact_forget_intent i "
+      " JOIN fact_forget_audit a ON a.batch_id = i.batch_id "
+      " WHERE i.batch_id = p.__wyl_batch_id "
+      " AND i.tenant_id = ? AND i.graph_id = ? "
+      " AND i.projection_table <> ? "
+      " AND i.state = 'COMPLETED' AND i.rows_purged = 0 "
+      " AND i.completed_at_us IS NOT NULL "
+      " AND a.tenant_id = i.tenant_id AND a.graph_id = i.graph_id "
+      " AND a.operator = i.operator AND a.reason = i.reason "
+      " AND a.rows_purged = 0 "
+      " AND a.created_at_us = i.completed_at_us "
+      " AND NOT EXISTS (SELECT 1 FROM fact_orphan_repair_audit r "
+      " WHERE r.original_forget_op_uuid = i.op_uuid "
+      " AND r.projection_table = ? "
+      " AND r.batch_id = p.__wyl_batch_id)) "
+      "GROUP BY p.__wyl_batch_id) candidates;");
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state bound = duckdb_bind_varchar (stmt, 1, schema->tenant_id)
+      | duckdb_bind_varchar (stmt, 2, schema->graph_id)
+      | (batch_id != NULL ? duckdb_bind_varchar (stmt, 3, batch_id)
+          : duckdb_bind_null (stmt, 3))
+      | (batch_id != NULL ? duckdb_bind_varchar (stmt, 4, batch_id)
+          : duckdb_bind_null (stmt, 4))
+      | duckdb_bind_varchar (stmt, 5, schema->tenant_id)
+      | duckdb_bind_varchar (stmt, 6, schema->graph_id)
+      | duckdb_bind_varchar (stmt, 7, table)
+      | duckdb_bind_varchar (stmt, 8, table);
+  if (bound != DuckDBSuccess
+      || duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  *out_batches = duckdb_value_int64 (&result, 0, 0);
+  *out_rows = duckdb_value_int64 (&result, 1, 0);
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_store_orphan_repair_candidates (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    guint64 *out_batches, guint64 *out_rows)
+{
+  if (out_batches != NULL)
+    *out_batches = 0;
+  if (out_rows != NULL)
+    *out_rows = 0;
+  if (store == NULL || schema == NULL || out_batches == NULL
+      || out_rows == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (rc == WYRELOG_E_OK)
+    rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_projection_shape_unlocked (store, schema, table);
+  gint64 batches = 0, rows = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = orphan_repair_census_unlocked (store, schema, table, NULL,
+            &batches, &rows);
+  wyl_fact_store_connection_session_end (&session);
+  if (rc == WYRELOG_E_OK) {
+    *out_batches = (guint64) batches;
+    *out_rows = (guint64) rows;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_repair_orphaned_forget (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, const gchar *operator_id, const gchar *reason,
+    const gchar *authenticated_actor_subject_id, const gchar *request_id,
+    guint64 *out_rows_purged)
+{
+  if (out_rows_purged != NULL)
+    *out_rows_purged = 0;
+  if (store == NULL || schema == NULL || batch_id == NULL
+      || batch_id[0] == '\0' || operator_id == NULL || operator_id[0] == '\0'
+      || reason == NULL || reason[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  g_autofree gchar *repair_uuid = g_uuid_string_random ();
+  if (table == NULL || repair_uuid == NULL)
+    return WYRELOG_E_NOMEM;
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, schema->tenant_id,
+            schema->graph_id, FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_projection_shape_unlocked (store, schema, table);
+  WylFactStoreTransaction transaction = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_transaction_begin (&session,
+            WYL_FACT_STORE_TRANSACTION_FORGET_COMPLETE, &transaction);
+  if (rc == WYRELOG_E_OK) {
+    gint64 batches = 0, rows = 0;
+    rc = orphan_repair_census_unlocked (store, schema, table, batch_id,
+            &batches, &rows);
+    if (rc == WYRELOG_E_OK && (batches != 1 || rows < 1))
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK) {
+      g_autoptr (GString) sql = g_string_new ("DELETE FROM ");
+      append_duckdb_identifier (sql, table);
+      g_string_append (sql, " WHERE __wyl_batch_id = ? "
+          "AND __wyl_tenant_id = ? AND __wyl_graph_id = ?;");
+      duckdb_prepared_statement stmt = NULL;
+      if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+        rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK) {
+        duckdb_state bound = duckdb_bind_varchar (stmt, 1, batch_id)
+            | duckdb_bind_varchar (stmt, 2, schema->tenant_id)
+            | duckdb_bind_varchar (stmt, 3, schema->graph_id);
+        if (bound != DuckDBSuccess
+            || duckdb_execute_prepared (stmt, NULL) != DuckDBSuccess)
+          rc = WYRELOG_E_IO;
+      }
+      duckdb_destroy_prepare (&stmt);
+    }
+    if (rc == WYRELOG_E_OK) {
+      duckdb_prepared_statement stmt = NULL;
+      static const gchar *audit_sql =
+          "INSERT INTO fact_orphan_repair_audit "
+          "(op_uuid, batch_id, tenant_id, graph_id, projection_table, "
+          " original_forget_op_uuid, operator, reason, rows_purged, "
+          " created_at_us, actor_subject_id, request_id) "
+          "SELECT ?, ?, ?, ?, ?, i.op_uuid, ?, ?, ?, ?, ?, ? "
+          "FROM fact_forget_intent i WHERE i.batch_id = ?;";
+      if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess)
+        rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK) {
+        duckdb_state bound = duckdb_bind_varchar (stmt, 1, repair_uuid)
+            | duckdb_bind_varchar (stmt, 2, batch_id)
+            | duckdb_bind_varchar (stmt, 3, schema->tenant_id)
+            | duckdb_bind_varchar (stmt, 4, schema->graph_id)
+            | duckdb_bind_varchar (stmt, 5, table)
+            | duckdb_bind_varchar (stmt, 6, operator_id)
+            | duckdb_bind_varchar (stmt, 7, reason)
+            | duckdb_bind_int64 (stmt, 8, rows)
+            | duckdb_bind_int64 (stmt, 9, g_get_real_time ())
+            | bind_optional_varchar (stmt, 10, authenticated_actor_subject_id)
+            | bind_optional_varchar (stmt, 11, request_id)
+            | duckdb_bind_varchar (stmt, 12, batch_id);
+        if (bound != DuckDBSuccess
+            || duckdb_execute_prepared (stmt, NULL) != DuckDBSuccess)
+          rc = WYRELOG_E_IO;
+      }
+      duckdb_destroy_prepare (&stmt);
+    }
+    rc = wyl_fact_store_transaction_finish (&transaction, rc);
+    if (rc == WYRELOG_E_OK && out_rows_purged != NULL)
+      *out_rows_purged = (guint64) rows;
+  }
   wyl_fact_store_connection_session_end (&session);
   return rc;
 }
