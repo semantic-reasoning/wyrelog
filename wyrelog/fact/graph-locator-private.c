@@ -2294,9 +2294,13 @@ struct WylFactGraphProvisionedRestoreWitness
   WylFactGraphDirectory directory;
   gchar *companion_name;
   gchar *old_name;
+  gchar *new_companion_name;
   gint companion_fd;
+  gint new_companion_fd;
   guint64 expected_device;
   guint64 expected_inode;
+  guint64 expected_new_device;
+  guint64 expected_new_inode;
   WylFactGraphProvisionedRestoreSlot slot;
 };
 
@@ -2311,14 +2315,17 @@ restore_witness_old_stat (const struct stat *st,
 }
 
 static wyrelog_error_t
-restore_witness_name (WylFactGraphProvisionedRestoreWitness *witness,
-    const gchar *name)
+restore_witness_name_exact (WylFactGraphProvisionedRestoreWitness *witness,
+    const gchar *name, guint64 device, guint64 inode)
 {
   struct stat before = { 0 }, held = { 0 }, after = { 0 };
   if (fstatat (witness->directory.graph_fd, name, &before,
       AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
-  if (!restore_witness_old_stat (&before, witness))
+  if (!S_ISREG (before.st_mode) || before.st_nlink != 2
+      || (before.st_mode & 07777) != 0600 || before.st_uid != geteuid ()
+      || (guint64) before.st_dev != device
+      || (guint64) before.st_ino != inode)
     return WYRELOG_E_POLICY;
   gint fd = openat (witness->directory.graph_fd, name,
           O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
@@ -2329,13 +2336,25 @@ restore_witness_name (WylFactGraphProvisionedRestoreWitness *witness,
       || fstatat (witness->directory.graph_fd, name, &after,
       AT_SYMLINK_NOFOLLOW) != 0)
     rc = WYRELOG_E_IO;
-  else if (!restore_witness_old_stat (&held, witness)
-      || !restore_witness_old_stat (&after, witness)
+  else if (!S_ISREG (held.st_mode) || held.st_nlink != 2
+      || (held.st_mode & 07777) != 0600 || held.st_uid != geteuid ()
+      || (guint64) held.st_dev != device || (guint64) held.st_ino != inode
+      || !S_ISREG (after.st_mode) || after.st_nlink != 2
+      || (after.st_mode & 07777) != 0600 || after.st_uid != geteuid ()
+      || (guint64) after.st_dev != device || (guint64) after.st_ino != inode
       || held.st_dev != before.st_dev || held.st_ino != before.st_ino
       || after.st_dev != before.st_dev || after.st_ino != before.st_ino)
     rc = WYRELOG_E_POLICY;
   close (fd);
   return rc;
+}
+
+static wyrelog_error_t
+restore_witness_name (WylFactGraphProvisionedRestoreWitness *witness,
+    const gchar *name)
+{
+  return restore_witness_name_exact (witness, name,
+             witness->expected_device, witness->expected_inode);
 }
 
 wyrelog_error_t
@@ -2369,21 +2388,54 @@ wyl_fact_graph_provisioned_restore_witness_revalidate
   if (rc == WYRELOG_E_OK)
     rc = restore_witness_name (witness, witness->old_name);
   if (rc == WYRELOG_E_OK
-      && witness->slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK) {
+      && witness->slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN) {
     struct stat main = { 0 };
     if (fstatat (witness->directory.graph_fd,
         WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, &main,
         AT_SYMLINK_NOFOLLOW) == 0) {
-      if (!S_ISREG (main.st_mode) || main.st_nlink != 1
+      guint links = witness->slot ==
+          WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION ? 2 : 1;
+      if (!S_ISREG (main.st_mode) || main.st_nlink != links
           || (main.st_mode & 07777) != 0600 || main.st_uid != geteuid ()
           || ((guint64) main.st_dev == witness->expected_device
-          && (guint64) main.st_ino == witness->expected_inode))
+          && (guint64) main.st_ino == witness->expected_inode)
+          || (witness->slot ==
+          WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION
+          && ((guint64) main.st_dev != witness->expected_new_device
+          || (guint64) main.st_ino != witness->expected_new_inode)))
         rc = WYRELOG_E_POLICY;
-    } else if (errno != ENOENT)
-      rc = errno_to_resolver_error (errno);
+    } else if (errno != ENOENT || witness->slot ==
+        WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION)
+      rc = errno == ENOENT ? WYRELOG_E_POLICY :
+          errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK && witness->slot ==
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION) {
+    struct stat new_companion = { 0 };
+    if (witness->new_companion_fd < 0
+        || fstat (witness->new_companion_fd, &new_companion) != 0
+        || !S_ISREG (new_companion.st_mode)
+        || new_companion.st_nlink != 2
+        || (new_companion.st_mode & 07777) != 0600
+        || new_companion.st_uid != geteuid ()
+        || (guint64) new_companion.st_dev != witness->expected_new_device
+        || (guint64) new_companion.st_ino != witness->expected_new_inode)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK)
+      rc = restore_witness_name_exact (witness,
+              witness->new_companion_name, witness->expected_new_device,
+              witness->expected_new_inode);
+    if (rc == WYRELOG_E_OK)
+      rc = restore_witness_name_exact (witness,
+              WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+              witness->expected_new_device, witness->expected_new_inode);
   }
   if (rc == WYRELOG_E_OK)
     rc = restore_witness_name (witness, witness->companion_name);
+  if (rc == WYRELOG_E_OK && witness->slot ==
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION)
+    rc = restore_witness_name_exact (witness, witness->new_companion_name,
+            witness->expected_new_device, witness->expected_new_inode);
   if (rc == WYRELOG_E_OK)
     rc = restore_witness_name (witness, witness->old_name);
   if (rc == WYRELOG_E_OK)
@@ -2400,8 +2452,11 @@ wyl_fact_graph_provisioned_restore_witness_free
     return;
   if (witness->companion_fd >= 0)
     close (witness->companion_fd);
+  if (witness->new_companion_fd >= 0)
+    close (witness->new_companion_fd);
   wyl_fact_graph_directory_clear (&witness->directory);
   g_free (witness->companion_name);
+  g_free (witness->new_companion_name);
   g_free (witness->old_name);
   g_free (witness);
 }
@@ -2447,6 +2502,7 @@ wyl_fact_graph_provisioned_restore_witness_open
   }
   witness->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
   witness->companion_fd = -1;
+  witness->new_companion_fd = -1;
   witness->companion_name = g_steal_pointer (&companion);
   witness->old_name = slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
     ? g_strdup (WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME)
@@ -2464,6 +2520,98 @@ wyl_fact_graph_provisioned_restore_witness_open
             witness->companion_name,
             O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (witness->companion_fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+            directory);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_provisioned_restore_witness_free (witness);
+    return rc;
+  }
+  *out_witness = witness;
+  return WYRELOG_E_OK;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_graph_provisioned_restore_dual_witness_open
+  (WylFactGraphDirectory *directory, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (out_witness != NULL)
+    *out_witness = NULL;
+  if (directory == NULL || out_witness == NULL || expected_old_main == NULL
+      || expected_new_main == NULL || expected_old_main->domain == 0
+      || expected_old_main->object == 0 || expected_old_main->object_width != 0
+      || expected_new_main->domain == 0 || expected_new_main->object == 0
+      || expected_new_main->object_width != 0
+      || !wyl_fact_artifact_inventory_identity_equal (expected_old_main,
+      expected_old_main)
+      || !wyl_fact_artifact_inventory_identity_equal (expected_new_main,
+      expected_new_main)
+      || wyl_fact_artifact_inventory_identity_equal (expected_old_main,
+      expected_new_main))
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  (void) old_provisioning_uuid;
+  (void) restore_uuid;
+  (void) replacement_uuid;
+  return WYRELOG_E_POLICY;
+#else
+  g_autofree gchar *old_companion = NULL;
+  g_autofree gchar *new_companion = NULL;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = provisioning_stage_name_from_operation
+        (old_provisioning_uuid, &old_companion);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (replacement_uuid,
+            &new_companion);
+  if (rc == WYRELOG_E_OK && g_strcmp0 (old_companion, new_companion) == 0)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_names_clear (&names);
+    return rc;
+  }
+  WylFactGraphProvisionedRestoreWitness *witness = g_try_new0
+        (WylFactGraphProvisionedRestoreWitness, 1);
+  if (witness == NULL) {
+    wyl_fact_artifact_transition_names_clear (&names);
+    return WYRELOG_E_NOMEM;
+  }
+  witness->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  witness->companion_fd = -1;
+  witness->new_companion_fd = -1;
+  witness->companion_name = g_steal_pointer (&old_companion);
+  witness->new_companion_name = g_steal_pointer (&new_companion);
+  witness->old_name = g_steal_pointer (&names.rollback);
+  witness->expected_device = expected_old_main->domain;
+  witness->expected_inode = expected_old_main->object;
+  witness->expected_new_device = expected_new_main->domain;
+  witness->expected_new_inode = expected_new_main->object;
+  witness->slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION;
+  wyl_fact_artifact_transition_names_clear (&names);
+  if (witness->old_name == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_clone (directory, &witness->directory);
+  if (rc == WYRELOG_E_OK) {
+    witness->companion_fd = openat (witness->directory.graph_fd,
+            witness->companion_name,
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (witness->companion_fd < 0)
+      rc = errno_to_resolver_error (errno);
+  }
+  if (rc == WYRELOG_E_OK) {
+    witness->new_companion_fd = openat (witness->directory.graph_fd,
+            witness->new_companion_name,
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (witness->new_companion_fd < 0)
       rc = errno_to_resolver_error (errno);
   }
   if (rc == WYRELOG_E_OK)
@@ -2798,6 +2946,25 @@ wyl_fact_graph_stage_clear (WylFactGraphStage *stage)
 #endif
 
 #ifdef G_OS_WIN32
+wyrelog_error_t
+wyl_fact_graph_provisioned_restore_dual_witness_open
+  (WylFactGraphDirectory *directory, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (out_witness != NULL)
+    *out_witness = NULL;
+  (void) directory;
+  (void) old_provisioning_uuid;
+  (void) restore_uuid;
+  (void) replacement_uuid;
+  (void) expected_old_main;
+  (void) expected_new_main;
+  return WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_fact_graph_provisioned_restore_witness_open
   (WylFactGraphDirectory *directory, const gchar *provisioning_uuid,
