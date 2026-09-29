@@ -576,6 +576,26 @@ fail_exact_stage_checkpoint_once (const gchar *point, gpointer user_data)
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  const gchar *main_path;
+  const gchar *companion_path;
+  gboolean fired;
+} RestoreShapeSwap;
+
+static wyrelog_error_t
+link_after_restore_shape_classification (const gchar *point,
+    gpointer user_data)
+{
+  RestoreShapeSwap *swap = user_data;
+  if (!swap->fired && g_strcmp0 (point,
+      "restore-post-publish-classified") == 0) {
+    swap->fired = TRUE;
+    g_assert_cmpint (link (swap->main_path, swap->companion_path), ==, 0);
+  }
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 replace_exact_stage_name (const gchar *point, gpointer user_data)
 {
@@ -1296,6 +1316,15 @@ test_posix_restore_companion_post_publish (void)
       WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK, &shape), ==,
       WYRELOG_E_OK);
   g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
+  WylFactGraphRestorePostPublishLayout observed =
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION;
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK);
+  g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &new_identity,
@@ -1345,6 +1374,21 @@ test_posix_restore_companion_post_publish (void)
       WYRELOG_E_POLICY);
   g_assert_null (shape);
   g_assert_cmpint (g_remove (stage), ==, 0);
+  RestoreShapeSwap swap = { main_path, new_companion, FALSE };
+  graph.checkpoint = link_after_restore_shape_classification;
+  graph.checkpoint_data = &swap;
+  observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION;
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (swap.fired);
+  g_assert_null (shape);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (g_remove (new_companion), ==, 0);
   g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
         (&resolver, &graph, lease, retained, exact_operation_uuid,
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
@@ -1357,6 +1401,13 @@ test_posix_restore_companion_post_publish (void)
       WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), ==,
       WYRELOG_E_OK);
   g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION);
+  g_clear_pointer (&shape, wyl_fact_graph_provisioned_restore_witness_free);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &new_identity,
@@ -1365,6 +1416,11 @@ test_posix_restore_companion_post_publish (void)
   g_assert_null (shape);
   g_autofree gchar *third = g_build_filename (graph_path, "third-link", NULL);
   g_assert_cmpint (link (main_path, third), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &new_identity,
@@ -1420,6 +1476,11 @@ test_posix_restore_companion_post_publish (void)
       WYRELOG_E_OK);
   g_assert_null (shape);
   g_assert_cmpint (symlink (main_path, new_companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &new_identity,
@@ -1429,6 +1490,11 @@ test_posix_restore_companion_post_publish (void)
   g_assert_cmpint (g_remove (new_companion), ==, 0);
   g_assert_true (g_file_set_contents (new_companion, "foreign", -1, NULL));
   g_assert_cmpint (g_chmod (new_companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &observed, &shape), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (shape);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &new_identity,

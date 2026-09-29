@@ -2829,6 +2829,67 @@ wyl_fact_graph_restore_post_publish_shape_open
 }
 
 wyrelog_error_t
+wyl_fact_graph_restore_post_publish_reserved_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout *out_layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (out_layout != NULL)
+    *out_layout = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  if (out_witness != NULL)
+    *out_witness = NULL;
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || expected_old_main == NULL || expected_new_main == NULL
+      || out_layout == NULL || out_witness == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) old_provisioning_uuid;
+  (void) restore_uuid;
+  (void) replacement_uuid;
+  return WYRELOG_E_POLICY;
+#else
+  g_autofree gchar *new_companion = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation
+        (replacement_uuid, &new_companion);
+  if (rc == WYRELOG_E_OK
+      && (!restore_inventory_identity_valid (expected_new_main)
+      || expected_new_main->domain == 0 || expected_new_main->object == 0))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_post_publish_authority (resolver, directory, lease);
+  WylFactGraphRestorePostPublishLayout selected =
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK;
+  struct stat named = { 0 };
+  if (rc == WYRELOG_E_OK
+      && fstatat (directory->graph_fd, new_companion, &named,
+      AT_SYMLINK_NOFOLLOW) == 0) {
+    if (!S_ISREG (named.st_mode) || named.st_nlink != 2
+        || named.st_uid != geteuid () || (named.st_mode & 07777) != 0600
+        || (guint64) named.st_dev != expected_new_main->domain
+        || (guint64) named.st_ino != expected_new_main->object)
+      rc = WYRELOG_E_POLICY;
+    else
+      selected = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION;
+  } else if (rc == WYRELOG_E_OK && errno != ENOENT)
+    rc = errno_to_resolver_error (errno);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-post-publish-classified",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_post_publish_shape_open (resolver, directory,
+            lease, old_provisioning_uuid, restore_uuid, replacement_uuid,
+            expected_old_main, expected_new_main, selected, out_witness);
+  if (rc == WYRELOG_E_OK)
+    *out_layout = selected;
+  return rc;
+#endif
+}
+
+wyrelog_error_t
 wyl_fact_graph_restore_companion_link_post_publish
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease,
@@ -3273,6 +3334,31 @@ wyl_fact_graph_stage_clear (WylFactGraphStage *stage)
 #endif
 
 #ifdef G_OS_WIN32
+wyrelog_error_t
+wyl_fact_graph_restore_post_publish_reserved_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout *out_layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (out_layout != NULL)
+    *out_layout = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  if (out_witness != NULL)
+    *out_witness = NULL;
+  (void) resolver;
+  (void) directory;
+  (void) lease;
+  (void) old_provisioning_uuid;
+  (void) restore_uuid;
+  (void) replacement_uuid;
+  (void) expected_old_main;
+  (void) expected_new_main;
+  return WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_fact_graph_restore_post_publish_shape_open
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
