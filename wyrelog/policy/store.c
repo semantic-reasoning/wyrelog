@@ -37578,7 +37578,7 @@ offline_restore_record_has_selected_marker
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   return wyl_fact_offline_restore_journal_decode (record->journal_blob,
              &journal) == WYRELOG_E_OK
-         && journal.version ==
+         && journal.version >=
          WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
          && journal.replacement_selected_pending_cleanup;
 }

@@ -488,7 +488,8 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
   if (journal == NULL
       || (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
       && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
-      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
       || journal->revision == 0 || !canonical_uuid (journal->operation_uuid)
       || !bounded_text (journal->tenant_id) || journal->graphs == NULL
       || journal->source_tenant_lifecycle_generation == 0
@@ -511,12 +512,14 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       && journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT)
       || (journal->lifecycle_handoff_complete
       && !journal->policy_generation_published)
-      || (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || (journal->version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
       ? !journal->replacement_selected_pending_cleanup
       || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
-      || journal->policy_generation_published
+      || (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      ? journal->policy_generation_published
       || journal->lifecycle_handoff_complete
+      : !journal->policy_generation_published)
       : journal->replacement_selected_pending_cleanup)
       || (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
       && (journal->confirmation
@@ -574,7 +577,8 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
     if ((journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
         && has_old)
         || ((journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
-        || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+        || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+        || journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
         && !has_old)
         || (has_old
         && (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
@@ -597,6 +601,15 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE))))
+      return FALSE;
+    if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION
+        && (journal->graphs->len != 1 || graph->expected_main_absent
+        || graph->durability_unprovable_acknowledged
+        || graph->transition_state
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED))
       return FALSE;
     if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
         && (!graph->replay_preflighted || graph->resume_forbidden))
@@ -683,7 +696,7 @@ wyl_fact_offline_restore_journal_encode
       journal->confirmation, journal->manifest_trust, journal->decision,
       journal->policy_generation_published, journal->lifecycle_handoff_complete,
       journal->graphs->len);
-  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+  if (journal->version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
     g_string_append_printf (text, "replacement_selected=%u\n",
         journal->replacement_selected_pending_cleanup);
   for (guint i = 0; i < journal->graphs->len; i++) {
@@ -934,7 +947,7 @@ wyl_fact_offline_restore_journal_decode
   out_journal->policy_generation_published = policy_published;
   out_journal->lifecycle_handoff_complete = handoff;
   guint graph_start = 17;
-  if (valid && version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION) {
+  if (valid && version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION) {
     valid = line_value (lines, graph_start, "replacement_selected", &value)
         && parse_bool (value,
             &out_journal->replacement_selected_pending_cleanup);
@@ -998,9 +1011,17 @@ can_advance_revision (const WylFactOfflineRestoreJournal *journal)
   if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
     return journal->replacement_selected_pending_cleanup
            && !graph->durability_unprovable_acknowledged
-           && graph->transition_state ==
+           && ((graph->transition_state ==
            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
-           && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+           && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE)
+           || graph->transition_state ==
+           WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
+    return journal->replacement_selected_pending_cleanup
+           && journal->policy_generation_published
+           && !journal->lifecycle_handoff_complete
+           && graph->transition_state ==
+           WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED;
   /* An imported v2 replacement may advance its journaled filesystem
    * transition. FINALIZE and later policy/lifecycle transitions remain closed. */
   return journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
@@ -1186,6 +1207,8 @@ wyl_fact_offline_restore_journal_mark_policy_published
         != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED)
       return WYRELOG_E_POLICY;
   }
+  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+    journal->version = WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION;
   journal->policy_generation_published = TRUE;
   journal->revision++;
   return WYRELOG_E_OK;
@@ -1331,7 +1354,8 @@ wyl_fact_offline_restore_journal_recovery
       && !((WylFactOfflineRestoreJournalGraph *)
       g_ptr_array_index (journal->graphs, 0))->expected_main_absent) {
     if (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
-        && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION)
+        && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+        && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION)
       return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
     /* The generic recovery classifier has no reservation or filesystem
      * authority. The dedicated companion runner handles durable publication;
