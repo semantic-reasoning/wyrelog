@@ -28,6 +28,16 @@ typedef struct
 typedef wyrelog_error_t (*WylFactGraphCommitInspectionFunc)
   (const WylFactGraphCommitInspection *inspection, gpointer user_data);
 
+/* Bind one old ACTIVE provisioning UUID to an imported, fully preflighted
+ * tenant journal. The root lease and every graph's quiescence remain held
+ * through a transaction-scoped exact filesystem proof. Only the journal
+ * changes; COMMIT admission and publication remain separate. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
+
 /* Linux-only, read-only inspection of an imported durable graph mode-A COMMIT
  * state. All lease, resolver, directory, runtime and witness handles remain
  * private and are released on return. Normal mode-A COMMIT admission and
