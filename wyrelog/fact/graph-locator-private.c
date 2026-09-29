@@ -3353,8 +3353,14 @@ restore_companion_link_post_publish
       rc = directory->checkpoint ("restore-companion-linked",
               directory->checkpoint_data);
   }
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-companion-before-main-fsync",
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK && fsync (main_fd) != 0)
     rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-companion-before-dir-fsync",
+            directory->checkpoint_data);
   if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
     rc = WYRELOG_E_IO;
   if (main_fd >= 0)

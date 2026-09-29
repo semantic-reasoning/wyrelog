@@ -3,6 +3,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gio/gio.h>
 #include <string.h>
 #include <stdio.h>
 #ifndef G_OS_WIN32
@@ -3263,6 +3264,10 @@ tenant_reserve_intrude (const gchar *graph_id, const gchar *replacement_uuid,
 }
 #endif
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t fail_companion_linked_once
+  (const gchar *point, gpointer user_data);
+#endif
 static void
 test_tenant_commit_sync_staged_both (gconstpointer data)
 {
@@ -3935,6 +3940,205 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                   session_operation, 32, 0, &f.committed), ==,
                   WYRELOG_E_BUSY);
               g_assert_null (f.committed.graphs);
+            }
+            if (g_str_has_prefix (mode,
+                "retain-sync-dir-publish-sync-companion")) {
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, 32, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (f.committed.revision, ==, 33);
+              if (g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-foreign")
+                  || g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-sibling-foreign")
+                  || g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-symlink")) {
+                gboolean sibling = g_str_has_suffix (mode, "sibling-foreign");
+                const gchar *target_graph = sibling ? second : first;
+                const WylFactOfflineRestoreJournalGraph *target = NULL;
+                for (guint i = 0; i < f.committed.graphs->len; i++) {
+                  const WylFactOfflineRestoreJournalGraph *candidate =
+                      g_ptr_array_index (f.committed.graphs, i);
+                  if (g_str_equal (candidate->graph_id, target_graph))
+                    target = candidate;
+                }
+                g_assert_nonnull (target);
+                g_autofree gchar *basename = g_strdup_printf
+                      ("provision-%s.sqlite",
+                        target->replacement_provisioning_uuid);
+                g_autofree gchar *foreign = graph_file_path (&f.fixture,
+                        target_graph, basename);
+                if (g_str_has_suffix (mode, "symlink")) {
+#ifdef __linux__
+                  g_autoptr (GFile) link = g_file_new_for_path (foreign);
+                  g_assert_true (g_file_make_symbolic_link (link, "/dev/null",
+                      NULL, NULL));
+#endif
+                } else
+                  g_assert_true (g_file_set_contents (foreign, "foreign", -1,
+                      NULL));
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                    session_operation, first, 33, 0, &f.committed), !=,
+                    WYRELOG_E_OK);
+                g_assert_null (f.committed.graphs);
+                g_assert_cmpint (g_remove (foreign), ==, 0);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+              }
+              if (g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-phase-fail")) {
+                g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                      (f.fixture.policy), "CREATE TEMP TRIGGER "
+                    "fail_tenant_companion_phase BEFORE UPDATE ON "
+                    "main.fact_tenant_restore_replacements BEGIN "
+                    "SELECT RAISE(ABORT,'injected phase failure'); END;",
+                    NULL, NULL, NULL), ==, SQLITE_OK);
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                    session_operation, first, 33, 0, &f.committed), !=,
+                    WYRELOG_E_OK);
+                g_assert_null (f.committed.graphs);
+                g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                      (f.fixture.policy), "DROP TRIGGER "
+                    "fail_tenant_companion_phase;", NULL, NULL, NULL), ==,
+                    SQLITE_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                      (f.fixture.policy), "UPDATE "
+                    "fact_tenant_restore_replacements SET "
+                    "phase='companion_synced' WHERE graph_id='alpha';",
+                    NULL, NULL, NULL), ==, SQLITE_CONSTRAINT_TRIGGER);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+              }
+#ifdef WYL_TEST_HANDLE_SEAMS
+              if (g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-before-dir-fsync")) {
+                const gchar *failure = "restore-companion-before-dir-fsync";
+                wyl_fact_offline_restore_tenant_companion_set_checkpoint_for_test
+                  (fail_retain_once, &failure);
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                    session_operation, first, 33, 0, &f.committed), ==,
+                    WYRELOG_E_IO);
+                g_assert_null (failure);
+                g_assert_null (f.committed.graphs);
+                wyl_fact_offline_restore_tenant_companion_set_checkpoint_for_test
+                  (NULL, NULL);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+              }
+              if (g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-after-link")) {
+                gboolean linked = FALSE;
+                wyl_fact_offline_restore_tenant_companion_set_checkpoint_for_test
+                  (fail_companion_linked_once, &linked);
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                    session_operation, first, 33, 0, &f.committed), ==,
+                    WYRELOG_E_IO);
+                g_assert_true (linked);
+                g_assert_null (f.committed.graphs);
+                wyl_fact_offline_restore_tenant_companion_set_checkpoint_for_test
+                  (NULL, NULL);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+                sqlite3_stmt *phase = NULL;
+                g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                      (f.fixture.policy), "SELECT phase FROM "
+                    "fact_tenant_restore_replacements WHERE graph_id='alpha';",
+                    -1, &phase, NULL), ==, SQLITE_OK);
+                g_assert_cmpint (sqlite3_step (phase), ==, SQLITE_ROW);
+                g_assert_cmpstr ((const gchar *) sqlite3_column_text
+                      (phase, 0), ==, "reserved");
+                sqlite3_finalize (phase);
+              }
+              if (g_str_equal (mode,
+                  "retain-sync-dir-publish-sync-companion-commit-response")) {
+                wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+                    WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                    session_operation, first, 33, 0, &f.committed), ==,
+                    WYRELOG_E_IO);
+                g_assert_null (f.committed.graphs);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+              }
+#endif
+              gboolean companion_reverse = g_str_equal (mode,
+                      "retain-sync-dir-publish-sync-companion-reverse");
+              const gchar *companion_first = companion_reverse ? second : first;
+              const gchar *companion_second = companion_reverse ? first : second;
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, companion_first, 33, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (f.committed.revision, ==, 33);
+              sqlite3_stmt *synced_count = NULL;
+              g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                    (f.fixture.policy), "SELECT COUNT(*) FROM "
+                  "fact_tenant_restore_replacements WHERE "
+                  "phase='companion_synced';", -1, &synced_count, NULL), ==,
+                  SQLITE_OK);
+              g_assert_cmpint (sqlite3_step (synced_count), ==, SQLITE_ROW);
+              g_assert_cmpint (sqlite3_column_int (synced_count, 0), ==, 1);
+              sqlite3_finalize (synced_count);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, companion_first, 33, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, companion_second, 33, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
+              synced_count = NULL;
+              g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                    (f.fixture.policy), "SELECT COUNT(*) FROM "
+                  "fact_tenant_restore_replacements WHERE "
+                  "phase='companion_synced';", -1, &synced_count, NULL), ==,
+                  SQLITE_OK);
+              g_assert_cmpint (sqlite3_step (synced_count), ==, SQLITE_ROW);
+              g_assert_cmpint (sqlite3_column_int (synced_count, 0), ==, 2);
+              sqlite3_finalize (synced_count);
+              g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                    (f.fixture.policy), "UPDATE fact_tenant_restore_replacements "
+                  "SET phase='reserved' WHERE graph_id='alpha';",
+                  NULL, NULL, NULL), ==, SQLITE_CONSTRAINT_TRIGGER);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+              g_assert_cmpint (wyl_policy_store_open (policy_path,
+                  &f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_policy_store_create_schema
+                    (f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, companion_second, 33, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
             }
 #ifdef WYL_TEST_HANDLE_SEAMS
             if (g_str_equal (mode,
@@ -5787,6 +5991,28 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-reserve", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/driver",
       "retain-sync-dir-publish-sync-driver", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/both",
+      "retain-sync-dir-publish-sync-companion", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/reverse",
+      "retain-sync-dir-publish-sync-companion-reverse", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/foreign",
+      "retain-sync-dir-publish-sync-companion-foreign", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/sibling-foreign",
+      "retain-sync-dir-publish-sync-companion-sibling-foreign", test_tenant_commit_sync_staged_both);
+#ifdef __linux__
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/symlink",
+      "retain-sync-dir-publish-sync-companion-symlink", test_tenant_commit_sync_staged_both);
+#endif
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/phase-fail",
+      "retain-sync-dir-publish-sync-companion-phase-fail", test_tenant_commit_sync_staged_both);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/after-link",
+      "retain-sync-dir-publish-sync-companion-after-link", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/before-dir-fsync",
+      "retain-sync-dir-publish-sync-companion-before-dir-fsync", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/commit-response",
+      "retain-sync-dir-publish-sync-companion-commit-response", test_tenant_commit_sync_staged_both);
+#endif
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/driver-conflict",
       "retain-sync-dir-publish-sync-driver-conflict", test_tenant_commit_sync_staged_both);
