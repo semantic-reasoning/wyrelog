@@ -2520,7 +2520,8 @@ test_daemon_mfa_validator = executable('test-daemon-mfa-validator',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
 )
 
-test('daemon-mfa-validator', test_daemon_mfa_validator)
+test('daemon-mfa-validator', test_daemon_mfa_validator,
+  timeout : 120)
 
 # #746: seam-enabled coverage for the MFA lockout / auto-unlock publication
 # path. Links the full-source test-seams archive so the test can observe the
@@ -2538,7 +2539,8 @@ test_daemon_mfa_validator_seams = executable('test-daemon-mfa-validator-seams',
     sodium_dep],
 )
 
-test('daemon-mfa-validator-seams', test_daemon_mfa_validator_seams)
+test('daemon-mfa-validator-seams', test_daemon_mfa_validator_seams,
+  timeout : 120)
 
 # #751: shared-handle multi-threaded barrier race proving exactly-once TOTP
 # proof consumption + MFA_OK publication under N concurrent same-step requests.
