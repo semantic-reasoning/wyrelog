@@ -5,6 +5,7 @@
 
 #include "fact/offline-backup-source-private.h"
 #include "fact/offline-restore-journal-private.h"
+#include "fact/replay-scheduler-private.h"
 #include "fact/runtime-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "policy/store-private.h"
@@ -79,6 +80,19 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_import_run
     GBytes *canonical_manifest, const gchar *operation_uuid,
     guint64 expected_revision, gint64 drain_timeout_us,
     const WylFactOfflineRestoreTenantInput *input, gpointer input_data,
+    WylFactOfflineRestoreJournal *out_committed);
+
+/* Replay and durably record preflight for every bound tenant graph. May be
+ * called after an import or after restart at the current journal revision.
+ * A failed CAS may have committed, so retry only after a fresh journal load.
+ * The caller retains manifest provenance; success leaves decision NONE and
+ * grants no publication or unseal authority. Must run in a replay job. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_preflight_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    GBytes *canonical_manifest, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
     WylFactOfflineRestoreJournal *out_committed);
 
 /* Imports external backup bytes, never the destination main's contents.
