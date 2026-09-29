@@ -7,6 +7,7 @@
 #include "fact/offline-restore-journal-stage-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 #include "fact/offline-restore-stage-private.h"
+#include "fact/offline-restore-validation-session-private.h"
 #include "fact/offline-restore-validation-private.h"
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylPolicyFactBackupSnapshot,
@@ -914,4 +915,57 @@ wyl_fact_offline_restore_tenant_import_run
     rc = copy_journal (&journal, out_committed);
   return rc;
 #endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_preflight_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    GBytes *canonical_manifest, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactReplayJobContext *job_context,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime_manager == NULL || tenant_id == NULL || *tenant_id == '\0'
+      || canonical_manifest == NULL || operation_uuid == NULL
+      || *operation_uuid == '\0' || expected_revision == 0
+      || expected_revision >= G_MAXINT64 || job_context == NULL
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  g_auto (WylFactOfflineRestoreJournal) observed = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load (policy,
+          operation_uuid, &observed);
+  if (rc == WYRELOG_E_OK && observed.revision != expected_revision)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK
+      && (observed.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || g_strcmp0 (observed.tenant_id, tenant_id) != 0))
+    rc = WYRELOG_E_POLICY;
+  g_autoptr (WylFactOfflineRestoreValidationSession) session = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_validation_session_new_for_preflight
+          (policy, fact_root, runtime_manager, canonical_manifest,
+            operation_uuid, expected_revision, drain_timeout_us, &session);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_validation_session_run_and_record_preflight
+          (session, job_context, out_committed);
+  if (rc == WYRELOG_E_OK
+      && (out_committed->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || out_committed->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || out_committed->graphs == NULL
+      || out_committed->graphs->len != observed.graphs->len))
+    rc = WYRELOG_E_POLICY;
+  for (guint i = 0; rc == WYRELOG_E_OK
+      && i < out_committed->graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (out_committed->graphs, i);
+    if (!graph->replay_preflighted)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  return rc;
 }

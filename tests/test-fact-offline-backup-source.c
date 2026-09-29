@@ -2971,6 +2971,44 @@ tenant_import_test_revalidate (gpointer data)
          ? WYRELOG_E_IO : WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  SessionFixture *fixture;
+  guint64 revision;
+  GBytes *manifest;
+} TenantPreflightTestJob;
+
+static wyrelog_error_t
+tenant_preflight_test_job (WylFactReplayJobContext *context, gpointer data)
+{
+  TenantPreflightTestJob *job = data;
+  SessionFixture *f = job->fixture;
+  return wyl_fact_offline_restore_tenant_preflight_run (f->fixture.policy,
+             f->fixture.root, f->fixture.runtime, "tenant-a", job->manifest,
+             session_operation, job->revision, 0, context, &f->committed);
+}
+
+static wyrelog_error_t
+tenant_preflight_test_worker (TenantPreflightTestJob *job)
+{
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  wyrelog_error_t rc = wyl_fact_replay_scheduler_new (&config, NULL,
+          &scheduler);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_scheduler_submit (scheduler, "tenant-a", "alpha",
+            job->fixture->cancel, tenant_preflight_test_job, job, NULL,
+            &future);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_future_wait (future);
+  if (scheduler != NULL)
+    g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+        WYRELOG_E_OK);
+  return rc;
+}
+
 static void
 test_tenant_external_import (gconstpointer data)
 {
@@ -3099,6 +3137,86 @@ test_tenant_external_import (gconstpointer data)
     g_assert_true (g_bytes_equal (staged_bytes,
         g_ptr_array_index (f.capture.artifact_bytes, i)));
   }
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  if (g_strcmp0 (mode, "straight") == 0) {
+    TenantPreflightTestJob straight = { &f, 3, f.capture.manifest };
+    g_assert_cmpint (tenant_preflight_test_worker (&straight), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 5);
+    g_assert_cmpint (f.committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+    for (guint i = 0; i < f.committed.graphs->len; i++)
+      g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (f.committed.graphs, i))->replay_preflighted);
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = session_journal_bytes (&f);
+    session_fixture_clear (&f);
+    return;
+  }
+  TenantPreflightTestJob job = { &f, 2, f.capture.manifest };
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_BUSY);
+  g_assert_null (f.committed.graphs);
+  job.revision = 3;
+  WylFactOfflineBackupManifest wrong = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_decode
+        (f.capture.manifest, &wrong), ==, WYRELOG_E_OK);
+  wrong.policy_generation++;
+  g_autoptr (GBytes) wrong_manifest = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&wrong,
+      &wrong_manifest), ==, WYRELOG_E_OK);
+  wyl_fact_offline_backup_manifest_clear (&wrong);
+  job.manifest = wrong_manifest;
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_POLICY);
+  job.manifest = f.capture.manifest;
+  fd = g_open (bound_stage, O_RDWR, 0);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (read (fd, &first, 1), ==, 1);
+  changed = first ^ 1;
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (write (fd, &changed, 1), ==, 1);
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (write (fd, &first, 1), ==, 1);
+  g_assert_cmpint (fsync (fd), ==, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+
+  f.mode = "fail-between";
+  f.record_preflight = TRUE;
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      f.capture.manifest, session_operation, 3, 0, &f.session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_offline_restore_validation_session_set_record_checkpoint_for_test
+    (f.session, session_record_checkpoint, &f);
+  g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_IO);
+  g_assert_null (f.committed.graphs);
+  g_clear_pointer (&f.session,
+      wyl_fact_offline_restore_validation_session_free);
+  g_auto (WylFactOfflineRestoreJournal) preflight_partial = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &preflight_partial), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (preflight_partial.revision, ==, 4);
+  g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (preflight_partial.graphs, 0))->replay_preflighted);
+  g_assert_false (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (preflight_partial.graphs, 1))->replay_preflighted);
+  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &f.fixture.policy),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+      WYRELOG_E_OK);
+  job.revision = preflight_partial.revision;
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 5);
+  g_assert_cmpint (f.committed.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  for (guint i = 0; i < f.committed.graphs->len; i++)
+    g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (f.committed.graphs, i))->replay_preflighted);
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
@@ -4468,6 +4586,8 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
 #ifdef __linux__
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/straight",
+      "straight", test_tenant_external_import);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/resume",
       "resume", test_tenant_external_import);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/short",
