@@ -4163,6 +4163,78 @@ test_graph_restore_replacement_reservation (void)
   g_assert_true (g_file_test (main_path, G_FILE_TEST_IS_REGULAR));
   g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
   g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  /* Exercise the schema-only handoff contract with one test-owned SQL
+   * transaction.  The production publisher is a separate recovery step. */
+  sqlite3 *promotion_db = wyl_policy_store_get_db (fixture.policy);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "UPDATE fact_graph_provisioning SET phase='active' "
+      "WHERE phase='restore_selected';", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (promotion_db, "BEGIN IMMEDIATE;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
+        (&finalized), ==, WYRELOG_E_OK);
+  import_restore_journal_for_test (fixture.policy, &finalized);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "UPDATE fact_graph_provisioning SET phase='active' "
+      "WHERE phase='restore_selected';", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "UPDATE fact_graphs SET lifecycle_state='active',sealed=0,"
+      "lifecycle_generation=lifecycle_generation+1 "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "UPDATE fact_graph_restore_replacements SET phase='verified' "
+      "WHERE phase='selected_pending_cleanup' AND tenant_id='tenant-a' "
+      "AND graph_id='alpha';", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "UPDATE fact_graph_provisioning SET phase='active' "
+      "WHERE phase='restore_selected' AND tenant_id='tenant-a' "
+      "AND graph_id='alpha';"
+      "UPDATE fact_graph_restore_replacements SET phase='verified' "
+      "WHERE phase='selected_pending_cleanup' AND tenant_id='tenant-a' "
+      "AND graph_id='alpha';"
+      "UPDATE tenants SET lifecycle_state='unsealing',"
+      "lifecycle_generation=lifecycle_generation+1 "
+      "WHERE tenant_id='tenant-a';"
+      "UPDATE tenants SET lifecycle_state='active',sealed=0,"
+      "sealed_generation=sealed_generation+1,"
+      "lifecycle_generation=lifecycle_generation+1 "
+      "WHERE tenant_id='tenant-a';", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_lifecycle_handoff
+        (&finalized), ==, WYRELOG_E_OK);
+  import_restore_journal_for_test (fixture.policy, &finalized);
+  g_assert_cmpint (sqlite3_exec (promotion_db,
+      "DELETE FROM fact_offline_restore_graph_claims "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (promotion_db, "COMMIT;", NULL, NULL,
+      NULL), ==, SQLITE_OK);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  sqlite3 *reopened_db = wyl_policy_store_get_db (fixture.policy);
+  g_assert_cmpint (sqlite3_exec (reopened_db, "BEGIN IMMEDIATE;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_stmt *stale_claim = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (reopened_db,
+      "INSERT INTO fact_offline_restore_graph_claims "
+      "(tenant_id,graph_id,operation_uuid) VALUES ('tenant-a','alpha',?1);",
+      -1, &stale_claim, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stale_claim, 1, operation_uuid,
+      -1, SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stale_claim), ==, SQLITE_DONE);
+  sqlite3_finalize (stale_claim);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (sqlite3_exec (reopened_db, "ROLLBACK;", NULL, NULL,
+      NULL), ==, SQLITE_OK);
 #endif
   wyl_policy_graph_restore_replacement_record_free (replayed);
   wyl_policy_graph_restore_replacement_record_free (reserved);

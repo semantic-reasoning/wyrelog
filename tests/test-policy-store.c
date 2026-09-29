@@ -55,6 +55,84 @@ static const gchar fixture_pre_selected_restore_replacement_table_sql[] =
     "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
 
+static const gchar fixture_restore_replacement_update_guard_pre_promotion_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN OLD.phase='selected_pending_cleanup' "
+    "OR NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='selected_pending_cleanup' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='restore_selected' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0))) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+
+static const gchar fixture_fact_graph_provisioning_update_guard_pre_promotion_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_update_guard "
+    "BEFORE UPDATE ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN OLD.phase='restore_selected' OR NEW.phase='restore_selected' "
+    "THEN RAISE(ABORT,'restore selection is recovery owned') END; "
+    "SELECT CASE WHEN NEW.updated_at<OLD.updated_at "
+    "THEN RAISE(ABORT,'provisioning updated_at regression') END; "
+    "SELECT CASE WHEN NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "THEN RAISE(ABORT,'invalid provisioning retry attempt') END; "
+    "SELECT CASE WHEN NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase IN ('staged','degraded')) OR "
+    "(OLD.phase='staged' AND NEW.phase IN ('published','degraded')) OR "
+    "(OLD.phase='published' AND NEW.phase IN ('verified','degraded')) OR "
+    "(OLD.phase='verified' AND NEW.phase IN ('active','degraded'))) "
+    "THEN RAISE(ABORT,'illegal provisioning phase transition') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    /* Terminal records are historical evidence.  Their identity stays
+     * immutable, but later normal graph transitions must not invalidate
+     * completed provisioning.  A terminal phase transition itself remains
+     * exact; only same-phase preservation uses this monotonic predicate. */
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase=NEW.phase AND g.lifecycle_state!='legacy_unclassified' AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation>=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation>=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase!=NEW.phase AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 static const gchar fixture_pre_selected_restore_replacement_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
     "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
@@ -312,7 +390,9 @@ check_restore_replacement_zero_reconciliation_migration (void)
       || sqlite3_exec (db, predecessor, NULL, NULL, NULL) != SQLITE_OK)
     return 9614;
   for (guint i = 1; i < sql->len; i++)
-    if (sqlite3_exec (db, g_ptr_array_index (sql, i), NULL, NULL,
+    if (sqlite3_exec (db, i == 3 ?
+        fixture_restore_replacement_update_guard_pre_promotion_sql :
+        g_ptr_array_index (sql, i), NULL, NULL,
         NULL) != SQLITE_OK)
       return 9615;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK
@@ -1176,6 +1256,45 @@ schema_sql_for_name (sqlite3 *db, const gchar *name)
     sql = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
   sqlite3_finalize (stmt);
   return sql;
+}
+
+static gint
+check_restore_promotion_trigger_migration (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9630;
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;",
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      fixture_restore_replacement_update_guard_pre_promotion_sql,
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db,
+      fixture_fact_graph_provisioning_update_guard_pre_promotion_sql,
+      NULL, NULL, NULL) != SQLITE_OK)
+    return 9631;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 9632;
+  g_autofree gchar *current = schema_sql_for_name (db,
+          "fact_graph_provisioning_update_guard");
+  if (current == NULL || strstr (current, "policy_published=1") == NULL)
+    return 9633;
+  const gchar *needle = "policy_published=1";
+  const gchar *at = strstr (current, needle);
+  g_autofree gchar *prefix = g_strndup (current, at - current);
+  g_autofree gchar *tampered = g_strconcat (prefix, "policy_published=0",
+          at + strlen (needle), NULL);
+  if (sqlite3_exec (db, "DROP TRIGGER fact_graph_provisioning_update_guard;",
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, tampered, NULL, NULL, NULL) != SQLITE_OK)
+    return 9634;
+  return wyl_policy_store_create_schema (store) == WYRELOG_E_POLICY ?
+         0 : 9635;
 }
 
 static gint
@@ -7501,6 +7620,8 @@ main (void)
   if ((rc = check_restore_replacement_schema_closure ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_replacement_zero_reconciliation_migration ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_restore_promotion_trigger_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_selected_predecessor_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
