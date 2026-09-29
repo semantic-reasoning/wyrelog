@@ -212,7 +212,7 @@ WINDOWS_AUTHORITY_CALLER_BODY_SHA256 = {
 
 POSIX_AUTHORITY_CALLER_BODY_SHA256 = {
     "wyl_fact_artifact_transition_posix_open":
-        "4d9316b4debfe5e881e8e20a483a744ab2bf55c28b915527a6d328e4cceb47f1",
+        "b05beb11af8ccf5f1806992f5974318d91e2ce543bfce2e491e0152943b2febd",
     "wyl_fact_artifact_transition_posix_capture":
         "2d6e19dc40a8b60f173b900b4261c6b562122ca715c29cc872aad638f76affe3",
     "wyl_fact_artifact_transition_posix_execute":

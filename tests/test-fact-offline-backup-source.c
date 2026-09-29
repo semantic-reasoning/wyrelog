@@ -5,15 +5,20 @@
 #include <glib/gstdio.h>
 #include <string.h>
 #include <stdio.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 
 #include "fact-test-support.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/graph-artifact-transition-posix-private.h"
 #include "wyrelog/fact/offline-backup-generation-private.h"
 #include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/fact/offline-backup-source-private.h"
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
 #include "wyrelog/fact/offline-restore-journal-store-private.h"
+#include "wyrelog/fact/offline-restore-rollback-private.h"
 #include "wyrelog/fact/offline-restore-stage-private.h"
 #include "wyrelog/fact/offline-restore-validation-session-private.h"
 #include "wyrelog/fact/provisioning-run-private.h"
@@ -2405,6 +2410,305 @@ test_graph_import_windows (void)
 
 #ifndef G_OS_WIN32
 static void
+rollback_test_advance (SessionFixture *f, gboolean begin)
+{
+  WylFactOfflineRestoreJournal journal = { 0 }, committed = { 0 };
+  WylFactOfflineRestoreStoreResult result;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f->fixture.policy, session_operation, &journal), ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
+  if (journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE)
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+  else {
+    g_assert_true (begin);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
+        "zeta", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE), ==,
+        WYRELOG_E_OK);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (f->fixture.policy, revision, &journal, &result, &committed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  wyl_fact_offline_restore_journal_clear (&committed);
+}
+
+static void
+test_graph_rollback (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "success", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_autofree gchar *sibling = graph_file_path (&f.fixture, "alpha",
+          "facts.duckdb");
+  GStatBuf sibling_before = { 0 }, sibling_after = { 0 };
+  g_assert_cmpint (g_stat (sibling, &sibling_before), ==, 0);
+  guint64 revision = 2;
+  if (!g_str_equal (mode, "fresh")) {
+    rollback_test_advance (&f, FALSE);
+    rollback_test_advance (&f, TRUE);
+    revision = 4;
+  }
+  if (g_str_equal (mode, "pending-absent")) {
+    g_assert_cmpint (g_remove (stage), ==, 0);
+    g_clear_pointer (&f.capture.manifest, g_bytes_unref);
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+            "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (policy_path,
+        &f.fixture.policy), ==, WYRELOG_E_OK);
+  }
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 5);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+  g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (g_stat (sibling, &sibling_after), ==, 0);
+  g_assert_cmpuint (sibling_after.st_ino, ==, sibling_before.st_ino);
+  g_assert_cmpint (sibling_after.st_size, ==, sibling_before.st_size);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 5, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 5);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
+test_graph_rollback_absent_main (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "stage-only", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  g_autofree gchar *main_path = graph_file_path (&f.fixture, "zeta",
+          "facts.duckdb");
+  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 2, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 5);
+  g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
+test_graph_rollback_unbound_orphan (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "coordinator", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  g_assert_true (g_file_set_contents (stage, "orphan", -1, NULL));
+  g_auto (WylFactOfflineRestoreJournal) before = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) after = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.revision, ==, 1);
+  g_assert_true (artifact_identity_is_zero
+        (&((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (before.graphs, 0))->staged_main_identity));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 1, 0, &committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (committed.graphs);
+  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.revision, ==, 1);
+  g_assert_cmpint (after.decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
+rollback_write_foreign (const gchar *path)
+{
+  g_assert_true (g_file_set_contents (path, "foreign", 7, NULL));
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+}
+
+static void
+test_graph_rollback_rejects (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "success", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  g_autofree gchar *main_path = graph_file_path (&f.fixture, "zeta",
+          "facts.duckdb");
+  if (g_str_equal (mode, "foreign-stage")) {
+    g_autofree gchar *parked = graph_file_path (&f.fixture, "zeta",
+            "parked-stage.duckdb");
+    g_assert_cmpint (g_rename (stage, parked), ==, 0);
+    rollback_write_foreign (stage);
+  } else if (g_str_equal (mode, "foreign-main")) {
+    g_autofree gchar *parked = graph_file_path (&f.fixture, "zeta",
+            "parked-main.duckdb");
+    g_assert_cmpint (g_rename (main_path, parked), ==, 0);
+    rollback_write_foreign (main_path);
+  } else if (g_str_equal (mode, "sidecar")) {
+    g_autofree gchar *sidecar = graph_file_path (&f.fixture, "zeta",
+            "facts.duckdb-wal");
+    rollback_write_foreign (sidecar);
+  } else if (g_str_equal (mode, "extra-link")) {
+    g_autofree gchar *extra = graph_file_path (&f.fixture, "zeta",
+            "extra-main-link");
+    g_assert_cmpint (link (main_path, extra), ==, 0);
+  } else if (g_str_equal (mode, "stage-link")) {
+    g_autofree gchar *extra = graph_file_path (&f.fixture, "zeta",
+            "extra-stage-link");
+    g_assert_cmpint (link (stage, extra), ==, 0);
+  } else if (g_str_equal (mode, "wrong-companion")) {
+    sqlite3_stmt *stmt = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+          (f.fixture.policy),
+        "SELECT stage_basename FROM fact_graph_provisioning "
+        "WHERE tenant_id='tenant-a' AND graph_id='zeta' "
+        "AND phase='active';", -1, &stmt, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+    const gchar *basename = (const gchar *) sqlite3_column_text (stmt, 0);
+    g_autofree gchar *companion = graph_file_path (&f.fixture, "zeta",
+            basename);
+    g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+    g_autofree gchar *parked = graph_file_path (&f.fixture, "zeta",
+            "parked-companion");
+    g_assert_cmpint (g_rename (companion, parked), ==, 0);
+    rollback_write_foreign (companion);
+  } else if (g_str_equal (mode, "tenant-generation"))
+    mutate_tenant_after_snapshot (&f.capture);
+
+  guint64 revision = g_str_equal (mode, "stale") ? 1 : 2;
+  if (g_str_equal (mode, "commit")) {
+    WylFactOfflineRestoreJournal journal = { 0 }, committed = { 0 };
+    WylFactOfflineRestoreStoreResult result;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (f.fixture.policy, session_operation, &journal), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+          (&journal, "zeta"), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+          (f.fixture.policy, 2, &journal, &result, &committed), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_fact_offline_restore_journal_clear (&journal);
+    journal = committed;
+    memset (&committed, 0, sizeof committed);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+          (f.fixture.policy, 3, &journal, &result, &committed), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_fact_offline_restore_journal_clear (&journal);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    revision = 4;
+  }
+
+  GStatBuf stage_before = { 0 }, stage_after = { 0 };
+  g_assert_cmpint (g_stat (stage, &stage_before), ==, 0);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &committed), !=, WYRELOG_E_OK);
+  g_assert_null (committed.graphs);
+  g_assert_cmpint (g_stat (stage, &stage_after), ==, 0);
+  g_assert_cmpuint (stage_after.st_ino, ==, stage_before.st_ino);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  WylFactOfflineRestoreRollbackCheckpoint target;
+  guint calls;
+} RollbackCrash;
+
+static wyrelog_error_t
+rollback_crash_checkpoint (WylFactOfflineRestoreRollbackCheckpoint point,
+    gpointer user_data)
+{
+  RollbackCrash *crash = user_data;
+  if (point != crash->target)
+    return WYRELOG_E_OK;
+  crash->calls++;
+  return WYRELOG_E_IO;
+}
+
+static void
+test_graph_rollback_crash (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "success", "zeta");
+  RollbackCrash crash = {
+    .target = g_str_equal (mode, "decision")
+      ? WYL_FACT_OFFLINE_RESTORE_ROLLBACK_AFTER_DECISION
+      : g_str_equal (mode, "begin")
+      ? WYL_FACT_OFFLINE_RESTORE_ROLLBACK_AFTER_BEGIN
+      : WYL_FACT_OFFLINE_RESTORE_ROLLBACK_BEFORE_COMPLETE,
+  };
+  if (!g_str_equal (mode, "sync"))
+    wyl_fact_offline_restore_graph_rollback_set_checkpoint_for_test
+      (rollback_crash_checkpoint, &crash);
+  else
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 2, 0, &committed), !=, WYRELOG_E_OK);
+  g_assert_null (committed.graphs);
+  if (!g_str_equal (mode, "sync"))
+    g_assert_cmpuint (crash.calls, ==, 1);
+  else
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR));
+  wyl_fact_offline_restore_graph_rollback_set_checkpoint_for_test
+    (NULL, NULL);
+  WylFactOfflineRestoreJournal pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &pending), ==, WYRELOG_E_OK);
+  guint64 revision = pending.revision;
+  g_assert_cmpuint (revision, ==,
+      g_str_equal (mode, "decision") ? 3 : 4);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (pending.graphs, 0);
+  if (revision == 4)
+    g_assert_cmpint (graph->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+  wyl_fact_offline_restore_journal_clear (&pending);
+  g_clear_pointer (&f.capture.manifest, g_bytes_unref);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, 5);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+#endif
+
+static void
 test_graph_import_authority_accessor (void)
 {
   WylFactOfflineBackupSourceAuthority authority;
@@ -2828,6 +3132,38 @@ main (int argc, char **argv)
   };
   g_test_add_func ("/fact-offline-backup-source/import/authority-accessor",
       test_graph_import_authority_accessor);
+  g_test_add_data_func ("/fact-offline-backup-source/rollback/fresh",
+      "fresh", test_graph_rollback);
+  g_test_add_data_func ("/fact-offline-backup-source/rollback/pending-present",
+      "pending-present", test_graph_rollback);
+  g_test_add_data_func ("/fact-offline-backup-source/rollback/pending-absent",
+      "pending-absent", test_graph_rollback);
+  g_test_add_func ("/fact-offline-backup-source/rollback/absent-main",
+      test_graph_rollback_absent_main);
+  g_test_add_func ("/fact-offline-backup-source/rollback/unbound-orphan",
+      test_graph_rollback_unbound_orphan);
+  const gchar *rollback_rejections[] = {
+    "foreign-stage", "foreign-main", "sidecar", "extra-link",
+    "stage-link", "wrong-companion",
+    "tenant-generation", "stale", "commit",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (rollback_rejections); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/rollback/reject/",
+            rollback_rejections[i], NULL);
+    g_test_add_data_func (path, rollback_rejections[i],
+        test_graph_rollback_rejects);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  const gchar *rollback_crashes[] = { "decision", "begin", "complete", "sync" };
+  for (guint i = 0; i < G_N_ELEMENTS (rollback_crashes); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/rollback/crash/",
+            rollback_crashes[i], NULL);
+    g_test_add_data_func (path, rollback_crashes[i],
+        test_graph_rollback_crash);
+  }
+#endif
   for (guint i = 0; i < G_N_ELEMENTS (import_modes); i++) {
     g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/import/",
             import_modes[i], NULL);

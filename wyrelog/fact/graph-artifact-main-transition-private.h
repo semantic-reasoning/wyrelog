@@ -305,6 +305,13 @@ wyrelog_error_t wyl_fact_artifact_main_transition_admit
     WylFactArtifactMainTransitionResult *out_result,
     WylFactArtifactMainTransition **out_transition);
 
+/* The inventory half of admission, also used by the provider's READY-only
+ * provisioned-main cleanup. It does not by itself authorize a mutation. */
+WylFactArtifactMainTransitionRefusal
+wyl_fact_artifact_main_transition_inventory_refusal
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    const WylFactArtifactMainTransitionObservation *observation);
+
 void wyl_fact_artifact_main_transition_free
   (WylFactArtifactMainTransition *transition);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactMainTransition,

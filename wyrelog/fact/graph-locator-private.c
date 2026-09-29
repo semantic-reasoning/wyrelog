@@ -2076,6 +2076,30 @@ wyl_fact_graph_provisioned_pair_revalidate
   return rc;
 }
 
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_revalidate_in_directory
+  (WylFactGraphProvisionedPair *pair,
+    const WylFactGraphDirectory *directory)
+{
+  if (pair == NULL || directory == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  return WYRELOG_E_POLICY;
+#else
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  struct stat held = { 0 }, supplied = { 0 };
+  if (rc == WYRELOG_E_OK
+      && (pair->directory.graph_fd < 0 || directory->graph_fd < 0
+      || fstat (pair->directory.graph_fd, &held) != 0
+      || fstat (directory->graph_fd, &supplied) != 0))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (held.st_dev != supplied.st_dev || held.st_ino != supplied.st_ino))
+    rc = WYRELOG_E_POLICY;
+  return rc;
+#endif
+}
+
 WylFactGraphProvisionedPair *
 wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair *pair)
 {

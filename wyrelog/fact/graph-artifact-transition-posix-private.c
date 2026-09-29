@@ -82,6 +82,7 @@ struct WylFactArtifactTransitionPosix
   guint64 graph_device;
   guint64 graph_inode;
   WylFactGraphResolver *resolver;
+  const WylFactGraphDirectory *directory;
   WylFactRootWriterLease *lease;
   WylFactArtifactTransitionNames names;
   guint8 operation_uuid[WYL_ID_BYTES];
@@ -590,6 +591,7 @@ wyl_fact_artifact_transition_posix_open
   provider->graph_device = directory->graph_device;
   provider->graph_inode = directory->graph_inode;
   provider->resolver = resolver;
+  provider->directory = directory;
   provider->lease = lease;
   provider->names = names;
   provider->capability = *capability;
@@ -1148,5 +1150,118 @@ wyl_fact_artifact_transition_posix_with_retired_stage_recovery
             transition_posix_recovery_post_sync_data);
     }
   }
+  return callback (user_data);
+}
+
+static wyrelog_error_t
+capture_ready_provisioned_retire
+  (WylFactArtifactTransitionPosix *provider,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, provider->directory);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  WylFactArtifactMainTransitionObservation observation = { 0 };
+  rc = wyl_fact_artifact_transition_posix_capture (provider, lifecycle,
+          &snapshot, &observation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0
+      || !lifecycle->sealed || lifecycle->main_binding_live
+      || request->expected_main_absent || !request->resume_forbidden
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->directory_identity, &observation.directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->lease_identity, &observation.lease_identity)
+      || wyl_fact_artifact_main_transition_inventory_refusal
+        (snapshot, &observation)
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE)
+    return WYRELOG_E_POLICY;
+  const WylFactArtifactMainTransitionEntryEvidence *main
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  const WylFactArtifactMainTransitionEntryEvidence *rollback
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK];
+  if (!main->present || main->reparse || main->link_count != 2
+      || main->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&main->identity,
+      &request->expected_main_identity)
+      || rollback->present
+      || (stage->present
+      && (stage->reparse || stage->link_count != 1
+      || stage->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
+      &request->staged_main_identity))))
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_provisioned_pair_revalidate_in_directory (pair,
+          provider->directory);
+  if (rc == WYRELOG_E_OK)
+    *out_observation = observation;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_with_ready_provisioned_retire
+  (WylFactArtifactTransitionPosix *provider,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data,
+    WylFactArtifactMainTransitionEffect *out_effect)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (provider == NULL || pair == NULL || request == NULL
+      || request->operation_uuid == NULL || lifecycle == NULL
+      || callback == NULL || out_effect == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMainTransitionObservation before = { 0 };
+  wyrelog_error_t rc = capture_ready_provisioned_retire (provider, pair,
+          request, lifecycle, &before);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = provider_revalidate_authority (provider);
+  if (rc == WYRELOG_E_OK)
+    rc = execute_verify_authorization (provider, &before);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_pair_revalidate_in_directory (pair,
+            provider->directory);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylFactArtifactMainTransitionEffect effect
+    = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  rc = execute_delete_and_sync_dir (provider, provider->names.stage,
+          &before.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+          WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
+          WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
+          WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
+          &effect);
+  *out_effect = effect;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (effect != WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
+    return effect == WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED
+      ? WYRELOG_E_POLICY : WYRELOG_E_BUSY;
+  if (transition_posix_recovery_post_sync_hook != NULL)
+    transition_posix_recovery_post_sync_hook (provider->graph_fd,
+        transition_posix_recovery_post_sync_data);
+  WylFactArtifactMainTransitionObservation after = { 0 };
+  rc = capture_ready_provisioned_retire (provider, pair, request,
+          lifecycle, &after);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (after.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE].present)
+    return WYRELOG_E_POLICY;
   return callback (user_data);
 }
