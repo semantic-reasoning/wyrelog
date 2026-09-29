@@ -2,6 +2,7 @@
 #pragma once
 
 #include "fact/graph-locator-private.h"
+#include "fact/offline-restore-journal-private.h"
 #include "fact/runtime-private.h"
 #include "policy/store-private.h"
 
@@ -51,8 +52,22 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_companion_recover
     guint64 expected_revision, gint64 drain_timeout_us,
     WylPolicyGraphRestoreReplacementRecord **out_committed);
 
+/* Drive one imported v2 graph COMMIT SYNC_STAGED intent. The journal begin
+ * CAS is durable before the exact stage file is synced. A pending UNKNOWN
+ * intent is retried only after a fresh provisioned READY capture. Completion
+ * requires proven file durability and returns the owned READY/RETAIN journal.
+ * Errors leave output empty; retry from a fresh policy handle if a commit
+ * response was ambiguous. This neither renames files nor admits COMMIT. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_sync_staged_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+void wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 #endif
 
