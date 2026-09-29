@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 #ifndef G_OS_WIN32
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -2925,6 +2926,184 @@ import_revalidate (gpointer data)
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  SessionFixture *fixture;
+  guint validations;
+  guint reads;
+  guint fail_validation;
+  const gchar *mode;
+} TenantImportTestInput;
+
+static wyrelog_error_t
+tenant_import_test_read (const gchar *graph_id, guint64 offset,
+    guint8 *buffer, gsize capacity, gsize *out_read, gpointer data)
+{
+  TenantImportTestInput *input = data;
+  guint index = g_strcmp0 (graph_id, "alpha") == 0 ? 0 : 1;
+  g_assert_cmpstr (graph_id, ==, index == 0 ? "alpha" : "zeta");
+  GBytes *payload = g_ptr_array_index (input->fixture->capture.artifact_bytes,
+          index);
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (payload, &length);
+  g_assert_cmpuint (offset, <=, length);
+  *out_read = MIN (capacity, length - offset);
+  if (index == 1 && g_strcmp0 (input->mode, "short") == 0
+      && offset >= length / 2)
+    *out_read = 0;
+  if (index == 1 && g_strcmp0 (input->mode, "excess") == 0
+      && offset == length) {
+    buffer[0] = 42;
+    *out_read = 1;
+  }
+  if (*out_read != 0)
+    memcpy (buffer, bytes + offset, *out_read);
+  input->reads++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+tenant_import_test_revalidate (gpointer data)
+{
+  TenantImportTestInput *input = data;
+  input->validations++;
+  return input->validations == input->fail_validation
+         ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+test_tenant_external_import (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "coordinator/tenant");
+  /* The input remains backup A while each provisioned destination main gains
+   * new bytes B under the same store identity. */
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    g_assert_cmpint (wyl_fact_store_open_provisioned_graph (f.fixture.policy,
+        f.fixture.root, "tenant-a", graphs[i], TRUE, &store), ==,
+        WYRELOG_E_OK);
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      { "id", "symbol", FALSE, TRUE },
+    };
+    const wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = "tenant-a", .graph_id = graphs[i],
+      .namespace_id = "backup", .relation_name = "items",
+      .schema_version = 1, .relation_visible = TRUE,
+      .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+    };
+    const wyl_fact_value_t values[] = {
+      { .type = WYL_FACT_VALUE_SYMBOL, .as.text = "current-main-B" },
+    };
+    const wyl_fact_row_t rows[] = { { values, G_N_ELEMENTS (values) } };
+    const wyl_fact_store_batch_t batch = {
+      .batch_id = "tenant-import-current-B", .tenant_id = "tenant-a",
+      .graph_id = graphs[i], .namespace_id = "backup",
+      .relation_name = "items", .schema_version = 1, .source = "test",
+      .idempotency_key = "tenant-import-B", .op = WYL_FACT_STORE_OP_ASSERT,
+      .rows = rows, .n_rows = G_N_ELEMENTS (rows),
+    };
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch,
+        &created), ==, WYRELOG_E_OK);
+    g_assert_true (created);
+    g_clear_pointer (&store, wyl_fact_store_close);
+    g_autofree gchar *path = graph_file_path (&f.fixture, graphs[i],
+            "facts.duckdb");
+    gchar *current = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (path, &current, &length, NULL));
+    g_autoptr (GBytes) current_bytes = g_bytes_new_take (current, length);
+    g_assert_false (g_bytes_equal (current_bytes,
+        g_ptr_array_index (f.capture.artifact_bytes, i)));
+  }
+  TenantImportTestInput test_input = { .fixture = &f,
+                                       .fail_validation = 4,
+                                       .mode = mode };
+  const WylFactOfflineRestoreTenantInput callbacks = {
+    tenant_import_test_read, tenant_import_test_revalidate,
+  };
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+      f.capture.manifest, session_operation, 1, 0, &callbacks, &test_input,
+      &f.committed), ==, WYRELOG_E_IO);
+  g_assert_null (f.committed.graphs);
+  g_auto (WylFactOfflineRestoreJournal) partial = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &partial), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (partial.revision, ==, 2);
+  g_assert_false (artifact_identity_is_zero (&((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (partial.graphs, 0))->staged_main_identity));
+  g_assert_true (artifact_identity_is_zero (&((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (partial.graphs, 1))->staged_main_identity));
+  test_input.fail_validation = 0;
+  test_input.validations = 0;
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+      f.capture.manifest, session_operation, 1, 0, &callbacks, &test_input,
+      &f.committed), ==, WYRELOG_E_BUSY);
+  g_autofree gchar *foreign = graph_file_path (&f.fixture, "alpha", "foreign");
+  g_assert_true (g_file_set_contents (foreign, "foreign", -1, NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+      f.capture.manifest, session_operation, partial.revision, 0,
+      &callbacks, &test_input, &f.committed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (foreign), ==, 0);
+  g_autofree gchar *bound_stage = session_stage_path (&f, "alpha");
+  gint fd = g_open (bound_stage, O_RDWR, 0);
+  g_assert_cmpint (fd, >=, 0);
+  guint8 first = 0;
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (read (fd, &first, 1), ==, 1);
+  guint8 changed = first ^ 1;
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (write (fd, &changed, 1), ==, 1);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+      f.capture.manifest, session_operation, partial.revision, 0,
+      &callbacks, &test_input, &f.committed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (write (fd, &first, 1), ==, 1);
+  g_assert_cmpint (fsync (fd), ==, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+  if (g_strcmp0 (mode, "short") == 0
+      || g_strcmp0 (mode, "excess") == 0) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+        f.capture.manifest, session_operation, partial.revision, 0,
+        &callbacks, &test_input, &f.committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (f.committed.graphs);
+    test_input.mode = "resume";
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+        f.capture.manifest, session_operation, partial.revision, 0,
+        &callbacks, &test_input, &f.committed), ==, WYRELOG_E_POLICY);
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = session_journal_bytes (&f);
+    session_fixture_clear (&f);
+    return;
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+      f.capture.manifest, session_operation, partial.revision, 0,
+      &callbacks, &test_input, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 3);
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    g_autofree gchar *path = session_stage_path (&f, graphs[i]);
+    gchar *staged = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (path, &staged, &length, NULL));
+    g_autoptr (GBytes) staged_bytes = g_bytes_new_take (staged, length);
+    g_assert_true (g_bytes_equal (staged_bytes,
+        g_ptr_array_index (f.capture.artifact_bytes, i)));
+  }
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 static wyrelog_error_t
 import_construction_gap (gpointer data)
@@ -4288,6 +4467,14 @@ main (int argc, char **argv)
       test_restore_validation_session_invalid_constructor);
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
+#ifdef __linux__
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/resume",
+      "resume", test_tenant_external_import);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/short",
+      "short", test_tenant_external_import);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/excess",
+      "excess", test_tenant_external_import);
+#endif
 #ifndef G_OS_WIN32
   const gchar *import_modes[] = {
     "success", "import-historical", "truncated", "excess", "corrupt",

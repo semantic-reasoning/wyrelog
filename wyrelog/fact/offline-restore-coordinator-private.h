@@ -57,6 +57,30 @@ typedef struct
   wyrelog_error_t (*revalidate) (gpointer user_data);
 } WylFactOfflineRestoreInput;
 
+/* Authenticated tenant backup bundle. Graph IDs are canonical manifest IDs;
+ * revalidate must prove the entire bundle remains bound to that manifest.
+ * The caller retains provenance authority through this operation. */
+typedef struct
+{
+  wyrelog_error_t (*read_at) (const gchar *graph_id, guint64 offset,
+      guint8 *buffer, gsize capacity, gsize *out_read, gpointer user_data);
+  wyrelog_error_t (*revalidate) (gpointer user_data);
+} WylFactOfflineRestoreTenantInput;
+
+/* Import every tenant graph from external backup bytes into journal-bound
+ * stages. Prior successful graph CASes remain durable after a later failure;
+ * retry must reload the journal and pass its current revision. Bound stages
+ * are reopened and fully checksummed before being skipped. Linux only;
+ * other platforms fail closed. No publish or unseal occurs, and an ambiguous
+ * CAS requires a fresh policy observation. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_import_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    GBytes *canonical_manifest, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    const WylFactOfflineRestoreTenantInput *input, gpointer input_data,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Imports external backup bytes, never the destination main's contents.
  * Requires a pristine confirmed/authenticated singleton journal at revision 1,
  * an existing provisioned main, and an existing selected runtime entry. The
