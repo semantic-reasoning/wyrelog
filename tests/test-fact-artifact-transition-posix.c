@@ -126,6 +126,8 @@ fixture_clear (Fixture *fixture)
   wyl_fact_artifact_transition_posix_set_test_rename_errno (0);
   wyl_fact_artifact_transition_posix_set_test_flush_errno (0);
   wyl_fact_artifact_transition_posix_set_test_post_open_hook (NULL, NULL);
+  wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
+    (NULL, NULL);
   wyl_fact_artifact_transition_names_clear (&fixture->names);
   wyl_fact_graph_directory_clear (&fixture->directory);
   wyl_fact_graph_locator_clear (&fixture->locator);
@@ -2151,6 +2153,136 @@ test_delete_unlink_enoent_requires_sync (void)
 }
 
 static void
+recreate_stage_after_recovery_sync (gint directory_fd, gpointer user_data)
+{
+  const gchar *name = user_data;
+  gint fd = openat (directory_fd, name,
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+}
+
+static wyrelog_error_t
+count_retired_stage_recovery (gpointer user_data)
+{
+  guint *calls = user_data;
+  (*calls)++;
+  return WYRELOG_E_OK;
+}
+
+static void
+test_retired_stage_recovery (void)
+{
+  for (guint mode = 0; mode < 2; mode++) {
+    Fixture fixture;
+    fixture_init (&fixture, "u2b-retire-recovery-XXXXXX");
+    if (mode == 0)
+      make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 30);
+    make_conforming (&fixture, fixture.names.stage, 31);
+    Identity main_id = mode == 0
+        ? real_identity (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME)
+        : (Identity) { 0 };
+    Identity stage_id = real_identity (&fixture, fixture.names.stage);
+    g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+    Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    Observation observation = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+        &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+    Request request = request_for (&observation, main_id, stage_id,
+            mode != 0);
+    request.resume_forbidden = TRUE;
+    g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
+        fixture.names.stage, 0), ==, 0);
+
+    guint calls = 0;
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+          (provider, &request, &lifecycle, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (calls, ==, 1);
+
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (RECOVER_RETIRE_SYNC_DIR));
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+          (provider, &request, &lifecycle, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_IO);
+    g_assert_cmpuint (calls, ==, 1);
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (RECOVER_RETIRE_SYNC_DIR)));
+
+    wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
+      (recreate_stage_after_recovery_sync, fixture.names.stage);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+          (provider, &request, &lifecycle, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_POLICY);
+    g_assert_cmpuint (calls, ==, 1);
+    wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
+      (NULL, NULL);
+    fixture_clear (&fixture);
+  }
+}
+
+static void
+test_retired_stage_recovery_rejects_conflicts (void)
+{
+  for (guint scenario = 0; scenario < 6; scenario++) {
+    Fixture fixture;
+    fixture_init (&fixture, "u2b-retire-recovery-conflict-XXXXXX");
+    make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 30);
+    make_conforming (&fixture, fixture.names.stage, 31);
+    Identity main_id = real_identity (&fixture,
+            WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+    Identity stage_id = real_identity (&fixture, fixture.names.stage);
+    g_autoptr (WylFactArtifactTransitionPosix) provider
+      = open_provider (&fixture);
+    Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    Observation observation = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+        &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+    Request request = request_for (&observation, main_id, stage_id, FALSE);
+    request.resume_forbidden = TRUE;
+    g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
+        fixture.names.stage, 0), ==, 0);
+    switch (scenario) {
+      case 0:
+        request.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+        break;
+      case 1:
+        request.lease_identity.object++;
+        break;
+      case 2:
+        g_assert_cmpint (renameat (fixture.directory.graph_fd,
+            WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+            fixture.directory.graph_fd, "parked-main.duckdb"), ==, 0);
+        make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 32);
+        break;
+      case 3:
+        make_conforming (&fixture, fixture.names.rollback, 33);
+        break;
+      case 4:
+        make_conforming (&fixture, "foreign-restore.duckdb", 34);
+        break;
+      case 5:
+        make_conforming (&fixture, "facts.duckdb-wal", 35);
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    guint calls = 0;
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+          (provider, &request, &lifecycle, count_retired_stage_recovery,
+        &calls), !=, WYRELOG_E_OK);
+    g_assert_cmpuint (calls, ==, 0);
+    fixture_clear (&fixture);
+  }
+}
+
+static void
 test_execute_post_open_substitution (void)
 {
   const WylFactArtifactMainTransitionOp ops[] = {
@@ -2855,6 +2987,10 @@ main (int argc, char **argv)
       test_delete_post_open_disappearance_requires_sync);
   g_test_add_func ("/fact/artifact-transition-posix/execute/delete-unlink-enoent",
       test_delete_unlink_enoent_requires_sync);
+  g_test_add_func ("/fact/artifact-transition-posix/recovery/retired-stage",
+      test_retired_stage_recovery);
+  g_test_add_func ("/fact/artifact-transition-posix/recovery/retired-stage-conflicts",
+      test_retired_stage_recovery_rejects_conflicts);
   g_test_add_func ("/fact/artifact-transition-posix/execute/authorization-binding",
       test_execute_authorization_binding);
   g_test_add_func ("/fact/artifact-transition-posix/execute/post-open-substitution",

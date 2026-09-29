@@ -143,6 +143,8 @@ static gint transition_posix_test_flush_errno;
 static WylFactArtifactTransitionPosixTestPostOpenHook
     transition_posix_test_post_open_hook;
 static gpointer transition_posix_test_post_open_data;
+static void (*transition_posix_recovery_post_sync_hook) (gint, gpointer);
+static gpointer transition_posix_recovery_post_sync_data;
 
 /*
  * Read-and-clear.  g_atomic_int_exchange would say this in one call but is
@@ -214,6 +216,14 @@ wyl_fact_artifact_transition_posix_set_test_post_open_hook
 {
   transition_posix_test_post_open_hook = hook;
   transition_posix_test_post_open_data = user_data;
+}
+
+void
+wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
+  (void (*hook) (gint directory_fd, gpointer user_data), gpointer user_data)
+{
+  transition_posix_recovery_post_sync_hook = hook;
+  transition_posix_recovery_post_sync_data = user_data;
 }
 
 /*
@@ -1092,4 +1102,51 @@ wyl_fact_artifact_transition_posix_execute
     default:
       return WYRELOG_E_INVALID;
   }
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data)
+{
+  if (provider == NULL || request == NULL || lifecycle == NULL
+      || callback == NULL || !request->resume_forbidden)
+    return WYRELOG_E_INVALID;
+
+  for (guint pass = 0; pass < 2; pass++) {
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    WylFactArtifactMainTransitionObservation observation = { 0 };
+    wyrelog_error_t rc = wyl_fact_artifact_transition_posix_capture
+          (provider, lifecycle, &snapshot, &observation);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+    WylFactArtifactMainTransitionResult result = { 0 };
+    rc = wyl_fact_artifact_main_transition_admit (request, snapshot,
+            &observation, &result, &transition);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (transition == NULL
+        || result.refusal != WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE
+        || result.state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED
+        || !result.terminal
+        || observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE].present
+        || observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK].present)
+      return WYRELOG_E_POLICY;
+
+    if (pass == 0) {
+      rc = provider_revalidate_authority (provider);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR)
+          || fsync (provider->graph_fd) != 0)
+        return WYRELOG_E_IO;
+      if (transition_posix_recovery_post_sync_hook != NULL)
+        transition_posix_recovery_post_sync_hook (provider->graph_fd,
+            transition_posix_recovery_post_sync_data);
+    }
+  }
+  return callback (user_data);
 }
