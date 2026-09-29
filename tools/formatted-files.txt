@@ -282,6 +282,8 @@ wyrelog/fact/offline-restore-journal-stage-private.c
 wyrelog/fact/offline-restore-journal-stage-private.h
 wyrelog/fact/offline-restore-journal-store-private.c
 wyrelog/fact/offline-restore-journal-store-private.h
+wyrelog/fact/offline-restore-rollback-private.c
+wyrelog/fact/offline-restore-rollback-private.h
 wyrelog/fact/offline-restore-stage-private.c
 wyrelog/fact/offline-restore-stage-private.h
 wyrelog/fact/offline-restore-stage-replay-private.c

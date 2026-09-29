@@ -361,6 +361,10 @@ if get_option('enable_fact_store').allowed() and \
     args : ['-r', '/fact-offline-backup-source/import'],
     timeout : 240,
   )
+  test('fact-offline-restore-graph-rollback', test_offline_backup_source,
+    args : ['-r', '/fact-offline-backup-source/rollback'],
+    timeout : 120,
+  )
 endif
 
 test_offline_restore_journal_stage = executable(

@@ -591,6 +591,17 @@ inventory_gate (const WylFactArtifactInventorySnapshot *snapshot,
   return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE;
 }
 
+WylFactArtifactMainTransitionRefusal
+wyl_fact_artifact_main_transition_inventory_refusal
+  (const WylFactArtifactInventorySnapshot *snapshot,
+    const WylFactArtifactMainTransitionObservation *observation)
+{
+  if (snapshot == NULL || observation == NULL)
+    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_INVENTORY_UNBOUND;
+  return inventory_gate (snapshot, observation,
+             &observation->directory_identity);
+}
+
 /* ------------------------------------------------------------------ */
 /* admission                                                           */
 /* ------------------------------------------------------------------ */

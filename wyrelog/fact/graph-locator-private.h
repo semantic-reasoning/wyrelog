@@ -385,6 +385,12 @@ WylFactGraphProvisionedPair *wyl_fact_graph_provisioned_pair_ref
 void wyl_fact_graph_provisioned_pair_free (WylFactGraphProvisionedPair * pair);
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
   (WylFactGraphProvisionedPair * pair);
+/* Revalidate the exact active pair and prove it belongs to this held graph
+ * directory. On POSIX the main and provisioning companion are the only two
+ * links to the held inode. This does not permit a post-RETAIN pair. */
+wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate_in_directory
+  (WylFactGraphProvisionedPair *pair,
+    const WylFactGraphDirectory *directory);
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
     directory, WylFactGraphStage * stage);

@@ -237,6 +237,22 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_with_retired_stage_recovery
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
     WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data);
 
+/* READY-only rollback cleanup for a POSIX provisioned main whose verified
+ * provisioning companion makes its link count two. The pair must be the
+ * active exact pair in this provider's directory; the stage must have one
+ * link and the journal's exact identity. The provider owns the stage name,
+ * unlink and directory fsync. Callback runs only after a second complete
+ * inventory and pair revalidation, under the same retained authority.
+ * out_effect is UNKNOWN until the backend attempt; a directly observed
+ * NOT_APPLIED can be recorded by the durable journal caller. */
+wyrelog_error_t wyl_fact_artifact_transition_posix_with_ready_provisioned_retire
+  (WylFactArtifactTransitionPosix *provider,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data,
+    WylFactArtifactMainTransitionEffect *out_effect);
+
 void wyl_fact_artifact_transition_posix_free
   (WylFactArtifactTransitionPosix *provider);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactTransitionPosix,
