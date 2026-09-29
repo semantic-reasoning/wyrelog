@@ -16,6 +16,7 @@
 #endif
 
 #include "fact/graph-locator-private.h"
+#include "fact/root-writer-lease-private.h"
 
 typedef struct
 {
@@ -1238,6 +1239,116 @@ test_posix_provisioned_restore_dual_witness (void)
 }
 
 static void
+test_posix_restore_companion_post_publish (void)
+{
+#ifdef __APPLE__
+  return;
+#else
+  const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+  const gchar *replacement_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070547";
+  g_autofree gchar *root = make_root ();
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *old_companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *new_companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070547.sqlite", NULL);
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+          "facts.duckdb", NULL);
+  g_autofree gchar *rollback = g_build_filename (graph_path,
+          "restore-01890f47-3c4b-7cc2-b8c4-dc0c0c070546.duckdb.superseded",
+          NULL);
+  create_provisioned_pair (old_companion, main_path);
+  GStatBuf old = { 0 }, current = { 0 };
+  g_assert_cmpint (g_stat (main_path, &old), ==, 0);
+  WylFactArtifactInventoryIdentity old_identity = {
+    .domain = (guint64) old.st_dev, .object = (guint64) old.st_ino,
+  };
+  g_assert_cmpint (g_rename (main_path, rollback), ==, 0);
+  g_assert_true (g_file_set_contents (main_path, "new", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (g_stat (main_path, &current), ==, 0);
+  WylFactArtifactInventoryIdentity new_identity = {
+    .domain = (guint64) current.st_dev, .object = (guint64) current.st_ino,
+  };
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) retained = NULL;
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) dual = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&graph, exact_operation_uuid, restore_uuid, &old_identity,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &retained), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *foreign = g_build_filename (graph_path, "foreign", NULL);
+  g_assert_true (g_file_set_contents (foreign, "x", -1, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (dual);
+  g_assert_false (g_file_test (new_companion, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (g_remove (foreign), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (dual, &graph), ==, WYRELOG_E_OK);
+  g_clear_pointer (&dual, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (g_remove (new_companion), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (retained, &graph), ==, WYRELOG_E_OK);
+  ExactStageFault fault = { "restore-companion-linked", FALSE };
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &fault;
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_IO);
+  g_assert_true (fault.fired);
+  g_assert_null (dual);
+  g_assert_true (g_file_test (new_companion, G_FILE_TEST_EXISTS));
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (dual, &graph), ==, WYRELOG_E_OK);
+  g_clear_pointer (&dual, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, NULL, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&dual, wyl_fact_graph_provisioned_restore_witness_free);
+  g_assert_cmpint (g_remove (new_companion), ==, 0);
+  g_assert_true (g_file_set_contents (new_companion, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (new_companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&resolver, &graph, lease, retained, exact_operation_uuid,
+      restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (dual);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  remove_tree (root);
+#endif
+}
+
+static void
 test_posix_resolver_exact_stage_create_open_publish (void)
 {
   g_autofree gchar *root = make_root ();
@@ -1901,6 +2012,8 @@ main (int argc, char **argv)
       test_posix_provisioned_restore_witness);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-dual-witness",
       test_posix_provisioned_restore_dual_witness);
+  g_test_add_func ("/fact-graph-locator/posix/restore-companion-post-publish",
+      test_posix_restore_companion_post_publish);
   g_test_add_func
     ("/fact-graph-locator/posix/provisioned-final-directory-replacement",
       test_posix_resolver_provisioned_final_rejects_directory_replacement);

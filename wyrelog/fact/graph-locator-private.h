@@ -433,6 +433,19 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_dual_witness_open
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main,
     WylFactGraphProvisionedRestoreWitness **out_witness);
+/* Linux post-PUBLISH effect. The caller supplies a durable COMMIT/PUBLISHED
+ * reservation and keeps the root writer lease; this helper cannot establish
+ * policy or journal authority. An error after link may leave the exact new
+ * companion in place. Retry only with fresh authority and identities. */
+wyrelog_error_t wyl_fact_graph_restore_companion_link_post_publish
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedRestoreWitness *retained_old,
+    const gchar *old_provisioning_uuid, const gchar *restore_uuid,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphProvisionedRestoreWitness,
     wyl_fact_graph_provisioned_restore_witness_free)
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
