@@ -3522,6 +3522,22 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_sync_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyGraphRestoreReplacementRecord **out_committed);
 
+/* Atomically select an imported graph replacement after a caller-held root
+ * lease and runtime quiescence prove the exact dual filesystem shape. The
+ * callback runs inside the policy writer transaction and must not reenter the
+ * store or mutate files. A commit-response error requires fresh observation
+ * of the complete policy/filesystem tuple before retry. */
+typedef wyrelog_error_t (*WylPolicyGraphRestoreSelectionEffectFunc)
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data);
+wyrelog_error_t wyl_policy_store_graph_restore_select_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *current_journal,
+    const WylPolicyOfflineRestoreRecord *selected_journal,
+    WylPolicyGraphRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+
 /* Complete a pending graph COMMIT RETAIN only after the callback proves the
  * exact retained filesystem shape. The effect runs under the policy writer
  * transaction and must not reenter the policy store. */
