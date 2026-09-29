@@ -15,6 +15,12 @@ typedef wyrelog_error_t (*WylFactArtifactInventoryPosixRevalidate)
 typedef void (*WylFactArtifactInventoryPosixBeforeEnd)
   (gint graph_fd, gpointer user_data);
 
+typedef struct
+{
+  WylFactArtifactMainTransitionSlot slot;
+  WylFactArtifactInventoryIdentity identity;
+} WylFactArtifactInventoryPosixOldPair;
+
 /*
  * The one POSIX inventory scanner used by both the normal namespace and the
  * bounded main-transition provider.  Operation names are optional; when
@@ -25,6 +31,20 @@ typedef void (*WylFactArtifactInventoryPosixBeforeEnd)
 wyrelog_error_t wyl_fact_artifact_inventory_posix_capture
   (gint graph_fd, guint64 owner, gint guard_fd, const gchar *stage_name,
     const gchar *rollback_name,
+    WylFactArtifactInventoryPosixRevalidate revalidate,
+    WylFactArtifactInventoryPosixBeforeEnd before_end, gpointer user_data,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionEntryEvidence
+    out_entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT]);
+
+/* Only the #623 provider may pass old_pair, after opening an exact locator
+ * witness and revalidating it at both capture boundaries. This relaxes the
+ * inventory anomaly classification only for that one observed old inode;
+ * it does not authenticate the pair by itself. */
+wyrelog_error_t wyl_fact_artifact_inventory_posix_capture_with_old_pair
+  (gint graph_fd, guint64 owner, gint guard_fd, const gchar *stage_name,
+    const gchar *rollback_name,
+    const WylFactArtifactInventoryPosixOldPair *old_pair,
     WylFactArtifactInventoryPosixRevalidate revalidate,
     WylFactArtifactInventoryPosixBeforeEnd before_end, gpointer user_data,
     WylFactArtifactInventorySnapshot **out_snapshot,

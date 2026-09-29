@@ -191,6 +191,20 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_capture
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation);
 
+/* The caller must freshly verify that provisioning_uuid is the ACTIVE policy
+ * record for the same sealed tenant/graph/store and generations. The provider
+ * reconstructs an exact old-main companion witness in the selected state;
+ * the returned marker is a value-contract assertion, never a filesystem
+ * capability. A fresh capture is required after each rename and restart. */
+wyrelog_error_t wyl_fact_artifact_transition_posix_capture_provisioned
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation);
+
 /*
  * Executes one authorized mutation operation against the held graph directory.
  *
@@ -216,6 +230,20 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_capture
  */
 wyrelog_error_t wyl_fact_artifact_transition_posix_execute
   (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
+
+/* Reconstruct and revalidate the exact old-main witness before execution.
+ * The ordinary execute rejects marked observations. A caller must pass the
+ * same durable request and ACTIVE provisioning UUID used at capture.
+ * FINALIZE is refused until the journaled companion/policy cleanup path can
+ * retire the old pair without leaving an ACTIVE orphan. */
+wyrelog_error_t wyl_fact_artifact_transition_posix_execute_provisioned
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactArtifactMainTransitionRequest *request,
     const WylFactArtifactMainTransitionObservation *authorized,
     WylFactArtifactMainTransitionOp op,
     WylFactArtifactMainTransitionEffect *out_effect,
