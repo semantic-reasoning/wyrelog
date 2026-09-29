@@ -177,8 +177,8 @@ TEST_REGISTRATION_PROFILES = {
         "687d7ba994a2128fd9cee1d1f17df794bda684e91064064f522f03b81ca2f40d",
     ),
     "tests/test-fact-artifact-transition-posix.c": (
-        40,
-        "7f7d98a77a5f51162288b9be29b5b591e9cb6ac1a172f6dbb983cf398dacdd2a",
+        42,
+        "39dbfd1ba1116ee84db02eb8ca96046b1ec072b73717f0079179611f0df6d4d3",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
         24,
@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "fe9ef19b9e00fc3747ecc2a0dadccfcad7f51af04f37dec3fe9124b48ebecd2a",
+        "69f2d9069fe45935932aa05cbf6565e555d10fd41b74795db139ad793bd34868",
     "tests/test-fact-artifact-transition-windows.c":
         "e28928fc2a46782f2558da57eab95c8a9ae831fb53857d816544d65a2e54f9fb",
 }

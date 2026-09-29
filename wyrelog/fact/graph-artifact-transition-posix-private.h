@@ -129,6 +129,7 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_DELETE_UNLINK_ENOENT_SYNC,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_CAPTURE_PRE_FINALIZE_MUTATE_STAGE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT,
@@ -220,6 +221,22 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_execute
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
 
+/* Recovery of an already absent stage after an interrupted RETIRE_STAGE.
+ * Under the caller's retained root lease and selected graph quiescence,
+ * capture/admit must twice prove the exact ABANDONED terminal shape around a
+ * successful graph-directory fsync. Only then is callback invoked, while
+ * provider authority is still held. The caller must recheck its journal
+ * revision, pending RETIRE_STAGE, sealed policy generations and graph runtime
+ * before a completion CAS. No proof escapes this call or survives independent
+ * filesystem mutation. Callback must not reenter or free provider. */
+typedef wyrelog_error_t (*WylFactArtifactRetiredStageRecoveryFunc)
+  (gpointer user_data);
+wyrelog_error_t wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data);
+
 void wyl_fact_artifact_transition_posix_free
   (WylFactArtifactTransitionPosix *provider);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactTransitionPosix,
@@ -245,6 +262,10 @@ void wyl_fact_artifact_transition_posix_set_test_rename_errno
  * seam then reports EIO, which is the probe-fails row. */
 void wyl_fact_artifact_transition_posix_set_test_flush_errno
   (gint errno_value);
+/* Test mutation after the recovery fsync and before recapture; caller clears
+ * it after use. */
+void wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
+  (void (*hook) (gint directory_fd, gpointer user_data), gpointer user_data);
 gboolean wyl_fact_artifact_transition_posix_test_fault_was_consumed
   (WylFactArtifactTransitionPosixTestFault fault);
 
