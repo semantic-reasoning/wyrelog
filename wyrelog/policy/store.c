@@ -39642,7 +39642,7 @@ wyrelog_error_t
 wyl_policy_store_tenant_restore_reserve_replacements_with_effect
   (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *expected_journal,
-    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyTenantRestoreReservationEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed)
 {
@@ -39697,8 +39697,6 @@ wyl_policy_store_tenant_restore_reserve_replacements_with_effect
     rc = tenant_restore_bind_authority_locked (store, &journal,
             first->graph_id, first->old_provisioning_uuid, &active_uuids);
   }
-  if (rc == WYRELOG_E_OK && exact)
-    rc = effect (current->journal_blob, active_uuids, effect_data);
   for (guint i = 0; rc == WYRELOG_E_OK && exact
       && i < journal.graphs->len; i++) {
     const WylFactOfflineRestoreJournalGraph *graph =
@@ -39737,6 +39735,8 @@ wyl_policy_store_tenant_restore_reserve_replacements_with_effect
     g_ptr_array_add (generated, copy);
     g_ptr_array_add (bindings, binding);
   }
+  if (rc == WYRELOG_E_OK && exact)
+    rc = effect (current->journal_blob, active_uuids, generated, effect_data);
   if (rc == WYRELOG_E_OK && exact)
     rc = wyl_fact_offline_restore_journal_bind_tenant_replacements
           (&journal, bindings);

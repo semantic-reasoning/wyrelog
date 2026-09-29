@@ -3231,13 +3231,37 @@ static wyrelog_error_t fail_retain_once (const gchar *point,
 
 static wyrelog_error_t
 tenant_reserve_test_effect (GBytes *journal, const GPtrArray *uuids,
-    gpointer user_data)
+    const GPtrArray *replacements, gpointer user_data)
 {
   g_assert_nonnull (journal);
   g_assert_cmpuint (uuids->len, ==, 2);
+  g_assert_cmpuint (replacements->len, ==, 2);
   (*(guint *) user_data)++;
   return WYRELOG_E_OK;
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  SessionFixture *fixture;
+  gchar *intruder;
+} TenantReservationIntruder;
+
+static wyrelog_error_t
+tenant_reserve_intrude (const gchar *graph_id, const gchar *replacement_uuid,
+    gpointer data)
+{
+  TenantReservationIntruder *intruder = data;
+  if (g_strcmp0 (graph_id, "alpha") != 0)
+    return WYRELOG_E_OK;
+  g_autofree gchar *basename = g_strdup_printf ("provision-%s.sqlite",
+          replacement_uuid);
+  intruder->intruder = graph_file_path (&intruder->fixture->fixture,
+          graph_id, basename);
+  return g_file_set_contents (intruder->intruder, "foreign", -1, NULL) ?
+         WYRELOG_E_OK : WYRELOG_E_IO;
+}
+#endif
 
 static void
 test_tenant_commit_sync_staged_both (gconstpointer data)
@@ -3876,6 +3900,80 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
               g_assert_cmpint (wyl_policy_store_create_schema
                     (f.fixture.policy), ==, WYRELOG_E_POLICY);
             }
+            if (g_str_equal (mode,
+                "retain-sync-dir-publish-sync-driver")) {
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, 32, 0, &f.committed), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (f.committed.version, ==,
+                  WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+              g_assert_cmpuint (f.committed.revision, ==, 33);
+              g_assert_nonnull (((WylFactOfflineRestoreJournalGraph *)
+                  g_ptr_array_index (f.committed.graphs, 0))->replacement_provisioning_uuid);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+              g_assert_cmpint (wyl_policy_store_open (policy_path,
+                  &f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_policy_store_create_schema
+                    (f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, 32, 0, &f.committed), ==,
+                  WYRELOG_E_BUSY);
+              g_assert_null (f.committed.graphs);
+            }
+#ifdef WYL_TEST_HANDLE_SEAMS
+            if (g_str_equal (mode,
+                "retain-sync-dir-publish-sync-driver-commit-response")) {
+              wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+                  WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, 32, 0, &f.committed), ==,
+                  WYRELOG_E_IO);
+              g_assert_null (f.committed.graphs);
+              g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+              g_assert_cmpint (wyl_policy_store_open (policy_path,
+                  &f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_policy_store_create_schema
+                    (f.fixture.policy), ==, WYRELOG_E_OK);
+              g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                    (f.fixture.policy, session_operation, &f.committed), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (f.committed.version, ==,
+                  WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+              g_assert_cmpuint (f.committed.revision, ==, 33);
+            }
+#endif
+#ifdef WYL_TEST_HANDLE_SEAMS
+            if (g_str_equal (mode,
+                "retain-sync-dir-publish-sync-driver-conflict")) {
+              TenantReservationIntruder intruder = { .fixture = &f };
+              wyl_fact_offline_restore_tenant_reserve_set_checkpoint_for_test
+                (tenant_reserve_intrude, &intruder);
+              wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+                    (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                  session_operation, 32, 0, &f.committed), ==,
+                  WYRELOG_E_POLICY);
+              g_assert_null (f.committed.graphs);
+              wyl_fact_offline_restore_tenant_reserve_set_checkpoint_for_test
+                (NULL, NULL);
+              g_assert_nonnull (intruder.intruder);
+              g_assert_cmpint (g_remove (intruder.intruder), ==, 0);
+              g_free (intruder.intruder);
+              g_auto (WylFactOfflineRestoreJournal) unchanged = { 0 };
+              g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                    (f.fixture.policy, session_operation, &unchanged), ==,
+                  WYRELOG_E_OK);
+              g_assert_cmpuint (unchanged.version, ==,
+                  WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION);
+              g_assert_cmpuint (unchanged.revision, ==, 32);
+            }
+#endif
           }
         }
       }
@@ -5675,6 +5773,14 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-interleaved", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/both",
       "retain-sync-dir-publish-sync-reserve", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/driver",
+      "retain-sync-dir-publish-sync-driver", test_tenant_commit_sync_staged_both);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/driver-conflict",
+      "retain-sync-dir-publish-sync-driver-conflict", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-reserve/driver-commit-response",
+      "retain-sync-dir-publish-sync-driver-commit-response", test_tenant_commit_sync_staged_both);
+#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-foreign",
       "sibling-foreign", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/sibling-stage-content",

@@ -462,6 +462,13 @@ wyrelog_error_t wyl_fact_graph_restore_tenant_post_publish_shape_open
     const gchar *restore_uuid,
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main);
+/* The tenant post-publish proof bound to a proposed replacement name. */
+wyrelog_error_t wyl_fact_graph_restore_tenant_reserved_post_publish_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main);
 typedef enum
 {
   WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID,
