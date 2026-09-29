@@ -3738,6 +3738,110 @@ test_graph_restore_replacement_reservation (void)
   g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
       g_ptr_array_index (synced_directory.graphs, 0))->next_op, ==,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
+  g_auto (WylFactOfflineRestoreJournal) published_by_driver = { 0 };
+  const gchar *publish_failure = "restore-publish-after-begin";
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (fail_retain_once, &publish_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      synced_directory.revision, 0, &published_by_driver), ==,
+      WYRELOG_E_IO);
+  g_assert_null (publish_failure);
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (NULL, NULL);
+  g_auto (WylFactOfflineRestoreJournal) publish_pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &publish_pending), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_pending.revision, 0, &published_by_driver), !=,
+      WYRELOG_E_OK);
+  g_assert_null (published_by_driver.graphs);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  publish_failure = "restore-publish-after-rename";
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (fail_retain_once, &publish_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_pending.revision, 0, &published_by_driver), ==,
+      WYRELOG_E_IO);
+  g_assert_null (publish_failure);
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_null (published_by_driver.graphs);
+  g_autofree gchar *parked_published_main = graph_file_path (&fixture,
+          "alpha", "parked-published-main-test");
+  g_assert_cmpint (g_rename (main_path, parked_published_main), ==, 0);
+  g_assert_true (g_file_set_contents (main_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_pending.revision, 0, &published_by_driver), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (g_remove (main_path), ==, 0);
+  g_assert_cmpint (g_rename (parked_published_main, main_path), ==, 0);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_PUBLISH_DIR_FSYNC);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_pending.revision, 0, &published_by_driver), !=,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_pending.revision, 0, &published_by_driver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (published_by_driver.graphs, 0))->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR);
+  g_auto (WylFactOfflineRestoreJournal) synced_published = { 0 };
+  publish_failure = "restore-publish-after-begin";
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (fail_retain_once, &publish_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published_by_driver.revision, 0, &synced_published), ==,
+      WYRELOG_E_IO);
+  g_assert_null (publish_failure);
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (NULL, NULL);
+  g_auto (WylFactOfflineRestoreJournal) publish_sync_pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &publish_sync_pending), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_PUBLISH_DIR_FSYNC);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_sync_pending.revision, 0, &synced_published), !=,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  publish_failure = "restore-publish-after-fsync";
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (fail_retain_once, &publish_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_sync_pending.revision, 0, &synced_published), ==,
+      WYRELOG_E_IO);
+  g_assert_null (publish_failure);
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      publish_sync_pending.revision, 0, &synced_published), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (synced_published.graphs, 0))->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (synced_published.graphs, 0))->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
 #else
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
         (fixture.policy, early.revision, &early_begin, &result,
@@ -3754,7 +3858,7 @@ test_graph_restore_replacement_reservation (void)
       g_ptr_array_index (published.graphs, 0);
   published.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
 #ifdef __linux__
-  published.revision = synced_directory.revision + 1;
+  published.revision = synced_published.revision + 1;
 #else
   published.revision = early_result.revision + 1;
 #endif
@@ -3776,7 +3880,6 @@ test_graph_restore_replacement_reservation (void)
         ("restore-%s.duckdb.superseded", operation_uuid);
   g_autofree gchar *rollback_path = graph_file_path (&fixture, "alpha",
           rollback_basename);
-  g_assert_cmpint (g_rename (stage_path, main_path), ==, 0);
   WylFactGraphRestorePostPublishLayout observed =
       WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect

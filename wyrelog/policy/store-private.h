@@ -3546,4 +3546,15 @@ wyrelog_error_t wyl_policy_store_graph_restore_sync_retained_with_effect
     WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Complete one pending graph COMMIT publication operation only after the
+ * caller proves its exact post-PUBLISH filesystem shape under this fence. */
+wyrelog_error_t wyl_policy_store_graph_restore_publish_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    guint operation,
+    WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+
 G_END_DECLS;
