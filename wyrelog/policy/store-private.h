@@ -3596,6 +3596,21 @@ wyrelog_error_t wyl_policy_store_tenant_restore_sync_retain_dir_step_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* v5 PUBLISH records UNKNOWN before stage-to-main rename. COMPLETE checks
+ * the exact published shape and durable directory update under tenant scope. */
+typedef enum
+{
+  WYL_POLICY_TENANT_RESTORE_PUBLISH_BEGIN = 1,
+  WYL_POLICY_TENANT_RESTORE_PUBLISH_COMPLETE,
+} WylPolicyTenantRestorePublishStep;
+wyrelog_error_t wyl_policy_store_tenant_restore_publish_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestorePublishStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Atomically select an imported graph replacement after a caller-held root
  * lease and runtime quiescence prove the exact dual filesystem shape. The
  * callback runs inside the policy writer transaction and must not reenter the
