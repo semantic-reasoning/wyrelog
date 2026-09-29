@@ -3679,6 +3679,65 @@ test_graph_restore_replacement_reservation (void)
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
   g_assert_cmpint (retained_graph->next_op, ==,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+  g_auto (WylFactOfflineRestoreJournal) synced_rollback = { 0 };
+  const gchar *sync_failure = "restore-sync-retained-after-begin";
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (fail_retain_once, &sync_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      retained.revision, 0, &synced_rollback), ==, WYRELOG_E_IO);
+  g_assert_null (sync_failure);
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (NULL, NULL);
+  g_auto (WylFactOfflineRestoreJournal) rollback_pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &rollback_pending), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (rollback_pending.graphs, 0))->pending_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_FSYNC);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      rollback_pending.revision, 0, &synced_rollback), !=, WYRELOG_E_OK);
+  g_assert_null (synced_rollback.graphs);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  sync_failure = "restore-sync-retained-after-fsync";
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (fail_retain_once, &sync_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      rollback_pending.revision, 0, &synced_rollback), ==, WYRELOG_E_IO);
+  g_assert_null (sync_failure);
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      rollback_pending.revision, 0, &synced_rollback), ==, WYRELOG_E_OK);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (synced_rollback.graphs, 0))->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR);
+  g_auto (WylFactOfflineRestoreJournal) synced_directory = { 0 };
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      synced_rollback.revision, 0, &synced_directory), !=, WYRELOG_E_OK);
+  g_assert_null (synced_directory.graphs);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  g_auto (WylFactOfflineRestoreJournal) directory_pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation_uuid, &directory_pending), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      directory_pending.revision, 0, &synced_directory), ==, WYRELOG_E_OK);
+  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (synced_directory.graphs, 0))->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
 #else
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
         (fixture.policy, early.revision, &early_begin, &result,
@@ -3695,7 +3754,7 @@ test_graph_restore_replacement_reservation (void)
       g_ptr_array_index (published.graphs, 0);
   published.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
 #ifdef __linux__
-  published.revision = retained.revision + 1;
+  published.revision = synced_directory.revision + 1;
 #else
   published.revision = early_result.revision + 1;
 #endif

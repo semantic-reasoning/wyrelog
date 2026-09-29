@@ -3535,4 +3535,15 @@ wyrelog_error_t wyl_policy_store_graph_restore_retain_with_effect
     WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Complete one pending retained durability operation under pinned sealed
+ * graph/old ACTIVE policy authority. The callback proves the exact effect. */
+wyrelog_error_t wyl_policy_store_graph_restore_sync_retained_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    guint operation,
+    WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result);
+
 G_END_DECLS;
