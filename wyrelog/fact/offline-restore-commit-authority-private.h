@@ -82,6 +82,14 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_sync_retained_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Advance one imported graph COMMIT PUBLISH or SYNC_PUBLISH_DIR operation.
+ * The exact post-publish shape is proved before journal completion. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_publish_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
@@ -90,6 +98,8 @@ void wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
 void wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
+void wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 #endif
 

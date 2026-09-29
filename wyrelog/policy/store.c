@@ -38572,15 +38572,29 @@ graph_restore_early_commit_with_effect
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE;
   gboolean sync_dir = operation ==
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR;
+  gboolean publish = operation ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH;
+  gboolean sync_publish_dir = operation ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR;
   WylFactArtifactMainTransitionState before_state = retain
     ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+    : sync_publish_dir
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED;
+  WylFactArtifactMainTransitionState after_state = publish
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED
+    : sync_publish_dir
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
     : WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED;
   WylFactArtifactMainTransitionOp after_next = retain
     ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
     : sync_rollback
     ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
-    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH;
-  if ((!retain && !sync_rollback && !sync_dir)
+    : sync_dir ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+    : publish ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  if ((!retain && !sync_rollback && !sync_dir
+      && !publish && !sync_publish_dir)
       || before.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
       || before.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       || before.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
@@ -38588,8 +38602,7 @@ graph_restore_early_commit_with_effect
       || before_graph->next_op != operation
       || before_graph->pending_op != operation
       || before_graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
-      || after_graph->transition_state !=
-      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED
+      || after_graph->transition_state != after_state
       || after_graph->next_op != after_next
       || after_graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
       || after_graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED)
@@ -38704,6 +38717,23 @@ wyl_policy_store_graph_restore_sync_retained_with_effect
 {
   if (operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
       && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR)
+    return WYRELOG_E_INVALID;
+  return graph_restore_early_commit_with_effect (store, expected, pending,
+             completed, operation, effect, effect_data, out_result);
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_publish_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *pending,
+    const WylPolicyOfflineRestoreRecord *completed,
+    guint operation,
+    WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result)
+{
+  if (operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+      && operation != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR)
     return WYRELOG_E_INVALID;
   return graph_restore_early_commit_with_effect (store, expected, pending,
              completed, operation, effect, effect_data, out_result);
