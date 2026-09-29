@@ -2747,7 +2747,290 @@ restore_post_publish_inventory (WylFactGraphDirectory *directory,
   }
   return rc;
 }
+
+static wyrelog_error_t
+restore_selected_cleanup_inventory (WylFactGraphDirectory *directory,
+    const gchar *rollback, const gchar *old_companion,
+    const gchar *new_companion,
+    const WylFactArtifactInventoryIdentity *old_identity,
+    const WylFactArtifactInventoryIdentity *new_identity,
+    WylFactGraphRestoreSelectedCleanupShape *out_shape)
+{
+  const gchar *allowed[] = { WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+                             new_companion, rollback, old_companion,
+                             "facts.duckdb.lock" };
+  gboolean seen[G_N_ELEMENTS (allowed)] = { FALSE };
+  gint scan_fd = openat (directory->graph_fd, ".",
+          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (scan_fd < 0)
+    return errno_to_resolver_error (errno);
+  struct stat before = { 0 }, after = { 0 };
+  wyrelog_error_t rc = fstat (scan_fd, &before) == 0
+    ? WYRELOG_E_OK : WYRELOG_E_IO;
+  DIR *scan = NULL;
+  if (rc == WYRELOG_E_OK) {
+    scan = fdopendir (scan_fd);
+    if (scan == NULL)
+      rc = errno_to_resolver_error (errno);
+    else
+      scan_fd = -1;
+  }
+  guint count = 0;
+  while (rc == WYRELOG_E_OK) {
+    errno = 0;
+    struct dirent *entry = readdir (scan);
+    if (entry == NULL) {
+      if (errno != 0)
+        rc = errno_to_resolver_error (errno);
+      break;
+    }
+    if (++count > 7) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    if (strcmp (entry->d_name, ".") == 0
+        || strcmp (entry->d_name, "..") == 0)
+      continue;
+    guint slot = 0;
+    while (slot < G_N_ELEMENTS (allowed)
+        && strcmp (entry->d_name, allowed[slot]) != 0)
+      slot++;
+    if (slot == G_N_ELEMENTS (allowed) || seen[slot]) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    seen[slot] = TRUE;
+    struct stat named = { 0 }, held = { 0 }, now = { 0 };
+    if (fstatat (directory->graph_fd, allowed[slot], &named,
+        AT_SYMLINK_NOFOLLOW) != 0) {
+      rc = errno_to_resolver_error (errno);
+      break;
+    }
+    const WylFactArtifactInventoryIdentity *expected = slot <= 1
+        ? new_identity : slot <= 3 ? old_identity : NULL;
+    guint links = slot <= 1 ? 2u : slot == 4 ? 1u
+        : seen[2] && seen[3] ? 2u : 1u;
+    if (!S_ISREG (named.st_mode) || named.st_uid != geteuid ()
+        || (named.st_mode & 07777) != 0600 || named.st_size < 0
+        || (expected != NULL
+        && ((guint64) named.st_dev != expected->domain
+        || (guint64) named.st_ino != expected->object))) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    /* Old link counts are checked after enumeration, when both names are
+     * known. Every encountered name is opened to pin its exact identity. */
+    gint fd = openat (directory->graph_fd, allowed[slot],
+            O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0 || fstat (fd, &held) != 0
+        || fstatat (directory->graph_fd, allowed[slot], &now,
+        AT_SYMLINK_NOFOLLOW) != 0)
+      rc = WYRELOG_E_IO;
+    else if (!restore_inventory_same_stat (&named, &held)
+        || !restore_inventory_same_stat (&named, &now)
+        || ((slot <= 1 || slot == 4) && named.st_nlink != links))
+      rc = WYRELOG_E_POLICY;
+    if (fd >= 0)
+      close (fd);
+  }
+  if (rc == WYRELOG_E_OK && (!seen[0] || !seen[1]
+      || (seen[3] && !seen[2])))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && seen[2]) {
+    struct stat old = { 0 };
+    if (fstatat (directory->graph_fd, rollback, &old,
+        AT_SYMLINK_NOFOLLOW) != 0)
+      rc = WYRELOG_E_IO;
+    else if ((guint64) old.st_dev != old_identity->domain
+        || (guint64) old.st_ino != old_identity->object
+        || old.st_nlink != (seen[3] ? 2 : 1))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && seen[3]) {
+      struct stat companion = { 0 };
+      if (fstatat (directory->graph_fd, old_companion, &companion,
+          AT_SYMLINK_NOFOLLOW) != 0)
+        rc = WYRELOG_E_IO;
+      else if (!restore_inventory_same_stat (&old, &companion))
+        rc = WYRELOG_E_POLICY;
+    }
+  }
+  if (rc == WYRELOG_E_OK && fstat (directory->graph_fd, &after) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && !restore_inventory_same_stat (&before, &after))
+    rc = WYRELOG_E_POLICY;
+  if (scan != NULL)
+    closedir (scan);
+  if (scan_fd >= 0)
+    close (scan_fd);
+  if (rc == WYRELOG_E_OK)
+    *out_shape = seen[3] ? WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL
+      : seen[2] ? WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL
+      : WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL;
+  return rc;
+}
+
+static wyrelog_error_t
+restore_selected_unlink_bound (WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+    const gchar *name,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    guint expected_links)
+{
+  gint fd = openat (directory->graph_fd, name,
+          O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    return errno_to_resolver_error (errno);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-selected-before-old-unlink",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_post_publish_authority (resolver, directory, lease);
+  struct stat held = { 0 }, named = { 0 };
+  if (rc == WYRELOG_E_OK
+      && (fstat (fd, &held) != 0
+      || fstatat (directory->graph_fd, name, &named,
+      AT_SYMLINK_NOFOLLOW) != 0))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!restore_inventory_same_stat (&held, &named)
+      || !S_ISREG (named.st_mode) || named.st_nlink != expected_links
+      || named.st_uid != geteuid () || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_dev != expected_identity->domain
+      || (guint64) named.st_ino != expected_identity->object))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && unlinkat (directory->graph_fd, name, 0) != 0)
+    rc = errno_to_resolver_error (errno);
+  close (fd);
+  return rc;
+}
 #endif
+
+wyrelog_error_t
+wyl_fact_graph_restore_selected_cleanup_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestoreSelectedCleanupShape *out_shape)
+{
+  if (out_shape != NULL)
+    *out_shape = WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || expected_old_main == NULL || expected_new_main == NULL
+      || out_shape == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) old_provisioning_uuid;
+  (void) restore_uuid;
+  (void) replacement_uuid;
+  return WYRELOG_E_POLICY;
+#else
+  g_autofree gchar *old_companion = NULL;
+  g_autofree gchar *new_companion = NULL;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = provisioning_stage_name_from_operation
+        (old_provisioning_uuid, &old_companion);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (replacement_uuid,
+            &new_companion);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (old_companion, new_companion) == 0
+      || !restore_inventory_identity_valid (expected_old_main)
+      || !restore_inventory_identity_valid (expected_new_main)
+      || expected_old_main->domain == 0 || expected_old_main->object == 0
+      || expected_new_main->domain == 0 || expected_new_main->object == 0
+      || wyl_fact_artifact_inventory_identity_equal (expected_old_main,
+      expected_new_main)))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_post_publish_authority (resolver, directory, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_selected_cleanup_inventory (directory, names.rollback,
+            old_companion, new_companion, expected_old_main,
+            expected_new_main, out_shape);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_post_publish_authority (resolver, directory, lease);
+  if (rc != WYRELOG_E_OK)
+    *out_shape = WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_selected_cleanup_execute
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main)
+{
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_restore_selected_cleanup_shape_open
+        (resolver, directory, lease, old_provisioning_uuid, restore_uuid,
+          replacement_uuid, expected_old_main, expected_new_main, &shape);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifndef __linux__
+  return WYRELOG_E_POLICY;
+#else
+  g_autofree gchar *old_companion = NULL;
+  WylFactArtifactTransitionNames names = { 0 };
+  rc = provisioning_stage_name_from_operation (old_provisioning_uuid,
+          &old_companion);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
+  if (rc == WYRELOG_E_OK
+      && shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL) {
+    rc = restore_selected_unlink_bound (resolver, directory, lease,
+            old_companion, expected_old_main, 2);
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint ("restore-selected-after-companion-unlink",
+              directory->checkpoint_data);
+    if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_restore_selected_cleanup_shape_open (resolver,
+              directory, lease, old_provisioning_uuid, restore_uuid,
+              replacement_uuid, expected_old_main, expected_new_main, &shape);
+    if (rc == WYRELOG_E_OK
+        && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK
+      && shape == WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL) {
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open (resolver,
+            directory, lease, old_provisioning_uuid, restore_uuid,
+            replacement_uuid, expected_old_main, expected_new_main, &shape);
+    if (rc == WYRELOG_E_OK
+        && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK)
+      rc = restore_selected_unlink_bound (resolver, directory, lease,
+              names.rollback, expected_old_main, 1);
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint ("restore-selected-after-rollback-unlink",
+              directory->checkpoint_data);
+  }
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open (resolver,
+            directory, lease, old_provisioning_uuid, restore_uuid,
+            replacement_uuid, expected_old_main, expected_new_main, &shape);
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+#endif
+}
 
 wyrelog_error_t
 wyl_fact_graph_restore_post_publish_shape_open

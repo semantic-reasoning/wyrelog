@@ -596,6 +596,29 @@ link_after_restore_shape_classification (const gchar *point,
   return WYRELOG_E_OK;
 }
 
+typedef struct
+{
+  const gchar *target_path;
+  const gchar *backup_path;
+  gboolean fired;
+} RestoreOldNameSwap;
+
+static wyrelog_error_t
+replace_restore_old_name_before_unlink (const gchar *point,
+    gpointer user_data)
+{
+  RestoreOldNameSwap *swap = user_data;
+  if (!swap->fired && g_strcmp0 (point,
+      "restore-selected-before-old-unlink") == 0) {
+    swap->fired = TRUE;
+    g_assert_cmpint (g_rename (swap->target_path, swap->backup_path), ==, 0);
+    g_assert_true (g_file_set_contents (swap->target_path, "foreign", -1,
+        NULL));
+    g_assert_cmpint (g_chmod (swap->target_path, 0600), ==, 0);
+  }
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 replace_exact_stage_name (const gchar *point, gpointer user_data)
 {
@@ -1521,6 +1544,80 @@ test_posix_restore_companion_post_publish (void)
       restore_uuid, replacement_uuid, &old_identity, &new_identity, &dual), ==,
       WYRELOG_E_POLICY);
   g_assert_null (dual);
+  g_assert_cmpint (g_remove (new_companion), ==, 0);
+  g_assert_cmpint (link (main_path, new_companion), ==, 0);
+  WylFactGraphRestoreSelectedCleanupShape cleanup =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &cleanup), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (cleanup, ==,
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL);
+  g_autofree gchar *parked_old_companion = g_strconcat (old_companion,
+          ".parked", NULL);
+  RestoreOldNameSwap old_swap = {
+    old_companion, parked_old_companion, FALSE
+  };
+  graph.checkpoint = replace_restore_old_name_before_unlink;
+  graph.checkpoint_data = &old_swap;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_execute
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity), ==, WYRELOG_E_POLICY);
+  g_assert_true (old_swap.fired);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_autofree gchar *foreign_contents = NULL;
+  g_assert_true (g_file_get_contents (old_companion, &foreign_contents,
+      NULL, NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign");
+  g_assert_cmpint (g_remove (old_companion), ==, 0);
+  g_assert_cmpint (g_rename (parked_old_companion, old_companion), ==, 0);
+  ExactStageFault companion_cleanup_fault = {
+    "restore-selected-after-companion-unlink", FALSE
+  };
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &companion_cleanup_fault;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_execute
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity), ==, WYRELOG_E_IO);
+  g_assert_true (companion_cleanup_fault.fired);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &cleanup), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (cleanup, ==,
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_PARTIAL);
+  g_assert_true (g_file_set_contents (foreign, "foreign", -1, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &cleanup), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (cleanup, ==,
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+  g_assert_cmpint (g_remove (foreign), ==, 0);
+  ExactStageFault cleanup_fault = {
+    "restore-selected-after-rollback-unlink", FALSE
+  };
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &cleanup_fault;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_execute
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity), ==, WYRELOG_E_IO);
+  g_assert_true (cleanup_fault.fired);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_shape_open
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity, &cleanup), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (cleanup, ==,
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL);
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_execute
+        (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
+      replacement_uuid, &old_identity, &new_identity), ==, WYRELOG_E_OK);
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
