@@ -936,80 +936,67 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
 }
 
 static wyrelog_error_t
-execute_retire_stage (const WylFactArtifactTransitionPosix *provider,
-    const WylFactArtifactMainTransitionEntryEvidence *expected,
+execute_delete_and_sync_dir (const WylFactArtifactTransitionPosix *provider,
+    const gchar *name, const WylFactArtifactMainTransitionEntryEvidence *expected,
+    WylFactArtifactTransitionPosixTestFault verify_fault,
+    WylFactArtifactTransitionPosixTestFault unlink_fault,
+    WylFactArtifactTransitionPosixTestFault sync_fault,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   gint fd = -1;
-  if (!execute_open_expected (provider, provider->names.stage, expected,
-      WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY, TRUE, &fd, out_effect))
-    return WYRELOG_E_OK;
-  if (!execute_name_still_expected (provider, provider->names.stage,
-      expected, TRUE, out_effect)) {
+  gboolean force_sync_failure = FALSE;
+  if (!execute_open_expected (provider, name, expected, verify_fault,
+      TRUE, &fd, out_effect)) {
+    if (*out_effect != WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
+      return WYRELOG_E_OK;
+    goto sync_directory;
+  }
+  if (!execute_name_still_expected (provider, name, expected, TRUE,
+      out_effect)) {
     close (fd);
-    return WYRELOG_E_OK;
+    if (*out_effect != WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
+      return WYRELOG_E_OK;
+    goto sync_directory;
   }
 
   gint unlink_res;
   gint unlink_errno;
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK)) {
+  if (posix_fault_take (unlink_fault)) {
     unlink_res = -1;
     unlink_errno = EIO;
+  } else if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_DELETE_UNLINK_ENOENT_SYNC)) {
+    /* Model a peer removing the verified name before unlinkat, then a
+     * failed directory flush for the resulting ENOENT path. */
+    unlink_res = -1;
+    unlink_errno = unlinkat (provider->graph_fd, name, 0) == 0 ? ENOENT : errno;
+    force_sync_failure = TRUE;
   } else {
-    unlink_res = unlinkat (provider->graph_fd, provider->names.stage, 0);
+    unlink_res = unlinkat (provider->graph_fd, name, 0);
     unlink_errno = unlink_res == 0 ? 0 : errno;
   }
   close (fd);
-
-  if (unlink_res == 0 || unlink_errno == ENOENT) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-    return WYRELOG_E_OK;
-  }
-  if (unlink_errno == EISDIR || unlink_errno == EPERM
-      || unlink_errno == EACCES || unlink_errno == EROFS
-      || unlink_errno == ENOTDIR)
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-  else
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-execute_finalize (const WylFactArtifactTransitionPosix *provider,
-    const WylFactArtifactMainTransitionEntryEvidence *expected,
-    WylFactArtifactMainTransitionEffect *out_effect)
-{
-  gint fd = -1;
-  if (!execute_open_expected (provider, provider->names.rollback, expected,
-      WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY, TRUE, &fd, out_effect))
-    return WYRELOG_E_OK;
-  if (!execute_name_still_expected (provider, provider->names.rollback,
-      expected, TRUE, out_effect)) {
-    close (fd);
+  if (unlink_res != 0 && unlink_errno != ENOENT) {
+    if (unlink_errno == EISDIR || unlink_errno == EPERM
+        || unlink_errno == EACCES || unlink_errno == EROFS
+        || unlink_errno == ENOTDIR)
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    else
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     return WYRELOG_E_OK;
   }
 
-  gint unlink_res;
-  gint unlink_errno;
-  if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK)) {
-    unlink_res = -1;
-    unlink_errno = EIO;
-  } else {
-    unlink_res = unlinkat (provider->graph_fd, provider->names.rollback, 0);
-    unlink_errno = unlink_res == 0 ? 0 : errno;
-  }
-  close (fd);
-
-  if (unlink_res == 0 || unlink_errno == ENOENT) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-    return WYRELOG_E_OK;
-  }
-  if (unlink_errno == EISDIR || unlink_errno == EPERM
-      || unlink_errno == EACCES || unlink_errno == EROFS
-      || unlink_errno == ENOTDIR)
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-  else
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+sync_directory:
+  /* A prior attempt may have removed an already absent name without making
+   * its directory update durable. Only a successful flush earns APPLIED. */
+  gint flush_res;
+  if (force_sync_failure || posix_fault_take (sync_fault)) {
+    (void) posix_take_level (&transition_posix_test_flush_errno);
+    flush_res = -1;
+  } else
+    flush_res = fsync (provider->graph_fd);
+  *out_effect = flush_res == 0
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+      : WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   return WYRELOG_E_OK;
 }
 
@@ -1087,13 +1074,21 @@ wyl_fact_artifact_transition_posix_execute
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ROLLBACK_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE:
-      return execute_retire_stage (provider,
+      return execute_delete_and_sync_dir (provider, provider->names.stage,
                  &authorized->entries
-                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE], out_effect);
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
+                 out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE:
-      return execute_finalize (provider,
+      return execute_delete_and_sync_dir (provider, provider->names.rollback,
                  &authorized->entries
-                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK], out_effect);
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
+                 WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
+                 out_effect);
     default:
       return WYRELOG_E_INVALID;
   }
