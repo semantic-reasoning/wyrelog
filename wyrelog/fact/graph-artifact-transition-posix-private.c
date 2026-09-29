@@ -627,10 +627,11 @@ wyl_fact_artifact_transition_posix_observe
              &snapshot, out_observation);
 }
 
-wyrelog_error_t
-wyl_fact_artifact_transition_posix_capture
+static wyrelog_error_t
+capture_internal
   (WylFactArtifactTransitionPosix *provider,
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    const WylFactArtifactInventoryPosixOldPair *old_pair,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
@@ -667,9 +668,9 @@ wyl_fact_artifact_transition_posix_capture
     close (guard_fd);
     return WYRELOG_E_POLICY;
   }
-  status = wyl_fact_artifact_inventory_posix_capture (provider->graph_fd,
-          geteuid (), guard_fd, provider->names.stage,
-          provider->names.rollback, inventory_provider_revalidate,
+  status = wyl_fact_artifact_inventory_posix_capture_with_old_pair
+        (provider->graph_fd, geteuid (), guard_fd, provider->names.stage,
+          provider->names.rollback, old_pair, inventory_provider_revalidate,
           inventory_provider_before_end, provider, &snapshot, entries);
   close (guard_fd);
   if (status != WYRELOG_E_OK) {
@@ -705,6 +706,111 @@ wyl_fact_artifact_transition_posix_capture
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_capture
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  return capture_internal (provider, lifecycle, NULL, out_snapshot,
+             out_observation);
+}
+
+static WylFactArtifactMainTransitionOldWitness
+old_witness_marker (WylFactGraphProvisionedRestoreSlot slot)
+{
+  return slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK;
+}
+
+static WylFactArtifactMainTransitionSlot
+old_witness_entry_slot (WylFactGraphProvisionedRestoreSlot slot)
+{
+  return slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+    ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN
+    : WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK;
+}
+
+static wyrelog_error_t
+open_restore_witness (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  if (out_witness != NULL)
+    *out_witness = NULL;
+  if (provider == NULL || provisioning_uuid == NULL || request == NULL
+      || request->operation_uuid == NULL || request->expected_main_absent
+      || out_witness == NULL
+      || (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      && slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK))
+    return WYRELOG_E_INVALID;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  return wyl_fact_graph_provisioned_restore_witness_open
+           ((WylFactGraphDirectory *) provider->directory,
+             provisioning_uuid, request->operation_uuid,
+             &request->expected_main_identity, slot, out_witness);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_capture_provisioned
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (out_observation != NULL)
+    *out_observation = (WylFactArtifactMainTransitionObservation) { 0 };
+  if (out_snapshot == NULL || out_observation == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  wyrelog_error_t rc = open_restore_witness (provider, provisioning_uuid,
+          request, slot, &witness);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  WylFactArtifactMainTransitionObservation observation = { 0 };
+  if (rc == WYRELOG_E_OK){
+    WylFactArtifactInventoryPosixOldPair old_pair = {
+      .slot = old_witness_entry_slot (slot),
+      .identity = request->expected_main_identity,
+    };
+    rc = capture_internal (provider, lifecycle, &old_pair, &snapshot,
+            &observation);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+            provider->directory);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = &observation.entries[old_witness_entry_slot (slot)];
+  if (!old->present || old->reparse || old->link_count != 2
+      || old->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&old->identity,
+      &request->expected_main_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->directory_identity, &observation.directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->lease_identity, &observation.lease_identity))
+    return WYRELOG_E_POLICY;
+  observation.old_main_witness = old_witness_marker (slot);
+  *out_snapshot = g_steal_pointer (&snapshot);
+  *out_observation = observation;
+  return WYRELOG_E_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* mutation executor                                                  */
 /* ------------------------------------------------------------------ */
@@ -729,6 +835,7 @@ static gboolean
 execute_open_expected (const WylFactArtifactTransitionPosix *provider,
     const gchar *name,
     const WylFactArtifactMainTransitionEntryEvidence *expected,
+    guint expected_links,
     WylFactArtifactTransitionPosixTestFault open_fault,
     gboolean absent_is_applied, gint *out_fd,
     WylFactArtifactMainTransitionEffect *out_effect)
@@ -764,11 +871,13 @@ execute_open_expected (const WylFactArtifactTransitionPosix *provider,
     return FALSE;
   }
   WylFactArtifactInventoryIdentity identity = identity_from_stat (&st);
-  if (!expected->present || expected->reparse || expected->link_count != 1
+  if (!expected->present || expected->reparse
+      || expected->link_count != expected_links
       || expected->owner_state
       != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
       || !S_ISREG (st.st_mode) || st.st_uid != geteuid ()
-      || (st.st_mode & 07777) != 0600 || st.st_nlink != 1
+      || (st.st_mode & 07777) != 0600
+      || (guint) st.st_nlink != expected_links
       || !wyl_fact_artifact_inventory_identity_equal (&identity,
       &expected->identity)) {
     close (fd);
@@ -790,6 +899,7 @@ static gboolean
 execute_name_still_expected (const WylFactArtifactTransitionPosix *provider,
     const gchar *name,
     const WylFactArtifactMainTransitionEntryEvidence *expected,
+    guint expected_links,
     gboolean absent_is_applied,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
@@ -804,7 +914,9 @@ execute_name_still_expected (const WylFactArtifactTransitionPosix *provider,
     return FALSE;
   }
   WylFactArtifactInventoryIdentity identity = identity_from_stat (&st);
-  if (S_ISLNK (st.st_mode)
+  if (!S_ISREG (st.st_mode) || st.st_uid != geteuid ()
+      || (st.st_mode & 07777) != 0600
+      || (guint) st.st_nlink != expected_links
       || !wyl_fact_artifact_inventory_identity_equal (&identity,
       &expected->identity)) {
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
@@ -842,14 +954,17 @@ static wyrelog_error_t
 execute_rename (const WylFactArtifactTransitionPosix *provider,
     const gchar *source, const gchar *destination,
     const WylFactArtifactMainTransitionEntryEvidence *expected_source,
+    guint expected_links,
     WylFactArtifactTransitionPosixTestFault fault,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   gint source_fd = -1;
   if (!execute_open_expected (provider, source, expected_source,
+      expected_links,
       WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE, FALSE, &source_fd, out_effect))
     return WYRELOG_E_OK;
   if (!execute_name_still_expected (provider, source, expected_source,
+      expected_links,
       FALSE, out_effect)) {
     close (source_fd);
     return WYRELOG_E_OK;
@@ -872,6 +987,7 @@ static wyrelog_error_t
 execute_sync_file (const WylFactArtifactTransitionPosix *provider,
     const gchar *name,
     const WylFactArtifactMainTransitionEntryEvidence *expected,
+    guint expected_links,
     WylFactArtifactTransitionPosixTestFault open_fault,
     WylFactArtifactTransitionPosixTestFault fsync_fault,
     WylFactArtifactMainTransitionDurability *out_durability,
@@ -879,7 +995,8 @@ execute_sync_file (const WylFactArtifactTransitionPosix *provider,
 {
   *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNPROVEN;
   gint fd = -1;
-  if (!execute_open_expected (provider, name, expected, open_fault,
+  if (!execute_open_expected (provider, name, expected, expected_links,
+      open_fault,
       FALSE, &fd, out_effect))
     return WYRELOG_E_OK;
 
@@ -949,7 +1066,9 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
 
 static wyrelog_error_t
 execute_delete_and_sync_dir (const WylFactArtifactTransitionPosix *provider,
-    const gchar *name, const WylFactArtifactMainTransitionEntryEvidence *expected,
+    const gchar *name,
+    const WylFactArtifactMainTransitionEntryEvidence *expected,
+    guint expected_links,
     WylFactArtifactTransitionPosixTestFault verify_fault,
     WylFactArtifactTransitionPosixTestFault unlink_fault,
     WylFactArtifactTransitionPosixTestFault sync_fault,
@@ -957,13 +1076,15 @@ execute_delete_and_sync_dir (const WylFactArtifactTransitionPosix *provider,
 {
   gint fd = -1;
   gboolean force_sync_failure = FALSE;
-  if (!execute_open_expected (provider, name, expected, verify_fault,
+  if (!execute_open_expected (provider, name, expected, expected_links,
+      verify_fault,
       TRUE, &fd, out_effect)) {
     if (*out_effect != WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
       return WYRELOG_E_OK;
     goto sync_directory;
   }
-  if (!execute_name_still_expected (provider, name, expected, TRUE,
+  if (!execute_name_still_expected (provider, name, expected,
+      expected_links, TRUE,
       out_effect)) {
     close (fd);
     if (*out_effect != WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
@@ -1012,13 +1133,14 @@ sync_directory:
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_fact_artifact_transition_posix_execute
+static wyrelog_error_t
+execute_verified
   (WylFactArtifactTransitionPosix *provider,
     const WylFactArtifactMainTransitionObservation *authorized,
     WylFactArtifactMainTransitionOp op,
     WylFactArtifactMainTransitionEffect *out_effect,
-    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability,
+    WylFactGraphProvisionedRestoreWitness *witness)
 {
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
@@ -1034,6 +1156,13 @@ wyl_fact_artifact_transition_posix_execute
   if (memcmp (provider->operation_uuid, authorized->operation_uuid,
       sizeof provider->operation_uuid) != 0)
     return WYRELOG_E_INVALID;
+  if ((witness == NULL
+      && authorized->old_main_witness
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE)
+      || (witness != NULL
+      && authorized->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE))
+    return WYRELOG_E_POLICY;
 
   if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_LEASE_VERIFY))
     return WYRELOG_E_POLICY;
@@ -1043,12 +1172,25 @@ wyl_fact_artifact_transition_posix_execute
   status = execute_verify_authorization (provider, authorized);
   if (status != WYRELOG_E_OK)
     return status;
+  if (witness != NULL) {
+    status = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+            provider->directory);
+    if (status != WYRELOG_E_OK)
+      return status;
+  }
+  guint main_links = witness != NULL
+      && authorized->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN ? 2u : 1u;
+  guint rollback_links = witness != NULL
+      && authorized->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK ? 2u : 1u;
 
   switch (op) {
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
       return execute_sync_file (provider, provider->names.stage,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 1,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_OPEN,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC,
                  &out_durability->staged_file, out_effect);
@@ -1057,11 +1199,13 @@ wyl_fact_artifact_transition_posix_execute
                  provider->names.rollback,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN],
+                 main_links,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETAIN_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
       return execute_sync_file (provider, provider->names.rollback,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 rollback_links,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_OPEN,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_FSYNC,
                  &out_durability->rollback_file, out_effect);
@@ -1074,6 +1218,7 @@ wyl_fact_artifact_transition_posix_execute
                  WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 1,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
       return execute_sync_dir (provider,
@@ -1084,11 +1229,13 @@ wyl_fact_artifact_transition_posix_execute
                  WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 rollback_links,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ROLLBACK_RENAME, out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE:
       return execute_delete_and_sync_dir (provider, provider->names.stage,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+                 1,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
@@ -1097,6 +1244,7 @@ wyl_fact_artifact_transition_posix_execute
       return execute_delete_and_sync_dir (provider, provider->names.rollback,
                  &authorized->entries
                  [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
+                 rollback_links,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
                  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
@@ -1104,6 +1252,77 @@ wyl_fact_artifact_transition_posix_execute
     default:
       return WYRELOG_E_INVALID;
   }
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_execute
+  (WylFactArtifactTransitionPosix *provider,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+  return execute_verified (provider, authorized, op, out_effect,
+             out_durability, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_execute_provisioned
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (out_durability != NULL)
+    *out_durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
+  if (provider == NULL || request == NULL || authorized == NULL
+      || out_effect == NULL || out_durability == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactGraphProvisionedRestoreSlot slot;
+  if (authorized->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN)
+    slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN;
+  else if (authorized->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK)
+    slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
+  else
+    return WYRELOG_E_POLICY;
+  if (op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE)
+    return WYRELOG_E_POLICY;
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = &authorized->entries[old_witness_entry_slot (slot)];
+  if (!old->present || old->link_count != 2
+      || !wyl_fact_artifact_inventory_identity_equal (&old->identity,
+      &request->expected_main_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->directory_identity, &request->directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->lease_identity, &request->lease_identity))
+    return WYRELOG_E_POLICY;
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  const WylFactArtifactMainTransitionEntryEvidence *main
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  if ((stage->present
+      && !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
+      &request->staged_main_identity))
+      || (slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK
+      && main->present
+      && !wyl_fact_artifact_inventory_identity_equal (&main->identity,
+      &request->staged_main_identity)))
+    return WYRELOG_E_POLICY;
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  wyrelog_error_t rc = open_restore_witness (provider, provisioning_uuid,
+          request, slot, &witness);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return execute_verified (provider, authorized, op, out_effect,
+             out_durability, witness);
 }
 
 wyrelog_error_t
@@ -1326,6 +1545,7 @@ wyl_fact_artifact_transition_posix_with_ready_provisioned_retire
     = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   rc = execute_delete_and_sync_dir (provider, provider->names.stage,
           &before.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
+          1,
           WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
           WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
           WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,

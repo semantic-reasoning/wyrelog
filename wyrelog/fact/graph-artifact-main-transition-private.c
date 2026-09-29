@@ -51,6 +51,7 @@ struct WylFactArtifactMainTransition
   gboolean pending;
   WylFactArtifactMainTransitionOp pending_op;
   guint64 pending_digest;
+  WylFactArtifactMainTransitionOldWitness pending_old_witness;
   WylFactArtifactMainTransitionEntryEvidence pending_pre[MT_SLOT_COUNT];
 };
 
@@ -352,6 +353,10 @@ revalidate (const WylFactArtifactMainTransition *transition,
       && (o->durability.directory_after_retain != MT_UNPROVEN
       || o->durability.rollback_file != MT_UNPROVEN))
     return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_SEAM_NOT_APPLICABLE;
+  if (o->old_main_witness > WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK
+      || (transition->expected_main_absent
+      && o->old_main_witness != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE))
+    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_LINK_SUBSTITUTION;
   for (guint slot = 0; slot < MT_SLOT_COUNT; slot++) {
     const WylFactArtifactMainTransitionEntryEvidence *entry
       = &o->entries[slot];
@@ -359,7 +364,16 @@ revalidate (const WylFactArtifactMainTransition *transition,
       continue;
     if (entry->reparse)
       return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_REPARSE;
-    if (entry->link_count != 1)
+    gboolean witnessed_old = !transition->expected_main_absent
+        && ((slot == MT_SLOT_MAIN
+        && o->old_main_witness
+        == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN)
+        || (slot == MT_SLOT_ROLLBACK
+        && o->old_main_witness
+        == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK))
+        && identity_same (&entry->identity,
+            &transition->expected_main_identity);
+    if (entry->link_count != (witnessed_old ? 2u : 1u))
       return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_LINK_SUBSTITUTION;
     if (entry->owner_state
         != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING)
@@ -368,6 +382,14 @@ revalidate (const WylFactArtifactMainTransition *transition,
         || entry->identity.domain != transition->directory_identity.domain)
       return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_CROSS_DEVICE;
   }
+  if (o->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN
+      && !o->entries[MT_SLOT_MAIN].present)
+    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_LINK_SUBSTITUTION;
+  if (o->old_main_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK
+      && !o->entries[MT_SLOT_ROLLBACK].present)
+    return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_LINK_SUBSTITUTION;
   return WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE;
 }
 
@@ -952,6 +974,7 @@ wyl_fact_artifact_main_transition_authorize
   transition->pending = TRUE;
   transition->pending_op = op;
   transition->pending_digest = observation_digest (observation);
+  transition->pending_old_witness = observation->old_main_witness;
   for (guint slot = 0; slot < MT_SLOT_COUNT; slot++)
     transition->pending_pre[slot] = observation->entries[slot];
   *out_result = (WylFactArtifactMainTransitionResult) {
@@ -1152,6 +1175,8 @@ wyl_fact_artifact_main_transition_record
 
   WylFactArtifactMainTransitionEntryEvidence pre[MT_SLOT_COUNT];
   guint64 pending_digest = transition->pending_digest;
+  WylFactArtifactMainTransitionOldWitness pending_old_witness
+    = transition->pending_old_witness;
   memcpy (pre, transition->pending_pre, sizeof pre);
 
   /*
@@ -1170,6 +1195,23 @@ wyl_fact_artifact_main_transition_record
   if (observation_digest (observation) != pending_digest)
     return result_refuse (transition,
                WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NO_PENDING_MUTATION,
+               MT_UNPROVEN, out_result);
+
+  WylFactArtifactMainTransitionOldWitness expected_witness
+    = pending_old_witness;
+  if (applied == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      && effect == WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+      && pending_old_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN)
+    expected_witness = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK;
+  else if (applied == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK
+      && effect == WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+      && pending_old_witness
+      == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK)
+    expected_witness = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN;
+  if (observation->old_main_witness != expected_witness)
+    return result_refuse (transition,
+               WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_LINK_SUBSTITUTION,
                MT_UNPROVEN, out_result);
 
   gboolean pre_ok = entries_shape_equal (observation->entries, pre);

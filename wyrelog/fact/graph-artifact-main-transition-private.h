@@ -175,6 +175,13 @@ typedef enum
   WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT,
 } WylFactArtifactMainTransitionSlot;
 
+typedef enum
+{
+  WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE = 0,
+  WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_MAIN,
+  WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_ROLLBACK,
+} WylFactArtifactMainTransitionOldWitness;
+
 /* Value-only evidence for one of the three operation-scoped names.  It carries
  * no entry name, path, descriptor, HANDLE, or reopen token. */
 typedef struct
@@ -225,6 +232,10 @@ typedef struct
   gboolean main_binding_live;
   WylFactArtifactMainTransitionEntryEvidence entries
   [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT];
+  /* Value-contract assertion only. A pure caller can forge this field;
+   * POSIX execution must independently reconstruct and revalidate the
+   * provisioned old-main companion before accepting a two-link entry. */
+  WylFactArtifactMainTransitionOldWitness old_main_witness;
   WylFactArtifactMainTransitionDurabilityEvidence durability;
   /*
    * MUST come from an out-of-band capability probe performed before any

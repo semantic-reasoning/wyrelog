@@ -5616,9 +5616,10 @@ inventory_capture_named_entry (gint graph_fd, guint64 owner,
 }
 
 wyrelog_error_t
-wyl_fact_artifact_inventory_posix_capture
+wyl_fact_artifact_inventory_posix_capture_with_old_pair
   (gint graph_fd, guint64 owner, gint guard_fd, const gchar *stage_name,
     const gchar *rollback_name,
+    const WylFactArtifactInventoryPosixOldPair *old_pair,
     WylFactArtifactInventoryPosixRevalidate revalidate,
     WylFactArtifactInventoryPosixBeforeEnd before_end, gpointer user_data,
     WylFactArtifactInventorySnapshot **out_snapshot,
@@ -5634,7 +5635,16 @@ wyl_fact_artifact_inventory_posix_capture
   if (out_entries != NULL)
     memset (out_entries, 0,
         sizeof (*out_entries) * WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT);
-  if (graph_fd < 0 || guard_fd < 0 || out_snapshot == NULL)
+  if (graph_fd < 0 || guard_fd < 0 || out_snapshot == NULL
+      || (old_pair != NULL
+      && (stage_name == NULL || rollback_name == NULL
+      || (old_pair->slot != WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN
+      && old_pair->slot
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK)
+      || old_pair->identity.domain == 0 || old_pair->identity.object == 0
+      || old_pair->identity.object_width != 0
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&old_pair->identity, &old_pair->identity))))
     return WYRELOG_E_INVALID;
   snapshot = wyl_fact_artifact_inventory_snapshot_new (256);
   if (snapshot == NULL)
@@ -5665,6 +5675,15 @@ wyl_fact_artifact_inventory_posix_capture
       break;
     }
     gboolean regular = inventory_stat_regular (&statbuf, owner, slot);
+    if (!regular && old_pair != NULL
+        && slot == WYL_FACT_ARTIFACT_INVENTORY_MAIN
+        && old_pair->slot == WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN
+        && S_ISREG (statbuf.st_mode) && statbuf.st_nlink == 2
+        && (statbuf.st_mode & 07777) == 0600
+        && (guint64) statbuf.st_uid == owner
+        && (guint64) statbuf.st_dev == old_pair->identity.domain
+        && (guint64) statbuf.st_ino == old_pair->identity.object)
+      regular = TRUE;
     gboolean bytes_ok = inventory_stat_bytes (&statbuf, &logical,
             &allocation_supported, &allocated);
     if ((!regular || !bytes_ok) && stage_name == NULL) {
@@ -5779,8 +5798,16 @@ wyl_fact_artifact_inventory_posix_capture
           }
           continue;
         }
+        gboolean witnessed_rollback = old_pair != NULL
+            && old_pair->slot
+            == WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK
+            && g_strcmp0 (entry->d_name, rollback_name) == 0
+            && named.st_nlink == 2
+            && (guint64) named.st_dev == old_pair->identity.domain
+            && (guint64) named.st_ino == old_pair->identity.object;
         if (S_ISLNK (named.st_mode) || !S_ISREG (named.st_mode)
-            || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
+            || (named.st_nlink != 1 && !witnessed_rollback)
+            || (named.st_mode & 07777) != 0600
             || (guint64) named.st_uid != owner) {
           result = wyl_fact_artifact_inventory_snapshot_add_anomaly (snapshot,
                   named.st_nlink > 1
@@ -5845,6 +5872,21 @@ wyl_fact_artifact_inventory_posix_capture
   }
   *out_snapshot = snapshot;
   return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_inventory_posix_capture
+  (gint graph_fd, guint64 owner, gint guard_fd, const gchar *stage_name,
+    const gchar *rollback_name,
+    WylFactArtifactInventoryPosixRevalidate revalidate,
+    WylFactArtifactInventoryPosixBeforeEnd before_end, gpointer user_data,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionEntryEvidence out_entries
+    [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_COUNT])
+{
+  return wyl_fact_artifact_inventory_posix_capture_with_old_pair (graph_fd,
+             owner, guard_fd, stage_name, rollback_name, NULL, revalidate,
+             before_end, user_data, out_snapshot, out_entries);
 }
 
 static wyrelog_error_t
