@@ -1524,6 +1524,18 @@ test_execute_retire_stage (void)
       MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
+  /* An absent name can be from a prior unsynced attempt. */
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_RETIRE_STAGE_SYNC_DIR));
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_RETIRE_STAGE_SYNC_DIR)));
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+
   /* 2. Symlink at stage file -> NOT_APPLIED, target file preserved */
   g_autofree gchar *target_path = g_build_filename (fixture.root, "preserved.txt", NULL);
   g_file_set_contents (target_path, "content", 7, NULL);
@@ -1546,6 +1558,22 @@ test_execute_retire_stage (void)
   g_assert_cmpint (fstatat (fixture.directory.graph_fd, fixture.names.stage,
       &st, AT_SYMLINK_NOFOLLOW), ==, -1);
   g_assert_cmpint (errno, ==, ENOENT);
+
+  /* A successful unlink without a proven directory flush is UNKNOWN. */
+  make_conforming (&fixture, fixture.names.stage, 22);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_RETIRE_STAGE_SYNC_DIR));
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_RETIRE_STAGE_SYNC_DIR)));
+  g_assert_cmpint (fstatat (fixture.directory.graph_fd, fixture.names.stage,
+      &st, AT_SYMLINK_NOFOLLOW), ==, -1);
+  g_assert_cmpint (errno, ==, ENOENT);
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   /* 4. Unlink fault -> UNKNOWN */
   make_conforming (&fixture, fixture.names.stage, 22);
@@ -1574,6 +1602,18 @@ test_execute_finalize (void)
       MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_FINALIZE_SYNC_DIR));
+  wyl_fact_artifact_transition_posix_set_test_flush_errno (EINVAL);
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_FINALIZE_SYNC_DIR)));
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+
   /* 2. Symlink at rollback file -> NOT_APPLIED, target preserved */
   g_autofree gchar *target_path = g_build_filename (fixture.root, "fin_target.txt", NULL);
   g_file_set_contents (target_path, "data", 4, NULL);
@@ -1596,6 +1636,21 @@ test_execute_finalize (void)
   g_assert_cmpint (fstatat (fixture.directory.graph_fd, fixture.names.rollback,
       &st, AT_SYMLINK_NOFOLLOW), ==, -1);
   g_assert_cmpint (errno, ==, ENOENT);
+
+  make_conforming (&fixture, fixture.names.rollback, 30);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_FINALIZE_SYNC_DIR));
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_FINALIZE_SYNC_DIR)));
+  g_assert_cmpint (fstatat (fixture.directory.graph_fd, fixture.names.rollback,
+      &st, AT_SYMLINK_NOFOLLOW), ==, -1);
+  g_assert_cmpint (errno, ==, ENOENT);
+  g_assert_cmpint (execute_current (provider,
+      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
 
   /* 4. Unlink fault -> UNKNOWN */
   make_conforming (&fixture, fixture.names.rollback, 30);
@@ -2010,6 +2065,89 @@ substitute_after_open (gint directory_fd, const gchar *name,
   g_assert_cmpint (fd, >=, 0);
   g_assert_cmpint (write (fd, "foreign", 7), ==, 7);
   g_assert_cmpint (close (fd), ==, 0);
+}
+
+typedef struct
+{
+  WylFactArtifactTransitionPosixTestFault sync_fault;
+} PostOpenRemoval;
+
+static void
+remove_after_open (gint directory_fd, const gchar *name,
+    gpointer user_data)
+{
+  const PostOpenRemoval *removal = user_data;
+  g_assert_cmpint (unlinkat (directory_fd, name, 0), ==, 0);
+  wyl_fact_artifact_transition_posix_set_test_fault (removal->sync_fault);
+}
+
+static void
+test_delete_post_open_disappearance_requires_sync (void)
+{
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_RETIRE_STAGE), MT (OP_FINALIZE),
+  };
+  const WylFactArtifactTransitionPosixTestFault sync_faults[] = {
+    PF (EXECUTE_RETIRE_STAGE_SYNC_DIR), PF (EXECUTE_FINALIZE_SYNC_DIR),
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (ops); i++) {
+    Fixture fixture;
+    fixture_init (&fixture, "u2b-delete-disappear-XXXXXX");
+    const gchar *name = i == 0 ? fixture.names.stage : fixture.names.rollback;
+    make_conforming (&fixture, name, 40 + i);
+    Observation authorized;
+    g_assert_cmpint (observe (&fixture, &authorized), ==, WYRELOG_E_OK);
+    PostOpenRemoval removal = { sync_faults[i] };
+    wyl_fact_artifact_transition_posix_set_test_post_open_hook
+      (remove_after_open, &removal);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_ENTRY_SUBSTITUTE));
+    g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+    WylFactArtifactMainTransitionEffect effect;
+    WylFactArtifactMainTransitionDurabilityEvidence durability;
+    g_assert_cmpint (wyl_fact_artifact_transition_posix_execute (provider,
+        &authorized, ops[i], &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (sync_faults[i]));
+    wyl_fact_artifact_transition_posix_set_test_post_open_hook (NULL, NULL);
+    g_assert_cmpint (execute_current (provider, ops[i], &effect, &durability),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    fixture_clear (&fixture);
+  }
+}
+
+static void
+test_delete_unlink_enoent_requires_sync (void)
+{
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_RETIRE_STAGE), MT (OP_FINALIZE),
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (ops); i++) {
+    Fixture fixture;
+    fixture_init (&fixture, "u2b-delete-unlink-enoent-XXXXXX");
+    const gchar *name = i == 0 ? fixture.names.stage : fixture.names.rollback;
+    make_conforming (&fixture, name, 50 + i);
+    g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_DELETE_UNLINK_ENOENT_SYNC));
+    WylFactArtifactMainTransitionEffect effect;
+    WylFactArtifactMainTransitionDurabilityEvidence durability;
+    g_assert_cmpint (execute_current (provider, ops[i], &effect, &durability),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (EXECUTE_DELETE_UNLINK_ENOENT_SYNC)));
+    struct stat st;
+    g_assert_cmpint (fstatat (fixture.directory.graph_fd, name, &st,
+        AT_SYMLINK_NOFOLLOW), ==, -1);
+    g_assert_cmpint (errno, ==, ENOENT);
+    g_assert_cmpint (execute_current (provider, ops[i], &effect, &durability),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    fixture_clear (&fixture);
+  }
 }
 
 static void
@@ -2713,6 +2851,10 @@ main (int argc, char **argv)
       test_execute_retire_stage);
   g_test_add_func ("/fact/artifact-transition-posix/execute/finalize",
       test_execute_finalize);
+  g_test_add_func ("/fact/artifact-transition-posix/execute/delete-post-open-disappearance",
+      test_delete_post_open_disappearance_requires_sync);
+  g_test_add_func ("/fact/artifact-transition-posix/execute/delete-unlink-enoent",
+      test_delete_unlink_enoent_requires_sync);
   g_test_add_func ("/fact/artifact-transition-posix/execute/authorization-binding",
       test_execute_authorization_binding);
   g_test_add_func ("/fact/artifact-transition-posix/execute/post-open-substitution",

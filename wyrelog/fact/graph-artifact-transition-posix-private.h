@@ -124,8 +124,11 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ROLLBACK_RENAME,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
+  WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_DELETE_UNLINK_ENOENT_SYNC,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_CAPTURE_PRE_FINALIZE_MUTATE_STAGE,
   WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_COUNT,
@@ -194,6 +197,13 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_capture
  * fsync, unlinkat) for the op authorized by the contract.  It reports the
  * empirical outcome as an Effect (APPLIED, NOT_APPLIED, or UNKNOWN) and earns
  * durability evidence for flush operations.
+ *
+ * For RETIRE_STAGE and FINALIZE, APPLIED includes a successful directory
+ * fsync after the name is absent. An absent name can be from an earlier
+ * attempt, so even that path requires the flush. A failed or unsupported
+ * flush reports UNKNOWN; it cannot justify a terminal durable restore
+ * journal transition, even if an in-memory transition records a terminal
+ * post-shape. Recovery must obtain fresh authority and durability evidence.
  *
  * The caller supplies the returned Effect and DurabilityEvidence to
  * wyl_fact_artifact_main_transition_record.
