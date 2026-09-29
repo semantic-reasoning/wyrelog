@@ -3227,6 +3227,43 @@ inspect_graph_commit_held_authority
   return WYRELOG_E_OK;
 }
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t
+fail_companion_linked_once (const gchar *point, gpointer user_data)
+{
+  gboolean *fired = user_data;
+  if (!*fired && g_strcmp0 (point, "restore-companion-linked") == 0) {
+    *fired = TRUE;
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+#endif
+
+typedef struct
+{
+  const gchar *policy_path;
+  gboolean called;
+} CompanionFenceProbe;
+
+static wyrelog_error_t
+probe_companion_policy_fence
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data)
+{
+  CompanionFenceProbe *probe = user_data;
+  g_assert_cmpstr (current->phase, ==, "reserved");
+  sqlite3 *other = NULL;
+  g_assert_cmpint (sqlite3_open_v2 (probe->policy_path, &other,
+      SQLITE_OPEN_READWRITE, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_busy_timeout (other, 0), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (other, "BEGIN IMMEDIATE;", NULL, NULL,
+      NULL), ==, SQLITE_BUSY);
+  g_assert_cmpint (sqlite3_close (other), ==, SQLITE_OK);
+  probe->called = TRUE;
+  return WYRELOG_E_IO;
+}
+
 static void
 test_graph_restore_replacement_reservation (void)
 {
@@ -3484,7 +3521,47 @@ test_graph_restore_replacement_reservation (void)
         ("provision-%s.sqlite", reserved->replacement_uuid);
   g_autofree gchar *replacement_path = graph_file_path (&fixture, "alpha",
           replacement_basename);
-  g_assert_cmpint (link (main_path, replacement_path), ==, 0);
+  WylPolicyOfflineRestoreRecord *fence_journal = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
+      operation_uuid, &fence_journal), ==, WYRELOG_E_OK);
+  g_autofree gchar *fence_policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  CompanionFenceProbe probe = { .policy_path = fence_policy_path };
+  WylPolicyGraphRestoreReplacementRecord *fence_result = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_sync_with_effect
+        (fixture.policy, reserved, fence_journal,
+      probe_companion_policy_fence, &probe, &policy_result, &fence_result), ==,
+      WYRELOG_E_IO);
+  g_assert_true (probe.called);
+  g_assert_null (fence_result);
+  g_assert_false (g_file_test (replacement_path, G_FILE_TEST_EXISTS));
+  wyl_policy_offline_restore_record_free (fence_journal);
+  WylPolicyGraphRestoreReplacementRecord *recovered = NULL;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean linked_before_failure = FALSE;
+  wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
+    (fail_companion_linked_once, &linked_before_failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &recovered), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_true (linked_before_failure);
+  g_assert_null (recovered);
+  g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
+  WylPolicyGraphRestoreReplacementRecord *after_link = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture.policy, operation_uuid, &after_link), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (after_link->phase, ==, "reserved");
+  wyl_policy_graph_restore_replacement_record_free (after_link);
+#endif
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &recovered), ==, WYRELOG_E_OK);
+  g_assert_nonnull (recovered);
+  g_assert_cmpstr (recovered->phase, ==, "companion_synced");
+  wyl_policy_graph_restore_replacement_record_free (recovered);
+  g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
   observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
@@ -3512,8 +3589,8 @@ test_graph_restore_replacement_reservation (void)
       &synced), ==, WYRELOG_E_INVALID);
   g_assert_null (synced);
   published_record->revision++;
-  gchar *reserved_phase = reserved->phase;
-  reserved->phase = "companion_synced";
+  gchar *reserved_replacement = reserved->replacement_uuid;
+  reserved->replacement_uuid = operation_uuid;
   g_assert_cmpint
     (wyl_policy_store_graph_restore_replacement_mark_companion_synced
         (fixture.policy, reserved, published_record, &policy_result,
@@ -3521,13 +3598,13 @@ test_graph_restore_replacement_reservation (void)
   g_assert_cmpint (policy_result, ==,
       WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
   g_assert_null (synced);
-  reserved->phase = reserved_phase;
+  reserved->replacement_uuid = reserved_replacement;
   g_assert_cmpint
     (wyl_policy_store_graph_restore_replacement_mark_companion_synced
         (fixture.policy, reserved, published_record, &policy_result,
       &synced), ==, WYRELOG_E_OK);
   g_assert_cmpint (policy_result, ==,
-      WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+      WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
   g_assert_cmpstr (synced->phase, ==, "companion_synced");
   g_assert_cmpstr (synced->replacement_uuid, ==, reserved->replacement_uuid);
 #ifdef __linux__
@@ -3546,7 +3623,17 @@ test_graph_restore_replacement_reservation (void)
       WYRELOG_E_OK);
   g_assert_cmpint (observed, ==,
       WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  recovered = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &recovered), !=, WYRELOG_E_OK);
+  g_assert_null (recovered);
   g_assert_cmpint (link (main_path, replacement_path), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (recovered->phase, ==, "companion_synced");
+  wyl_policy_graph_restore_replacement_record_free (recovered);
 #endif
   WylPolicyGraphRestoreReplacementRecord *synced_replay = NULL;
   g_assert_cmpint

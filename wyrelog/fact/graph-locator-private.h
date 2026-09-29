@@ -477,6 +477,19 @@ wyrelog_error_t wyl_fact_graph_restore_companion_link_post_publish
     const WylFactArtifactInventoryIdentity *expected_old_main,
     const WylFactArtifactInventoryIdentity *expected_new_main,
     WylFactGraphProvisionedRestoreWitness **out_witness);
+/* Effect variant for a journal-selected exact A or B layout. It never falls
+ * back to the other layout if the namespace changes after classification.
+ * A needs the freshly opened retained-old witness; B ignores it. */
+wyrelog_error_t wyl_fact_graph_restore_companion_link_post_publish_for_layout
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedRestoreWitness *retained_old,
+    const gchar *old_provisioning_uuid, const gchar *restore_uuid,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    WylFactGraphRestorePostPublishLayout layout,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactGraphProvisionedRestoreWitness,
     wyl_fact_graph_provisioned_restore_witness_free)
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
