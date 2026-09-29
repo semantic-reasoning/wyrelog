@@ -39616,6 +39616,26 @@ wyl_policy_store_tenant_restore_sync_retain_dir_step_with_effect
              effect, effect_data, out_result, out_committed);
 }
 
+wyrelog_error_t
+wyl_policy_store_tenant_restore_publish_step_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestorePublishStep step,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (step != WYL_POLICY_TENANT_RESTORE_PUBLISH_BEGIN
+      && step != WYL_POLICY_TENANT_RESTORE_PUBLISH_COMPLETE)
+    return WYRELOG_E_INVALID;
+  return tenant_restore_step_with_effect (store, expected_journal, graph_id,
+             step == WYL_POLICY_TENANT_RESTORE_PUBLISH_BEGIN,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED,
+             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
+             effect, effect_data, out_result, out_committed);
+}
+
 static wyrelog_error_t
 restore_selection_delete_old_locked (sqlite3 *db,
     const WylPolicyGraphRestoreReplacementRecord *row)

@@ -453,6 +453,15 @@ wyrelog_error_t wyl_fact_graph_restore_post_publish_shape_open
     const WylFactArtifactInventoryIdentity *expected_new_main,
     WylFactGraphRestorePostPublishLayout layout,
     WylFactGraphProvisionedRestoreWitness **out_witness);
+/* Exact tenant v5 post-PUBLISH shape with no replacement companion. The
+ * old rollback/companion pair and new one-link main are held and rechecked
+ * under the lease; the stage and every unlisted sidecar must be absent. */
+wyrelog_error_t wyl_fact_graph_restore_tenant_post_publish_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const gchar *restore_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main);
 typedef enum
 {
   WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID,
