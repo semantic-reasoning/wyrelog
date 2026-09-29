@@ -16,6 +16,7 @@
 #include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/fact/offline-backup-source-private.h"
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
+#include "wyrelog/fact/offline-restore-commit-authority-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
 #include "wyrelog/fact/offline-restore-journal-store-private.h"
 #include "wyrelog/fact/offline-restore-rollback-private.h"
@@ -3191,6 +3192,41 @@ test_graph_import (gconstpointer data)
 }
 #endif
 
+static wyrelog_error_t
+inspect_graph_commit (const WylFactGraphCommitInspection *inspection,
+    gpointer user_data)
+{
+  WylFactGraphRestorePostPublishLayout *layout = user_data;
+  g_assert_cmpstr (inspection->tenant_id, ==, "tenant-a");
+  g_assert_cmpstr (inspection->graph_id, ==, "alpha");
+  g_assert_cmpuint (inspection->old_main.object, !=, 0);
+  g_assert_cmpuint (inspection->new_main.object, !=, 0);
+  *layout = inspection->layout;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+inspect_graph_commit_held_authority
+  (const WylFactGraphCommitInspection *inspection, gpointer user_data)
+{
+  BackupFixture *fixture = user_data;
+  g_assert_cmpstr (inspection->graph_id, ==, "alpha");
+  WylFactRootWriterLease *other = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture->root,
+      &other), ==, WYRELOG_E_BUSY);
+  g_assert_null (other);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "alpha"), ==,
+      WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture->runtime, &key, &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
+  return WYRELOG_E_OK;
+}
+
 static void
 test_graph_restore_replacement_reservation (void)
 {
@@ -3200,6 +3236,13 @@ test_graph_restore_replacement_reservation (void)
   create_graph (&fixture, "alpha");
   seal_graph (&fixture, "alpha");
   seal_tenant (&fixture);
+
+  WylFactGraphKey runtime_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&runtime_key, "tenant-a", "alpha"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (fixture.runtime,
+      &runtime_key, session_build_engine, NULL, NULL), ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&runtime_key);
 
   WylPolicyTenantAuthorityRecord *tenant = NULL;
   WylPolicyGraphAuthorityRecord *authority = NULL;
@@ -3216,6 +3259,15 @@ test_graph_restore_replacement_reservation (void)
   g_autofree gchar *old_uuid = g_strdup ((const gchar *) sqlite3_column_text
             (old_stmt, 0));
   sqlite3_finalize (old_stmt);
+
+  g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  GStatBuf old_stat = { 0 };
+  g_assert_cmpint (g_stat (main_path, &old_stat), ==, 0);
+  WylFactArtifactInventoryIdentity old_identity = {
+    .domain = (guint64) old_stat.st_dev,
+    .object = (guint64) old_stat.st_ino,
+  };
 
   WylFactOfflineBackupManifest manifest = { 0 };
   g_assert_cmpint (wyl_fact_offline_backup_manifest_init (&manifest,
@@ -3241,15 +3293,25 @@ test_graph_restore_replacement_reservation (void)
   target->lifecycle_generation = authority->lifecycle_generation;
   target->reconciliation_generation = authority->reconciliation_generation;
   target->expected_main_absent = FALSE;
-  target->expected_main_identity = (WylFactArtifactInventoryIdentity) {
-    .domain = 1, .object = 101
-  };
+  target->expected_main_identity = old_identity;
   g_ptr_array_add (targets, target);
   gchar operation_uuid[WYL_ID_STRING_BUF];
   wyl_id_t operation_id;
   g_assert_cmpint (wyl_id_new (&operation_id), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_format (&operation_id, operation_uuid,
       sizeof operation_uuid), ==, WYRELOG_E_OK);
+  g_autofree gchar *stage_basename = g_strdup_printf ("restore-%s.duckdb",
+          operation_uuid);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "alpha",
+          stage_basename);
+  g_assert_true (g_file_set_contents (stage_path, "replacement", -1, NULL));
+  g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+  GStatBuf stage_stat = { 0 };
+  g_assert_cmpint (g_stat (stage_path, &stage_stat), ==, 0);
+  WylFactArtifactInventoryIdentity new_identity = {
+    .domain = (guint64) stage_stat.st_dev,
+    .object = (guint64) stage_stat.st_ino,
+  };
   g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_init (&initial,
       manifest_bytes, operation_uuid, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
@@ -3276,11 +3338,8 @@ test_graph_restore_replacement_reservation (void)
     g_assert_cmpint (wyl_fact_offline_restore_journal_decode (encoded,
         &desired), ==, WYRELOG_E_OK);
     if (step == 0) {
-      WylFactArtifactInventoryIdentity staged = {
-        .domain = 1, .object = 201
-      };
       g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
-            (&desired, "alpha", &staged), ==, WYRELOG_E_OK);
+            (&desired, "alpha", &new_identity), ==, WYRELOG_E_OK);
     } else if (step == 1) {
       g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
             (&desired, "alpha"), ==, WYRELOG_E_OK);
@@ -3365,6 +3424,10 @@ test_graph_restore_replacement_reservation (void)
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
   published_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
   published_graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  published_graph->copied = TRUE;
+  published_graph->checksum_verified = TRUE;
+  published_graph->identity_verified = TRUE;
+  published_graph->schema_verified = TRUE;
   g_autoptr (GBytes) published_blob = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&published,
       &published_blob), ==, WYRELOG_E_OK);
@@ -3384,6 +3447,60 @@ test_graph_restore_replacement_reservation (void)
       SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
   sqlite3_finalize (update);
+#ifdef __linux__
+  /* Synthetic imported COMMIT: normal mode-A admission still refuses it. */
+  g_autofree gchar *rollback_basename = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation_uuid);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "alpha",
+          rollback_basename);
+  g_assert_cmpint (g_rename (main_path, rollback_path), ==, 0);
+  g_assert_cmpint (g_rename (stage_path, main_path), ==, 0);
+  WylFactGraphRestorePostPublishLayout observed =
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision + 1, 0, inspect_graph_commit, &observed), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit, &observed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK);
+  g_autofree gchar *foreign_path = graph_file_path (&fixture, "alpha",
+          "foreign-file");
+  g_assert_true (g_file_set_contents (foreign_path, "foreign", -1, NULL));
+  observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit, &observed), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  g_assert_cmpint (g_remove (foreign_path), ==, 0);
+  g_autofree gchar *replacement_basename = g_strdup_printf
+        ("provision-%s.sqlite", reserved->replacement_uuid);
+  g_autofree gchar *replacement_path = graph_file_path (&fixture, "alpha",
+          replacement_basename);
+  g_assert_cmpint (link (main_path, replacement_path), ==, 0);
+  observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit, &observed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit_held_authority,
+      &fixture), ==, WYRELOG_E_OK);
+  WylFactRootWriterLease *released = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root,
+      &released), ==, WYRELOG_E_OK);
+  wyl_fact_root_writer_lease_release (released);
+#endif
   WylPolicyOfflineRestoreRecord *published_record = NULL;
   g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
       operation_uuid, &published_record), ==, WYRELOG_E_OK);
@@ -3413,6 +3530,24 @@ test_graph_restore_replacement_reservation (void)
       WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
   g_assert_cmpstr (synced->phase, ==, "companion_synced");
   g_assert_cmpstr (synced->replacement_uuid, ==, reserved->replacement_uuid);
+#ifdef __linux__
+  observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit, &observed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION);
+  g_assert_cmpint (g_remove (replacement_path), ==, 0);
+  observed = WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_inspect
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, inspect_graph_commit, &observed), !=,
+      WYRELOG_E_OK);
+  g_assert_cmpint (observed, ==,
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  g_assert_cmpint (link (main_path, replacement_path), ==, 0);
+#endif
   WylPolicyGraphRestoreReplacementRecord *synced_replay = NULL;
   g_assert_cmpint
     (wyl_policy_store_graph_restore_replacement_mark_companion_synced
