@@ -80,7 +80,8 @@ validate_complete_source_set (WylFactOfflineBackupSource *source,
 
   gsize source_count = wyl_fact_offline_backup_source_count (source);
   if (source_count != journal->graphs->len
-      || source_count != manifest->artifacts->len)
+      || (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      && source_count != manifest->artifacts->len))
     return WYRELOG_E_POLICY;
 
   GHashTable *source_indexes = g_hash_table_new_full (g_str_hash, g_str_equal,
@@ -124,6 +125,10 @@ validate_complete_source_set (WylFactOfflineBackupSource *source,
   for (guint i = 0; i < manifest->artifacts->len && rc == WYRELOG_E_OK; i++) {
     WylFactOfflineBackupArtifact *artifact = g_ptr_array_index
           (manifest->artifacts, i);
+    if (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        && artifact != NULL
+        && g_strcmp0 (artifact->graph_id, journal->selected_graph_id) != 0)
+      continue;
     if (artifact == NULL || artifact->graph_id == NULL
         || g_hash_table_contains (manifest_ids, artifact->graph_id)
         || !g_hash_table_contains (journal_ids, artifact->graph_id)) {
@@ -154,11 +159,40 @@ copy_journal (const WylFactOfflineRestoreJournal *source,
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_offline_restore_tenant_stages_run
+/* The graph entry point deliberately cannot resume a bound stage. Unlike
+ * tenant partial staging, all work here is one pristine singleton. Check the
+ * complete staging contract before closing any source runtime admission. */
+static gboolean
+graph_journal_is_pristine (const WylFactOfflineRestoreJournal *journal,
+    const gchar *graph_id)
+{
+  if (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || g_strcmp0 (journal->selected_graph_id, graph_id) != 0
+      || journal->revision != 1 || journal->graphs == NULL
+      || journal->graphs->len != 1
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal->policy_generation_published || journal->lifecycle_handoff_complete
+      || journal->confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal->manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED)
+    return FALSE;
+  const WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (journal->graphs, 0);
+  return graph != NULL && g_strcmp0 (graph->graph_id, graph_id) == 0
+         && identity_is_zero (&graph->staged_main_identity)
+         && !graph->copied && !graph->checksum_verified && !graph->identity_verified
+         && !graph->schema_verified && !graph->replay_preflighted
+         && graph->transition_state == WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+         && !graph->transition_terminal
+         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+         && !graph->resume_forbidden && !graph->durability_unprovable_acknowledged;
+}
+
+static wyrelog_error_t
+restore_stages_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
-    GBytes *canonical_manifest, const gchar *operation_uuid,
+    const gchar *selected_graph_id, GBytes *canonical_manifest, const gchar *operation_uuid,
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed)
 {
@@ -181,8 +215,9 @@ wyl_fact_offline_restore_tenant_stages_run
             &journal);
   if (rc == WYRELOG_E_OK && journal.revision != expected_revision)
     rc = WYRELOG_E_BUSY;
-  if (rc == WYRELOG_E_OK
-      && journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT)
+  if (rc == WYRELOG_E_OK && (selected_graph_id != NULL
+      ? !graph_journal_is_pristine (&journal, selected_graph_id)
+      : journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK
       && g_strcmp0 (journal.tenant_id, tenant_id) != 0)
@@ -203,7 +238,10 @@ wyl_fact_offline_restore_tenant_stages_run
     return rc;
   }
   g_autoptr (WylFactOfflineBackupSource) source = NULL;
-  rc = wyl_fact_offline_backup_source_new_with_lease (policy, fact_root,
+  rc = selected_graph_id != NULL
+      ? wyl_fact_offline_backup_source_new_for_graph_with_lease (policy, fact_root,
+          runtime_manager, tenant_id, selected_graph_id, drain_timeout_us, lease, &source)
+      : wyl_fact_offline_backup_source_new_with_lease (policy, fact_root,
           runtime_manager, tenant_id, drain_timeout_us, lease, &source);
   GHashTable *source_indexes = NULL;
   if (rc == WYRELOG_E_OK)
@@ -271,4 +309,34 @@ wyl_fact_offline_restore_tenant_stages_run
   wyl_fact_offline_restore_journal_clear (&journal);
   wyl_fact_offline_backup_manifest_clear (&manifest);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_stages_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    GBytes *canonical_manifest, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  return restore_stages_run (policy, fact_root, runtime_manager, tenant_id,
+             NULL, canonical_manifest, operation_uuid, expected_revision,
+             drain_timeout_us, out_committed);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_graph_stage_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    const gchar *graph_id, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (graph_id == NULL || graph_id[0] == '\0')
+    return WYRELOG_E_INVALID;
+  return restore_stages_run (policy, fact_root, runtime_manager, tenant_id,
+             graph_id, canonical_manifest, operation_uuid, expected_revision,
+             drain_timeout_us, out_committed);
 }

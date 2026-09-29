@@ -29,4 +29,21 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_stages_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Graph-local counterpart: only the explicitly selected graph is sourced,
+ * drained and staged. A complete canonical tenant manifest is accepted, but
+ * its selected artifact must exactly match the singleton graph journal.
+ * Requires a confirmed/authenticated pristine unbound journal at revision 1
+ * before constructing the source. Bound or preflighted retries are rejected;
+ * reload durable state after any ambiguous failure and use recovery, never
+ * overwrite an existing stage. The tenant remains sealed and root authority
+ * remains exclusive. No publication, verification flags or unseal occurs.
+ * Source provenance and point-in-time revalidation limitations above apply.
+ * This still sources the existing local main, not an external backup import. */
+wyrelog_error_t wyl_fact_offline_restore_graph_stage_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    const gchar *graph_id, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
+
 G_END_DECLS

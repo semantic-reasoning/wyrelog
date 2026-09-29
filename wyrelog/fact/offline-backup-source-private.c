@@ -27,6 +27,8 @@ typedef struct
   guint64 format_version;
   guint64 path_encoding_version;
   gchar *schema_digest;
+  gchar *provisioning_uuid;
+  GBytes *provisioning_evidence;
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
   WylPolicyGraphErrorClass last_error_class;
@@ -47,6 +49,7 @@ struct WylFactOfflineBackupSource
   WylFactRootWriterLease *root_lease;
   gboolean owns_root_lease;
   gchar *tenant_id;
+  gchar *selected_graph_id;
   WylPolicyTenantLifecycleState tenant_state;
   guint64 tenant_lifecycle_generation;
   guint64 tenant_reconciliation_generation;
@@ -66,6 +69,8 @@ offline_backup_graph_free (OfflineBackupGraph *graph)
   g_free (graph->graph_id);
   g_free (graph->store_uuid);
   g_free (graph->schema_digest);
+  g_free (graph->provisioning_uuid);
+  g_clear_pointer (&graph->provisioning_evidence, g_bytes_unref);
   g_free (graph);
 }
 
@@ -82,6 +87,7 @@ wyl_fact_offline_backup_source_free (WylFactOfflineBackupSource *source)
     g_clear_pointer (&source->root_lease,
         wyl_fact_root_writer_lease_release);
   g_free (source->tenant_id);
+  g_free (source->selected_graph_id);
   g_free (source);
 }
 
@@ -263,17 +269,23 @@ inventory_is_main_only (const WylFactArtifactInventorySnapshot *snapshot,
   return TRUE;
 }
 
+#ifndef G_OS_WIN32
 static wyrelog_error_t
 find_active_operation (WylFactOfflineBackupSource *source,
-    const WylPolicyGraphAuthorityRecord *authority, gchar **out_operation_uuid
+    const WylPolicyGraphAuthorityRecord *authority, gchar **out_operation_uuid,
+    GBytes **out_operation_evidence
 #ifdef __APPLE__
     , WylFactGraphDarwinOperationEvidence *out_evidence
 #endif
     )
 {
   *out_operation_uuid = NULL;
+  *out_operation_evidence = NULL;
   GPtrArray *records = NULL;
-  wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list
+  wyrelog_error_t rc = source->selected_graph_id != NULL
+      ? wyl_policy_store_graph_provisioning_list_for_graph
+        (source->policy, authority->tenant_id, source->selected_graph_id, &records)
+      : wyl_policy_store_graph_provisioning_list
         (source->policy, authority->tenant_id, &records);
   gboolean found = FALSE;
   for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
@@ -288,6 +300,8 @@ find_active_operation (WylFactOfflineBackupSource *source,
     }
     found = TRUE;
     *out_operation_uuid = g_strdup (record->op_uuid);
+    if (record->darwin_operation_evidence != NULL)
+      *out_operation_evidence = g_bytes_ref (record->darwin_operation_evidence);
     if (*out_operation_uuid == NULL) {
       rc = WYRELOG_E_NOMEM;
       break;
@@ -306,11 +320,14 @@ find_active_operation (WylFactOfflineBackupSource *source,
   }
   if (rc == WYRELOG_E_OK && !found)
     rc = WYRELOG_E_POLICY;
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
     g_clear_pointer (out_operation_uuid, g_free);
+    g_clear_pointer (out_operation_evidence, g_bytes_unref);
+  }
   g_clear_pointer (&records, g_ptr_array_unref);
   return rc;
 }
+#endif
 
 static wyrelog_error_t
 open_graph_source (WylFactOfflineBackupSource *source,
@@ -325,6 +342,7 @@ open_graph_source (WylFactOfflineBackupSource *source,
 #ifndef G_OS_WIN32
   WylFactGraphProvisionedPair *pair = NULL;
   g_autofree gchar *operation_uuid = NULL;
+  g_autoptr (GBytes) operation_evidence = NULL;
 #ifdef __APPLE__
   WylFactGraphDarwinOperationEvidence evidence = { 0 };
 #endif
@@ -342,7 +360,8 @@ open_graph_source (WylFactOfflineBackupSource *source,
             record->tenant_id, record->graph_id, FALSE, &directory);
 #ifndef G_OS_WIN32
   if (rc == WYRELOG_E_OK)
-    rc = find_active_operation (source, record, &operation_uuid
+    rc = find_active_operation (source, record, &operation_uuid,
+            &operation_evidence
 #ifdef __APPLE__
             , &evidence
 #endif
@@ -410,6 +429,12 @@ open_graph_source (WylFactOfflineBackupSource *source,
   if (rc == WYRELOG_E_OK) {
     graph->logical_bytes = main_evidence.logical_bytes;
     graph->physical_bytes = main_evidence.allocated_bytes;
+#ifndef G_OS_WIN32
+    if (source->selected_graph_id != NULL) {
+      graph->provisioning_uuid = g_steal_pointer (&operation_uuid);
+      graph->provisioning_evidence = g_steal_pointer (&operation_evidence);
+    }
+#endif
   }
 #ifndef G_OS_WIN32
   wyl_fact_graph_provisioned_pair_free (pair);
@@ -422,11 +447,21 @@ open_graph_source (WylFactOfflineBackupSource *source,
 }
 
 static wyrelog_error_t
+read_source_snapshot (WylFactOfflineBackupSource *source,
+    WylPolicyFactBackupSnapshot **out_snapshot)
+{
+  return source->selected_graph_id != NULL
+      ? wyl_policy_store_read_fact_graph_backup_snapshot
+           (source->policy, source->tenant_id, source->selected_graph_id, out_snapshot)
+      : wyl_policy_store_read_fact_backup_snapshot
+           (source->policy, source->tenant_id, out_snapshot);
+}
+
+static wyrelog_error_t
 revalidate_policy (WylFactOfflineBackupSource *source)
 {
   WylPolicyFactBackupSnapshot *snapshot = NULL;
-  wyrelog_error_t rc = wyl_policy_store_read_fact_backup_snapshot
-        (source->policy, source->tenant_id, &snapshot);
+  wyrelog_error_t rc = read_source_snapshot (source, &snapshot);
   if (rc == WYRELOG_E_OK && !tenant_record_equal (source, snapshot->tenant))
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK && snapshot->graphs->len != source->graphs->len)
@@ -437,6 +472,26 @@ revalidate_policy (WylFactOfflineBackupSource *source)
         g_ptr_array_index (snapshot->graphs, i);
     if (!graph_record_equal (graph, current))
       rc = WYRELOG_E_BUSY;
+#ifndef G_OS_WIN32
+    if (rc == WYRELOG_E_OK && source->selected_graph_id != NULL) {
+      g_autofree gchar *uuid = NULL;
+      g_autoptr (GBytes) evidence = NULL;
+#ifdef __APPLE__
+      WylFactGraphDarwinOperationEvidence decoded = { 0 };
+#endif
+      rc = find_active_operation (source, current->authority, &uuid, &evidence
+#ifdef __APPLE__
+              , &decoded
+#endif
+              );
+      if (rc == WYRELOG_E_OK
+          && (g_strcmp0 (uuid, graph->provisioning_uuid) != 0
+          || ((evidence == NULL) != (graph->provisioning_evidence == NULL))
+          || (evidence != NULL
+          && !g_bytes_equal (evidence, graph->provisioning_evidence))))
+        rc = WYRELOG_E_POLICY;
+    }
+#endif
   }
   g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);
   return rc;
@@ -462,7 +517,7 @@ wyl_fact_offline_backup_source_revalidate (WylFactOfflineBackupSource *source)
 static wyrelog_error_t
 offline_backup_source_new (wyl_policy_store_t *policy,
     const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
-    const gchar *tenant_id, gint64 drain_timeout_us,
+    const gchar *tenant_id, const gchar *selected_graph_id, gint64 drain_timeout_us,
     WylFactRootWriterLease *borrowed_lease,
     WylFactOfflineBackupSource **out_source)
 {
@@ -482,9 +537,11 @@ offline_backup_source_new (wyl_policy_store_t *policy,
   source->runtime_manager = wyl_fact_graph_runtime_manager_ref
         (runtime_manager);
   source->tenant_id = g_strdup (tenant_id);
+  source->selected_graph_id = g_strdup (selected_graph_id);
   source->graphs = g_ptr_array_new_with_free_func
         ((GDestroyNotify) offline_backup_graph_free);
-  if (source->tenant_id == NULL) {
+  if (source->tenant_id == NULL
+      || (selected_graph_id != NULL && source->selected_graph_id == NULL)) {
     wyl_fact_offline_backup_source_free (source);
     return WYRELOG_E_NOMEM;
   }
@@ -512,8 +569,7 @@ offline_backup_source_new (wyl_policy_store_t *policy,
     rc = wyl_fact_root_writer_lease_authorizes_resolver (source->root_lease,
             &resolver);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_read_fact_backup_snapshot (policy, tenant_id,
-            &snapshot);
+    rc = read_source_snapshot (source, &snapshot);
   if (rc == WYRELOG_E_OK
       && (snapshot->tenant->lifecycle_state
       != WYL_POLICY_TENANT_LIFECYCLE_SEALED
@@ -570,7 +626,7 @@ wyl_fact_offline_backup_source_new (wyl_policy_store_t *policy,
     WylFactOfflineBackupSource **out_source)
 {
   return offline_backup_source_new (policy, fact_root, runtime_manager,
-             tenant_id, drain_timeout_us, NULL, out_source);
+             tenant_id, NULL, drain_timeout_us, NULL, out_source);
 }
 
 wyrelog_error_t
@@ -583,7 +639,31 @@ wyl_fact_offline_backup_source_new_with_lease (wyl_policy_store_t *policy,
   if (root_lease == NULL)
     return WYRELOG_E_INVALID;
   return offline_backup_source_new (policy, fact_root, runtime_manager,
-             tenant_id, drain_timeout_us, root_lease, out_source);
+             tenant_id, NULL, drain_timeout_us, root_lease, out_source);
+}
+
+wyrelog_error_t
+wyl_fact_offline_backup_source_new_for_graph_with_lease (wyl_policy_store_t *policy,
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
+    const gchar *tenant_id, const gchar *graph_id, gint64 drain_timeout_us,
+    WylFactRootWriterLease *root_lease,
+    WylFactOfflineBackupSource **out_source)
+{
+  if (out_source != NULL)
+    *out_source = NULL;
+  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || runtime_manager == NULL || tenant_id == NULL || tenant_id[0] == '\0'
+      || graph_id == NULL || graph_id[0] == '\0'
+      || root_lease == NULL || out_source == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  /* The Windows opening path does not bind provisioning authority. */
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  return offline_backup_source_new (policy, fact_root, runtime_manager,
+             tenant_id, graph_id, drain_timeout_us, root_lease, out_source);
+#endif
 }
 
 const gchar *
