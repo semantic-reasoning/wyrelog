@@ -214,6 +214,15 @@ wyrelog_error_t wyl_fact_offline_restore_journal_decide
 wyrelog_error_t wyl_fact_offline_restore_journal_begin_attempt
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     WylFactArtifactMainTransitionOp operation);
+/* Records a directly observed backend NOT_APPLIED effect for the pending op.
+ * The journal cannot prove that effect: callers must retain transition and
+ * root authority through authorize/execute and must not infer NOT_APPLIED
+ * from a post-crash namespace shape. COMPLETED means this attempt's outcome
+ * was recorded, not that the operation succeeded. The same next_op remains
+ * retryable through begin_attempt. */
+wyrelog_error_t wyl_fact_offline_restore_journal_record_not_applied
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    WylFactArtifactMainTransitionOp operation);
 wyrelog_error_t wyl_fact_offline_restore_journal_complete_attempt
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     WylFactArtifactMainTransitionState state,

@@ -1039,6 +1039,25 @@ wyl_fact_offline_restore_journal_begin_attempt
 }
 
 wyrelog_error_t
+wyl_fact_offline_restore_journal_record_not_applied
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    WylFactArtifactMainTransitionOp operation)
+{
+  WylFactOfflineRestoreJournalGraph *graph = find_graph (journal, graph_id);
+  if (graph == NULL || !valid_journal (journal)
+      || !can_advance_revision (journal)
+      || journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+      || operation == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || operation != graph->pending_op || operation != graph->next_op)
+    return WYRELOG_E_POLICY;
+  graph->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+  graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  journal->revision++;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_journal_mark_policy_published
   (WylFactOfflineRestoreJournal *journal)
 {
@@ -1274,6 +1293,14 @@ successor_begin (WylFactOfflineRestoreJournal *journal, gpointer data)
            (journal, begin->graph_id, begin->operation);
 }
 
+static wyrelog_error_t
+successor_not_applied (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  BeginSuccessor *attempt = data;
+  return wyl_fact_offline_restore_journal_record_not_applied
+           (journal, attempt->graph_id, attempt->operation);
+}
+
 typedef struct
 {
   const gchar *graph_id;
@@ -1347,6 +1374,12 @@ wyl_fact_offline_restore_journal_is_legal_successor
     if (old_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
         && successor_from_candidate (current_bytes, desired,
         successor_complete, &complete))
+      return TRUE;
+    BeginSuccessor not_applied = { old_graph->graph_id,
+                                   old_graph->pending_op };
+    if (old_graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && successor_from_candidate (current_bytes, desired,
+        successor_not_applied, &not_applied))
       return TRUE;
   }
   if (successor_from_candidate (current_bytes, desired, successor_decide,

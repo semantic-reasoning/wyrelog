@@ -409,6 +409,80 @@ storage_contract (void)
 }
 
 static void
+not_applied_retry_cas (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  WylFactOfflineRestoreStoreResult result = 0;
+  init_journal (&current, OP_A);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create (store,
+      &current, &result, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&current);
+
+  for (guint step = 0; step < 3; step++) {
+    clone_journal (&committed, &desired);
+    wyrelog_error_t rc;
+    if (step == 0) {
+      WylFactArtifactInventoryIdentity stage = {
+        .domain = 1, .object = 201,
+      };
+      rc = wyl_fact_offline_restore_journal_bind_staged_identity
+            (&desired, "alpha", &stage);
+    } else if (step == 1)
+      rc = wyl_fact_offline_restore_journal_decide (&desired,
+              WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+    else
+      rc = wyl_fact_offline_restore_journal_begin_attempt (&desired,
+              "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE);
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_auto (WylFactOfflineRestoreJournal) next = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+        committed.revision, &desired, &result, &next), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_fact_offline_restore_journal_clear (&desired);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    committed = next;
+    memset (&next, 0, sizeof next);
+  }
+
+  clone_journal (&committed, &desired);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&desired, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE),
+      ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&committed, &desired));
+  g_auto (WylFactOfflineRestoreJournal) winner = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      committed.revision, &desired, &result, &winner), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpuint (winner.revision, ==, committed.revision + 1);
+  g_auto (WylFactOfflineRestoreJournal) stale = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      committed.revision, &desired, &result, &stale), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_STALE);
+  g_auto (WylFactOfflineRestoreJournal) reloaded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (store, OP_A,
+      &reloaded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (reloaded.revision, ==, winner.revision);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (reloaded.graphs, 0);
+  g_assert_cmpint (graph->attempt, ==, WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&reloaded,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE), ==,
+      WYRELOG_E_OK);
+}
+
+static void
 claim_matrix_and_schema_tamper (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -832,6 +906,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/offline-restore-journal-store/contract",
       storage_contract);
+  g_test_add_func ("/fact/offline-restore-journal-store/not-applied-retry",
+      not_applied_retry_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/claim-matrix-tamper",
       claim_matrix_and_schema_tamper);
   g_test_add_func ("/fact/offline-restore-journal-store/rollback-concurrency",

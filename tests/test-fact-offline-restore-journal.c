@@ -182,6 +182,70 @@ complete_step (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
 }
 
 static void
+not_applied_attempt_is_retryable (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity stage = identity (201);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+        (&journal, "alpha", &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&journal, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE), ==,
+      WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) before = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &encoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (encoded, &before),
+      ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&journal, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (journal.revision, ==, revision);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&journal, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, revision + 1);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (journal.graphs, 0);
+  g_assert_cmpint (graph->attempt, ==, WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  g_assert_cmpint (graph->pending_op, ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+  g_assert_cmpint (graph->next_op, ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE);
+  g_assert_cmpint (graph->transition_state, ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+  g_assert_cmpuint (graph->staged_main_identity.domain, ==, stage.domain);
+  g_assert_cmpuint (graph->staged_main_identity.object, ==, stage.object);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&before, &journal));
+  graph->destination_lifecycle_generation++;
+  g_assert_false (wyl_fact_offline_restore_journal_is_legal_successor
+        (&before, &journal));
+  graph->destination_lifecycle_generation--;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&journal, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  journal.revision = G_MAXUINT64;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_record_not_applied
+        (&journal, "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE),
+      ==, WYRELOG_E_POLICY);
+}
+
+static void
 decision_barrier_and_recovery (void)
 {
   g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
@@ -430,6 +494,8 @@ main (int argc, char **argv)
       admission_is_fail_closed);
   g_test_add_func ("/fact/offline-restore/decision-recovery",
       decision_barrier_and_recovery);
+  g_test_add_func ("/fact/offline-restore/not-applied-retry",
+      not_applied_attempt_is_retryable);
   g_test_add_func ("/fact/offline-restore/rollback-converges",
       rollback_converges);
   g_test_add_func ("/fact/offline-restore/tamper-scope",
