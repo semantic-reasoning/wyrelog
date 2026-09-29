@@ -38075,7 +38075,9 @@ offline_restore_record_has_tenant_binding
          && (journal.version ==
          WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
          || journal.version ==
-         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
+         || journal.version ==
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION);
 }
 
 static gboolean

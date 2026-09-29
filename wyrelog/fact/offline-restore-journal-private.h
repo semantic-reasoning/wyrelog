@@ -15,6 +15,7 @@ G_BEGIN_DECLS
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION 4u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION 5u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION 6u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION 7u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -236,6 +237,10 @@ wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
  * atomically reserve the matching policy rows under tenant authority. */
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_replacements
   (WylFactOfflineRestoreJournal *journal, const GPtrArray *ordered_bindings);
+/* Pure v6 to v7 image. A later scoped policy transaction must select the
+ * entire tenant's replacement vector atomically with this journal CAS. */
+wyrelog_error_t wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
+  (WylFactOfflineRestoreJournal *journal);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide
   (WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreDecision decision);

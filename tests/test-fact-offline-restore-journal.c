@@ -396,6 +396,60 @@ tenant_replacement_binding (void)
       ==, SECOND_REPLACEMENT);
   g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_replacements
         (&journal, bindings), ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) v6_roundtrip = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&decoded,
+      &v6_roundtrip), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (encoded, v6_roundtrip));
+  guint64 selected_revision = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
+        (&journal), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION);
+  g_assert_cmpuint (journal.revision, ==, selected_revision + 1);
+  g_assert_true (journal.replacement_selected_pending_cleanup);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&decoded, &journal));
+  g_autoptr (GBytes) selected_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &selected_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (selected_blob,
+      &selected), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&selected), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_autoptr (GBytes) selected_roundtrip = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &selected_roundtrip), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (selected_blob, selected_roundtrip));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
+        (&journal), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
+      WYRELOG_E_POLICY);
+  WylFactOfflineRestoreJournalGraph *changed = g_ptr_array_index
+        (selected.graphs, 0);
+  g_autofree gchar *original_store = g_strdup (changed->store_uuid);
+  g_free (changed->store_uuid);
+  changed->store_uuid = g_strdup ("forged-store");
+  g_assert_false (wyl_fact_offline_restore_journal_is_legal_successor
+        (&decoded, &selected));
+  g_free (changed->store_uuid);
+  changed->store_uuid = g_strdup (original_store);
+  selected.replacement_selected_pending_cleanup = FALSE;
+  g_autoptr (GBytes) invalid = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &invalid), ==, WYRELOG_E_INVALID);
+  selected.replacement_selected_pending_cleanup = TRUE;
+  changed->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  changed->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &invalid), ==, WYRELOG_E_INVALID);
+  changed->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+  changed->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  g_free (changed->replacement_provisioning_uuid);
+  changed->replacement_provisioning_uuid = g_strdup (OLD_PROVISION);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &invalid), ==, WYRELOG_E_INVALID);
 }
 
 static void
