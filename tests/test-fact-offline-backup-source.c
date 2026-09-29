@@ -4206,28 +4206,40 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
       WYRELOG_E_OK);
   reject_shape = FALSE;
+  g_auto (WylFactOfflineRestoreJournal) promoted = { 0 };
+  g_assert_true (g_file_set_contents (foreign_path, "foreign", -1, NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (foreign_path), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      finalized.revision + 1, 0, &promoted), ==, WYRELOG_E_POLICY);
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (ambiguous_commit)
     wyl_policy_store_offline_restore_fail_once (fixture.policy,
         WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
 #endif
   wyrelog_error_t promote_rc =
-      wyl_policy_store_graph_restore_selected_promote_with_effect
-        (fixture.policy, promote_row, promote_journal,
-          selected_promotion_shape_for_test, &reject_shape,
-          &promotion_result);
+      wyl_fact_offline_restore_graph_commit_promote_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+          finalized.revision, 0, &promoted);
   if (ambiguous_commit)
     g_assert_cmpint (promote_rc, ==, WYRELOG_E_IO);
   else {
     g_assert_cmpint (promote_rc, ==, WYRELOG_E_OK);
-    g_assert_cmpint (promotion_result, ==,
-        WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+    g_assert_cmpuint (promoted.revision, ==, finalized.revision + 2);
+    g_assert_true (promoted.policy_generation_published);
+    g_assert_true (promoted.lifecycle_handoff_complete);
   }
   g_clear_pointer (&fixture.policy, wyl_policy_store_close);
   g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
   promotion_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
   g_assert_cmpint
     (wyl_policy_store_graph_restore_selected_promote_with_effect

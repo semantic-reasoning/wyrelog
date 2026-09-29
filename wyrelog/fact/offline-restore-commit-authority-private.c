@@ -2290,3 +2290,170 @@ wyl_fact_offline_restore_graph_commit_finalize_run
   return rc;
 #endif
 }
+
+#ifdef __linux__
+typedef struct
+{
+  WylFactGraphResolver *resolver;
+  WylFactGraphDirectory *directory;
+  WylFactRootWriterLease *lease;
+  WylFactGraphRuntimeManager *runtime;
+  WylFactGraphKey *key;
+  const WylFactOfflineRestoreJournalGraph *graph;
+} PromoteEffectContext;
+
+static wyrelog_error_t
+promote_selected_terminal_effect
+  (const WylPolicyGraphRestoreReplacementRecord *row, gpointer user_data)
+{
+  PromoteEffectContext *context = user_data;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (context->lease, context->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (context->runtime, context->key);
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_restore_selected_cleanup_shape_open
+          (context->resolver, context->directory, context->lease,
+            row->old_provisioning_uuid, row->operation_uuid,
+            row->replacement_uuid, &context->graph->expected_main_identity,
+            &context->graph->staged_main_identity, &shape);
+  if (rc == WYRELOG_E_OK
+      && shape != WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+#endif
+
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_promote_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || expected_revision == 0
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  WylFactRootWriterLease *lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphKey key = { 0 };
+  WylFactGraphQuiescenceToken *quiescence = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_load (policy,
+            operation_uuid, &row);
+  const WylFactOfflineRestoreJournalGraph *graph =
+      journal.graphs != NULL && journal.graphs->len == 1
+      ? g_ptr_array_index (journal.graphs, 0) : NULL;
+  if (rc == WYRELOG_E_OK
+      && (journal.revision != expected_revision
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !journal.replacement_selected_pending_cleanup
+      || journal.policy_generation_published
+      || journal.lifecycle_handoff_complete || graph == NULL || row == NULL
+      || !g_str_equal (row->phase, "selected_pending_cleanup")
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || !graph->transition_terminal || !graph->replay_preflighted
+      || g_strcmp0 (journal.operation_uuid, row->operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, row->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->store_uuid, row->store_uuid) != 0
+      || g_strcmp0 (graph->old_provisioning_uuid,
+      row->old_provisioning_uuid) != 0
+      || journal.destination_tenant_lifecycle_generation !=
+      row->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      row->tenant_reconciliation_generation
+      || graph->destination_lifecycle_generation !=
+      row->graph_lifecycle_generation
+      || graph->destination_reconciliation_generation !=
+      row->graph_reconciliation_generation))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
+            drain_timeout_us, &quiescence);
+  WylFactGraphLocator locator = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
+            journal.selected_graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+            FALSE, &directory);
+  wyl_fact_graph_locator_clear (&locator);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  PromoteEffectContext effect = { &resolver, &directory, lease,
+                                  runtime, &key, graph };
+  if (rc == WYRELOG_E_OK)
+    rc = promote_selected_terminal_effect (row, &effect);
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyOfflineRestoreRecord before = {
+      .operation_uuid = journal.operation_uuid,
+      .tenant_id = journal.tenant_id,
+      .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
+      .selected_graph_id = journal.selected_graph_id,
+      .revision = journal.revision,
+      .graph_count = 1,
+      .journal_blob = encoded,
+    };
+    memcpy (before.manifest_sha256, journal.manifest_sha256, 32);
+    WylPolicyOfflineRestoreStoreResult result =
+        WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = wyl_policy_store_graph_restore_selected_promote_with_effect
+          (policy, row, &before, promote_selected_terminal_effect,
+            &effect, &result);
+    if (rc == WYRELOG_E_OK
+        && result != WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
+      rc = WYRELOG_E_BUSY;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_policy_published (&journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_lifecycle_handoff (&journal);
+    if (rc == WYRELOG_E_OK) {
+      *out_committed = journal;
+      memset (&journal, 0, sizeof journal);
+    }
+  }
+  wyl_fact_graph_directory_clear (&directory);
+  g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
+  wyl_fact_graph_key_clear (&key);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_policy_graph_restore_replacement_record_free (row);
+  return rc;
+#endif
+}
