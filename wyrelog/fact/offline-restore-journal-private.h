@@ -10,6 +10,7 @@
 G_BEGIN_DECLS
 
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION 1u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION 2u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -142,6 +143,7 @@ typedef struct
   gboolean expected_main_absent;
   WylFactArtifactInventoryIdentity expected_main_identity;
   WylFactArtifactInventoryIdentity staged_main_identity;
+  gchar *old_provisioning_uuid;
   gboolean copied;
   gboolean checksum_verified;
   gboolean identity_verified;
@@ -208,6 +210,13 @@ wyrelog_error_t wyl_fact_offline_restore_journal_mark_preflight
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_staged_identity
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const WylFactArtifactInventoryIdentity *identity);
+/* Records the old policy provisioning UUID for graph-local mode-A restore.
+ * Caller must verify the ACTIVE record and matching graph/store generations;
+ * this pure mutator does not prove those external facts. COMMIT stays closed
+ * until policy can reserve a replacement alongside that ACTIVE record. */
+wyrelog_error_t wyl_fact_offline_restore_journal_bind_provisioned_old
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const gchar *old_uuid);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide
   (WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreDecision decision);

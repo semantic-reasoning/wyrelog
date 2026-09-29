@@ -15,6 +15,7 @@ journal_graph_free (WylFactOfflineRestoreJournalGraph *graph)
   g_free (graph->store_uuid);
   g_free (graph->schema_digest);
   g_free (graph->checksum);
+  g_free (graph->old_provisioning_uuid);
   g_free (graph);
 }
 
@@ -486,7 +487,8 @@ static gboolean
 valid_journal (const WylFactOfflineRestoreJournal *journal)
 {
   if (journal == NULL
-      || journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      || (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      && journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION)
       || journal->revision == 0 || !canonical_uuid (journal->operation_uuid)
       || !bounded_text (journal->tenant_id) || journal->graphs == NULL
       || journal->source_tenant_lifecycle_generation == 0
@@ -561,6 +563,17 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       return FALSE;
     if (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
         && g_strcmp0 (journal->selected_graph_id, graph->graph_id) != 0)
+      return FALSE;
+    gboolean has_old = graph->old_provisioning_uuid != NULL;
+    if ((journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+        && has_old)
+        || (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+        && !has_old)
+        || (has_old
+        && (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        || graph->expected_main_absent
+        || !canonical_uuid (graph->old_provisioning_uuid)
+        || graph->old_provisioning_uuid[14] != '7')))
       return FALSE;
     if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
         && (!graph->replay_preflighted || graph->resume_forbidden))
@@ -678,6 +691,11 @@ wyl_fact_offline_restore_journal_encode
         graph->transition_terminal, graph->pending_op, graph->attempt);
     append_bool (text, graph->resume_forbidden);
     append_bool (text, graph->durability_unprovable_acknowledged);
+    if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION) {
+      g_string_append_c (text, '|');
+      g_string_append (text, graph->old_provisioning_uuid == NULL ? "-"
+          : graph->old_provisioning_uuid);
+    }
     g_string_append_c (text, '\n');
   }
   guint8 checksum_bytes[32];
@@ -745,12 +763,14 @@ parse_identity (const gchar *text,
 }
 
 static WylFactOfflineRestoreJournalGraph *
-decode_graph (const gchar *line)
+decode_graph (const gchar *line, guint version)
 {
   if (!g_str_has_prefix (line, "graph="))
     return NULL;
   g_auto (GStrv) fields = g_strsplit (line + 6, "|", -1);
-  if (g_strv_length (fields) != 20 || strlen (fields[13]) != 5
+  if (g_strv_length (fields)
+      != (version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION ? 21 : 20)
+      || strlen (fields[13]) != 5
       || strlen (fields[19]) != 2)
     return NULL;
   WylFactOfflineRestoreJournalGraph *graph = g_new0
@@ -788,6 +808,10 @@ decode_graph (const gchar *line)
   valid = valid && parse_bool (resume, &graph->resume_forbidden)
       && parse_bool (acknowledge,
           &graph->durability_unprovable_acknowledged);
+  if (valid && version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION) {
+    if (g_strcmp0 (fields[20], "-") != 0)
+      graph->old_provisioning_uuid = g_strdup (fields[20]);
+  }
   graph->transition_state = (WylFactArtifactMainTransitionState) state;
   graph->next_op = (WylFactArtifactMainTransitionOp) next;
   graph->pending_op = (WylFactArtifactMainTransitionOp) operation;
@@ -887,7 +911,8 @@ wyl_fact_offline_restore_journal_decode
     out_journal->graphs = g_ptr_array_new_with_free_func
           ((GDestroyNotify) journal_graph_free);
   for (guint i = 0; valid && i < graph_count; i++) {
-    WylFactOfflineRestoreJournalGraph *graph = decode_graph (lines[17 + i]);
+    WylFactOfflineRestoreJournalGraph *graph = decode_graph (lines[17 + i],
+            version);
     valid = graph != NULL;
     if (valid)
       g_ptr_array_add (out_journal->graphs, graph);
@@ -925,7 +950,38 @@ find_graph (WylFactOfflineRestoreJournal *journal, const gchar *graph_id)
 static gboolean
 can_advance_revision (const WylFactOfflineRestoreJournal *journal)
 {
-  return journal != NULL && journal->revision < G_MAXUINT64;
+  if (journal == NULL || journal->revision == G_MAXUINT64)
+    return FALSE;
+  /* Graph-local mode-A COMMIT records remain readable for diagnosis, but
+   * policy cannot yet reserve the replacement pair, so every successor is
+   * unsafe even when the old provisioning UUID is bound. */
+  return !(journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+         && journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+         && journal->graphs != NULL && journal->graphs->len == 1
+         && !((WylFactOfflineRestoreJournalGraph *)
+         g_ptr_array_index (journal->graphs, 0))->expected_main_absent);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_bind_provisioned_old
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const gchar *old_uuid)
+{
+  WylFactOfflineRestoreJournalGraph *graph = find_graph (journal, graph_id);
+  if (graph == NULL || !valid_journal (journal)
+      || !can_advance_revision (journal)
+      || journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || graph->expected_main_absent || !graph->replay_preflighted
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || !canonical_uuid (old_uuid) || old_uuid[14] != '7')
+    return WYRELOG_E_POLICY;
+  graph->old_provisioning_uuid = g_strdup (old_uuid);
+  journal->version = WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION;
+  journal->revision++;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -981,6 +1037,10 @@ wyl_fact_offline_restore_journal_decide (WylFactOfflineRestoreJournal *journal,
       && decision != WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK))
     return WYRELOG_E_POLICY;
   if (decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT) {
+    if (journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        && !((WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (journal->graphs, 0))->expected_main_absent)
+      return WYRELOG_E_POLICY;
     if (journal->confirmation
         != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
         || journal->manifest_trust
@@ -1185,6 +1245,11 @@ wyl_fact_offline_restore_journal_recovery
 {
   if (!valid_journal (journal))
     return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
+  if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      && journal->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      && !((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (journal->graphs, 0))->expected_main_absent)
+    return WYL_FACT_OFFLINE_RESTORE_RECOVERY_REFUSE;
   for (guint i = 0; i < journal->graphs->len; i++) {
     WylFactOfflineRestoreJournalGraph *graph =
         g_ptr_array_index (journal->graphs, i);
@@ -1270,6 +1335,20 @@ static wyrelog_error_t
 successor_preflight (WylFactOfflineRestoreJournal *journal, gpointer data)
 {
   return wyl_fact_offline_restore_journal_mark_preflight (journal, data);
+}
+
+typedef struct
+{
+  const gchar *graph_id;
+  const gchar *old_uuid;
+} HandoffSuccessor;
+
+static wyrelog_error_t
+successor_bind_handoff (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  HandoffSuccessor *bind = data;
+  return wyl_fact_offline_restore_journal_bind_provisioned_old (journal,
+             bind->graph_id, bind->old_uuid);
 }
 
 static wyrelog_error_t
@@ -1358,8 +1437,13 @@ wyl_fact_offline_restore_journal_is_legal_successor
     if (graph == NULL || old_graph == NULL)
       return FALSE;
     BindSuccessor bind = { graph->graph_id, graph->staged_main_identity };
+    HandoffSuccessor handoff = { graph->graph_id,
+                                 graph->old_provisioning_uuid };
     if (successor_from_candidate (current_bytes, desired, successor_bind,
         &bind)
+        || (handoff.old_uuid != NULL
+        && successor_from_candidate (current_bytes, desired,
+        successor_bind_handoff, &handoff))
         || successor_from_candidate (current_bytes, desired,
         successor_preflight, graph->graph_id))
       return TRUE;

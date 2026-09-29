@@ -2700,14 +2700,13 @@ test_graph_rollback_rejects (gconstpointer data)
     journal = committed;
     memset (&committed, 0, sizeof committed);
     g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&journal,
-        WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
-    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
-          (f.fixture.policy, 3, &journal, &result, &committed), ==,
-        WYRELOG_E_OK);
-    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+        WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_POLICY);
     wyl_fact_offline_restore_journal_clear (&journal);
     wyl_fact_offline_restore_journal_clear (&committed);
-    revision = 4;
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = session_journal_bytes (&f);
+    session_fixture_clear (&f);
+    return;
   }
 
   GStatBuf stage_before = { 0 }, stage_after = { 0 };
