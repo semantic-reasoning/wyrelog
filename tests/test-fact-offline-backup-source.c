@@ -1271,22 +1271,42 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
   g_assert_cmpint (wyl_fact_offline_backup_generate (source,
       &capture_destination, &f->capture), ==, WYRELOG_E_OK);
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
-  gboolean graph_scope = selected_graph != NULL || g_str_equal (mode, "graph-scope");
+  if (g_str_equal (mode, "coordinator/checksum")) {
+    WylFactOfflineBackupManifest manifest = { 0 };
+    g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (f->capture.manifest,
+        &manifest), ==, WYRELOG_E_OK);
+    for (guint i = 0; i < manifest.artifacts->len; i++) {
+      WylFactOfflineBackupArtifact *artifact = g_ptr_array_index (manifest.artifacts, i);
+      if (g_strcmp0 (artifact->graph_id, selected_graph) == 0) {
+        g_free (artifact->checksum);
+        artifact->checksum = g_strdup ("sha256:0000000000000000000000000000000000000000000000000000000000000000");
+      }
+    }
+    g_clear_pointer (&f->capture.manifest, g_bytes_unref);
+    g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
+        &f->capture.manifest), ==, WYRELOG_E_OK);
+    wyl_fact_offline_backup_manifest_clear (&manifest);
+  }
+  gboolean graph_scope = !g_str_equal (mode, "coordinator/tenant")
+      && (selected_graph != NULL || g_str_equal (mode, "graph-scope"));
+  const gchar *journal_mode = g_str_has_prefix (mode, "coordinator/")
+      ? mode + strlen ("coordinator/") : mode;
   create_restore_journal_for_manifest_internal (&f->fixture,
       f->capture.manifest, graph_scope ? WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
       : WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
-      selected_graph != NULL ? selected_graph : graph_scope ? "alpha" : NULL, session_operation,
+      graph_scope ? selected_graph != NULL ? selected_graph : "alpha" : NULL, session_operation,
       !(g_str_equal (mode, "main-absence-violated")
       || g_str_equal (mode, "stage-only")
-      || g_str_equal (mode, "orphan-provision")), mode);
-  if (selected_graph != NULL)
+      || g_str_equal (mode, "orphan-provision")), journal_mode);
+  if (selected_graph != NULL && !g_str_has_prefix (mode, "coordinator"))
     session_stage_one_graph (f, g_str_equal (selected_graph, "alpha") ? 0 : 1);
   else if (g_str_equal (mode, "partial-staging"))
     session_stage_one_graph (f, 0);
   else if (g_str_equal (mode, "untrusted") || g_str_equal (mode, "unconfirmed")) {
     session_stage_one_graph (f, 0);
     session_stage_one_graph (f, 1);
-  }else if (!graph_scope && !g_str_equal (mode, "unstaged")) {
+  }else if (!graph_scope && !g_str_equal (mode, "unstaged")
+      && !g_str_has_prefix (mode, "coordinator")) {
     WylFactOfflineRestoreJournal staged = { 0 };
     g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
           (f->fixture.policy, f->fixture.root, f->fixture.runtime, "tenant-a",
@@ -1685,6 +1705,237 @@ graph_corrupt_schema (SessionFixture *f, const gchar *graph)
       sql, NULL, NULL, NULL), ==, SQLITE_OK);
 }
 
+static void
+test_graph_coordinator_rejects_before_drain (gconstpointer data)
+{
+  const gchar *mode = data;
+  g_autofree gchar *fixture_mode = g_strconcat ("coordinator/", mode, NULL);
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, fixture_mode, "zeta");
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission
+        (f.fixture.runtime, &key), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (f.fixture.runtime,
+      &key, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (before.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_autoptr (GHashTable) files = session_graph_files (&f);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_stage_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", "zeta",
+      f.capture.manifest, session_operation, 1, 0, &f.committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (f.committed.graphs);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (f.fixture.runtime,
+      &key, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpint (before.admission, ==, after.admission);
+  g_assert_cmpuint (before.operation_generation, ==, after.operation_generation);
+  g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+  g_autoptr (GBytes) journal_after = session_journal_bytes (&f);
+  g_assert_true (g_bytes_equal (journal_after, f.journal_before));
+  session_assert_files_unchanged (&f, files);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  wyl_fact_graph_key_clear (&key);
+  session_fixture_clear (&f);
+}
+
+static wyrelog_error_t
+graph_source_drift_sink (guint64 offset, const guint8 *bytes, gsize length,
+    gpointer data)
+{
+  SessionFixture *f = data;
+  g_assert_nonnull (bytes);
+  g_assert_cmpuint (length, >, 0);
+  if (offset == 0) {
+    if (g_str_equal (f->mode, "sibling-provision"))
+      graph_corrupt_provision (f, "alpha");
+    else if (g_str_equal (f->mode, "selected-provision"))
+      graph_corrupt_provision (f, "zeta");
+    else if (g_str_equal (f->mode, "selected-schema"))
+      graph_corrupt_schema (f, "zeta");
+    else if (g_str_equal (f->mode, "sibling-schema"))
+      graph_corrupt_schema (f, "alpha");
+    else if (g_str_equal (f->mode, "tenant-change"))
+      mutate_tenant_after_snapshot (&f->capture);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+test_graph_source_late_drift (gconstpointer data)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "coordinator", "zeta");
+  f.mode = data;
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (f.fixture.root, &lease), ==, WYRELOG_E_OK);
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", "zeta",
+      0, lease, &source), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (wyl_fact_offline_backup_source_count (source), ==, 1);
+  WylFactOfflineBackupSourceArtifact artifact = { 0 };
+  g_assert_true (wyl_fact_offline_backup_source_get (source, 0, &artifact));
+  g_assert_cmpstr (artifact.graph_id, ==, "zeta");
+  guint64 copied = 999;
+  wyrelog_error_t rc = wyl_fact_offline_backup_source_copy_to_sink
+        (source, 0, graph_source_drift_sink, &f, &copied);
+  gboolean success = g_str_has_prefix (f.mode, "sibling-");
+  g_assert_cmpint (rc == WYRELOG_E_OK, ==, success);
+  g_assert_cmpuint (copied, ==, success ? artifact.logical_bytes : 0);
+  g_assert_cmpint (wyl_fact_offline_backup_source_revalidate (source)
+      == WYRELOG_E_OK, ==, success);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  session_assert_authority (&f, FALSE);
+  session_fixture_clear (&f);
+}
+
+static void
+test_graph_staging_coordinator (gconstpointer data)
+{
+  const gchar *mode = data;
+  const gchar *selected = g_str_equal (mode, "alpha") ? "alpha" : "zeta";
+  const gchar *sibling = g_str_equal (selected, "alpha") ? "zeta" : "alpha";
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, g_str_equal (mode, "checksum")
+      ? "coordinator/checksum" : "coordinator", selected);
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", sibling), ==, WYRELOG_E_OK);
+  /* Fixture backup closed admission. Reopen the sibling before the operation
+   * under test, so accidentally draining it cannot pass unnoticed. */
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission
+        (f.fixture.runtime, &key), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus before = { 0 }, after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (f.fixture.runtime,
+      &key, &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (before.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  if (g_str_equal (mode, "sibling-schema"))
+    graph_corrupt_schema (&f, sibling);
+  if (g_str_equal (mode, "sibling-provision"))
+    graph_corrupt_provision (&f, sibling);
+  if (g_str_equal (mode, "selected-provision"))
+    graph_corrupt_provision (&f, selected);
+  if (g_str_equal (mode, "selected-schema"))
+    graph_corrupt_schema (&f, selected);
+  if (g_str_equal (mode, "sibling-artifact")) {
+    g_autofree gchar *path = graph_file_path (&f.fixture, sibling, "foreign");
+    g_assert_true (g_file_set_contents (path, "keep", -1, NULL));
+  }
+  g_autoptr (GHashTable) files = session_graph_files (&f);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "commit-response"))
+    wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+#endif
+  wyrelog_error_t rc = wyl_fact_offline_restore_graph_stage_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          g_str_equal (mode, "wrong-tenant") ? "other" : "tenant-a",
+          g_str_equal (mode, "wrong-graph") ? sibling : selected,
+          f.capture.manifest, session_operation,
+          g_str_equal (mode, "stale") ? 2 : 1, 0, &f.committed);
+  gboolean failure = g_str_has_prefix (mode, "wrong-")
+      || g_str_has_prefix (mode, "selected-") || g_str_equal (mode, "stale")
+      || g_str_equal (mode, "commit-response") || g_str_equal (mode, "checksum");
+  g_assert_cmpint (rc == WYRELOG_E_OK, ==, !failure);
+  if (failure)
+    g_assert_null (f.committed.graphs);
+  if (g_str_equal (mode, "commit-response")) {
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *path = g_build_filename (f.fixture.root, "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (path, &f.fixture.policy), ==, WYRELOG_E_OK);
+  }
+  g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (f.fixture.policy,
+      session_operation, &durable), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (durable.graphs->len, ==, 1);
+  WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index (durable.graphs, 0);
+  g_assert_cmpstr (graph->graph_id, ==, selected);
+  gboolean bound = !failure || g_str_equal (mode, "commit-response");
+  g_assert_cmpuint (durable.revision, ==, bound ? 2 : 1);
+  g_assert_cmpint (artifact_identity_is_zero (&graph->staged_main_identity), ==, !bound);
+  g_assert_false (graph->copied);
+  g_assert_false (graph->checksum_verified);
+  g_assert_false (graph->identity_verified);
+  g_assert_false (graph->schema_verified);
+  g_assert_false (graph->replay_preflighted);
+  g_assert_cmpint (durable.decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  /* Every preexisting graph file, including the sibling's foreign file,
+   * remains byte-identical. Only the selected stage may be added. */
+  g_autoptr (GHashTable) current = session_graph_files (&f);
+  g_assert_cmpuint (g_hash_table_size (current), ==,
+      g_hash_table_size (files) + (bound || g_str_equal (mode, "checksum") ? 1 : 0));
+  GHashTableIter iter;
+  gpointer path, bytes;
+  g_hash_table_iter_init (&iter, files);
+  while (g_hash_table_iter_next (&iter, &path, &bytes)) {
+    GBytes *actual = g_hash_table_lookup (current, path);
+    g_assert_nonnull (actual);
+    g_assert_true (g_bytes_equal (bytes, actual));
+  }
+  if (bound) {
+    g_autoptr (GBytes) journal_before = session_journal_bytes (&f);
+    g_auto (WylFactOfflineRestoreJournal) retry = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_graph_stage_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+        selected, f.capture.manifest, session_operation, 2, 0, &retry), ==, WYRELOG_E_POLICY);
+    g_assert_null (retry.graphs);
+    g_autoptr (GBytes) journal_after = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (journal_before, journal_after));
+    session_assert_files_unchanged (&f, current);
+  }
+  if (g_str_equal (mode, "checksum")) {
+    /* A failed checksum leaves a recovery-owned orphan, not permission to
+     * overwrite it on retry, even though the journal is still revision 1. */
+    g_auto (WylFactOfflineRestoreJournal) retry = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_graph_stage_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", selected,
+        f.capture.manifest, session_operation, 1, 0, &retry), !=, WYRELOG_E_OK);
+    g_assert_null (retry.graphs);
+    g_autoptr (GBytes) unchanged = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (unchanged, f.journal_before));
+    session_assert_files_unchanged (&f, current);
+  }
+  if (!failure) {
+    f.mode = "success";
+    f.record_preflight = TRUE;
+    g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
+        session_operation, 2, 0, &f.session), ==, WYRELOG_E_OK);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, ==, 3);
+    graph = g_ptr_array_index (f.committed.graphs, 0);
+    g_assert_true (graph->replay_preflighted);
+    g_clear_pointer (&f.session, wyl_fact_offline_restore_validation_session_free);
+    g_auto (WylFactOfflineRestoreJournal) retry = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_graph_stage_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a", selected,
+        f.capture.manifest, session_operation, 3, 0, &retry), ==, WYRELOG_E_POLICY);
+    session_assert_files_unchanged (&f, current);
+  }
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (f.fixture.runtime,
+      &key, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (before.operation_generation, ==, after.operation_generation);
+  g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+  g_assert_cmpint (before.admission, ==, after.admission);
+  g_assert_cmpint (before.state, ==, after.state);
+  WylFactGraphSnapshot *snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot
+        (f.fixture.runtime, &key, &snapshot), ==, WYRELOG_E_OK);
+  guint calls = 0;
+  g_assert_cmpint (wyl_fact_graph_snapshot_use (snapshot, session_snapshot_callback, &calls), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (calls, ==, 1);
+  wyl_fact_graph_snapshot_unref (snapshot);
+  wyl_fact_graph_runtime_status_clear (&before);
+  wyl_fact_graph_runtime_status_clear (&after);
+  wyl_fact_graph_key_clear (&key);
+  session_assert_authority (&f, FALSE);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
 static wyrelog_error_t
 graph_session_checkpoint (const gchar *graph, gpointer data)
 {
@@ -1934,15 +2185,67 @@ test_restore_validation_session_windows_fail_closed (void)
 #endif
 }
 
+static void
+test_graph_coordinator_invalid_input (void)
+{
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_stage_run (NULL, NULL, NULL,
+      NULL, NULL, NULL, NULL, 0, 0, &journal), ==, WYRELOG_E_INVALID);
+  g_assert_null (journal.graphs);
+  WylFactOfflineBackupSource *source = (gpointer) 1;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (NULL, NULL, NULL, NULL, NULL, 0, NULL, &source), ==, WYRELOG_E_INVALID);
+  g_assert_null (source);
+#ifdef G_OS_WIN32
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-graph-source-windows-XXXXXX");
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "alpha",
+      0, lease, &source), ==, WYRELOG_E_POLICY);
+  g_assert_null (source);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-offline-backup-source/coordinator/invalid",
+      test_graph_coordinator_invalid_input);
   g_test_add_func ("/fact-offline-backup-source/session-invalid-constructor",
       test_restore_validation_session_invalid_constructor);
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
 #ifndef G_OS_WIN32
+  const gchar *reject_modes[] = { "untrusted", "unconfirmed", "tenant" };
+  for (guint i = 0; i < G_N_ELEMENTS (reject_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/coordinator/reject/",
+            reject_modes[i], NULL);
+    g_test_add_data_func (path, reject_modes[i], test_graph_coordinator_rejects_before_drain);
+  }
+  const gchar *source_modes[] = { "sibling-provision", "selected-provision",
+                                  "sibling-schema", "selected-schema", "tenant-change" };
+  for (guint i = 0; i < G_N_ELEMENTS (source_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/coordinator/source/",
+            source_modes[i], NULL);
+    g_test_add_data_func (path, source_modes[i], test_graph_source_late_drift);
+  }
+  const gchar *coordinator_modes[] = { "alpha", "zeta", "sibling-schema",
+                                       "sibling-provision", "sibling-artifact", "selected-schema",
+                                       "selected-provision", "wrong-tenant", "wrong-graph", "stale", "checksum",
+#ifdef WYL_TEST_HANDLE_SEAMS
+                                       "commit-response",
+#endif
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (coordinator_modes); i++) {
+    g_autofree gchar *path = g_strconcat ("/fact-offline-backup-source/coordinator/",
+            coordinator_modes[i], NULL);
+    g_test_add_data_func (path, coordinator_modes[i], test_graph_staging_coordinator);
+  }
   const gchar *graph_modes[] = { "alpha/observe", "zeta/observe", "alpha/record", "zeta/record",
                                  "alpha/missing-sibling-runtime", "zeta/missing-selected-runtime",
                                  "zeta/sibling-schema", "zeta/sibling-provision", "alpha/sibling-artifact",

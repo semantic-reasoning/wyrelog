@@ -49,6 +49,19 @@ wyrelog_error_t wyl_fact_offline_backup_source_new_with_lease
     gint64 drain_timeout_us, WylFactRootWriterLease *root_lease,
     WylFactOfflineBackupSource **out_source);
 
+/* Selected-graph variant: |graph_id| must be nonempty and valid. Borrows
+ * |root_lease| under the same lifetime contract above; failures clear output.
+ * Reads and drains only the selected graph, retaining its active provisioning
+ * UUID and evidence for every revalidation. Tenant authority must be sealed.
+ * Windows fails closed with POLICY because its source opening path does not
+ * bind provisioning authority; existing tenant constructors are unchanged. */
+wyrelog_error_t wyl_fact_offline_backup_source_new_for_graph_with_lease
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, const gchar *tenant_id,
+    const gchar *graph_id, gint64 drain_timeout_us,
+    WylFactRootWriterLease *root_lease,
+    WylFactOfflineBackupSource **out_source);
+
 const gchar *wyl_fact_offline_backup_source_tenant_id
   (const WylFactOfflineBackupSource *source);
 /* This is the sealed tenant lifecycle generation. */
