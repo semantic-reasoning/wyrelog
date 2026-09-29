@@ -460,6 +460,30 @@ tenant_bound_generic_writer_denied (void)
   g_assert_cmpint (wyl_policy_store_offline_restore_cas (store, 1, &raw,
       &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
   g_assert_null (raw_committed);
+  graph->old_provisioning_uuid = g_strdup (OLD_PROVISION);
+  graph->expected_main_absent = FALSE;
+  graph->expected_main_identity.domain = 1;
+  graph->expected_main_identity.object = 101;
+  graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+  graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  graph->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+  graph->replacement_provisioning_uuid = g_strdup
+        ("018f22d0-7b6d-7a5b-8c31-123456789ac3");
+  bound.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  bound.version =
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION;
+  g_clear_pointer (&blob, g_bytes_unref);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&bound,
+      &blob), ==, WYRELOG_E_OK);
+  raw.journal_blob = blob;
+  raw.revision = bound.revision;
+  g_assert_cmpint (wyl_policy_store_offline_restore_create (store, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
+  g_assert_cmpint (wyl_policy_store_offline_restore_cas (store, 1, &raw,
+      &raw_result, &raw_committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (raw_committed);
   g_auto (WylFactOfflineRestoreJournal) durable = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (store,
       OP_A, &durable), ==, WYRELOG_E_OK);

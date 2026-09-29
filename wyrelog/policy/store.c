@@ -37819,8 +37819,10 @@ offline_restore_record_has_tenant_binding
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   return wyl_fact_offline_restore_journal_decode (record->journal_blob,
              &journal) == WYRELOG_E_OK
-         && journal.version ==
-         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION;
+         && (journal.version ==
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+         || journal.version ==
+         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
 }
 
 static gboolean

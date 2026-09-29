@@ -14,6 +14,7 @@ G_BEGIN_DECLS
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION 3u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION 4u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION 5u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION 6u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -147,6 +148,7 @@ typedef struct
   WylFactArtifactInventoryIdentity expected_main_identity;
   WylFactArtifactInventoryIdentity staged_main_identity;
   gchar *old_provisioning_uuid;
+  gchar *replacement_provisioning_uuid;
   gboolean copied;
   gboolean checksum_verified;
   gboolean identity_verified;
@@ -181,6 +183,12 @@ typedef struct
   gboolean replacement_selected_pending_cleanup;
   GPtrArray *graphs;
 } WylFactOfflineRestoreJournal;
+
+typedef struct
+{
+  const gchar *graph_id;
+  const gchar *replacement_provisioning_uuid;
+} WylFactOfflineRestoreTenantReplacementBinding;
 
 void wyl_fact_offline_restore_target_graph_free
   (WylFactOfflineRestoreTargetGraph *graph);
@@ -224,6 +232,10 @@ wyrelog_error_t wyl_fact_offline_restore_journal_bind_provisioned_old
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const gchar *old_uuid);
+/* Pure all-graph v5 to v6 reservation image. The actual durable write must
+ * atomically reserve the matching policy rows under tenant authority. */
+wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_replacements
+  (WylFactOfflineRestoreJournal *journal, const GPtrArray *ordered_bindings);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide
   (WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreDecision decision);
