@@ -344,6 +344,59 @@ recover_absent_callback (gpointer user_data)
 }
 
 static wyrelog_error_t
+recover_unbound_callback (gpointer user_data)
+{
+  GraphRollback *rollback = user_data;
+  const WylFactOfflineRestoreJournalGraph *graph = selected_graph (rollback);
+  if (graph->staged_main_identity.domain != 0
+      || graph->staged_main_identity.object != 0)
+    return WYRELOG_E_POLICY;
+  if (rollback->journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK)
+    return wyl_fact_offline_restore_journal_recovery (&rollback->journal)
+           == WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE
+      ? check_current (rollback) : WYRELOG_E_POLICY;
+  if (rollback->journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE)
+    return WYRELOG_E_POLICY;
+  return cas_change (rollback, ROLLBACK_DECIDE);
+}
+
+static wyrelog_error_t
+open_provider (GraphRollback *rollback)
+{
+  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_probe_capability
+        (&rollback->directory, rollback->journal.operation_uuid,
+          &capability);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_posix_open (&rollback->resolver,
+            &rollback->directory, rollback->lease,
+            rollback->journal.operation_uuid, &capability,
+            &rollback->provider);
+  return rc;
+}
+
+static wyrelog_error_t
+recover_unbound (GraphRollback *rollback)
+{
+  wyrelog_error_t rc = open_provider (rollback);
+  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+    .sealed = TRUE, .main_binding_live = FALSE,
+  };
+  WylFactArtifactMainTransitionObservation observation = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
+            &lifecycle, &observation);
+  if (rc == WYRELOG_E_OK) {
+    WylFactArtifactMainTransitionRequest request = request_for (rollback,
+            &observation);
+    rc = wyl_fact_artifact_transition_posix_with_unbound_absence
+          (rollback->provider, rollback->pair, &request, &lifecycle,
+            recover_unbound_callback, rollback);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
 retire_stage (GraphRollback *rollback)
 {
   WylFactArtifactTransitionPosixLifecycle lifecycle = {
@@ -488,22 +541,20 @@ wyl_fact_offline_restore_graph_rollback_run
     rc = check_current (&rollback);
   if (rc == WYRELOG_E_OK)
     rc = open_active_pair (&rollback);
-  /* An unbound stage has no durable ownership proof. The stage coordinator
-   * may have crashed after creating it and before its binding CAS. Keep the
-   * journal pending for operator reconciliation rather than report COMPLETE. */
-  if (rc == WYRELOG_E_OK
+  gboolean unbound = rc == WYRELOG_E_OK
       && selected_graph (&rollback)->staged_main_identity.domain == 0
-      && selected_graph (&rollback)->staged_main_identity.object == 0)
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK
+      && selected_graph (&rollback)->staged_main_identity.object == 0;
+  if (rc == WYRELOG_E_OK && unbound)
+    rc = recover_unbound (&rollback);
+  if (rc == WYRELOG_E_OK && !unbound
       && rollback.journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE)
     rc = cas_change (&rollback, ROLLBACK_DECIDE);
 #ifdef WYL_TEST_HANDLE_SEAMS
-  if (rc == WYRELOG_E_OK && rollback.journal.revision
+  if (rc == WYRELOG_E_OK && !unbound && rollback.journal.revision
       == expected_revision + 1)
     rc = run_checkpoint (WYL_FACT_OFFLINE_RESTORE_ROLLBACK_AFTER_DECISION);
 #endif
-  gboolean needs_cleanup = rc == WYRELOG_E_OK
+  gboolean needs_cleanup = rc == WYRELOG_E_OK && !unbound
       && wyl_fact_offline_restore_journal_recovery (&rollback.journal)
       != WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE;
   if (rc == WYRELOG_E_OK
@@ -520,15 +571,7 @@ wyl_fact_offline_restore_graph_rollback_run
 #endif
   if (rc == WYRELOG_E_OK
       && needs_cleanup) {
-    WylFactArtifactTransitionPosixCapability capability = { 0 };
-    rc = wyl_fact_artifact_transition_posix_probe_capability
-          (&rollback.directory, rollback.journal.operation_uuid,
-            &capability);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_transition_posix_open (&rollback.resolver,
-              &rollback.directory, rollback.lease,
-              rollback.journal.operation_uuid, &capability,
-              &rollback.provider);
+    rc = open_provider (&rollback);
     if (rc == WYRELOG_E_OK)
       rc = retire_stage (&rollback);
   }

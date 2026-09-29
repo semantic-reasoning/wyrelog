@@ -1153,6 +1153,89 @@ wyl_fact_artifact_transition_posix_with_retired_stage_recovery
   return callback (user_data);
 }
 
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_with_unbound_absence
+  (WylFactArtifactTransitionPosix *provider,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactRetiredStageRecoveryFunc callback, gpointer user_data)
+{
+  if (provider == NULL || request == NULL || lifecycle == NULL
+      || callback == NULL || request->operation_uuid == NULL
+      || !lifecycle->sealed || lifecycle->main_binding_live
+      || !request->resume_forbidden
+      || (request->expected_main_absent ? pair != NULL : pair == NULL))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactInventoryIdentity zero = { 0 };
+  if (!wyl_fact_artifact_inventory_identity_equal
+        (&request->staged_main_identity, &zero)
+      || (request->expected_main_absent
+      && !wyl_fact_artifact_inventory_identity_equal
+        (&request->expected_main_identity, &zero)))
+    return WYRELOG_E_INVALID;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  for (guint pass = 0; pass < 2; pass++) {
+    wyrelog_error_t rc = WYRELOG_E_OK;
+    if (pair != NULL)
+      rc = wyl_fact_graph_provisioned_pair_revalidate_in_directory (pair,
+              provider->directory);
+    g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+    WylFactArtifactMainTransitionObservation observation = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_artifact_transition_posix_capture (provider, lifecycle,
+              &snapshot, &observation);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    const WylFactArtifactMainTransitionEntryEvidence *main
+      = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+    if (!wyl_fact_artifact_inventory_identity_equal
+          (&request->directory_identity, &observation.directory_identity)
+        || !wyl_fact_artifact_inventory_identity_equal
+          (&request->lease_identity, &observation.lease_identity)
+        || wyl_fact_artifact_main_transition_inventory_refusal
+          (snapshot, &observation)
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE
+        || observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE].present
+        || observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK].present)
+      return WYRELOG_E_POLICY;
+    if (request->expected_main_absent) {
+      if (main->present)
+        return WYRELOG_E_POLICY;
+    } else {
+#ifdef __APPLE__
+      const guint expected_links = 1;
+#else
+      const guint expected_links = 2;
+#endif
+      if (!main->present || main->reparse
+          || main->link_count != expected_links
+          || main->owner_state
+          != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+          || !wyl_fact_artifact_inventory_identity_equal
+            (&main->identity, &request->expected_main_identity))
+        return WYRELOG_E_POLICY;
+    }
+    if (pass == 0) {
+      rc = provider_revalidate_authority (provider);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (posix_fault_take
+            (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR)
+          || fsync (provider->graph_fd) != 0)
+        return WYRELOG_E_IO;
+      if (transition_posix_recovery_post_sync_hook != NULL)
+        transition_posix_recovery_post_sync_hook (provider->graph_fd,
+            transition_posix_recovery_post_sync_data);
+    }
+  }
+  return callback (user_data);
+}
+
 static wyrelog_error_t
 capture_ready_provisioned_retire
   (WylFactArtifactTransitionPosix *provider,
