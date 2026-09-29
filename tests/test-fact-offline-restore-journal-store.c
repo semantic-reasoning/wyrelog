@@ -1149,7 +1149,7 @@ encrypted_rollback_failure (void)
 #endif
 
 static void
-tenant_replacement_schema_is_atomic (void)
+tenant_replacement_schema_variant (const gchar *old_phase)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
@@ -1184,12 +1184,11 @@ tenant_replacement_schema_is_atomic (void)
   g_assert_nonnull (insert_sql);
   g_assert_nonnull (delete_sql);
   g_auto (GStrv) parts = g_strsplit (table_sql,
-          "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced'))",
+          "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup')),",
           2);
   g_assert_nonnull (parts[1]);
   g_autofree gchar *predecessor = g_strdup_printf
-        ("%sphase TEXT NOT NULL CHECK(phase='reserved')%s",
-          parts[0], parts[1]);
+        ("%s%s%s", parts[0], old_phase, parts[1]);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
       "DROP TABLE fact_tenant_restore_replacements;", NULL, NULL, NULL),
       ==, SQLITE_OK);
@@ -1210,6 +1209,15 @@ tenant_replacement_schema_is_atomic (void)
       NULL, NULL, NULL), ==, SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
+}
+
+static void
+tenant_replacement_schema_is_atomic (void)
+{
+  tenant_replacement_schema_variant
+    ("phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced')),");
+  tenant_replacement_schema_variant
+    ("phase TEXT NOT NULL CHECK(phase='reserved'),");
 }
 
 int
