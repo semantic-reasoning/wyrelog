@@ -22,6 +22,7 @@
 #define OP_D "018f22d0-7b6d-7a5b-8c31-123456789abf"
 #define OP_E "018f22d0-7b6d-7a5b-8c31-123456789ac0"
 #define OP_F "018f22d0-7b6d-7a5b-8c31-123456789ac1"
+#define OLD_PROVISION "018f22d0-7b6d-7a5b-8c31-123456789ac2"
 
 static void init_journal (WylFactOfflineRestoreJournal *journal,
     const gchar *operation_uuid);
@@ -406,6 +407,76 @@ storage_contract (void)
   g_assert_cmpuint (((WylFactOfflineRestoreJournalGraph *)
       g_ptr_array_index (width_16_committed.graphs, 0))->
       staged_main_identity.object_width, ==, 16);
+}
+
+static void
+provisioned_handoff_cas (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant
+        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
+      "schema_version,owner_scope,created_at,updated_at) VALUES"
+      "('tenant-a','alpha','file:///alpha','/alpha',1,'tenant-a',1,1);",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_autoptr (GBytes) manifest = manifest_bytes ("alpha");
+  g_autoptr (GPtrArray) targets = target_graphs ("alpha");
+  WylFactOfflineRestoreTargetGraph *target = g_ptr_array_index (targets, 0);
+  target->expected_main_absent = FALSE;
+  target->expected_main_identity
+    = (WylFactArtifactInventoryIdentity) { .domain = 1, .object = 101 };
+  g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&initial, manifest,
+      OP_A, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreStoreResult result = 0;
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create (store,
+      &initial, &result, &current), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  for (guint step = 0; step < 2; step++) {
+    g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+    clone_journal (&current, &desired);
+    if (step == 0) {
+      WylFactArtifactInventoryIdentity stage = { .domain = 1, .object = 201 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+            (&desired, "alpha", &stage), ==, WYRELOG_E_OK);
+    } else {
+      g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+            (&desired, "alpha"), ==, WYRELOG_E_OK);
+    }
+    g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+        current.revision, &desired, &result, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_fact_offline_restore_journal_clear (&current);
+    current = committed;
+    memset (&committed, 0, sizeof committed);
+  }
+  g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+  clone_journal (&current, &desired);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_provisioned_old
+        (&desired, "alpha", OLD_PROVISION), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      current.revision, &desired, &result, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpuint (committed.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+  g_auto (WylFactOfflineRestoreJournal) stale = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      current.revision, &desired, &result, &stale), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, !=, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_auto (WylFactOfflineRestoreJournal) reloaded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (store,
+      OP_A, &reloaded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (reloaded.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
 }
 
 static void
@@ -906,6 +977,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/offline-restore-journal-store/contract",
       storage_contract);
+  g_test_add_func ("/fact/offline-restore-journal-store/provisioned-handoff-cas",
+      provisioned_handoff_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/not-applied-retry",
       not_applied_retry_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/claim-matrix-tamper",
