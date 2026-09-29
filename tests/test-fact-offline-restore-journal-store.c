@@ -477,6 +477,41 @@ provisioned_handoff_cas (void)
       OP_A, &reloaded), ==, WYRELOG_E_OK);
   g_assert_cmpuint (reloaded.version, ==,
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+  /* Import a historical COMMIT without a replacement reservation. The
+   * journal successor is structurally legal, but policy CAS must refuse it. */
+  g_auto (WylFactOfflineRestoreJournal) imported = { 0 };
+  clone_journal (&reloaded, &imported);
+  imported.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  imported.revision++;
+  g_autoptr (GBytes) imported_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&imported,
+      &imported_blob), ==, WYRELOG_E_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "UPDATE fact_offline_restore_journals SET revision=?1,"
+      "journal_blob=?2 WHERE operation_uuid=?3;", -1, &update,
+      NULL), ==, SQLITE_OK);
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (imported_blob, &length);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, imported.revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, bytes, length,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, OP_A, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  sqlite3_finalize (update);
+  g_auto (WylFactOfflineRestoreJournal) begin = { 0 };
+  clone_journal (&imported, &begin);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&begin,
+      "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED), ==,
+      WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&imported, &begin));
+  g_auto (WylFactOfflineRestoreJournal) denied = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (store,
+      imported.revision, &begin, &result, &denied), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied.graphs);
 }
 
 static void
