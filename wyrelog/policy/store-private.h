@@ -3550,6 +3550,19 @@ wyrelog_error_t wyl_policy_store_tenant_restore_reserve_replacements_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* The callback proves the complete post-publish filesystem vector under a
+ * root writer lease and quiescence for every tenant graph. Its phases are in
+ * journal graph order. A reserved selected graph may be linked and synced;
+ * an already synced graph must be re-synced and proved before replay returns. */
+typedef wyrelog_error_t (*WylPolicyTenantRestoreCompanionEffectFunc)
+  (GBytes *canonical_journal, const GPtrArray *phases,
+    guint selected_index, gpointer user_data);
+wyrelog_error_t wyl_policy_store_tenant_restore_companion_sync_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreCompanionEffectFunc effect,
+    gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result);
+
 /* Typed v5 COMMIT SYNC_STAGED journal step. BEGIN durably records UNKNOWN
  * before any effect. COMPLETE runs its proof/effect callback inside a fresh
  * fenced policy transaction and advances only after proven durability. */
