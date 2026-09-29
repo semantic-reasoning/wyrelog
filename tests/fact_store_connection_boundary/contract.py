@@ -16,7 +16,7 @@ ROLE_OWNERS = {
     "wyrelog/fact/replay-store-private.c",
 }
 EXPECTED_RAW_INVENTORY = {
-    "wyrelog/fact/store.c": (58, 441, 4, 3),
+    "wyrelog/fact/store.c": (58, 443, 4, 3),
     "wyrelog/fact/compound.c": (0, 63, 8, 0),
     "wyrelog/fact/replay.c": (0, 0, 0, 0),
     "wyrelog/fact/replay-store-private.c": (0, 21, 3, 0),
@@ -126,7 +126,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "wyl_fact_store_open": 2,
         "wyl_fact_store_open_identified": 2,
         "wyl_fact_store_retract_by_batch_id": 11,
-        "wyl_fact_store_repair_orphaned_forget": 19,
+        "wyl_fact_store_repair_orphaned_forget": 21,
         "wyl_fact_store_test_query_int64": 4,
         "wyl_fact_store_test_query_text": 5,
     },

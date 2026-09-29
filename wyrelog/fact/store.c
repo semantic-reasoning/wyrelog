@@ -4134,8 +4134,7 @@ orphan_repair_census_unlocked (wyl_fact_store_t *store,
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autoptr (GString) sql = g_string_new (
-    "SELECT COUNT(*), COALESCE(SUM(row_count), 0) FROM ("
-    " SELECT p.__wyl_batch_id, COUNT(*) AS row_count FROM ");
+    "SELECT COUNT(DISTINCT p.__wyl_batch_id), COUNT(*) FROM ");
   append_duckdb_identifier (sql, table);
   g_string_append (sql,
       " p WHERE p.__wyl_tenant_id = ? AND p.__wyl_graph_id = ? "
@@ -4168,8 +4167,7 @@ orphan_repair_census_unlocked (wyl_fact_store_t *store,
         " AND r.projection_table = ? "
         " AND r.batch_id = p.__wyl_batch_id) ");
   g_string_append (sql,
-      ") "
-      "GROUP BY p.__wyl_batch_id) candidates;");
+      ");");
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result = { 0 };
   if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess) {
@@ -4290,17 +4288,18 @@ wyl_fact_store_repair_orphaned_forget (wyl_fact_store_t *store,
       g_string_append (sql, " WHERE __wyl_batch_id = ? "
           "AND __wyl_tenant_id = ? AND __wyl_graph_id = ?;");
       duckdb_prepared_statement stmt = NULL;
-      if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+      if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess) {
+        duckdb_destroy_prepare (&stmt);
         rc = WYRELOG_E_IO;
-      if (rc == WYRELOG_E_OK) {
+      } else {
         duckdb_state bound = duckdb_bind_varchar (stmt, 1, batch_id)
             | duckdb_bind_varchar (stmt, 2, schema->tenant_id)
             | duckdb_bind_varchar (stmt, 3, schema->graph_id);
         if (bound != DuckDBSuccess
             || duckdb_execute_prepared (stmt, NULL) != DuckDBSuccess)
           rc = WYRELOG_E_IO;
+        duckdb_destroy_prepare (&stmt);
       }
-      duckdb_destroy_prepare (&stmt);
     }
     if (rc == WYRELOG_E_OK) {
       duckdb_prepared_statement stmt = NULL;
@@ -4311,9 +4310,10 @@ wyl_fact_store_repair_orphaned_forget (wyl_fact_store_t *store,
           " created_at_us, actor_subject_id, request_id) "
           "SELECT ?, ?, ?, ?, ?, i.op_uuid, ?, ?, ?, ?, ?, ? "
           "FROM fact_forget_intent i WHERE i.batch_id = ?;";
-      if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess)
+      if (duckdb_prepare (store->conn, audit_sql, &stmt) != DuckDBSuccess) {
+        duckdb_destroy_prepare (&stmt);
         rc = WYRELOG_E_IO;
-      if (rc == WYRELOG_E_OK) {
+      } else {
         duckdb_state bound = duckdb_bind_varchar (stmt, 1, repair_uuid)
             | duckdb_bind_varchar (stmt, 2, batch_id)
             | duckdb_bind_varchar (stmt, 3, schema->tenant_id)
@@ -4329,8 +4329,8 @@ wyl_fact_store_repair_orphaned_forget (wyl_fact_store_t *store,
         if (bound != DuckDBSuccess
             || duckdb_execute_prepared (stmt, NULL) != DuckDBSuccess)
           rc = WYRELOG_E_IO;
+        duckdb_destroy_prepare (&stmt);
       }
-      duckdb_destroy_prepare (&stmt);
     }
     rc = wyl_fact_store_transaction_finish (&transaction, rc);
     if (rc == WYRELOG_E_OK && out_rows_purged != NULL)
