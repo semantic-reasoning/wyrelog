@@ -2873,6 +2873,8 @@ check_fact_forget_rejects_other_relation (void)
           G_N_ELEMENTS (columns));
   wyl_policy_fact_relation_schema_options_t wrong = schema;
   wrong.relation_name = "other";
+  wrong.namespace_id = "other-shop";
+  wrong.schema_version = 2;
   g_autofree gchar *table = NULL;
   if (wyl_fact_store_ensure_projection (store, &schema, &table)
       != WYRELOG_E_OK
@@ -2918,6 +2920,152 @@ check_fact_forget_rejects_other_relation (void)
   return 0;
 }
 
+static wyrelog_error_t
+fail_orphan_repair_commit (WylFactStoreTransactionTestKind kind,
+    WylFactStoreTransactionTestPhase phase, gpointer user_data)
+{
+  (void) user_data;
+  if (kind == WYL_FACT_STORE_TRANSACTION_TEST_FORGET_COMPLETE
+      && phase == WYL_FACT_STORE_TRANSACTION_TEST_BEFORE_COMMIT)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_fact_orphan_repair (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2120;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_policy_fact_relation_schema_options_t wrong = schema;
+  wrong.relation_name = "other";
+  wrong.namespace_id = "other-shop";
+  wrong.schema_version = 2;
+  g_autofree gchar *table = NULL;
+  g_autofree gchar *wrong_table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, &wrong, &wrong_table)
+      != WYRELOG_E_OK)
+    return 2121;
+  const wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "orphan"},
+  };
+  const wyl_fact_row_t rows[] = { {values, 1} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "old-batch", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .idempotency_key = "old:1",
+    .op = WYL_FACT_STORE_OP_ASSERT, .rows = rows, .n_rows = 1,
+  };
+  if (wyl_fact_store_append_batch (store, &schema, &batch, NULL)
+      != WYRELOG_E_OK)
+    return 2122;
+  guint64 candidates = 99, candidate_rows = 99;
+  if (wyl_fact_store_orphan_repair_candidates (store, &schema,
+      &candidates, &candidate_rows) != WYRELOG_E_OK
+      || candidates != 0 || candidate_rows != 0)
+    return 2123;
+  /* Recreate the pre-guard wrong-relation forget's durable state. */
+  g_autofree gchar *seed_sql = g_strdup_printf (
+    "INSERT INTO fact_forget_intent (op_uuid, batch_id, tenant_id, "
+    "graph_id, namespace_id, relation_name, schema_version, "
+    "projection_table, content_hash, idempotency_key, operator, reason, "
+    "rows_purged, state, created_at_us, completed_at_us) "
+    "SELECT 'old-op', batch_id, tenant_id, graph_id, 'other-shop', "
+    "'other', 2, '%s', content_hash, idempotency_key, "
+    "'admin', 'old wrong relation', 0, 'COMPLETED', 100, 101 "
+    "FROM fact_batches WHERE batch_id = 'old-batch';"
+    "INSERT INTO fact_forget_audit "
+    "(id, batch_id, tenant_id, graph_id, operator, reason, "
+    "rows_purged, created_at_us) VALUES "
+    "(1, 'old-batch', 'tenant-a', 'orders', 'admin', "
+    "'old wrong relation', 0, 101);"
+    "DELETE FROM fact_event_log WHERE batch_id = 'old-batch';"
+    "DELETE FROM fact_batches WHERE batch_id = 'old-batch';",
+    wrong_table);
+  if (!exec_ok (store, seed_sql))
+    return 2124;
+  if (wyl_fact_store_orphan_repair_candidates (store, &schema,
+      &candidates, &candidate_rows) != WYRELOG_E_OK
+      || candidates != 1 || candidate_rows != 1)
+    return 2125;
+  if (!exec_ok (store,
+      "INSERT INTO fact_forget_audit "
+      "(id, batch_id, tenant_id, graph_id, operator, reason, "
+      "rows_purged, created_at_us) VALUES "
+      "(2, 'old-batch', 'tenant-a', 'orders', 'admin', "
+      "'ambiguous', 0, 102);"))
+    return 2129;
+  if (wyl_fact_store_orphan_repair_candidates (store, &schema,
+      &candidates, &candidate_rows) != WYRELOG_E_OK
+      || candidates != 0 || candidate_rows != 0
+      || wyl_fact_store_repair_orphaned_forget (store, &schema,
+      "old-batch", "repair-admin", "ambiguous", NULL, NULL, NULL)
+      != WYRELOG_E_NOT_FOUND)
+    return 2130;
+  if (!exec_ok (store, "DELETE FROM fact_forget_audit WHERE id = 2;"))
+    return 2131;
+  wyl_fact_store_test_set_transaction_hook (store, fail_orphan_repair_commit,
+      NULL);
+  if (wyl_fact_store_repair_orphaned_forget (store, &schema,
+      "old-batch", "repair-admin", "rollback", NULL, NULL, NULL)
+      != WYRELOG_E_IO)
+    return 2132;
+  wyl_fact_store_test_set_transaction_hook (store, NULL, NULL);
+  gint64 count = -1;
+  g_autofree gchar *projection_sql = g_strdup_printf (
+    "SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (store, projection_sql, &count) || count != 1
+      || !count_i64 (store,
+      "SELECT COUNT(*) FROM fact_orphan_repair_audit;", &count)
+      || count != 0)
+    return 2133;
+  g_autofree gchar *backup_sql = g_strdup_printf (
+    "CREATE TABLE orphan_backup AS SELECT * FROM %s;", table);
+  if (!exec_ok (store, backup_sql))
+    return 2134;
+  guint64 purged = 0;
+  if (wyl_fact_store_repair_orphaned_forget (store, &schema,
+      "old-batch", "repair-admin", "issue 1273", "actor-1", "request-1",
+      &purged) != WYRELOG_E_OK
+      || purged != 1)
+    return 2126;
+  if (!count_i64 (store, projection_sql, &count) || count != 0
+      || !count_i64 (store,
+      "SELECT COUNT(*) FROM fact_orphan_repair_audit "
+      "WHERE batch_id = 'old-batch' AND rows_purged = 1 "
+      "AND original_forget_op_uuid = 'old-op' "
+      "AND actor_subject_id = 'actor-1' "
+      "AND request_id = 'request-1';", &count)
+      || count != 1)
+    return 2127;
+  if (wyl_fact_store_orphan_repair_candidates (store, &schema,
+      &candidates, &candidate_rows) != WYRELOG_E_OK
+      || candidates != 0 || candidate_rows != 0
+      || wyl_fact_store_repair_orphaned_forget (store, &schema,
+      "old-batch", "repair-admin", "retry", NULL, NULL, &purged)
+      != WYRELOG_E_NOT_FOUND || purged != 0)
+    return 2128;
+  g_autofree gchar *restore_sql = g_strdup_printf (
+    "INSERT INTO %s SELECT * FROM orphan_backup;", table);
+  if (!exec_ok (store, restore_sql)
+      || wyl_fact_store_orphan_repair_candidates (store, &schema,
+      &candidates, &candidate_rows) != WYRELOG_E_OK
+      || candidates != 0 || candidate_rows != 0
+      || wyl_fact_store_repair_orphaned_forget (store, &schema,
+      "old-batch", "repair-admin", "reappeared", NULL, NULL, NULL)
+      != WYRELOG_E_NOT_FOUND)
+    return 2135;
+  return 0;
+}
+
 static gint
 check_fact_store_forget (void)
 {
@@ -2928,6 +3076,9 @@ check_fact_store_forget (void)
   if (rc != 0)
     return rc;
   rc = check_fact_forget_rejects_other_relation ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_orphan_repair ();
   if (rc != 0)
     return rc;
   return 0;
