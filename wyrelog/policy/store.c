@@ -57,6 +57,7 @@
 #include "fact/graph-locator-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "fact/publication-lock-event-private.h"
+#include "fact/offline-restore-journal-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -1008,7 +1009,7 @@ static const gchar restore_replacement_table_sql[] =
     "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
     "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
     "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
-    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
     "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
     "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
     "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified')) ,"
@@ -11266,6 +11267,23 @@ migrate_offline_restore_schema (sqlite3 *db)
 static wyrelog_error_t graph_provisioning_require_true
   (sqlite3 *db, const gchar *sql);
 
+/* b0faddd1 installed the same table with >0 for this one generation. A
+ * normally sealed graph can still have reconciliation generation zero. */
+static gchar *
+restore_replacement_pre_zero_table_sql (void)
+{
+  const gchar *needle =
+      "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0)";
+  const gchar *previous =
+      "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>0)";
+  const gchar *at = strstr (restore_replacement_table_sql, needle);
+  if (at == NULL)
+    return NULL;
+  g_autofree gchar *prefix = g_strndup (restore_replacement_table_sql,
+          at - restore_replacement_table_sql);
+  return g_strconcat (prefix, previous, at + strlen (needle), NULL);
+}
+
 static wyrelog_error_t
 migrate_restore_replacement_schema (sqlite3 *db)
 {
@@ -11305,6 +11323,49 @@ migrate_restore_replacement_schema (sqlite3 *db)
     return rc;
   if (present != 0 && present != G_N_ELEMENTS (objects))
     return WYRELOG_E_POLICY;
+  if (present == G_N_ELEMENTS (objects)) {
+    wyrelog_error_t table_rc = graph_authority_object_matches (db, "table",
+            objects[0].name, objects[0].sql);
+    if (table_rc != WYRELOG_E_OK) {
+      g_autofree gchar *predecessor =
+          restore_replacement_pre_zero_table_sql ();
+      if (predecessor == NULL
+          || graph_authority_object_matches (db, "table", objects[0].name,
+          predecessor) != WYRELOG_E_OK)
+        return table_rc;
+      for (guint i = 1; i < G_N_ELEMENTS (objects); i++) {
+        rc = graph_authority_object_matches (db, objects[i].type,
+                objects[i].name, objects[i].sql);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+      }
+      rc = graph_provisioning_require_true (db,
+              "SELECT NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE "
+              "type='trigger' AND tbl_name='fact_graph_restore_replacements' "
+              "AND name NOT IN ('fact_graph_restore_replacement_insert_guard',"
+              "'fact_graph_restore_replacement_update_guard',"
+              "'fact_graph_restore_replacement_delete_guard'));");
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      rc = exec_sql (db,
+              "DROP TRIGGER fact_graph_restore_replacement_insert_guard;"
+              "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
+              "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
+              "ALTER TABLE fact_graph_restore_replacements RENAME TO "
+              "fact_graph_restore_replacements_pre_recon_zero;");
+      if (rc == WYRELOG_E_OK)
+        rc = exec_sql (db, restore_replacement_table_sql);
+      if (rc == WYRELOG_E_OK)
+        rc = exec_sql (db,
+                "INSERT INTO fact_graph_restore_replacements SELECT * FROM "
+                "fact_graph_restore_replacements_pre_recon_zero;"
+                "DROP TABLE fact_graph_restore_replacements_pre_recon_zero;");
+      for (guint i = 1; i < G_N_ELEMENTS (objects) && rc == WYRELOG_E_OK; i++)
+        rc = exec_sql (db, objects[i].sql);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+  }
   if (present == 0)
     for (guint i = 0; i < G_N_ELEMENTS (objects) && rc == WYRELOG_E_OK; i++)
       rc = exec_sql (db, objects[i].sql);
@@ -37778,4 +37839,330 @@ wyl_policy_store_offline_restore_foreach (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
+}
+
+void
+wyl_policy_graph_restore_replacement_record_free
+  (WylPolicyGraphRestoreReplacementRecord *record)
+{
+  if (record == NULL)
+    return;
+  g_free (record->operation_uuid);
+  g_free (record->replacement_uuid);
+  g_free (record->tenant_id);
+  g_free (record->graph_id);
+  g_free (record->old_provisioning_uuid);
+  g_free (record->store_uuid);
+  g_free (record->companion_basename);
+  g_free (record->phase);
+  g_free (record);
+}
+
+static gboolean
+restore_replacement_reservation_valid
+  (const WylPolicyGraphRestoreReplacementReservation *r)
+{
+  gboolean shape = r != NULL
+      && graph_provisioning_uuid_is_canonical (r->operation_uuid)
+      && graph_provisioning_uuid_is_canonical (r->old_provisioning_uuid)
+      && wyl_policy_store_tenant_id_is_valid (r->tenant_id)
+      && fact_graph_customer_name_is_valid (r->graph_id)
+      && graph_store_uuid_is_canonical (r->store_uuid)
+      && r->tenant_lifecycle_generation > 0
+      && r->tenant_lifecycle_generation <= G_MAXINT64
+      && r->tenant_reconciliation_generation > 0
+      && r->tenant_reconciliation_generation <= G_MAXINT64
+      && r->graph_lifecycle_generation > 0
+      && r->graph_lifecycle_generation <= G_MAXINT64
+      && r->graph_reconciliation_generation <= G_MAXINT64
+      && r->journal_revision > 0 && r->journal_revision <= G_MAXINT64
+      && r->journal_blob != NULL && g_bytes_get_size (r->journal_blob) > 0
+      && g_bytes_get_size (r->journal_blob) <= 8u * 1024u * 1024u;
+  if (!shape)
+    return FALSE;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  if (wyl_fact_offline_restore_journal_decode (r->journal_blob,
+      &journal) != WYRELOG_E_OK)
+    return FALSE;
+  g_autoptr (GBytes) canonical = NULL;
+  if (wyl_fact_offline_restore_journal_encode (&journal,
+      &canonical) != WYRELOG_E_OK
+      || !g_bytes_equal (canonical, r->journal_blob))
+    return FALSE;
+  if (journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal.confirmation !=
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal.manifest_trust !=
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || journal.graphs == NULL || journal.graphs->len != 1
+      || journal.revision != r->journal_revision
+      || g_strcmp0 (journal.operation_uuid, r->operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, r->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id, r->graph_id) != 0
+      || journal.destination_tenant_lifecycle_generation !=
+      r->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      r->tenant_reconciliation_generation)
+    return FALSE;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal.graphs, 0);
+  return graph != NULL && !graph->expected_main_absent
+         && graph->replay_preflighted
+         && g_strcmp0 (graph->graph_id, r->graph_id) == 0
+         && g_strcmp0 (graph->old_provisioning_uuid,
+             r->old_provisioning_uuid) == 0
+         && g_strcmp0 (graph->store_uuid, r->store_uuid) == 0
+         && graph->destination_lifecycle_generation ==
+         r->graph_lifecycle_generation
+         && graph->destination_reconciliation_generation ==
+         r->graph_reconciliation_generation;
+}
+
+static wyrelog_error_t
+restore_replacement_from_row (sqlite3_stmt *stmt,
+    WylPolicyGraphRestoreReplacementRecord **out_record)
+{
+  static const guint text_columns[] = { 0, 1, 2, 3, 4, 5, 11, 12 };
+  static const guint integer_columns[] = { 6, 7, 8, 9, 10, 13 };
+  for (guint i = 0; i < G_N_ELEMENTS (text_columns); i++)
+    if (sqlite3_column_type (stmt, text_columns[i]) != SQLITE_TEXT)
+      return WYRELOG_E_POLICY;
+  for (guint i = 0; i < G_N_ELEMENTS (integer_columns); i++)
+    if (sqlite3_column_type (stmt, integer_columns[i]) != SQLITE_INTEGER
+        || sqlite3_column_int64 (stmt, integer_columns[i]) <
+        ((integer_columns[i] == 9 || integer_columns[i] == 13) ? 0 : 1))
+      return WYRELOG_E_POLICY;
+  WylPolicyGraphRestoreReplacementRecord *r =
+      g_new0 (WylPolicyGraphRestoreReplacementRecord, 1);
+  r->operation_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  r->replacement_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+  r->tenant_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 2));
+  r->graph_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+  r->old_provisioning_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 4));
+  r->store_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 5));
+  r->tenant_lifecycle_generation = sqlite3_column_int64 (stmt, 6);
+  r->tenant_reconciliation_generation = sqlite3_column_int64 (stmt, 7);
+  r->graph_lifecycle_generation = sqlite3_column_int64 (stmt, 8);
+  r->graph_reconciliation_generation = sqlite3_column_int64 (stmt, 9);
+  r->journal_revision = sqlite3_column_int64 (stmt, 10);
+  r->companion_basename = g_strdup ((const gchar *) sqlite3_column_text (stmt, 11));
+  r->phase = g_strdup ((const gchar *) sqlite3_column_text (stmt, 12));
+  r->attempt = sqlite3_column_int64 (stmt, 13);
+  g_autofree gchar *derived = g_strdup_printf ("provision-%s.sqlite",
+          r->replacement_uuid);
+  gboolean valid = graph_provisioning_uuid_is_canonical (r->operation_uuid)
+      && graph_provisioning_uuid_is_canonical (r->replacement_uuid)
+      && graph_provisioning_uuid_is_canonical (r->old_provisioning_uuid)
+      && g_strcmp0 (r->old_provisioning_uuid, r->replacement_uuid) != 0
+      && wyl_policy_store_tenant_id_is_valid (r->tenant_id)
+      && fact_graph_customer_name_is_valid (r->graph_id)
+      && graph_store_uuid_is_canonical (r->store_uuid)
+      && g_strcmp0 (r->companion_basename, derived) == 0
+      && (g_str_equal (r->phase, "reserved")
+      || g_str_equal (r->phase, "companion_synced")
+      || g_str_equal (r->phase, "verified"));
+  if (!valid) {
+    wyl_policy_graph_restore_replacement_record_free (r);
+    return WYRELOG_E_POLICY;
+  }
+  *out_record = r;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+restore_replacement_load_locked (wyl_policy_store_t *store,
+    const gchar *operation_uuid,
+    WylPolicyGraphRestoreReplacementRecord **out_record)
+{
+  *out_record = NULL;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT restore_operation_uuid,replacement_uuid,tenant_id,graph_id,"
+          "old_provisioning_uuid,store_uuid,tenant_lifecycle_generation,"
+          "tenant_reconciliation_generation,graph_lifecycle_generation,"
+          "graph_reconciliation_generation,journal_revision,companion_basename,"
+          "phase,attempt FROM main.fact_graph_restore_replacements "
+          "WHERE restore_operation_uuid=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, operation_uuid);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = restore_replacement_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_replacement_load (wyl_policy_store_t *store,
+    const gchar *operation_uuid,
+    WylPolicyGraphRestoreReplacementRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || out_record == NULL
+      || !graph_provisioning_uuid_is_canonical (operation_uuid))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_replacement_load_locked (store, operation_uuid, out_record);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+static wyrelog_error_t
+restore_replacement_authority_locked (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementReservation *r,
+    gboolean *out_matches)
+{
+  *out_matches = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT EXISTS(SELECT 1 FROM main.fact_offline_restore_journals AS j "
+          "JOIN main.fact_offline_restore_graph_claims AS c ON "
+          "c.operation_uuid=j.operation_uuid AND c.tenant_id=j.tenant_id "
+          "AND c.graph_id=j.selected_graph_id "
+          "JOIN main.tenants AS t ON t.tenant_id=j.tenant_id "
+          "JOIN main.fact_graphs AS g ON g.tenant_id=j.tenant_id "
+          "AND g.graph_id=j.selected_graph_id "
+          "JOIN main.fact_graph_provisioning AS p ON p.tenant_id=g.tenant_id "
+          "AND p.graph_id=g.graph_id AND p.store_uuid=g.store_uuid "
+          "WHERE j.operation_uuid=?1 AND j.scope='graph' AND j.tenant_id=?2 "
+          "AND j.selected_graph_id=?3 AND j.revision=?4 AND j.journal_blob=?5 "
+          "AND t.lifecycle_state='sealed' AND t.lifecycle_generation=?6 "
+          "AND t.reconciliation_generation=?7 "
+          "AND g.lifecycle_state='sealed' AND g.store_uuid=?8 "
+          "AND g.lifecycle_generation=?9 AND g.reconciliation_generation=?10 "
+          "AND p.op_uuid=?11 AND p.phase='active');", &stmt);
+  gsize blob_len = 0;
+  const guint8 *blob = g_bytes_get_data (r->journal_blob, &blob_len);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, r->operation_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 2, r->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, r->graph_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 4, r->journal_revision) != SQLITE_OK
+      || sqlite3_bind_blob64 (stmt, 5, blob, blob_len, SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6, r->tenant_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 7, r->tenant_reconciliation_generation) != SQLITE_OK
+      || bind_text (stmt, 8, r->store_uuid) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 9, r->graph_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 10, r->graph_reconciliation_generation) != SQLITE_OK
+      || bind_text (stmt, 11, r->old_provisioning_uuid) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW
+      && sqlite3_column_type (stmt, 0) == SQLITE_INTEGER)
+    *out_matches = sqlite3_column_int (stmt, 0) == 1;
+  else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_replacement_reserve (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementReservation *reservation,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyGraphRestoreReplacementRecord **out_record)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || !restore_replacement_reservation_valid (reservation)
+      || out_result == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store, &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  gboolean authority = FALSE;
+  rc = restore_replacement_authority_locked (store, reservation, &authority);
+  if (rc != WYRELOG_E_OK || !authority) {
+    if (rc == WYRELOG_E_OK)
+      *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_STALE;
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  }
+  WylPolicyGraphRestoreReplacementRecord *existing = NULL;
+  rc = restore_replacement_load_locked (store, reservation->operation_uuid,
+          &existing);
+  if (rc == WYRELOG_E_OK) {
+    gboolean replay = g_strcmp0 (existing->tenant_id, reservation->tenant_id) == 0
+        && g_strcmp0 (existing->graph_id, reservation->graph_id) == 0
+        && g_strcmp0 (existing->old_provisioning_uuid,
+            reservation->old_provisioning_uuid) == 0
+        && g_strcmp0 (existing->store_uuid, reservation->store_uuid) == 0
+        && existing->tenant_lifecycle_generation ==
+        reservation->tenant_lifecycle_generation
+        && existing->tenant_reconciliation_generation ==
+        reservation->tenant_reconciliation_generation
+        && existing->graph_lifecycle_generation ==
+        reservation->graph_lifecycle_generation
+        && existing->graph_reconciliation_generation ==
+        reservation->graph_reconciliation_generation
+        && existing->journal_revision == reservation->journal_revision;
+    *out_result = replay ? WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY :
+        WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK, FALSE);
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_graph_restore_replacement_record_free (existing);
+      return rc;
+    }
+    *out_record = existing;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  gchar replacement_uuid[WYL_ID_STRING_BUF];
+  rc = graph_provisioning_uuid_new (replacement_uuid);
+  g_autofree gchar *basename = rc == WYRELOG_E_OK ?
+      g_strdup_printf ("provision-%s.sqlite", replacement_uuid) : NULL;
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "INSERT INTO main.fact_graph_restore_replacements("
+            "restore_operation_uuid,replacement_uuid,tenant_id,graph_id,"
+            "old_provisioning_uuid,store_uuid,tenant_lifecycle_generation,"
+            "tenant_reconciliation_generation,graph_lifecycle_generation,"
+            "graph_reconciliation_generation,journal_revision,companion_basename,"
+            "phase,attempt,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,"
+            "'reserved',0,unixepoch(),unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, reservation->operation_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 2, replacement_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 3, reservation->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, reservation->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 5, reservation->old_provisioning_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 6, reservation->store_uuid) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 7, reservation->tenant_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 8, reservation->tenant_reconciliation_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 9, reservation->graph_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 10, reservation->graph_reconciliation_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 11, reservation->journal_revision) != SQLITE_OK
+      || bind_text (stmt, 12, basename) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+  WylPolicyGraphRestoreReplacementRecord *committed = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_replacement_load_locked (store, reservation->operation_uuid,
+            &committed);
+  rc = offline_restore_finish_mutation (store, &fence, rc, rc == WYRELOG_E_OK);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_graph_restore_replacement_record_free (committed);
+    return rc;
+  }
+  *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  *out_record = committed;
+  return WYRELOG_E_OK;
 }

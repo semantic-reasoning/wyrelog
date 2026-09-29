@@ -3448,4 +3448,50 @@ wyrelog_error_t wyl_policy_store_offline_restore_foreach
   (wyl_policy_store_t *store, WylPolicyOfflineRestoreRecordFunc func,
     gpointer user_data);
 
+/* The store decodes this v2 mode-A journal snapshot, then checks its exact
+ * bytes and current policy authority again in one transaction. */
+typedef struct
+{
+  const gchar *operation_uuid;
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *old_provisioning_uuid;
+  const gchar *store_uuid;
+  guint64 tenant_lifecycle_generation;
+  guint64 tenant_reconciliation_generation;
+  guint64 graph_lifecycle_generation;
+  guint64 graph_reconciliation_generation;
+  guint64 journal_revision;
+  GBytes *journal_blob;
+} WylPolicyGraphRestoreReplacementReservation;
+
+typedef struct
+{
+  gchar *operation_uuid;
+  gchar *replacement_uuid;
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *old_provisioning_uuid;
+  gchar *store_uuid;
+  gchar *companion_basename;
+  guint64 tenant_lifecycle_generation;
+  guint64 tenant_reconciliation_generation;
+  guint64 graph_lifecycle_generation;
+  guint64 graph_reconciliation_generation;
+  guint64 journal_revision;
+  guint64 attempt;
+  gchar *phase;
+} WylPolicyGraphRestoreReplacementRecord;
+
+void wyl_policy_graph_restore_replacement_record_free
+  (WylPolicyGraphRestoreReplacementRecord *record);
+wyrelog_error_t wyl_policy_store_graph_restore_replacement_reserve
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementReservation *reservation,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyGraphRestoreReplacementRecord **out_record);
+wyrelog_error_t wyl_policy_store_graph_restore_replacement_load
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    WylPolicyGraphRestoreReplacementRecord **out_record);
+
 G_END_DECLS;

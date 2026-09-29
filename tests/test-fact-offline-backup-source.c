@@ -3191,6 +3191,186 @@ test_graph_import (gconstpointer data)
 }
 #endif
 
+static void
+test_graph_restore_replacement_reservation (void)
+{
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "restore-replacement-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "alpha");
+  seal_graph (&fixture, "alpha");
+  seal_tenant (&fixture);
+
+  WylPolicyTenantAuthorityRecord *tenant = NULL;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (fixture.policy,
+      "tenant-a", &tenant), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "alpha", &authority), ==, WYRELOG_E_OK);
+  sqlite3_stmt *old_stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (fixture.policy),
+      "SELECT op_uuid FROM fact_graph_provisioning WHERE tenant_id='tenant-a' "
+      "AND graph_id='alpha' AND phase='active';", -1, &old_stmt, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (old_stmt), ==, SQLITE_ROW);
+  g_autofree gchar *old_uuid = g_strdup ((const gchar *) sqlite3_column_text
+            (old_stmt, 0));
+  sqlite3_finalize (old_stmt);
+
+  WylFactOfflineBackupManifest manifest = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_init (&manifest,
+      "tenant-a", 1), ==, WYRELOG_E_OK);
+  WylFactOfflineBackupArtifact artifact = {
+    .graph_id = "alpha", .store_uuid = authority->store_uuid,
+    .format_version = authority->format_version,
+    .path_encoding_version = authority->path_encoding_version,
+    .schema_digest = "schema-alpha", .logical_bytes = 10,
+    .physical_bytes = 4096, .checksum = "sha256:alpha",
+  };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_add (&manifest,
+      &artifact), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) manifest_bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
+      &manifest_bytes), ==, WYRELOG_E_OK);
+  wyl_fact_offline_backup_manifest_clear (&manifest);
+  g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
+  WylFactOfflineRestoreTargetGraph *target = g_new0
+        (WylFactOfflineRestoreTargetGraph, 1);
+  target->graph_id = g_strdup ("alpha");
+  target->lifecycle_generation = authority->lifecycle_generation;
+  target->reconciliation_generation = authority->reconciliation_generation;
+  target->expected_main_absent = FALSE;
+  target->expected_main_identity = (WylFactArtifactInventoryIdentity) {
+    .domain = 1, .object = 101
+  };
+  g_ptr_array_add (targets, target);
+  gchar operation_uuid[WYL_ID_STRING_BUF];
+  wyl_id_t operation_id;
+  g_assert_cmpint (wyl_id_new (&operation_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&operation_id, operation_uuid,
+      sizeof operation_uuid), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&initial,
+      manifest_bytes, operation_uuid, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
+      "alpha", tenant->lifecycle_generation,
+      tenant->reconciliation_generation, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylPolicyGraphRestoreReplacementRecord *premature = NULL;
+  WylFactOfflineRestoreStoreResult premature_result = 0;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture.policy, &initial, &premature_result, &premature), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (premature);
+  WylFactOfflineRestoreStoreResult result = 0;
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create
+        (fixture.policy, &initial, &result, &current), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  for (guint step = 0; step < 3; step++) {
+    g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+    g_autoptr (GBytes) encoded = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&current,
+        &encoded), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decode (encoded,
+        &desired), ==, WYRELOG_E_OK);
+    if (step == 0) {
+      WylFactArtifactInventoryIdentity staged = {
+        .domain = 1, .object = 201
+      };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+            (&desired, "alpha", &staged), ==, WYRELOG_E_OK);
+    } else if (step == 1) {
+      g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight
+            (&desired, "alpha"), ==, WYRELOG_E_OK);
+    } else {
+      g_assert_cmpint (wyl_fact_offline_restore_journal_bind_provisioned_old
+            (&desired, "alpha", old_uuid), ==, WYRELOG_E_OK);
+    }
+    g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (fixture.policy,
+        current.revision, &desired, &result, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_fact_offline_restore_journal_clear (&current);
+    current = committed;
+    memset (&committed, 0, sizeof committed);
+  }
+  WylPolicyGraphRestoreReplacementRecord *reserved = NULL;
+  WylPolicyGraphRestoreReplacementRecord *rejected = NULL;
+  g_autoptr (GBytes) current_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&current,
+      &current_blob), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreStoreResult policy_result = 0;
+  WylPolicyGraphRestoreReplacementReservation attempt = {
+    .operation_uuid = current.operation_uuid,
+    .tenant_id = current.tenant_id,
+    .graph_id = "alpha",
+    .old_provisioning_uuid = operation_uuid,
+    .store_uuid = authority->store_uuid,
+    .tenant_lifecycle_generation = tenant->lifecycle_generation,
+    .tenant_reconciliation_generation = tenant->reconciliation_generation,
+    .graph_lifecycle_generation = authority->lifecycle_generation,
+    .graph_reconciliation_generation = authority->reconciliation_generation,
+    .journal_revision = current.revision,
+    .journal_blob = current_blob,
+  };
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_reserve
+        (fixture.policy, &attempt, &policy_result, &rejected), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (rejected);
+  attempt.old_provisioning_uuid = old_uuid;
+  attempt.graph_lifecycle_generation++;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_reserve
+        (fixture.policy, &attempt, &policy_result, &rejected), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (rejected);
+  attempt.graph_lifecycle_generation--;
+  g_autoptr (GBytes) wrong_blob = g_bytes_new_static ("wrong", 5);
+  attempt.journal_blob = wrong_blob;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_reserve
+        (fixture.policy, &attempt, &policy_result, &rejected), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (rejected);
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture.policy, operation_uuid, &rejected), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture.policy, &current, &result, &reserved), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_nonnull (reserved);
+  g_assert_cmpstr (reserved->old_provisioning_uuid, ==, old_uuid);
+  g_assert_cmpstr (reserved->phase, ==, "reserved");
+  WylPolicyGraphRestoreReplacementRecord *replayed = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture.policy, &current, &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
+  g_assert_cmpstr (reserved->replacement_uuid, ==, replayed->replacement_uuid);
+  WylPolicyGraphRestoreReplacementRecord *loaded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load
+        (fixture.policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (reserved->replacement_uuid, ==, loaded->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (loaded);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  loaded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load
+        (fixture.policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (reserved->replacement_uuid, ==, loaded->replacement_uuid);
+  wyl_policy_graph_restore_replacement_record_free (loaded);
+  wyl_policy_graph_restore_replacement_record_free (replayed);
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+  wyl_policy_graph_authority_record_free (authority);
+  wyl_policy_tenant_authority_record_free (tenant);
+  fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3345,6 +3525,8 @@ main (int argc, char **argv)
         test_restore_validation_session_constructor_rejects);
   }
 #endif
+  g_test_add_func ("/fact-offline-backup-source/restore-replacement",
+      test_graph_restore_replacement_reservation);
   g_test_add_func ("/fact-offline-backup-source/multi-graph-copy",
       test_multi_graph_copy_and_lease_lifetime);
   g_test_add_func ("/fact-offline-backup-source/empty-active",

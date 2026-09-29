@@ -213,7 +213,7 @@ wyrelog_error_t wyl_fact_offline_restore_journal_bind_staged_identity
 /* Records the old policy provisioning UUID for graph-local mode-A restore.
  * Caller must verify the ACTIVE record and matching graph/store generations;
  * this pure mutator does not prove those external facts. COMMIT stays closed
- * until policy can reserve a replacement alongside that ACTIVE record. */
+ * until replacement publication and lifecycle handoff are implemented. */
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_provisioned_old
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const gchar *old_uuid);
