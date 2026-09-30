@@ -55,10 +55,10 @@ EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "34f5e21ca73f60ceb4dba087a71fe7413b2c04cee800659efde96c5c8b314598"
+    "e7e1e58ec0738473d929d57cf56b7d2e4bfa6da1706db0f507fb0901aac8ae5f"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "57abc436a9989cdeb53ab82f4076ed5fad1ae730c1babdeaffcdbabbec9ea869"
+    "79b403dd66211c9cc0e589797e2e3bad4250803fc7af4b9ed3b33dc03360e8df"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
     "f7da76f746898486e91f8d0c68f1388e8939d7bfd2e813dbc03a020e044e189e"
@@ -70,10 +70,10 @@ EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
     "1465b5fa4b2f546bf64a97d905b3460073eafa2e839fdbb6417ea28a4717aa4f"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
-    1326, 70, 65, 98, 99, 474, 501, 1030, 120, 315,
+    1326, 130, 65, 98, 99, 474, 532, 1547, 120, 315,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "3491cdbaca7543c549ec7224a92ebb558bf0a1e755faf5af24e7e249f3893b34"
+    "8892bd33c4072d99875828958dcc83eca0f695b40f1e690f8e470d160a10bba6"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -719,13 +719,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 31691)
+        artifact_lock_require(len(semantic_tokens) == 32022)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2153)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2159)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
