@@ -10813,6 +10813,50 @@ static const gchar fact_graph_provisioning_insert_guard_pre_selected_sql[] =
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
+static const gchar fact_graph_provisioning_insert_guard_pre_tenant_selected_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))) OR "
+    "(NEW.phase='restore_selected' AND g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_graph_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.scope='graph' AND j.tenant_id=NEW.tenant_id "
+    "AND j.selected_graph_id=NEW.graph_id "
+    "AND j.revision>r.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 static const gchar fact_graph_provisioning_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
     "BEFORE INSERT ON fact_graph_provisioning BEGIN "
@@ -10853,6 +10897,29 @@ static const gchar fact_graph_provisioning_insert_guard_sql[] =
     "AND j.selected_graph_id=NEW.graph_id "
     "AND j.revision>r.journal_revision "
     "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)) OR "
+    "(NEW.phase='restore_selected' AND NEW.attempt=0 AND "
+    "g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_tenant_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_tenant_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid AND c.tenant_id=r.tenant_id "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' AND t.sealed=1 "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND j.scope='tenant' AND j.tenant_id=NEW.tenant_id "
+    "AND j.revision=r.journal_revision+1 "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=7' || char(10))>0 "
     "AND instr(CAST(j.journal_blob AS TEXT),"
     "'replacement_selected=1' || char(10))>0)))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
@@ -11980,17 +12047,59 @@ migrate_restore_replacement_schema (sqlite3 *db)
           "OR r.tenant_id!=j.tenant_id OR r.graph_id!=j.selected_graph_id));");
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = graph_provisioning_require_true (db,
-          "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_provisioning AS p "
-          "LEFT JOIN main.fact_graph_restore_replacements AS r ON "
-          "r.replacement_uuid=p.op_uuid "
-          "WHERE p.phase='restore_selected' AND ("
-          "r.replacement_uuid IS NULL "
-          "OR r.phase!='selected_pending_cleanup' "
-          "OR r.tenant_id!=p.tenant_id OR r.graph_id!=p.graph_id "
-          "OR r.store_uuid!=p.store_uuid));");
-  return rc == WYRELOG_E_OK ?
-         restore_replacement_validate_selected_journals (db) : rc;
+  return restore_replacement_validate_selected_journals (db);
+}
+
+static wyrelog_error_t
+tenant_selected_provisioning_valid (sqlite3 *db,
+    const WylFactOfflineRestoreJournal *journal,
+    const WylFactOfflineRestoreJournalGraph *graph)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT EXISTS(SELECT 1 FROM main.fact_graph_provisioning AS p "
+          "JOIN main.fact_graphs AS g ON g.tenant_id=p.tenant_id "
+          "AND g.graph_id=p.graph_id JOIN main.tenants AS t ON "
+          "t.tenant_id=p.tenant_id JOIN main.fact_offline_restore_tenant_claims "
+          "AS c ON c.tenant_id=p.tenant_id WHERE c.operation_uuid=?1 "
+          "AND p.tenant_id=?2 AND p.graph_id=?3 AND p.op_uuid=?4 "
+          "AND p.store_uuid=?5 AND p.stage_basename=?6 "
+          "AND p.expected_lifecycle_generation=?7 "
+          "AND p.expected_reconciliation_generation=?8 "
+          "AND p.phase='restore_selected' AND p.attempt=0 "
+          "AND g.store_uuid=?5 AND g.lifecycle_state='sealed' AND g.sealed=1 "
+          "AND g.lifecycle_generation=?7 AND g.reconciliation_generation=?8 "
+          "AND t.lifecycle_state='sealed' AND t.sealed=1 "
+          "AND t.lifecycle_generation=?9 AND t.reconciliation_generation=?10) "
+          "AND NOT EXISTS(SELECT 1 FROM main.fact_graph_provisioning "
+          "WHERE op_uuid=?11);", &stmt);
+  g_autofree gchar *basename = g_strdup_printf ("provision-%s.sqlite",
+          graph->replacement_provisioning_uuid);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, journal->operation_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 2, journal->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 3, graph->graph_id) != WYRELOG_E_OK
+      || bind_text (stmt, 4, graph->replacement_provisioning_uuid)
+      != WYRELOG_E_OK
+      || bind_text (stmt, 5, graph->store_uuid) != WYRELOG_E_OK
+      || bind_text (stmt, 6, basename) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 7,
+      graph->destination_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 8,
+      graph->destination_reconciliation_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 9,
+      journal->destination_tenant_lifecycle_generation) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 10,
+      journal->destination_tenant_reconciliation_generation) != SQLITE_OK
+      || bind_text (stmt, 11, graph->old_provisioning_uuid) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  gboolean matches = step == SQLITE_ROW && sqlite3_column_int (stmt, 0) == 1;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return step == SQLITE_ROW ?
+         (matches ? WYRELOG_E_OK : WYRELOG_E_POLICY) : WYRELOG_E_IO;
 }
 
 static wyrelog_error_t
@@ -12025,6 +12134,35 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
     rc = wyl_fact_offline_restore_journal_decode (encoded, &journal);
     if (rc != WYRELOG_E_OK)
       break;
+    gboolean tenant_selected = journal.version ==
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION;
+    if (tenant_selected) {
+      g_autoptr (GBytes) canonical = NULL;
+      if (journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+          || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+          || wyl_fact_offline_restore_journal_encode (&journal,
+          &canonical) != WYRELOG_E_OK
+          || !g_bytes_equal (encoded, canonical)) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+      sqlite3_stmt *graph_count = NULL;
+      rc = prepare_stmt (db,
+              "SELECT count(*) FROM main.fact_graphs WHERE tenant_id=?1;",
+              &graph_count);
+      if (rc == WYRELOG_E_OK)
+        rc = bind_text (graph_count, 1, journal.tenant_id);
+      int graph_step = rc == WYRELOG_E_OK ?
+          sqlite3_step (graph_count) : SQLITE_ERROR;
+      if (rc == WYRELOG_E_OK && graph_step != SQLITE_ROW)
+        rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK && sqlite3_column_int (graph_count, 0)
+          != (int) journal.graphs->len)
+        rc = WYRELOG_E_POLICY;
+      sqlite3_finalize (graph_count);
+      if (rc != WYRELOG_E_OK)
+        break;
+    }
     sqlite3_reset (rows);
     sqlite3_clear_bindings (rows);
     rc = bind_text (rows, 1, operation);
@@ -12032,8 +12170,9 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
     int row_step;
     while (rc == WYRELOG_E_OK
         && (row_step = sqlite3_step (rows)) == SQLITE_ROW) {
-      if (journal.version !=
+      if ((journal.version !=
           WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
+          && !tenant_selected)
           || count >= journal.graphs->len) {
         rc = WYRELOG_E_POLICY;
         break;
@@ -12061,19 +12200,25 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
           || sqlite3_column_int64 (rows, 8) !=
           (sqlite3_int64) graph->destination_reconciliation_generation
           || sqlite3_column_int64 (rows, 9) !=
-          (sqlite3_int64) journal.revision
+          (sqlite3_int64) journal.revision - (tenant_selected ? 1 : 0)
           || g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 10),
           basename) != 0
-          || (g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
+          || (tenant_selected ?
+          g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
+          "selected_pending_cleanup") != 0 :
+          (g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
           "reserved") != 0
           && g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 11),
-          "companion_synced") != 0))
+          "companion_synced") != 0)))
         rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK && tenant_selected)
+        rc = tenant_selected_provisioning_valid (db, &journal, graph);
     }
     if (rc == WYRELOG_E_OK && row_step != SQLITE_DONE)
       rc = WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK && journal.version ==
+    if (rc == WYRELOG_E_OK && (journal.version ==
         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
+        || tenant_selected)
         && count != journal.graphs->len)
       rc = WYRELOG_E_POLICY;
   }
@@ -12083,16 +12228,29 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
   sqlite3_finalize (journals);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = graph_provisioning_require_true (db,
+          "SELECT NOT EXISTS(SELECT 1 FROM "
+          "main.fact_tenant_restore_replacements AS r LEFT JOIN "
+          "main.fact_offline_restore_journals AS j ON "
+          "j.operation_uuid=r.restore_operation_uuid LEFT JOIN "
+          "main.fact_offline_restore_tenant_claims AS c ON "
+          "c.operation_uuid=r.restore_operation_uuid AND "
+          "c.tenant_id=r.tenant_id WHERE j.operation_uuid IS NULL "
+          "OR c.operation_uuid IS NULL OR j.scope!='tenant' "
+          "OR j.tenant_id!=r.tenant_id);");
+  if (rc != WYRELOG_E_OK)
+    return rc;
   return graph_provisioning_require_true (db,
-             "SELECT NOT EXISTS(SELECT 1 FROM "
-             "main.fact_tenant_restore_replacements AS r LEFT JOIN "
-             "main.fact_offline_restore_journals AS j ON "
-             "j.operation_uuid=r.restore_operation_uuid LEFT JOIN "
-             "main.fact_offline_restore_tenant_claims AS c ON "
-             "c.operation_uuid=r.restore_operation_uuid AND "
-             "c.tenant_id=r.tenant_id WHERE j.operation_uuid IS NULL "
-             "OR c.operation_uuid IS NULL OR j.scope!='tenant' "
-             "OR j.tenant_id!=r.tenant_id);");
+             "SELECT NOT EXISTS(SELECT 1 FROM main.fact_graph_provisioning "
+             "AS p LEFT JOIN main.fact_graph_restore_replacements AS g "
+             "ON g.replacement_uuid=p.op_uuid AND g.phase='selected_pending_cleanup' "
+             "AND g.tenant_id=p.tenant_id AND g.graph_id=p.graph_id "
+             "AND g.store_uuid=p.store_uuid LEFT JOIN "
+             "main.fact_tenant_restore_replacements AS t ON "
+             "t.replacement_uuid=p.op_uuid AND t.phase='selected_pending_cleanup' "
+             "AND t.tenant_id=p.tenant_id AND t.graph_id=p.graph_id "
+             "AND t.store_uuid=p.store_uuid WHERE p.phase='restore_selected' "
+             "AND g.replacement_uuid IS NULL AND t.replacement_uuid IS NULL);");
 }
 
 static wyrelog_error_t
@@ -12517,6 +12675,14 @@ graph_provisioning_preflight (sqlite3 *db,
       *out_kind == WYL_PROVISIONING_SCHEMA_PRE_SELECTED ?
       fact_graph_provisioning_insert_guard_pre_selected_sql :
       fact_graph_provisioning_insert_guard_windows_sql;
+  gboolean insert_guard_matches = graph_authority_object_matches (db,
+          "trigger", "fact_graph_provisioning_insert_guard",
+          insert_guard_sql) == WYRELOG_E_OK;
+  if (!insert_guard_matches && *out_kind == WYL_PROVISIONING_SCHEMA_CANONICAL)
+    insert_guard_matches = graph_authority_object_matches (db,
+            "trigger", "fact_graph_provisioning_insert_guard",
+            fact_graph_provisioning_insert_guard_pre_tenant_selected_sql)
+        == WYRELOG_E_OK;
   gboolean update_guard_matches = graph_authority_object_matches (db,
           "trigger", "fact_graph_provisioning_update_guard",
           *out_kind == WYL_PROVISIONING_SCHEMA_CANONICAL ?
@@ -12538,9 +12704,7 @@ graph_provisioning_preflight (sqlite3 *db,
             fact_graph_provisioning_update_guard_sql) == WYRELOG_E_OK;
   if ((rc = graph_authority_object_matches (db, "trigger",
       "fact_graph_provisioning_immutable", immutable_sql)) != WYRELOG_E_OK
-      || (rc = graph_authority_object_matches (db, "trigger",
-      "fact_graph_provisioning_insert_guard",
-      insert_guard_sql)) != WYRELOG_E_OK
+      || !insert_guard_matches
       || !update_guard_matches)
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
 
@@ -13665,6 +13829,13 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
   if (provisioning_kind == WYL_PROVISIONING_SCHEMA_CANONICAL) {
+    rc = migrate_tenant_authority_guard (db,
+            "fact_graph_provisioning_insert_guard",
+            fact_graph_provisioning_insert_guard_pre_tenant_selected_sql,
+            fact_graph_provisioning_insert_guard_sql,
+            "DROP TRIGGER fact_graph_provisioning_insert_guard;");
+    if (rc != WYRELOG_E_OK)
+      return rc;
     rc = migrate_tenant_authority_guard (db,
             "fact_graph_provisioning_update_guard",
             fact_graph_provisioning_update_guard_pre_promotion_sql,
