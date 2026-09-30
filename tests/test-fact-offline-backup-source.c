@@ -26,6 +26,7 @@
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
 #include "wyrelog/fact/offline-restore-begin-private.h"
 #include "wyrelog/fact/offline-restore-prepare-private.h"
+#include "wyrelog/fact/offline-restore-resume-private.h"
 #include "wyrelog/fact/offline-restore-dry-run-private.h"
 #include "wyrelog/fact/offline-restore-commit-authority-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
@@ -3677,6 +3678,87 @@ tenant_sync_test_begin_effect (GBytes *journal, const GPtrArray *active_uuids,
   g_assert_cmpuint (active_uuids->len, ==, 2);
   (*(guint *) user_data)++;
   return WYRELOG_E_OK;
+}
+
+static void
+test_tenant_commit_resume_v5 (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, graphs[i], 5 + i, 0, &f.committed), ==,
+        WYRELOG_E_OK);
+    if (i + 1 < G_N_ELEMENTS (graphs))
+      wyl_fact_offline_restore_journal_clear (&f.committed);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&f.committed,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
+  import_restore_journal_for_test (f.fixture.policy, &f.committed);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  guint64 revision = 8;
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision - 1, 0, &f.committed), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (f.committed.graphs);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_IO);
+  g_assert_null (f.committed.graphs);
+  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &f.fixture.policy),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &f.committed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 9);
+  revision = f.committed.revision;
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_autofree gchar *foreign = graph_file_path (&f.fixture, "alpha",
+          "foreign");
+  g_assert_true (g_file_set_contents (foreign, "foreign", -1, NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (f.committed.graphs);
+  g_assert_cmpint (g_remove (foreign), ==, 0);
+#endif
+  for (guint step = 0; step < 12; step++) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (f.committed.revision, >, revision);
+    revision = f.committed.revision;
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, revision);
+  for (guint i = 0; i < f.committed.graphs->len; i++) {
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (f.committed.graphs, i);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE);
+  }
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
 }
 
 static void
@@ -7956,6 +8038,8 @@ main (int argc, char **argv)
       "straight", test_tenant_external_import);
   g_test_add_func ("/fact-offline-backup-source/tenant-provisioned-binding",
       test_tenant_provisioned_binding);
+  g_test_add_func ("/fact-offline-backup-source/tenant-commit-resume-v5",
+      test_tenant_commit_resume_v5);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/fresh",
       "fresh", test_tenant_commit_sync_staged_first);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/pending",
