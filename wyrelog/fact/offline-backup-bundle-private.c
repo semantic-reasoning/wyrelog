@@ -3,6 +3,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 
 #include "fact/offline-backup-bundle-private.h"
