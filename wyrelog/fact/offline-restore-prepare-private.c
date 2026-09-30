@@ -6,6 +6,7 @@
 #include "fact/offline-restore-validation-private.h"
 #include "fact/offline-restore-validation-session-private.h"
 
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 typedef struct
 {
   WylFactOfflineRestoreValidationSession *session;
@@ -26,6 +27,7 @@ prepare_job_run (WylFactReplayJobContext *context, gpointer data)
   return wyl_fact_offline_restore_validation_session_run_and_record_preflight
            (job->session, context, &job->committed);
 }
+#endif
 
 wyrelog_error_t
 wyl_fact_offline_restore_prepare_run
