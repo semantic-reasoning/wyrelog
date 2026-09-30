@@ -1737,23 +1737,16 @@ entry_quiescent_locked (const WylFactGraphRuntimeEntry *entry)
          && entry->waiting_engine_calls == 0;
 }
 
-wyrelog_error_t
-wyl_fact_graph_runtime_manager_quiesce (WylFactGraphRuntimeManager *manager,
-    const WylFactGraphKey *key, gint64 timeout_us,
-    WylFactGraphQuiescenceToken **out_token)
+static wyrelog_error_t
+quiesce_entry (WylFactGraphRuntimeManager *manager,
+    WylFactGraphRuntimeEntry *entry, gint64 timeout_us,
+    gboolean require_closed, WylFactGraphQuiescenceToken **out_token)
 {
-  if (out_token == NULL)
-    return WYRELOG_E_INVALID;
-  *out_token = NULL;
   WylFactGraphQuiescenceToken *token = g_try_new0
         (WylFactGraphQuiescenceToken, 1);
-  if (token == NULL)
+  if (token == NULL) {
+    runtime_entry_unref (entry);
     return WYRELOG_E_NOMEM;
-  WylFactGraphRuntimeEntry *entry = NULL;
-  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
-  if (rc != WYRELOG_E_OK) {
-    g_free (token);
-    return rc;
   }
   token->entry = entry;
   GThread *self = g_thread_self ();
@@ -1761,8 +1754,16 @@ wyl_fact_graph_runtime_manager_quiesce (WylFactGraphRuntimeManager *manager,
   gint64 deadline = timeout_us > 0
       ? (timeout_us > G_MAXINT64 - now ? G_MAXINT64 : now + timeout_us) : 0;
 
+  wyrelog_error_t rc = WYRELOG_E_OK;
   runtime_state_lock (entry);
   if (entry->abandoned || g_atomic_int_get (&manager->shutdown)) {
+    rc = WYRELOG_E_BUSY;
+  } else if (require_closed
+      && (entry->admission != WYL_FACT_GRAPH_ADMISSION_CLOSED
+      || entry->state != WYL_FACT_GRAPH_RUNTIME_EMPTY
+      || entry->operation_generation != 0
+      || entry->engine_generation != 0
+      || entry->current != NULL)) {
     rc = WYRELOG_E_BUSY;
   } else if (entry->engine_call_owner == self || entry->operation_owner == self) {
     rc = WYRELOG_E_INVALID;
@@ -1818,6 +1819,35 @@ wyl_fact_graph_runtime_manager_quiesce (WylFactGraphRuntimeManager *manager,
     g_free (token);
   }
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_quiesce (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, gint64 timeout_us,
+    WylFactGraphQuiescenceToken **out_token)
+{
+  if (out_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  WylFactGraphRuntimeEntry *entry = NULL;
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, NULL, &entry);
+  return rc == WYRELOG_E_OK ? quiesce_entry (manager, entry, timeout_us,
+             FALSE, out_token) : rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_runtime_manager_quiesce_missing_closed
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    gint64 timeout_us, WylFactGraphQuiescenceToken **out_token)
+{
+  if (out_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  WylFactGraphRuntimeEntry *entry = NULL;
+  WylFactGraphAdmission closed = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  wyrelog_error_t rc = manager_lookup_entry (manager, key, &closed, &entry);
+  return rc == WYRELOG_E_OK ? quiesce_entry (manager, entry, timeout_us,
+             TRUE, out_token) : rc;
 }
 
 void

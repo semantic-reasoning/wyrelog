@@ -976,6 +976,81 @@ test_quiescence_refuses_inflight_publication (void)
   wyl_fact_graph_key_clear (&key);
 }
 
+static void
+test_restore_quiescence_mints_closed_without_engine (void)
+{
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "restore"),
+      ==, WYRELOG_E_OK);
+  WylFactGraphQuiescenceToken *token = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &key, 0, &token), ==, WYRELOG_E_OK);
+  g_assert_nonnull (token);
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EMPTY);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  g_assert_false (status.queryable);
+  g_assert_cmpuint (status.operation_generation, ==, 0);
+  g_assert_cmpuint (status.engine_generation, ==, 0);
+  wyl_fact_graph_runtime_status_clear (&status);
+  WylFactGraphQuiescenceToken *competing = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &key, 0, &competing), ==, WYRELOG_E_BUSY);
+  g_assert_null (competing);
+  wyl_fact_graph_quiescence_token_release (token);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &key, 0, &token), ==, WYRELOG_E_OK);
+  wyl_fact_graph_quiescence_token_release (token);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_open_admission (manager,
+      &key), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &key, 0, &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+      &status), ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  wyl_fact_graph_runtime_status_clear (&status);
+  WylFactGraphKey published = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&published, "tenant-a",
+      "published"), ==, WYRELOG_E_OK);
+  BuildSpec spec = { .marker = 201 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager,
+      &published, build_marker_engine, &spec, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &published, 0, &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  gboolean evicted = FALSE;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_evict_closed (manager,
+      &published, &evicted), ==, WYRELOG_E_OK);
+  g_assert_true (evicted);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &published, 0, &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  wyl_fact_graph_key_clear (&published);
+  WylFactGraphKey degraded = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&degraded, "tenant-a",
+      "degraded"), ==, WYRELOG_E_OK);
+  BuildSpec failed = { .failure = WYRELOG_E_IO };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh_closed (manager,
+      &degraded, build_marker_engine, &failed, NULL), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &degraded, 0, &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  wyl_fact_graph_key_clear (&degraded);
+  wyl_fact_graph_runtime_manager_shutdown (manager);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_quiesce_missing_closed
+        (manager, &key, 0, &token), ==, WYRELOG_E_BUSY);
+  g_assert_null (token);
+  wyl_fact_graph_key_clear (&key);
+}
+
 typedef struct
 {
   WylFactGraphSnapshot *snapshot;
@@ -3419,6 +3494,8 @@ main (int argc, char **argv)
       test_quiescence_shutdown_wakes_waiter);
   g_test_add_func ("/fact-runtime/quiescence-refuses-inflight-publication",
       test_quiescence_refuses_inflight_publication);
+  g_test_add_func ("/fact-runtime/restore-quiescence-mints-closed",
+      test_restore_quiescence_mints_closed_without_engine);
   g_test_add_func ("/fact-runtime/drain-waits-for-admitted-engine-call",
       test_drain_waits_for_admitted_engine_call);
   g_test_add_func ("/fact-runtime/drain-refusals-and-shutdown-wake",

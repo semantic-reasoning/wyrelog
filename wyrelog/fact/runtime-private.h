@@ -395,6 +395,14 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_open_admission
 wyrelog_error_t wyl_fact_graph_runtime_manager_quiesce
   (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
     gint64 timeout_us, WylFactGraphQuiescenceToken **out_token);
+/* Restore-only mechanism: mint a missing CLOSED, EMPTY entry under the map
+ * lock, then quiesce it after rechecking its state. An existing entry must
+ * still be CLOSED, EMPTY and never built; all other states are refused. This
+ * does not authorize restore: callers must hold root authority and prove the
+ * exact sealed policy/journal before and after acquiring the token. */
+wyrelog_error_t wyl_fact_graph_runtime_manager_quiesce_missing_closed
+  (WylFactGraphRuntimeManager *manager, const WylFactGraphKey *key,
+    gint64 timeout_us, WylFactGraphQuiescenceToken **out_token);
 void wyl_fact_graph_quiescence_token_release
   (WylFactGraphQuiescenceToken *token);
 
