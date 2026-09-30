@@ -24,6 +24,7 @@
 #include "wyrelog/fact/offline-backup-bundle-private.h"
 #include "wyrelog/fact/offline-backup-source-private.h"
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
+#include "wyrelog/fact/offline-restore-begin-private.h"
 #include "wyrelog/fact/offline-restore-dry-run-private.h"
 #include "wyrelog/fact/offline-restore-commit-authority-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
@@ -1104,6 +1105,174 @@ test_restore_dry_run_read_only (void)
   g_assert_cmpint (g_rmdir (bundle_root), ==, 0);
   destination_capture_clear (&capture);
   fixture_clear (&fixture);
+#endif
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  const gchar *path;
+  gboolean fired;
+} BeginProofCollision;
+
+static wyrelog_error_t
+begin_proof_collision (gpointer data)
+{
+  BeginProofCollision *collision = data;
+  collision->fired = TRUE;
+  if (!g_file_set_contents (collision->path, "foreign", -1, NULL)
+      || g_chmod (collision->path, 0600) != 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+#endif
+
+static void
+test_restore_begin_authenticated (void)
+{
+#ifndef __linux__
+  return;
+#else
+  const WylFactOfflineRestoreScope scopes[] = {
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
+  };
+  for (guint pass = 0; pass < G_N_ELEMENTS (scopes); pass++) {
+    BackupFixture fixture = { 0 };
+    fixture_init (&fixture, "wyl-offline-restore-begin-XXXXXX");
+    create_tenant (&fixture);
+    create_graph (&fixture, "alpha");
+    create_graph (&fixture, "zeta");
+    seal_graph (&fixture, "alpha");
+    seal_graph (&fixture, "zeta");
+    seal_tenant (&fixture);
+    const gchar *ids[] = { "alpha", "zeta" };
+    for (guint i = 0; i < G_N_ELEMENTS (ids); i++) {
+      WylFactGraphKey key = { 0 };
+      g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", ids[i]),
+          ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh
+            (fixture.runtime, &key, session_build_engine, NULL, NULL), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+            (fixture.runtime, &key), ==, WYRELOG_E_OK);
+      wyl_fact_graph_key_clear (&key);
+    }
+    g_autoptr (WylFactOfflineBackupSource) source = NULL;
+    g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+        fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+        WYRELOG_E_OK);
+    DestinationCapture capture;
+    destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+    g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+        &capture_destination, &capture), ==, WYRELOG_E_OK);
+    g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *bundle_root = g_dir_make_tmp
+          ("wyl-offline-restore-begin-bundle-XXXXXX", &error);
+    g_assert_no_error (error);
+    g_autofree gchar *manifest_path = g_build_filename (bundle_root,
+            "manifest", NULL);
+    gsize manifest_length = 0;
+    const guint8 *manifest_data = g_bytes_get_data (capture.manifest,
+            &manifest_length);
+    g_assert_true (g_file_set_contents (manifest_path,
+        (const gchar *) manifest_data, manifest_length, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+    for (guint i = 0; i < capture.completed_graphs->len; i++) {
+      const gchar *id = g_ptr_array_index (capture.completed_graphs, i);
+      GBytes *bytes = g_ptr_array_index (capture.artifact_bytes, i);
+      g_autofree gchar *component = NULL;
+      g_assert_cmpint (wyl_fact_graph_component_encode (id,
+          &component), ==, WYRELOG_E_OK);
+      g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb",
+              component);
+      g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+      gsize length = 0;
+      const gchar *data = g_bytes_get_data (bytes, &length);
+      g_assert_true (g_file_set_contents (path, data, length, &error));
+      g_assert_no_error (error);
+      g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+    }
+    g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+    g_checksum_update (checksum, manifest_data, manifest_length);
+    guint8 digest[32];
+    gsize digest_length = sizeof digest;
+    g_checksum_get_digest (checksum, digest, &digest_length);
+    g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+    g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root,
+        digest, &bundle), ==, WYRELOG_E_OK);
+    g_autoptr (GHashTable) alpha_before =
+        capture_dry_run_graph_namespace (&fixture, "alpha");
+    g_autoptr (GHashTable) zeta_before =
+        capture_dry_run_graph_namespace (&fixture, "zeta");
+    const gchar *selected = scopes[pass] ==
+        WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH ? "alpha" : NULL;
+    const gchar *operation = pass == 0 ?
+        "018f22d0-7b6d-7a5b-8c31-123456789ad1" :
+        "018f22d0-7b6d-7a5b-8c31-123456789ad2";
+    WylFactOfflineRestoreJournal committed = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, FALSE, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &committed), ==,
+        WYRELOG_E_NOT_FOUND);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    g_autofree gchar *collision = graph_file_path (&fixture, "alpha",
+            "facts.duckdb.wal");
+    BeginProofCollision collision_data = { collision, FALSE };
+    wyl_fact_offline_restore_begin_set_proof_checkpoint_for_test
+      (begin_proof_collision, &collision_data);
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    wyl_fact_offline_restore_begin_set_proof_checkpoint_for_test (NULL,
+        NULL);
+    g_assert_true (collision_data.fired);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &committed), ==,
+        WYRELOG_E_NOT_FOUND);
+    sqlite3_stmt *no_claim = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+          (fixture.policy),
+        "SELECT (SELECT count(*) FROM fact_offline_restore_journals "
+        "WHERE operation_uuid=?) + "
+        "(SELECT count(*) FROM fact_offline_restore_tenant_claims "
+        "WHERE operation_uuid=?) + "
+        "(SELECT count(*) FROM fact_offline_restore_graph_claims "
+        "WHERE operation_uuid=?);", -1, &no_claim, NULL), ==, SQLITE_OK);
+    for (gint column = 1; column <= 3; column++)
+      g_assert_cmpint (sqlite3_bind_text (no_claim, column, operation, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (no_claim), ==, SQLITE_ROW);
+    g_assert_cmpint (sqlite3_column_int (no_claim, 0), ==, 0);
+    g_assert_cmpint (sqlite3_finalize (no_claim), ==, SQLITE_OK);
+    g_assert_cmpint (g_remove (collision), ==, 0);
+#endif
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, 1);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+    g_assert_cmpuint (committed.graphs->len, ==, selected == NULL ? 2 : 1);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+        alpha_before);
+    assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+        zeta_before);
+    g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+    remove_tree (bundle_root);
+    destination_capture_clear (&capture);
+    fixture_clear (&fixture);
+  }
 #endif
 }
 
@@ -8055,6 +8224,8 @@ main (int argc, char **argv)
       test_generation_multi_graph_order);
   g_test_add_func ("/fact-offline-backup-source/restore-dry-run-read-only",
       test_restore_dry_run_read_only);
+  g_test_add_func ("/fact-offline-backup-source/restore-begin-authenticated",
+      test_restore_begin_authenticated);
   g_test_add_func ("/fact-offline-backup-source/restore-staging-coordinator",
       test_tenant_restore_staging_coordinator);
   g_test_add_func

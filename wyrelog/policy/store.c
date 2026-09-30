@@ -20214,7 +20214,7 @@ wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
 }
 
 static wyrelog_error_t
-read_fact_backup_snapshot (wyl_policy_store_t *store,
+read_fact_backup_snapshot_unlocked (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *graph_id,
     WylPolicyFactBackupSnapshot **out_snapshot)
 {
@@ -20223,16 +20223,6 @@ read_fact_backup_snapshot (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || tenant_id == NULL
       || out_snapshot == NULL)
     return WYRELOG_E_INVALID;
-  g_rec_mutex_lock (&store->graph_authority_mutex);
-  if (sqlite3_get_autocommit (store->db) == 0) {
-    g_rec_mutex_unlock (&store->graph_authority_mutex);
-    return WYRELOG_E_BUSY;
-  }
-  if (sqlite3_exec (store->db, "BEGIN DEFERRED;", NULL, NULL, NULL)
-      != SQLITE_OK) {
-    g_rec_mutex_unlock (&store->graph_authority_mutex);
-    return WYRELOG_E_IO;
-  }
   WylPolicyFactBackupSnapshot *snapshot = g_try_new0
         (WylPolicyFactBackupSnapshot, 1);
   wyrelog_error_t rc = snapshot == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
@@ -20275,18 +20265,45 @@ read_fact_backup_snapshot (wyl_policy_store_t *store,
       policy_fact_backup_graph_snapshot_free (graph);
   }
   g_clear_pointer (&authorities, g_ptr_array_unref);
-  if (rc == WYRELOG_E_OK
-      && sqlite3_exec (store->db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
-    rc = WYRELOG_E_IO;
-  if (rc != WYRELOG_E_OK)
-    (void) sqlite3_exec (store->db, "ROLLBACK;", NULL, NULL, NULL);
-  g_rec_mutex_unlock (&store->graph_authority_mutex);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_fact_backup_snapshot_free (snapshot);
     return rc;
   }
   *out_snapshot = snapshot;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_fact_backup_snapshot (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyFactBackupSnapshot **out_snapshot)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (store == NULL || store->db == NULL || tenant_id == NULL
+      || out_snapshot == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  if (sqlite3_get_autocommit (store->db) == 0) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  if (sqlite3_exec (store->db, "BEGIN DEFERRED;", NULL, NULL, NULL)
+      != SQLITE_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_IO;
+  }
+  wyrelog_error_t rc = read_fact_backup_snapshot_unlocked (store,
+          tenant_id, graph_id, out_snapshot);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_exec (store->db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK)
+    (void) sqlite3_exec (store->db, "ROLLBACK;", NULL, NULL, NULL);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_snapshot, wyl_policy_fact_backup_snapshot_free);
+  return rc;
 }
 
 wyrelog_error_t
@@ -38844,9 +38861,41 @@ wyl_policy_store_offline_restore_load (wyl_policy_store_t *store,
   return rc;
 }
 
-wyrelog_error_t
-wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
+static gboolean offline_restore_begin_policy_valid
+  (const WylPolicyOfflineRestoreRecord *record,
+    const WylPolicyFactBackupSnapshot *snapshot,
+    const GPtrArray *provisioning);
+
+static wyrelog_error_t
+offline_restore_run_begin_proof_locked
+  (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data)
+{
+  WylPolicyFactBackupSnapshot *snapshot = NULL;
+  GPtrArray *provisioning = NULL;
+  wyrelog_error_t rc = read_fact_backup_snapshot_unlocked (store,
+          record->tenant_id,
+          record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+          ? record->selected_graph_id : NULL, &snapshot);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_list (store, record->tenant_id,
+            record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+            ? record->selected_graph_id : NULL, &provisioning);
+  if (rc == WYRELOG_E_OK && !offline_restore_begin_policy_valid
+        (record, snapshot, provisioning))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = proof (snapshot, provisioning, proof_data);
+  wyl_policy_fact_backup_snapshot_free (snapshot);
+  g_clear_pointer (&provisioning, g_ptr_array_unref);
+  return rc;
+}
+
+static wyrelog_error_t
+offline_restore_create (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed)
 {
@@ -38878,10 +38927,14 @@ wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
     if (claim_rc != WYRELOG_E_OK)
       rc = claim_rc;
     else if (offline_restore_record_equal (existing, record)) {
-      *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY;
-      *out_committed = existing;
-      existing = NULL;
-      rc = WYRELOG_E_OK;
+      if (proof != NULL)
+        rc = offline_restore_run_begin_proof_locked (store, record, proof,
+                proof_data);
+      if (rc == WYRELOG_E_OK) {
+        *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY;
+        *out_committed = existing;
+        existing = NULL;
+      }
     } else {
       *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
       *out_committed = existing;
@@ -38955,6 +39008,10 @@ wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
           wyl_policy_offline_restore_record_free);
     return rc;
   }
+  if (rc == WYRELOG_E_OK && proof != NULL) {
+    rc = offline_restore_run_begin_proof_locked (store, record, proof,
+            proof_data);
+  }
   sqlite3_stmt *insert = NULL;
   rc = rc == WYRELOG_E_OK ? prepare_stmt (store->db,
           "INSERT INTO main.fact_offline_restore_journals(operation_uuid,tenant_id,scope,"
@@ -39017,6 +39074,127 @@ wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
   *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
   *out_committed = committed;
   return WYRELOG_E_OK;
+}
+
+static gboolean
+offline_restore_begin_policy_valid
+  (const WylPolicyOfflineRestoreRecord *record,
+    const WylPolicyFactBackupSnapshot *snapshot,
+    const GPtrArray *provisioning)
+{
+  if (snapshot == NULL || snapshot->tenant == NULL
+      || snapshot->graphs == NULL || provisioning == NULL
+      || snapshot->tenant->lifecycle_state
+      != WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      || !snapshot->tenant->sealed_compatibility)
+    return FALSE;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  if (wyl_fact_offline_restore_journal_decode (record->journal_blob,
+      &journal) != WYRELOG_E_OK
+      || g_strcmp0 (journal.operation_uuid, record->operation_uuid) != 0
+      || journal.revision != record->revision
+      || memcmp (journal.manifest_sha256, record->manifest_sha256, 32) != 0
+      || journal.graphs == NULL
+      || journal.graphs->len != record->graph_count
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      || journal.revision != 1
+      || journal.scope != (record->scope ==
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT :
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
+      || g_strcmp0 (journal.selected_graph_id,
+      record->selected_graph_id) != 0
+      || journal.confirmation
+      != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal.manifest_trust
+      != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal.policy_generation_published
+      || journal.lifecycle_handoff_complete
+      || g_strcmp0 (journal.tenant_id, record->tenant_id) != 0
+      || g_strcmp0 (snapshot->tenant->tenant_id, journal.tenant_id) != 0
+      || journal.destination_tenant_lifecycle_generation
+      != snapshot->tenant->lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation
+      != snapshot->tenant->reconciliation_generation
+      || journal.graphs->len != snapshot->graphs->len
+      || journal.graphs->len != provisioning->len)
+    return FALSE;
+  g_autoptr (GBytes) canonical = NULL;
+  if (wyl_fact_offline_restore_journal_encode (&journal, &canonical)
+      != WYRELOG_E_OK || !g_bytes_equal (canonical, record->journal_blob))
+    return FALSE;
+  for (guint i = 0; i < journal.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, i);
+    const WylPolicyFactBackupGraphSnapshot *selected =
+        g_ptr_array_index (snapshot->graphs, i);
+    const WylPolicyGraphAuthorityRecord *authority = selected == NULL ?
+        NULL : selected->authority;
+    const WylPolicyGraphProvisioningRecord *provision =
+        g_ptr_array_index ((GPtrArray *) provisioning, i);
+    if (graph == NULL || authority == NULL || provision == NULL
+        || g_strcmp0 (graph->graph_id, authority->graph_id) != 0
+        || g_strcmp0 (provision->graph_id, graph->graph_id) != 0
+        || g_strcmp0 (provision->tenant_id, journal.tenant_id) != 0
+        || provision->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+        || g_strcmp0 (provision->store_uuid, graph->store_uuid) != 0
+        || g_strcmp0 (graph->store_uuid, authority->store_uuid) != 0
+        || authority->lifecycle_state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+        || !authority->sealed_compatibility
+        || authority->materialization_state
+        != WYL_POLICY_GRAPH_MATERIALIZATION_MATERIALIZED
+        || authority->last_error_class != WYL_POLICY_GRAPH_ERROR_NONE
+        || !authority->has_store_identity
+        || authority->format_version != graph->format_version
+        || authority->path_encoding_version != graph->path_encoding_version
+        || authority->lifecycle_generation
+        != graph->destination_lifecycle_generation
+        || authority->reconciliation_generation
+        != graph->destination_reconciliation_generation
+        || graph->expected_main_absent
+        || graph->copied || graph->checksum_verified
+        || graph->identity_verified || graph->schema_verified
+        || graph->replay_preflighted || graph->old_provisioning_uuid != NULL
+        || graph->replacement_provisioning_uuid != NULL
+        || !wyl_fact_artifact_inventory_identity_equal
+          (&graph->staged_main_identity,
+        &(WylFactArtifactInventoryIdentity) { 0 })
+        || graph->transition_state
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || graph->next_op
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || graph->transition_terminal || graph->resume_forbidden
+        || graph->durability_unprovable_acknowledged
+        || selected->active_schema_digest == NULL)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_create (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  return offline_restore_create (store, record, NULL, NULL, out_result,
+             out_committed);
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_create_guarded (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed)
+{
+  if (proof == NULL)
+    return WYRELOG_E_INVALID;
+  return offline_restore_create (store, record, proof, proof_data,
+             out_result, out_committed);
 }
 
 static wyrelog_error_t restore_replacement_early_commit_authority_locked
