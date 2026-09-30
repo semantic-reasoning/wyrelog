@@ -150,6 +150,7 @@ wyrelog_sources += files('fact/graph-artifact-main-transition-private.c')
 if get_option('enable_fact_store').allowed()
   wyrelog_sources += files('fact/compound.c',
     'fact/graph-seal-private.c',
+    'fact/offline-backup-bundle-private.c',
     'fact/offline-backup-generation-private.c',
     'fact/offline-backup-source-private.c',
     'fact/offline-restore-commit-authority-private.c',
