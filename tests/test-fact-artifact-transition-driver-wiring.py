@@ -177,8 +177,8 @@ TEST_REGISTRATION_PROFILES = {
         "687d7ba994a2128fd9cee1d1f17df794bda684e91064064f522f03b81ca2f40d",
     ),
     "tests/test-fact-artifact-transition-posix.c": (
-        42,
-        "39dbfd1ba1116ee84db02eb8ca96046b1ec072b73717f0079179611f0df6d4d3",
+        43,
+        "1244367116e4b749a7dd5b3697ccc5704d9671eabd3bf28047f41f0d18d5d845",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
         24,
@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "69f2d9069fe45935932aa05cbf6565e555d10fd41b74795db139ad793bd34868",
+        "49d4531fe95561ea792810a4a8207c0ba37cdbd31f6b0b0db83b9bc5f8e5c6b2",
     "tests/test-fact-artifact-transition-windows.c":
         "e28928fc2a46782f2558da57eab95c8a9ae831fb53857d816544d65a2e54f9fb",
 }
@@ -213,10 +213,10 @@ WINDOWS_AUTHORITY_CALLER_BODY_SHA256 = {
 POSIX_AUTHORITY_CALLER_BODY_SHA256 = {
     "wyl_fact_artifact_transition_posix_open":
         "b05beb11af8ccf5f1806992f5974318d91e2ce543bfce2e491e0152943b2febd",
-    "wyl_fact_artifact_transition_posix_capture":
-        "2d6e19dc40a8b60f173b900b4261c6b562122ca715c29cc872aad638f76affe3",
+    "capture_internal":
+        "67bd0e840624176d6500924222e770ec8ab7271f63c4c30bdab5b4ffc74fd631",
     "wyl_fact_artifact_transition_posix_execute":
-        "c1780f7e063a792045f2a9fbf0836ae8802415d73f45b2937a41fb5893a38aa5",
+        "ae40b09dbc6196789a6df1a2f8457a87ba5c88dfc120e995b43bfc428415705e",
 }
 POSIX_AUTHORITY_TEST_BODY_SHA256 = (
     "3cbfcbae6979204e8855c845dc4e80b6b4710ab3beb3dd9518c7f9931aa4dcce"
@@ -656,7 +656,8 @@ def require_test_registrations(
     actual_profile = (len(registrations), hashlib.sha256(registration_bytes).hexdigest())
     if actual_profile != expected_profile:
         raise AssertionError(
-            f"{label}: complete path-to-callback registration profile drift"
+            f"{label}: complete path-to-callback registration profile drift "
+            f"{actual_profile!r}"
         )
     registered_body_profile: list[str] = []
     for path, function in registrations:
@@ -675,7 +676,10 @@ def require_test_registrations(
         "".join(registered_body_profile).encode("utf-8")
     ).hexdigest()
     if actual_body_sha256 != expected_body_sha256:
-        raise AssertionError(f"{label}: complete registered test body profile drift")
+        raise AssertionError(
+            f"{label}: complete registered test body profile drift "
+            f"{actual_body_sha256}"
+        )
     for path, function in expected.items():
         if registrations.count((path, function)) != 1:
             raise AssertionError(
@@ -1417,7 +1421,8 @@ def verify(root: pathlib.Path, overrides: Mapping[str, str] | None = None) -> No
         TEST_REGISTRATION_PROFILES["tests/test-fact-artifact-transition-posix.c"],
         TEST_REGISTERED_BODY_SHA256["tests/test-fact-artifact-transition-posix.c"],
         "POSIX runtime registration",
-        [("ifdef", "__APPLE__"), ("endif", "")],
+        [("ifdef", "__APPLE__"), ("endif", ""),
+         ("ifdef", "__APPLE__"), ("else", ""), ("endif", "")],
     )
     require_test_registrations(
         logical["tests/test-fact-artifact-transition-windows.c"],
@@ -1507,14 +1512,27 @@ def verify(root: pathlib.Path, overrides: Mapping[str, str] | None = None) -> No
         raw["meson.build"], raw["wyrelog/meson.build"], raw["tests/meson.build"]
     )
 
-    posix_capture = function_body(
-        posix, "wyl_fact_artifact_transition_posix_capture"
-    )
+    posix_capture = function_body(posix, "capture_internal")
     require(posix_capture, "provider_revalidate_authority", "POSIX capture authority")
     require(
         posix_capture,
-        "wyl_fact_artifact_inventory_posix_capture",
+        "wyl_fact_artifact_inventory_posix_capture_with_old_pair",
         "POSIX correlated capture",
+    )
+    posix_capture_public = function_body(
+        posix, "wyl_fact_artifact_transition_posix_capture"
+    )
+    require(
+        posix_capture_public,
+        "capture_internal (provider, lifecycle, NULL, out_snapshot,",
+        "POSIX normal capture delegation",
+    )
+    posix_capture_provisioned = function_body(
+        posix, "wyl_fact_artifact_transition_posix_capture_provisioned"
+    )
+    require(
+        posix_capture_provisioned, "capture_internal",
+        "POSIX provisioned capture delegation",
     )
     posix_authority = function_body(posix, "provider_revalidate_authority")
     if (
@@ -1533,7 +1551,7 @@ def verify(root: pathlib.Path, overrides: Mapping[str, str] | None = None) -> No
     )
     for symbol, body in (
         ("wyl_fact_artifact_transition_posix_open", posix_open),
-        ("wyl_fact_artifact_transition_posix_capture", posix_capture),
+        ("capture_internal", posix_capture),
         ("wyl_fact_artifact_transition_posix_execute", posix_execute),
     ):
         if (
