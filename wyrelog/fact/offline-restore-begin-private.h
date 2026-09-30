@@ -11,7 +11,8 @@ G_BEGIN_DECLS
 /* Establish a pristine revision-1 restore claim from an authenticated bundle.
  * The trusted digest must have been supplied to bundle_open independently.
  * Explicit confirmation, sealed policy, selected runtime quiescence, exact
- * ACTIVE pairs, and collision-free destination inventories are required.
+ * ACTIVE pairs, matching active/backup schema digests, and collision-free
+ * destination inventories are required.
  * Success mutates only policy journal/claim rows. An error after SQLite COMMIT
  * may still leave a durable claim; reload by operation UUID before retry.
  * out_committed must be zero-initialized or previously cleared. Linux only. */

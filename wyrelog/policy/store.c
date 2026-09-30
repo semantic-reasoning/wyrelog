@@ -39168,7 +39168,8 @@ offline_restore_begin_policy_valid
         || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
         || graph->transition_terminal || graph->resume_forbidden
         || graph->durability_unprovable_acknowledged
-        || selected->active_schema_digest == NULL)
+        || g_strcmp0 (selected->active_schema_digest,
+        graph->schema_digest) != 0)
       return FALSE;
   }
   return TRUE;

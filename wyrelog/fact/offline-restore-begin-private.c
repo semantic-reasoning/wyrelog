@@ -107,6 +107,8 @@ target_matches (const WylPolicyFactBackupSnapshot *snapshot,
         || authority->last_error_class != WYL_POLICY_GRAPH_ERROR_NONE
         || !authority->has_store_identity
         || g_strcmp0 (authority->store_uuid, artifact->store_uuid) != 0
+        || g_strcmp0 (entry->active_schema_digest,
+        artifact->schema_digest) != 0
         || authority->format_version != artifact->format_version
         || authority->path_encoding_version != artifact->path_encoding_version
         || artifact->format_version != WYL_FACT_STORE_FORMAT_VERSION
