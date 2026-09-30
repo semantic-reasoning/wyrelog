@@ -4698,7 +4698,8 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
   g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
       WYRELOG_E_OK);
   guint64 revision = 10;
-  if (g_str_equal (mode, "pending-second")) {
+  if (g_str_equal (mode, "pending-second")
+      || g_str_equal (mode, "restart-pending-second")) {
     WylPolicyOfflineRestoreRecord *raw = NULL, *begun = NULL;
     WylPolicyOfflineRestoreStoreResult result =
         WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
@@ -4758,6 +4759,13 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
         WYRELOG_E_BUSY);
     g_assert_null (f.committed.graphs);
   }
+  if (g_str_equal (mode, "restart-second")
+      || g_str_equal (mode, "restart-pending-second")) {
+    g_clear_pointer (&f.fixture.runtime,
+        wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+        ==, WYRELOG_E_OK);
+  }
   g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_sync_staged_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
       session_operation, second, revision, 0, &f.committed), ==,
@@ -4792,6 +4800,12 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
           &f.fixture.policy), ==, WYRELOG_E_OK);
       g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
           WYRELOG_E_OK);
+      if (g_str_equal (mode, "retain-after-begin")) {
+        g_clear_pointer (&f.fixture.runtime,
+            wyl_fact_graph_runtime_manager_unref);
+        g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+              (&f.fixture.runtime), ==, WYRELOG_E_OK);
+      }
       WylFactOfflineRestoreJournal pending = { 0 };
       g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
             (f.fixture.policy, session_operation, &pending), ==,
@@ -8293,6 +8307,10 @@ main (int argc, char **argv)
       "reverse", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/pending-second",
       "pending-second", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/restart-second",
+      "restart-second", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/restart-pending-second",
+      "restart-pending-second", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/completed-sibling-foreign",
       "completed-sibling-foreign", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/both/completed-sibling-stage-content",
