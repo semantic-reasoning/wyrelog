@@ -367,6 +367,16 @@ if get_option('enable_fact_store').allowed() and \
   )
 endif
 
+if get_option('enable_fact_store').allowed()
+  test_offline_backup_bundle = executable('test-fact-offline-backup-bundle',
+    'test-fact-offline-backup-bundle.c',
+    include_directories : [include_directories('..'),
+      include_directories('../wyrelog')],
+    dependencies : [wyrelog_handle_test_seams_dep],
+  )
+  test('fact-offline-backup-bundle', test_offline_backup_bundle)
+endif
+
 test_offline_restore_journal_stage = executable(
   'test-fact-offline-restore-journal-stage',
   'test-fact-offline-restore-journal-stage.c',
