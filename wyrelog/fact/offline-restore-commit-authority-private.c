@@ -1544,6 +1544,149 @@ wyl_fact_offline_restore_tenant_companion_sync_run
 #endif
 }
 
+#ifdef __linux__
+static wyrelog_error_t
+tenant_select_effect (GBytes *canonical_journal, gpointer user_data)
+{
+  TenantCompanionEffect *effect = user_data;
+  if (!g_bytes_equal (canonical_journal, effect->encoded)
+      || effect->journal->graphs->len != effect->binding.graph_count)
+    return WYRELOG_E_POLICY;
+  for (guint pass = 0; pass < 2; pass++) {
+    for (guint i = 0; i < effect->binding.graph_count; i++) {
+      WylFactGraphRestorePostPublishLayout layout =
+          WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID;
+      WylFactGraphProvisionedRestoreWitness *witness = NULL;
+      wyrelog_error_t rc = tenant_companion_open_graph (effect, i,
+              "companion_synced", &layout, &witness);
+      wyl_fact_graph_provisioned_restore_witness_free (witness);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (layout != WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION)
+        return WYRELOG_E_POLICY;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+#endif
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_select_replacements_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || expected_revision == 0
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  WylFactRootWriterLease *lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  WylPolicyOfflineRestoreRecord *expected = NULL;
+  WylPolicyOfflineRestoreRecord *committed = NULL;
+  TenantBindGraph *held = NULL;
+  guint graph_count = 0;
+  g_autoptr (GBytes) canonical = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+            &expected);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+  if (rc == WYRELOG_E_OK
+      && (journal.revision != expected_revision
+      || !g_bytes_equal (canonical, expected->journal_blob)
+      || journal.version !=
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || journal.graphs == NULL || journal.graphs->len == 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK) {
+    graph_count = journal.graphs->len;
+    held = g_try_new0 (TenantBindGraph, graph_count);
+    if (held == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  for (guint i = 0; i < graph_count; i++)
+    held[i].directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < graph_count; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, i);
+    TenantBindGraph *item = &held[i];
+    rc = wyl_fact_graph_key_init (&item->key, journal.tenant_id,
+            graph->graph_id);
+    gint64 remaining = drain_timeout_us;
+    if (rc == WYRELOG_E_OK && deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0)
+        rc = WYRELOG_E_BUSY;
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &item->key,
+              remaining, &item->quiescence);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
+              journal.tenant_id, graph->graph_id, FALSE, &item->directory);
+  }
+  WylPolicyOfflineRestoreStoreResult result =
+      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (rc == WYRELOG_E_OK) {
+    TenantCompanionEffect effect = {
+      .binding = { .lease = lease, .resolver = &resolver,
+                   .runtime = runtime, .graphs = held,
+                   .graph_count = graph_count },
+      .journal = &journal, .encoded = canonical,
+    };
+    rc = wyl_policy_store_tenant_restore_select_with_effect (policy,
+            expected, tenant_select_effect, &effect, &result, &committed);
+  }
+  if (rc == WYRELOG_E_OK
+      && result != WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (committed->journal_blob,
+            out_committed);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  for (guint i = 0; i < graph_count; i++) {
+    wyl_fact_graph_directory_clear (&held[i].directory);
+    g_clear_pointer (&held[i].quiescence,
+        wyl_fact_graph_quiescence_token_release);
+    wyl_fact_graph_key_clear (&held[i].key);
+  }
+  g_free (held);
+  wyl_policy_offline_restore_record_free (committed);
+  wyl_policy_offline_restore_record_free (expected);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  return rc;
+#endif
+}
+
 static wyrelog_error_t
 tenant_commit_step_run
   (wyl_policy_store_t *policy, const gchar *fact_root,

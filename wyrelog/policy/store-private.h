@@ -3563,6 +3563,19 @@ wyrelog_error_t wyl_policy_store_tenant_restore_companion_sync_with_effect
     const gchar *graph_id, WylPolicyTenantRestoreCompanionEffectFunc effect,
     gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Select every bound replacement in one fenced policy transaction. The
+ * callback proves the complete dual-companion filesystem vector under the
+ * caller's root writer lease and all-graph quiescence; it must not mutate
+ * files or reenter the policy store. */
+typedef wyrelog_error_t (*WylPolicyTenantRestoreSelectionEffectFunc)
+  (GBytes *canonical_journal, gpointer user_data);
+wyrelog_error_t wyl_policy_store_tenant_restore_select_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyTenantRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Typed v5 COMMIT SYNC_STAGED journal step. BEGIN durably records UNKNOWN
  * before any effect. COMPLETE runs its proof/effect callback inside a fresh
  * fenced policy transaction and advances only after proven durability. */
