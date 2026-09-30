@@ -550,6 +550,7 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       || journal->manifest_trust
       != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED)))
     return FALSE;
+  guint tenant_selected_pending_count = 0;
   for (guint i = 0; i < journal->graphs->len; i++) {
     WylFactOfflineRestoreJournalGraph *graph =
         g_ptr_array_index (journal->graphs, i);
@@ -602,17 +603,36 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
         || journal->version ==
         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION) {
+      gboolean selected_cleanup = journal->version ==
+          WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION;
+      gboolean cleanup_pending = selected_cleanup
+          && graph->transition_state ==
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+          && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+          && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+          && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+          && !graph->transition_terminal;
+      if (cleanup_pending && ++tenant_selected_pending_count > 1)
+        return FALSE;
+      gboolean cleanup_finalized = selected_cleanup
+          && graph->transition_state ==
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+          && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+          && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+          && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+          && graph->transition_terminal;
       if (!has_old || !has_replacement
           || !canonical_uuid (graph->replacement_provisioning_uuid)
           || graph->replacement_provisioning_uuid[14] != '7'
           || graph->expected_main_absent
           || graph->durability_unprovable_acknowledged
-          || graph->transition_state !=
+          || (!cleanup_pending && !cleanup_finalized &&
+          (graph->transition_state !=
           WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
           || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
           || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
           || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
-          || graph->transition_terminal)
+          || graph->transition_terminal)))
         return FALSE;
       for (guint other_index = 0; other_index < journal->graphs->len;
           other_index++) {
@@ -1286,6 +1306,79 @@ wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+tenant_selected_finalize_step (WylFactOfflineRestoreJournal *journal,
+    const gchar *graph_id, gboolean complete)
+{
+  WylFactOfflineRestoreJournalGraph *graph = find_graph (journal, graph_id);
+  if (graph == NULL || !valid_journal (journal)
+      || journal->version !=
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION
+      || journal->revision == G_MAXUINT64)
+    return WYRELOG_E_POLICY;
+  if (graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      || graph->transition_terminal
+      || (complete ? graph->attempt !=
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      : graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE))
+    return WYRELOG_E_POLICY;
+  if (!complete) {
+    for (guint i = 0; i < journal->graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *other =
+          g_ptr_array_index (journal->graphs, i);
+      if (other != graph
+          && other->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN)
+        return WYRELOG_E_POLICY;
+    }
+  }
+  WylFactOfflineRestoreJournalGraph changed = *graph;
+  if (complete) {
+    changed.transition_state = WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED;
+    changed.next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    changed.pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
+    changed.attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+    changed.transition_terminal = TRUE;
+  } else {
+    changed.pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+    changed.attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+  }
+  WylFactOfflineRestoreJournal candidate = *journal;
+  candidate.revision++;
+  candidate.graphs = g_ptr_array_sized_new (journal->graphs->len);
+  if (candidate.graphs == NULL)
+    return WYRELOG_E_NOMEM;
+  for (guint i = 0; i < journal->graphs->len; i++) {
+    WylFactOfflineRestoreJournalGraph *entry =
+        g_ptr_array_index (journal->graphs, i);
+    g_ptr_array_add (candidate.graphs, entry == graph ? &changed : entry);
+  }
+  gboolean valid = valid_journal (&candidate);
+  g_ptr_array_unref (candidate.graphs);
+  if (!valid)
+    return WYRELOG_E_POLICY;
+  *graph = changed;
+  journal->revision++;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id)
+{
+  return tenant_selected_finalize_step (journal, graph_id, FALSE);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id)
+{
+  return tenant_selected_finalize_step (journal, graph_id, TRUE);
+}
+
 wyrelog_error_t
 wyl_fact_offline_restore_journal_bind_staged_identity
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
@@ -1795,6 +1888,22 @@ successor_tenant_selected (WylFactOfflineRestoreJournal *journal,
            (journal);
 }
 
+static wyrelog_error_t
+successor_tenant_finalize_begin (WylFactOfflineRestoreJournal *journal,
+    gpointer data)
+{
+  return wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+           (journal, data);
+}
+
+static wyrelog_error_t
+successor_tenant_finalize_complete (WylFactOfflineRestoreJournal *journal,
+    gpointer data)
+{
+  return wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+           (journal, data);
+}
+
 gboolean
 wyl_fact_offline_restore_journal_is_legal_successor
   (const WylFactOfflineRestoreJournal *current,
@@ -1836,6 +1945,20 @@ wyl_fact_offline_restore_journal_is_legal_successor
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION)
     return successor_from_candidate (current_bytes, desired,
                successor_tenant_selected, NULL);
+  if (current->version ==
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION
+      && desired->version == current->version) {
+    for (guint i = 0; i < current->graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (current->graphs, i);
+      if (successor_from_candidate (current_bytes, desired,
+          successor_tenant_finalize_begin, graph->graph_id)
+          || successor_from_candidate (current_bytes, desired,
+          successor_tenant_finalize_complete, graph->graph_id))
+        return TRUE;
+    }
+    return FALSE;
+  }
 
   for (guint i = 0; i < desired->graphs->len; i++) {
     WylFactOfflineRestoreJournalGraph *graph =

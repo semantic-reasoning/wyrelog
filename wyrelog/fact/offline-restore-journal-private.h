@@ -241,6 +241,11 @@ wyrelog_error_t wyl_fact_offline_restore_journal_bind_tenant_replacements
  * entire tenant's replacement vector atomically with this journal CAS. */
 wyrelog_error_t wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
   (WylFactOfflineRestoreJournal *journal);
+/* v7 selected tenant cleanup advances exactly one graph per revision. */
+wyrelog_error_t wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id);
+wyrelog_error_t wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide
   (WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreDecision decision);

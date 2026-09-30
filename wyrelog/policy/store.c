@@ -12136,6 +12136,23 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
       break;
     gboolean tenant_selected = journal.version ==
         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION;
+    guint64 cleanup_revisions = tenant_selected ? 1 : 0;
+    if (tenant_selected) {
+      for (guint i = 0; i < journal.graphs->len; i++) {
+        const WylFactOfflineRestoreJournalGraph *graph =
+            g_ptr_array_index (journal.graphs, i);
+        if (graph->transition_state ==
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED)
+          cleanup_revisions += 2;
+        else if (graph->attempt ==
+            WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN)
+          cleanup_revisions++;
+      }
+      if (journal.revision <= cleanup_revisions) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+    }
     if (tenant_selected) {
       g_autoptr (GBytes) canonical = NULL;
       if (journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
@@ -12200,7 +12217,7 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
           || sqlite3_column_int64 (rows, 8) !=
           (sqlite3_int64) graph->destination_reconciliation_generation
           || sqlite3_column_int64 (rows, 9) !=
-          (sqlite3_int64) journal.revision - (tenant_selected ? 1 : 0)
+          (sqlite3_int64) (journal.revision - cleanup_revisions)
           || g_strcmp0 ((const gchar *) sqlite3_column_text (rows, 10),
           basename) != 0
           || (tenant_selected ?
