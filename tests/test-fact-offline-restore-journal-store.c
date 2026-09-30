@@ -1220,6 +1220,49 @@ tenant_replacement_schema_is_atomic (void)
     ("phase TEXT NOT NULL CHECK(phase='reserved'),");
 }
 
+static void
+tenant_selected_insert_guard_migration (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM sqlite_master WHERE "
+      "name='fact_graph_provisioning_insert_guard';",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_autofree gchar *current = g_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 0));
+  sqlite3_finalize (stmt);
+  const gchar *tenant_branch = strstr (current,
+          " OR (NEW.phase='restore_selected' AND NEW.attempt=0");
+  g_assert_nonnull (tenant_branch);
+  const gchar *ending = strstr (tenant_branch, "THEN RAISE(ABORT,");
+  g_assert_nonnull (ending);
+  g_autofree gchar *prefix = g_strndup (current, tenant_branch - current);
+  g_autofree gchar *predecessor = g_strconcat
+        (prefix, ")) ", ending, NULL);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_insert_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, predecessor,
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_insert_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_autofree gchar *forged = g_strdup (predecessor);
+  gchar *word = strstr (forged, "provisioning authority mismatch");
+  g_assert_nonnull (word);
+  word[0] = 'x';
+  g_assert_cmpint (sqlite3_exec (db, forged,
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1230,6 +1273,8 @@ main (int argc, char **argv)
       tenant_bound_generic_writer_denied);
   g_test_add_func ("/fact/offline-restore-journal-store/tenant-replacement-schema",
       tenant_replacement_schema_is_atomic);
+  g_test_add_func ("/fact/offline-restore-journal-store/tenant-selected-guard-migration",
+      tenant_selected_insert_guard_migration);
   g_test_add_func ("/fact/offline-restore-journal-store/provisioned-handoff-cas",
       provisioned_handoff_cas);
   g_test_add_func ("/fact/offline-restore-journal-store/not-applied-retry",

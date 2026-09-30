@@ -3241,6 +3241,92 @@ tenant_reserve_test_effect (GBytes *journal, const GPtrArray *uuids,
   return WYRELOG_E_OK;
 }
 
+/* Import the exact post-selection SQL image to exercise reopen validation
+ * before the scoped tenant selection writer exists. */
+static void
+tenant_selected_schema_fixture (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *bound)
+{
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autoptr (GBytes) before = NULL;
+  g_autoptr (GBytes) selected_bytes = NULL;
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (bound,
+      &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (before,
+      &selected), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_replacements_selected
+        (&selected), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
+      &selected_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db, "BEGIN IMMEDIATE;", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE fact_offline_restore_journals SET revision=?1,journal_blob=?2 "
+      "WHERE operation_uuid=?3 AND revision=?4;", -1, &update, NULL), ==,
+      SQLITE_OK);
+  gsize size = 0;
+  const void *bytes = g_bytes_get_data (selected_bytes, &size);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, selected.revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, bytes, size,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, selected.operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 4, bound->revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (update);
+  for (guint i = 0; i < selected.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (selected.graphs, i);
+    gchar *sql = sqlite3_mprintf
+          ("DELETE FROM fact_graph_provisioning WHERE op_uuid='%q' AND "
+            "phase='active';", graph->old_provisioning_uuid);
+    g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    sqlite3_free (sql);
+    sql = sqlite3_mprintf
+          ("INSERT INTO fact_graph_provisioning (op_uuid,tenant_id,graph_id,"
+            "store_uuid,stage_basename,expected_lifecycle_generation,"
+            "expected_reconciliation_generation,phase,attempt,created_at,"
+            "updated_at) VALUES('%q','%q','%q','%q',"
+            "'provision-%q.sqlite',%lld,%lld,'restore_selected',0,"
+            "unixepoch(),unixepoch());",
+            graph->replacement_provisioning_uuid, selected.tenant_id,
+            graph->graph_id, graph->store_uuid,
+            graph->replacement_provisioning_uuid,
+            (long long) graph->destination_lifecycle_generation,
+            (long long) graph->destination_reconciliation_generation);
+    g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    sqlite3_free (sql);
+  }
+  sqlite3_stmt *guard = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM sqlite_master WHERE "
+      "name='fact_tenant_restore_replacement_update_guard';",
+      -1, &guard, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+  g_autofree gchar *guard_sql = g_strdup
+        ((const gchar *) sqlite3_column_text (guard, 0));
+  sqlite3_finalize (guard);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_tenant_restore_replacement_update_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "UPDATE fact_tenant_restore_replacements SET "
+      "phase='selected_pending_cleanup' WHERE phase='companion_synced';",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (db), ==, selected.graphs->len);
+  g_assert_cmpint (sqlite3_exec (db, guard_sql, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, "COMMIT;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
+}
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef struct
 {
@@ -4139,6 +4225,50 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                     (f.fixture.policy, f.fixture.root, f.fixture.runtime,
                   session_operation, companion_second, 33, 0, &f.committed), ==,
                   WYRELOG_E_OK);
+              if (g_str_has_prefix (mode,
+                  "retain-sync-dir-publish-sync-companion-schema")) {
+                tenant_selected_schema_fixture (f.fixture.policy,
+                    &f.committed);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+                sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+                g_assert_cmpint (sqlite3_exec (db,
+                    "UPDATE fact_tenant_restore_replacements SET "
+                    "phase='companion_synced' WHERE graph_id='zeta';",
+                    NULL, NULL, NULL), ==, SQLITE_CONSTRAINT_TRIGGER);
+                if (g_str_has_suffix (mode, "schema-phase")) {
+                  sqlite3_stmt *guard = NULL;
+                  g_assert_cmpint (sqlite3_prepare_v2 (db,
+                      "SELECT sql FROM sqlite_master WHERE "
+                      "name='fact_tenant_restore_replacement_update_guard';",
+                      -1, &guard, NULL), ==, SQLITE_OK);
+                  g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+                  g_autofree gchar *guard_sql = g_strdup
+                        ((const gchar *) sqlite3_column_text (guard, 0));
+                  sqlite3_finalize (guard);
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "DROP TRIGGER fact_tenant_restore_replacement_update_guard;",
+                      NULL, NULL, NULL), ==, SQLITE_OK);
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "UPDATE fact_tenant_restore_replacements SET "
+                      "phase='companion_synced' WHERE graph_id='zeta';",
+                      NULL, NULL, NULL), ==, SQLITE_OK);
+                  g_assert_cmpint (sqlite3_exec (db, guard_sql,
+                      NULL, NULL, NULL), ==, SQLITE_OK);
+                } else
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "DELETE FROM fact_graph_provisioning "
+                      "WHERE graph_id='alpha' AND phase='restore_selected';",
+                      NULL, NULL, NULL), ==, SQLITE_OK);
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_POLICY);
+              }
             }
 #ifdef WYL_TEST_HANDLE_SEAMS
             if (g_str_equal (mode,
@@ -5995,6 +6125,10 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/reverse",
       "retain-sync-dir-publish-sync-companion-reverse", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/selected-schema",
+      "retain-sync-dir-publish-sync-companion-schema", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/selected-schema-phase",
+      "retain-sync-dir-publish-sync-companion-schema-phase", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/foreign",
       "retain-sync-dir-publish-sync-companion-foreign", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/sibling-foreign",
