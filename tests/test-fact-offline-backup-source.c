@@ -4514,6 +4514,46 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                         g_ptr_array_index (f.committed.graphs,
                         graph_index))->transition_state,
                         ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+                  g_autoptr (GBytes) v7_blob = NULL;
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+                        (&f.committed, &v7_blob), ==, WYRELOG_E_OK);
+                  g_auto (WylFactOfflineRestoreJournal) v8_candidate = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+                        (v7_blob, &v8_candidate), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_selected_published
+                        (&v8_candidate), ==, WYRELOG_E_OK);
+                  WylFactOfflineRestoreStoreResult generic_result =
+                      WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+                  g_auto (WylFactOfflineRestoreJournal) generic_committed = {
+                    0
+                  };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+                        (f.fixture.policy, f.committed.revision,
+                      &v8_candidate, &generic_result,
+                      &generic_committed), ==, WYRELOG_E_POLICY);
+                  g_assert_null (generic_committed.graphs);
+                  g_autoptr (GBytes) v8_blob = NULL;
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+                        (&v8_candidate, &v8_blob), ==, WYRELOG_E_OK);
+                  WylPolicyOfflineRestoreRecord v8_record = {
+                    .operation_uuid = v8_candidate.operation_uuid,
+                    .tenant_id = v8_candidate.tenant_id,
+                    .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT,
+                    .revision = v8_candidate.revision,
+                    .graph_count = v8_candidate.graphs->len,
+                    .journal_blob = v8_blob,
+                  };
+                  memcpy (v8_record.manifest_sha256,
+                      v8_candidate.manifest_sha256, 32);
+                  WylPolicyOfflineRestoreStoreResult policy_generic_result =
+                      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+                  WylPolicyOfflineRestoreRecord *policy_generic_committed =
+                      NULL;
+                  g_assert_cmpint (wyl_policy_store_offline_restore_cas
+                        (f.fixture.policy, f.committed.revision,
+                      &v8_record, &policy_generic_result,
+                      &policy_generic_committed), ==, WYRELOG_E_POLICY);
+                  g_assert_null (policy_generic_committed);
                   g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
                   g_assert_cmpint (wyl_policy_store_open (policy_path,
                       &f.fixture.policy), ==, WYRELOG_E_OK);

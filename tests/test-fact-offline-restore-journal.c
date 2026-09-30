@@ -459,6 +459,54 @@ tenant_replacement_binding (void)
   g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&finalized,
       "zeta", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
       WYRELOG_E_POLICY);
+  g_autoptr (GBytes) all_finalized_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&finalized,
+      &all_finalized_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) all_finalized = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (all_finalized_blob, &all_finalized), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_policy_published
+        (&finalized), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_selected_published
+        (&journal), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_selected_published
+        (&finalized), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (finalized.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
+  g_assert_cmpuint (finalized.revision, ==, all_finalized.revision + 1);
+  g_assert_true (finalized.policy_generation_published);
+  g_assert_true (finalized.lifecycle_handoff_complete);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&all_finalized, &finalized));
+  g_autoptr (GBytes) tenant_published_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&finalized,
+      &tenant_published_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) tenant_published = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (tenant_published_blob, &tenant_published), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) published_roundtrip = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&tenant_published, &published_roundtrip), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (tenant_published_blob,
+      published_roundtrip));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery
+        (&tenant_published), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_selected_published
+        (&tenant_published), ==, WYRELOG_E_POLICY);
+  tenant_published.policy_generation_published = FALSE;
+  g_autoptr (GBytes) invalid_published = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&tenant_published, &invalid_published), ==, WYRELOG_E_INVALID);
+  tenant_published.policy_generation_published = TRUE;
+  WylFactOfflineRestoreJournalGraph *published_graph =
+      g_ptr_array_index (tenant_published.graphs, 0);
+  published_graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE;
+  published_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  published_graph->transition_terminal = FALSE;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&tenant_published, &invalid_published), ==, WYRELOG_E_INVALID);
   WylFactOfflineRestoreJournalGraph *changed = g_ptr_array_index
         (selected.graphs, 0);
   g_autofree gchar *original_store = g_strdup (changed->store_uuid);
