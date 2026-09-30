@@ -145,6 +145,17 @@ snapshot_equal (const WylPolicyFactBackupSnapshot *a,
   return TRUE;
 }
 
+static gboolean
+inventory_observation_equal (const WylFactArtifactInventoryObservation *a,
+    const WylFactArtifactInventoryObservation *b)
+{
+  return wyl_fact_artifact_inventory_identity_equal
+           (&a->directory_identity, &b->directory_identity)
+         && wyl_fact_artifact_inventory_identity_equal
+           (&a->guard_identity, &b->guard_identity)
+         && a->entry_fingerprint == b->entry_fingerprint;
+}
+
 static wyrelog_error_t
 read_scope_snapshot (wyl_policy_store_t *policy, const gchar *tenant_id,
     WylFactOfflineRestoreScope scope, const gchar *selected_graph_id,
@@ -426,8 +437,8 @@ wyl_fact_offline_restore_dry_run (wyl_policy_store_t *policy,
         || repeated.main_present != graph->inventory.main_present
         || !wyl_fact_artifact_inventory_identity_equal
           (&repeated.main_identity, &graph->inventory.main_identity)
-        || repeated.observation.entry_fingerprint !=
-        graph->inventory.observation.entry_fingerprint))
+        || !inventory_observation_equal (&repeated.observation,
+        &graph->inventory.observation)))
       rc = WYRELOG_E_BUSY;
     g_free (op_uuid);
   }
