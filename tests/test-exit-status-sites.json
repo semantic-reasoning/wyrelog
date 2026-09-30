@@ -120,14 +120,14 @@
   },
   {
     "path": "tests/test-fact-artifact-transition-posix.c",
-    "line": 2496,
+    "line": 2926,
     "api": "_exit",
     "expression": "77",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-transition-posix.c",
-    "line": 2497,
+    "line": 2927,
     "api": "_exit",
     "expression": "78",
     "platform": "posix-normalized-wrapper"
@@ -155,7 +155,7 @@
   },
   {
     "path": "tests/test-fact-offline-restore-journal-store.c",
-    "line": 135,
+    "line": 136,
     "api": "_Exit",
     "expression": "abrupt_mutation_child (store_path, key_path, mutation)",
     "platform": "posix-normalized-wrapper"
