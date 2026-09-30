@@ -21,6 +21,11 @@ wyrelog_error_t wyl_fact_offline_restore_journal_store_create
   (wyl_policy_store_t *store, const WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreStoreResult *out_result,
     WylFactOfflineRestoreJournal *out_committed);
+wyrelog_error_t wyl_fact_offline_restore_journal_store_create_guarded
+  (wyl_policy_store_t *store, const WylFactOfflineRestoreJournal *journal,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed);
 wyrelog_error_t wyl_fact_offline_restore_journal_store_load
   (wyl_policy_store_t *store, const gchar *operation_uuid,
     WylFactOfflineRestoreJournal *out_journal);

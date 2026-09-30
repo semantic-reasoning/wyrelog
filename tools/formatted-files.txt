@@ -277,6 +277,8 @@ wyrelog/fact/offline-backup-manifest-private.c
 wyrelog/fact/offline-backup-manifest-private.h
 wyrelog/fact/offline-backup-source-private.c
 wyrelog/fact/offline-backup-source-private.h
+wyrelog/fact/offline-restore-begin-private.c
+wyrelog/fact/offline-restore-begin-private.h
 wyrelog/fact/offline-restore-commit-authority-private.c
 wyrelog/fact/offline-restore-commit-authority-private.h
 wyrelog/fact/offline-restore-coordinator-private.c

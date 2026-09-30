@@ -3434,6 +3434,17 @@ wyrelog_error_t wyl_policy_store_offline_restore_create
   (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *record,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
+/* Called inside the fenced create transaction with copied authority values.
+ * The callback may inspect held filesystem/source handles but must not call
+ * policy APIs or retain either array. A failure rolls back without a claim. */
+typedef wyrelog_error_t (*WylPolicyOfflineRestoreBeginProofFunc)
+  (const WylPolicyFactBackupSnapshot *snapshot,
+    const GPtrArray *provisioning_records, gpointer user_data);
+wyrelog_error_t wyl_policy_store_offline_restore_create_guarded
+  (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *record,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
 wyrelog_error_t wyl_policy_store_offline_restore_load
   (wyl_policy_store_t *store, const gchar *operation_uuid,
     WylPolicyOfflineRestoreRecord **out_record);

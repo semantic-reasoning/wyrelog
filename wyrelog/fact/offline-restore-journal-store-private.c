@@ -168,9 +168,10 @@ wyl_fact_offline_restore_journal_store_load (wyl_policy_store_t *store,
   return rc;
 }
 
-wyrelog_error_t
-wyl_fact_offline_restore_journal_store_create (wyl_policy_store_t *store,
+static wyrelog_error_t
+journal_store_create (wyl_policy_store_t *store,
     const WylFactOfflineRestoreJournal *journal,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
     WylFactOfflineRestoreStoreResult *out_result,
     WylFactOfflineRestoreJournal *out_committed)
 {
@@ -186,8 +187,10 @@ wyl_fact_offline_restore_journal_store_create (wyl_policy_store_t *store,
   WylPolicyOfflineRestoreRecord *committed = NULL;
   WylPolicyOfflineRestoreStoreResult result;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_offline_restore_create (store, &record, &result,
-            &committed);
+    rc = proof == NULL ? wyl_policy_store_offline_restore_create (store,
+            &record, &result, &committed) :
+        wyl_policy_store_offline_restore_create_guarded (store, &record,
+            proof, proof_data, &result, &committed);
   if (rc == WYRELOG_E_OK) {
     *out_result = map_result (result);
     if (committed != NULL)
@@ -196,6 +199,29 @@ wyl_fact_offline_restore_journal_store_create (wyl_policy_store_t *store,
   wyl_policy_offline_restore_record_free (committed);
   record_clear (&record);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_store_create (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *journal,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  return journal_store_create (store, journal, NULL, NULL, out_result,
+             out_committed);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_journal_store_create_guarded
+  (wyl_policy_store_t *store, const WylFactOfflineRestoreJournal *journal,
+    WylPolicyOfflineRestoreBeginProofFunc proof, gpointer proof_data,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (proof == NULL)
+    return WYRELOG_E_INVALID;
+  return journal_store_create (store, journal, proof, proof_data,
+             out_result, out_committed);
 }
 
 wyrelog_error_t
