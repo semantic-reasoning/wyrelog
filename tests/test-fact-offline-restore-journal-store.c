@@ -1184,7 +1184,7 @@ tenant_replacement_schema_variant (const gchar *old_phase)
   g_assert_nonnull (insert_sql);
   g_assert_nonnull (delete_sql);
   g_auto (GStrv) parts = g_strsplit (table_sql,
-          "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup')),",
+          "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup','verified')) ,",
           2);
   g_assert_nonnull (parts[1]);
   g_autofree gchar *predecessor = g_strdup_printf
@@ -1214,6 +1214,8 @@ tenant_replacement_schema_variant (const gchar *old_phase)
 static void
 tenant_replacement_schema_is_atomic (void)
 {
+  tenant_replacement_schema_variant
+    ("phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup')),");
   tenant_replacement_schema_variant
     ("phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced')),");
   tenant_replacement_schema_variant
