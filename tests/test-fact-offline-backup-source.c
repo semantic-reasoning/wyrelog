@@ -4269,6 +4269,153 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                 g_assert_cmpint (wyl_policy_store_create_schema
                       (f.fixture.policy), ==, WYRELOG_E_POLICY);
               }
+              if (g_str_has_prefix (mode,
+                  "retain-sync-dir-publish-sync-companion-select")) {
+                gboolean insert_fail = g_str_has_suffix (mode,
+                        "select-insert-fail");
+                gboolean delete_fail = g_str_has_suffix (mode,
+                        "select-delete-fail");
+                gboolean phase_fail = g_str_has_suffix (mode,
+                        "select-phase-fail");
+                gboolean foreign = g_str_has_suffix (mode,
+                        "select-foreign");
+                gboolean response = g_str_has_suffix (mode,
+                        "select-commit-response");
+                gboolean stale = g_str_has_suffix (mode, "select-stale");
+                sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+                if (delete_fail)
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "CREATE TEMP TRIGGER fail_second_selected_delete "
+                      "BEFORE DELETE ON main.fact_graph_provisioning "
+                      "WHEN OLD.graph_id='zeta' AND OLD.phase='active' BEGIN "
+                      "SELECT RAISE(ABORT,'injected selected delete failure'); "
+                      "END;", NULL, NULL, NULL), ==, SQLITE_OK);
+                if (insert_fail)
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "CREATE TEMP TRIGGER fail_second_selected_insert "
+                      "BEFORE INSERT ON main.fact_graph_provisioning "
+                      "WHEN NEW.graph_id='zeta' AND "
+                      "NEW.phase='restore_selected' BEGIN "
+                      "SELECT RAISE(ABORT,'injected selected insert failure'); "
+                      "END;", NULL, NULL, NULL), ==, SQLITE_OK);
+                if (phase_fail)
+                  g_assert_cmpint (sqlite3_exec (db,
+                      "CREATE TEMP TRIGGER fail_second_selected_phase "
+                      "BEFORE UPDATE ON main.fact_tenant_restore_replacements "
+                      "WHEN NEW.graph_id='zeta' BEGIN "
+                      "SELECT RAISE(ABORT,'injected selected phase failure'); "
+                      "END;", NULL, NULL, NULL), ==, SQLITE_OK);
+                g_autofree gchar *foreign_path = foreign ?
+                    graph_file_path (&f.fixture, second,
+                        "foreign-selected-sidecar") : NULL;
+                if (foreign)
+                  g_assert_true (g_file_set_contents (foreign_path,
+                      "foreign", -1, NULL));
+                #ifdef WYL_TEST_HANDLE_SEAMS
+                if (response)
+                  wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+                      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+                #endif
+                wyl_fact_offline_restore_journal_clear (&f.committed);
+                if (stale) {
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_select_replacements_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, 32, 0, &f.committed), !=,
+                      WYRELOG_E_OK);
+                  g_assert_null (f.committed.graphs);
+                }
+                wyrelog_error_t selected_rc =
+                    wyl_fact_offline_restore_tenant_select_replacements_run
+                      (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                        session_operation, 33, 0, &f.committed);
+                if (delete_fail || insert_fail || phase_fail || foreign) {
+                  g_assert_cmpint (selected_rc, !=, WYRELOG_E_OK);
+                  g_assert_null (f.committed.graphs);
+                  if (delete_fail)
+                    g_assert_cmpint (sqlite3_exec (db,
+                        "DROP TRIGGER fail_second_selected_delete;",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                  if (insert_fail)
+                    g_assert_cmpint (sqlite3_exec (db,
+                        "DROP TRIGGER fail_second_selected_insert;",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                  if (phase_fail)
+                    g_assert_cmpint (sqlite3_exec (db,
+                        "DROP TRIGGER fail_second_selected_phase;",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                  if (foreign)
+                    g_assert_cmpint (g_remove (foreign_path), ==, 0);
+                  g_auto (WylFactOfflineRestoreJournal) unchanged = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &unchanged), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (unchanged.version, ==,
+                      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION);
+                  g_assert_cmpuint (unchanged.revision, ==, 33);
+                  sqlite3_stmt *before_counts = NULL;
+                  g_assert_cmpint (sqlite3_prepare_v2 (db,
+                      "SELECT (SELECT count(*) FROM fact_graph_provisioning "
+                      "WHERE phase='active'),(SELECT count(*) FROM "
+                      "fact_graph_provisioning WHERE phase='restore_selected'),"
+                      "(SELECT count(*) FROM fact_tenant_restore_replacements "
+                      "WHERE phase='companion_synced');", -1,
+                      &before_counts, NULL), ==, SQLITE_OK);
+                  g_assert_cmpint (sqlite3_step (before_counts), ==,
+                      SQLITE_ROW);
+                  g_assert_cmpint (sqlite3_column_int (before_counts, 0), ==, 2);
+                  g_assert_cmpint (sqlite3_column_int (before_counts, 1), ==, 0);
+                  g_assert_cmpint (sqlite3_column_int (before_counts, 2), ==, 2);
+                  sqlite3_finalize (before_counts);
+                  selected_rc =
+                      wyl_fact_offline_restore_tenant_select_replacements_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                          session_operation, 33, 0, &f.committed);
+                }
+                if (response) {
+                  g_assert_cmpint (selected_rc, ==, WYRELOG_E_IO);
+                  g_assert_null (f.committed.graphs);
+                } else
+                  g_assert_cmpint (selected_rc, ==, WYRELOG_E_OK);
+                if (!response) {
+                  g_assert_cmpuint (f.committed.version, ==,
+                      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION);
+                  g_assert_cmpuint (f.committed.revision, ==, 34);
+                }
+                g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                g_assert_cmpint (wyl_policy_store_open (policy_path,
+                    &f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (wyl_policy_store_create_schema
+                      (f.fixture.policy), ==, WYRELOG_E_OK);
+                g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                      (f.fixture.policy),
+                    "UPDATE fact_tenant_restore_replacements SET "
+                    "phase='companion_synced' WHERE graph_id='alpha';",
+                    NULL, NULL, NULL), ==, SQLITE_CONSTRAINT_TRIGGER);
+                if (response) {
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &f.committed),
+                      ==, WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.version, ==,
+                      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION);
+                  g_assert_cmpuint (f.committed.revision, ==, 34);
+                }
+                sqlite3_stmt *selected_count = NULL;
+                g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+                      (f.fixture.policy), "SELECT "
+                    "(SELECT count(*) FROM fact_tenant_restore_replacements "
+                    "WHERE phase='selected_pending_cleanup'),"
+                    "(SELECT count(*) FROM fact_graph_provisioning "
+                    "WHERE phase='restore_selected'),"
+                    "(SELECT count(*) FROM fact_graph_provisioning "
+                    "WHERE phase='active');", -1, &selected_count, NULL),
+                    ==, SQLITE_OK);
+                g_assert_cmpint (sqlite3_step (selected_count), ==,
+                    SQLITE_ROW);
+                g_assert_cmpint (sqlite3_column_int (selected_count, 0), ==, 2);
+                g_assert_cmpint (sqlite3_column_int (selected_count, 1), ==, 2);
+                g_assert_cmpint (sqlite3_column_int (selected_count, 2), ==, 0);
+                sqlite3_finalize (selected_count);
+              }
             }
 #ifdef WYL_TEST_HANDLE_SEAMS
             if (g_str_equal (mode,
@@ -6129,6 +6276,22 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion-schema", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/selected-schema-phase",
       "retain-sync-dir-publish-sync-companion-schema-phase", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/both",
+      "retain-sync-dir-publish-sync-companion-select", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/delete-fail",
+      "retain-sync-dir-publish-sync-companion-select-delete-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/insert-fail",
+      "retain-sync-dir-publish-sync-companion-select-insert-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/phase-fail",
+      "retain-sync-dir-publish-sync-companion-select-phase-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/foreign",
+      "retain-sync-dir-publish-sync-companion-select-foreign", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/stale",
+      "retain-sync-dir-publish-sync-companion-select-stale", test_tenant_commit_sync_staged_both);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/commit-response",
+      "retain-sync-dir-publish-sync-companion-select-commit-response", test_tenant_commit_sync_staged_both);
+#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/foreign",
       "retain-sync-dir-publish-sync-companion-foreign", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/sibling-foreign",
