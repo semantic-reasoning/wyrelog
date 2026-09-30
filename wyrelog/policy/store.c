@@ -1223,7 +1223,7 @@ static const gchar tenant_restore_replacement_table_pre_selected_sql[] =
     "CHECK(old_provisioning_uuid!=replacement_uuid),"
     "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
     "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
-static const gchar tenant_restore_replacement_table_sql[] =
+static const gchar tenant_restore_replacement_table_pre_verified_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_tenant_restore_replacements ("
     "restore_operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,"
     "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL UNIQUE,"
@@ -1235,6 +1235,24 @@ static const gchar tenant_restore_replacement_table_sql[] =
     "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
     "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
     "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup')),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "PRIMARY KEY(restore_operation_uuid,graph_id),"
+    "CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+static const gchar tenant_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_tenant_restore_replacements ("
+    "restore_operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,"
+    "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL UNIQUE,"
+    "old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','selected_pending_cleanup','verified')) ,"
     "created_at INTEGER NOT NULL CHECK(created_at>=0),"
     "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
     "PRIMARY KEY(restore_operation_uuid,graph_id),"
@@ -12313,7 +12331,10 @@ migrate_tenant_restore_replacement_schema (sqlite3 *db)
   } else if (graph_authority_object_matches (db, "table", objects[0].name,
       objects[0].sql) != WYRELOG_E_OK) {
     rc = graph_authority_object_matches (db, "table", objects[0].name,
-            tenant_restore_replacement_table_pre_selected_sql);
+            tenant_restore_replacement_table_pre_verified_sql);
+    if (rc != WYRELOG_E_OK)
+      rc = graph_authority_object_matches (db, "table", objects[0].name,
+              tenant_restore_replacement_table_pre_selected_sql);
     if (rc != WYRELOG_E_OK)
       rc = graph_authority_object_matches (db, "table", objects[0].name,
               tenant_restore_replacement_table_pre_companion_sql);
