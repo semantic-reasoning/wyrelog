@@ -1394,8 +1394,9 @@ wyl_fact_offline_restore_tenant_reserve_replacements_run
         rc = WYRELOG_E_BUSY;
     }
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &item->key,
-              remaining, &item->quiescence);
+      rc = tenant_commit_v5_quiesce (policy, lease, &resolver, runtime,
+              &journal, canonical, &item->key, remaining,
+              &item->quiescence);
     if (rc == WYRELOG_E_OK)
       rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
               journal.tenant_id, graph->graph_id, FALSE, &item->directory);
