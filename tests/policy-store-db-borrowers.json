@@ -54,6 +54,7 @@
     "tests/check-service-credential-store-inspect.c": 1,
     "tests/check-service-permission-closure-seed.c": 3,
     "tests/test-fact-graph-seal.c": 1,
+    "tests/test-fact-offline-backup-source.c": 1,
     "tests/test-fact-offline-restore-stage-replay.c": 1,
     "tests/test-policy-graph-authority.c": 4,
     "tests/test-policy-service-namespace.c": 5,
