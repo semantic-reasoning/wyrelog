@@ -5794,6 +5794,53 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                         "retain-sync-dir-publish-sync-companion-select-promote-driver");
                 if (g_str_has_suffix (mode, "select-promote-policy")
                     || promote_driver) {
+                  if (g_str_equal (mode,
+                      "retain-sync-dir-publish-sync-companion-select-promote-driver-restart")
+                      || g_str_equal (mode,
+                      "retain-sync-dir-publish-sync-companion-select-promote-driver-restart-drift")) {
+                    g_clear_pointer (&f.fixture.runtime,
+                        wyl_fact_graph_runtime_manager_unref);
+                    g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+                          (&f.fixture.runtime), ==, WYRELOG_E_OK);
+                  }
+                  if (g_str_equal (mode,
+                      "retain-sync-dir-publish-sync-companion-select-promote-driver-restart-drift")) {
+                    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+                    sqlite3_stmt *guard = NULL;
+                    g_assert_cmpint (sqlite3_prepare_v2 (db,
+                        "SELECT sql FROM sqlite_master WHERE "
+                        "name='fact_tenant_restore_replacement_update_guard';",
+                        -1, &guard, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+                    g_autofree gchar *guard_sql = g_strdup
+                          ((const gchar *) sqlite3_column_text (guard, 0));
+                    sqlite3_finalize (guard);
+                    g_assert_cmpint (sqlite3_exec (db,
+                        "DROP TRIGGER fact_tenant_restore_replacement_update_guard;"
+                        "UPDATE fact_tenant_restore_replacements SET "
+                        "journal_revision=34 WHERE graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    wyl_fact_offline_restore_journal_clear (&f.committed);
+                    g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                        session_operation, first, 34, 0, &f.committed), ==,
+                        WYRELOG_E_POLICY);
+                    WylFactGraphKey key = { 0 };
+                    WylFactGraphRuntimeStatus status = { 0 };
+                    g_assert_cmpint (wyl_fact_graph_key_init (&key,
+                        "tenant-a", "alpha"), ==, WYRELOG_E_OK);
+                    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+                          (f.fixture.runtime, &key, &status), ==,
+                        WYRELOG_E_NOT_FOUND);
+                    wyl_fact_graph_runtime_status_clear (&status);
+                    wyl_fact_graph_key_clear (&key);
+                    g_assert_cmpint (sqlite3_exec (db,
+                        "UPDATE fact_tenant_restore_replacements SET "
+                        "journal_revision=33 WHERE graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_exec (db, guard_sql,
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                  }
                   wyl_fact_offline_restore_journal_clear (&f.committed);
                   g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
                         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
@@ -5807,6 +5854,15 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                       WYRELOG_E_OK);
                   g_assert_cmpuint (f.committed.revision, ==, 38);
                   if (promote_driver) {
+                    if (g_str_equal (mode,
+                        "retain-sync-dir-publish-sync-companion-select-promote-driver-restart")
+                        || g_str_equal (mode,
+                        "retain-sync-dir-publish-sync-companion-select-promote-driver-restart-drift")) {
+                      g_clear_pointer (&f.fixture.runtime,
+                          wyl_fact_graph_runtime_manager_unref);
+                      g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+                            (&f.fixture.runtime), ==, WYRELOG_E_OK);
+                    }
                     if (g_str_has_suffix (mode,
                         "promote-driver-stale")) {
                       wyl_fact_offline_restore_journal_clear (&f.committed);
@@ -6311,6 +6367,12 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                       &f.fixture.policy), ==, WYRELOG_E_OK);
                   g_assert_cmpint (wyl_policy_store_create_schema
                         (f.fixture.policy), ==, WYRELOG_E_OK);
+                  if (g_str_has_suffix (mode, "select-finalize-both")) {
+                    g_clear_pointer (&f.fixture.runtime,
+                        wyl_fact_graph_runtime_manager_unref);
+                    g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+                          (&f.fixture.runtime), ==, WYRELOG_E_OK);
+                  }
                   wyl_fact_offline_restore_journal_clear (&f.committed);
                   g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
                         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
@@ -6402,6 +6464,10 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                   g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
                       g_ptr_array_index (pending.graphs, 0))->attempt, ==,
                       WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+                  g_clear_pointer (&f.fixture.runtime,
+                      wyl_fact_graph_runtime_manager_unref);
+                  g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+                        (&f.fixture.runtime), ==, WYRELOG_E_OK);
                   g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
                         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
                       session_operation, first, 35, 0, &f.committed), ==,
@@ -8445,6 +8511,10 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion-select-promote-policy", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver",
       "retain-sync-dir-publish-sync-companion-select-promote-driver", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-restart",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-restart", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-restart-drift",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-restart-drift", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-successor",
       "retain-sync-dir-publish-sync-companion-select-promote-driver-successor", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-successor-chain",

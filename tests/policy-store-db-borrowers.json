@@ -21,7 +21,7 @@
     "tests/test-daemon-http-facts.c": 14,
     "tests/test-daemon-service-credential-handoff.c": 1,
     "tests/test-fact-graph-seal.c": 9,
-    "tests/test-fact-offline-backup-source.c": 59,
+    "tests/test-fact-offline-backup-source.c": 60,
     "tests/test-fact-offline-restore-journal-store.c": 19,
     "tests/test-fact-provisioning-run.c": 15,
     "tests/test-fact-reconcile-move.c": 2,
