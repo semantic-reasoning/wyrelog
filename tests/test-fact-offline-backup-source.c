@@ -3335,6 +3335,146 @@ tenant_selected_schema_fixture (wyl_policy_store_t *store,
       SQLITE_OK);
 }
 
+/* Import the all-graph terminal SQL image before the scoped v8 writer exists. */
+static void
+tenant_published_schema_fixture (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *selected)
+{
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autoptr (GBytes) before = NULL;
+  g_autoptr (GBytes) published_bytes = NULL;
+  g_auto (WylFactOfflineRestoreJournal) published = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (selected,
+      &before), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (before,
+      &published), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < published.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (published.graphs, i);
+    g_autofree gchar *graph_id = g_strdup (graph->graph_id);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+          (&published, graph_id), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+          (&published, graph_id), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_tenant_selected_published
+        (&published), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&published,
+      &published_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db, "BEGIN IMMEDIATE;", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  sqlite3_stmt *journal_guard = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM sqlite_master WHERE "
+      "name='fact_offline_restore_journal_update_guard';",
+      -1, &journal_guard, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (journal_guard), ==, SQLITE_ROW);
+  g_autofree gchar *journal_guard_sql = g_strdup
+        ((const gchar *) sqlite3_column_text (journal_guard, 0));
+  sqlite3_finalize (journal_guard);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_offline_restore_journal_update_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE fact_offline_restore_journals SET revision=?1,journal_blob=?2 "
+      "WHERE operation_uuid=?3 AND revision=?4;", -1, &update, NULL), ==,
+      SQLITE_OK);
+  gsize size = 0;
+  const void *bytes = g_bytes_get_data (published_bytes, &size);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, published.revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, bytes, size,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, published.operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 4, selected->revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (update);
+  g_assert_cmpint (sqlite3_exec (db, journal_guard_sql,
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  for (guint i = 0; i < published.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (published.graphs, i);
+    gchar *sql = sqlite3_mprintf
+          ("UPDATE fact_graphs SET lifecycle_state='active',sealed=0,"
+            "lifecycle_generation=lifecycle_generation+1 "
+            "WHERE tenant_id='%q' AND graph_id='%q' AND "
+            "lifecycle_state='sealed';", published.tenant_id,
+            graph->graph_id);
+    g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    sqlite3_free (sql);
+    sql = sqlite3_mprintf
+          ("UPDATE fact_graph_provisioning SET phase='active' "
+            "WHERE op_uuid='%q' AND phase='restore_selected';",
+            graph->replacement_provisioning_uuid);
+    g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    sqlite3_free (sql);
+  }
+  sqlite3_stmt *guard = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM sqlite_master WHERE "
+      "name='fact_tenant_restore_replacement_update_guard';",
+      -1, &guard, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+  g_autofree gchar *guard_sql = g_strdup
+        ((const gchar *) sqlite3_column_text (guard, 0));
+  sqlite3_finalize (guard);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_tenant_restore_replacement_update_guard;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "UPDATE fact_tenant_restore_replacements SET phase='verified' "
+      "WHERE phase='selected_pending_cleanup';", NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (db), ==, published.graphs->len);
+  g_assert_cmpint (sqlite3_exec (db, guard_sql, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  gchar *sql = sqlite3_mprintf
+        ("UPDATE tenants SET lifecycle_state='unsealing',"
+          "lifecycle_generation=lifecycle_generation+1 "
+          "WHERE tenant_id='%q' AND lifecycle_state='sealed';"
+          "UPDATE tenants SET lifecycle_state='active',sealed=0,"
+          "sealed_generation=sealed_generation+1,"
+          "lifecycle_generation=lifecycle_generation+1 "
+          "WHERE tenant_id='%q' AND lifecycle_state='unsealing';"
+          "DELETE FROM fact_offline_restore_tenant_claims "
+          "WHERE tenant_id='%q' AND operation_uuid='%q';",
+          published.tenant_id, published.tenant_id,
+          published.tenant_id, published.operation_uuid);
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_free (sql);
+  g_assert_cmpint (sqlite3_exec (db, "COMMIT;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
+}
+
+static void
+tenant_published_tamper_guarded (sqlite3 *db, const gchar *guard_name,
+    const gchar *mutation)
+{
+  gchar *query = sqlite3_mprintf
+        ("SELECT sql FROM sqlite_master WHERE name='%q';", guard_name);
+  sqlite3_stmt *guard = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db, query, -1, &guard, NULL), ==,
+      SQLITE_OK);
+  sqlite3_free (query);
+  g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+  g_autofree gchar *guard_sql = g_strdup
+        ((const gchar *) sqlite3_column_text (guard, 0));
+  sqlite3_finalize (guard);
+  query = sqlite3_mprintf ("DROP TRIGGER \"%w\";", guard_name);
+  g_assert_cmpint (sqlite3_exec (db, query, NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_free (query);
+  g_assert_cmpint (sqlite3_exec (db, mutation, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, guard_sql, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+}
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef struct
 {
@@ -4423,6 +4563,168 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                 g_assert_cmpint (sqlite3_column_int (selected_count, 1), ==, 2);
                 g_assert_cmpint (sqlite3_column_int (selected_count, 2), ==, 0);
                 sqlite3_finalize (selected_count);
+                if (g_str_has_prefix (mode,
+                    "retain-sync-dir-publish-sync-companion-select-published-schema")) {
+                  tenant_published_schema_fixture (f.fixture.policy,
+                      &f.committed);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  sqlite3 *published_db = wyl_policy_store_get_db
+                        (f.fixture.policy);
+                  g_assert_cmpint (sqlite3_exec (published_db,
+                      "UPDATE fact_tenant_restore_replacements SET "
+                      "phase='selected_pending_cleanup' WHERE graph_id='alpha';",
+                      NULL, NULL, NULL), ==, SQLITE_CONSTRAINT_TRIGGER);
+                  gboolean tampered = FALSE;
+                  gboolean valid_change = FALSE;
+                  if (g_str_has_suffix (mode, "published-schema-claim")) {
+                    gchar *sql = sqlite3_mprintf
+                          ("INSERT INTO fact_offline_restore_tenant_claims "
+                            "(tenant_id,operation_uuid) VALUES('tenant-a','%q');",
+                            session_operation);
+                    g_assert_cmpint (sqlite3_exec (published_db, sql,
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    sqlite3_free (sql);
+                    tampered = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-journal")) {
+                    sqlite3_stmt *guard = NULL;
+                    g_assert_cmpint (sqlite3_prepare_v2 (published_db,
+                        "SELECT sql FROM sqlite_master WHERE "
+                        "name='fact_offline_restore_journal_update_guard';",
+                        -1, &guard, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+                    g_autofree gchar *guard_sql = g_strdup
+                          ((const gchar *) sqlite3_column_text (guard, 0));
+                    sqlite3_finalize (guard);
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "DROP TRIGGER fact_offline_restore_journal_update_guard;"
+                        "UPDATE fact_offline_restore_journals SET "
+                        "revision=revision+1 WHERE scope='tenant';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_exec (published_db, guard_sql,
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    tampered = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-row")) {
+                    sqlite3_stmt *guard = NULL;
+                    g_assert_cmpint (sqlite3_prepare_v2 (published_db,
+                        "SELECT sql FROM sqlite_master WHERE "
+                        "name='fact_tenant_restore_replacement_update_guard';",
+                        -1, &guard, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+                    g_autofree gchar *guard_sql = g_strdup
+                          ((const gchar *) sqlite3_column_text (guard, 0));
+                    sqlite3_finalize (guard);
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "DROP TRIGGER fact_tenant_restore_replacement_update_guard;"
+                        "UPDATE fact_tenant_restore_replacements SET "
+                        "phase='selected_pending_cleanup' WHERE graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    g_assert_cmpint (sqlite3_exec (published_db, guard_sql,
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    tampered = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-graph")) {
+                    tenant_published_tamper_guarded (published_db,
+                        "fact_graph_authority_update_guard",
+                        "UPDATE fact_graphs SET "
+                        "lifecycle_generation=lifecycle_generation-1 "
+                        "WHERE tenant_id='tenant-a' AND graph_id='alpha';");
+                    tampered = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-tenant")) {
+                    tenant_published_tamper_guarded (published_db,
+                        "tenant_authority_update_guard",
+                        "UPDATE tenants SET "
+                        "lifecycle_generation=lifecycle_generation-1 "
+                        "WHERE tenant_id='tenant-a';");
+                    tampered = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-later-graph")) {
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "UPDATE fact_graphs SET lifecycle_state='sealed',"
+                        "sealed=1,lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    tampered = TRUE;
+                    valid_change = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-later-tenant")) {
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "UPDATE tenants SET lifecycle_state='sealing',"
+                        "lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    tampered = TRUE;
+                    valid_change = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-later-graph-claim")) {
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "UPDATE fact_graphs SET lifecycle_state='sealed',"
+                        "sealed=1,lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    create_restore_journal_for_manifest (&f.fixture,
+                        f.capture.manifest,
+                        WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha",
+                        "018f22d0-7b6d-7a5b-8c31-123456789af9");
+                    tampered = TRUE;
+                    valid_change = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-later-tenant-claim")) {
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "UPDATE fact_graphs SET lifecycle_state='sealed',"
+                        "sealed=1,lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a' AND "
+                        "lifecycle_state='active';"
+                        "UPDATE tenants SET lifecycle_state='sealing',"
+                        "lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a' AND "
+                        "lifecycle_state='active';"
+                        "UPDATE tenants SET lifecycle_state='sealed',sealed=1,"
+                        "sealed_generation=sealed_generation+1,"
+                        "lifecycle_generation=lifecycle_generation+1 "
+                        "WHERE tenant_id='tenant-a' AND "
+                        "lifecycle_state='sealing';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    create_restore_journal_for_manifest (&f.fixture,
+                        f.capture.manifest,
+                        WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL,
+                        "018f22d0-7b6d-7a5b-8c31-123456789af8");
+                    tampered = TRUE;
+                    valid_change = TRUE;
+                  } else if (g_str_has_suffix (mode,
+                      "published-schema-provision")) {
+                    g_assert_cmpint (sqlite3_exec (published_db,
+                        "DELETE FROM fact_graph_provisioning "
+                        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+                        NULL, NULL, NULL), ==, SQLITE_OK);
+                    tampered = TRUE;
+                  }
+                  if (tampered) {
+                    g_clear_pointer (&f.fixture.policy,
+                        wyl_policy_store_close);
+                    g_assert_cmpint (wyl_policy_store_open (policy_path,
+                        &f.fixture.policy), ==, WYRELOG_E_OK);
+                    g_assert_cmpint (wyl_policy_store_create_schema
+                          (f.fixture.policy), ==, valid_change ?
+                        WYRELOG_E_OK : WYRELOG_E_POLICY);
+                  }
+                  g_clear_pointer (&f.session,
+                      wyl_fact_offline_restore_validation_session_free);
+                  for (guint i = 0; i < 2; i++)
+                    g_clear_pointer (&f.snapshots[i],
+                        wyl_fact_graph_snapshot_unref);
+                  g_clear_object (&f.cancel);
+                  g_clear_pointer (&f.journal_before, g_bytes_unref);
+                  destination_capture_clear (&f.capture);
+                  fixture_clear (&f.fixture);
+                  return;
+                }
                 if (g_str_has_suffix (mode, "select-finalize-policy")) {
                   WylPolicyOfflineRestoreRecord *selected_record = NULL;
                   WylPolicyOfflineRestoreRecord *pending_record = NULL;
@@ -6574,6 +6876,28 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion-schema-phase", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/both",
       "retain-sync-dir-publish-sync-companion-select", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema",
+      "retain-sync-dir-publish-sync-companion-select-published-schema", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-claim",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-claim", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-journal",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-journal", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-row",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-row", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-graph",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-graph", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-tenant",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-tenant", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-later-graph",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-later-graph", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-later-tenant",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-later-tenant", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-later-graph-claim",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-later-graph-claim", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-later-tenant-claim",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-later-tenant-claim", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-provision",
+      "retain-sync-dir-publish-sync-companion-select-published-schema-provision", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/delete-fail",
       "retain-sync-dir-publish-sync-companion-select-delete-fail", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/insert-fail",
