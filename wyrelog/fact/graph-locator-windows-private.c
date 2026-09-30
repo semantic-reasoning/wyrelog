@@ -19,6 +19,23 @@
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
 
 wyrelog_error_t
+wyl_fact_graph_directory_pre_stage_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphPreStageInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || expected_main == NULL || out_inventory == NULL)
+    return WYRELOG_E_INVALID;
+  (void) pair;
+  /* The exact durable ACTIVE pair evidence is not available on Windows. */
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
 wyl_fact_graph_directory_restore_inventory
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,

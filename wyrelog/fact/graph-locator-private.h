@@ -122,6 +122,23 @@ typedef struct
   gboolean main_present;
 } WylFactGraphRestoreInventory;
 
+/* Read-only destination observation before any restore stage exists. The
+ * caller supplies the exact ACTIVE pair authority, or NULL for an empty
+ * graph. A stage, rollback, WAL sidecar, or foreign entry fails closed; the
+ * existing facts.duckdb.lock file is allowed. */
+typedef struct
+{
+  WylFactArtifactInventoryObservation observation;
+  WylFactArtifactInventoryIdentity main_identity;
+  gboolean main_present;
+} WylFactGraphPreStageInventory;
+
+wyrelog_error_t wyl_fact_graph_directory_pre_stage_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphPreStageInventory *out_inventory);
+
 /* Observational restore preflight under the session-owned root writer lease.
  * The guard identity is the verified root directory (the actual flock
  * object), NOT the generic artifact namespace guard. The caller supplies
