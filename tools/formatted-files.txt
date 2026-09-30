@@ -293,6 +293,8 @@ wyrelog/fact/offline-restore-journal-store-private.c
 wyrelog/fact/offline-restore-journal-store-private.h
 wyrelog/fact/offline-restore-prepare-private.c
 wyrelog/fact/offline-restore-prepare-private.h
+wyrelog/fact/offline-restore-resume-private.c
+wyrelog/fact/offline-restore-resume-private.h
 wyrelog/fact/offline-restore-rollback-private.c
 wyrelog/fact/offline-restore-rollback-private.h
 wyrelog/fact/offline-restore-stage-private.c
