@@ -12212,22 +12212,16 @@ tenant_selected_provisioning_valid (sqlite3 *db,
 static wyrelog_error_t
 tenant_published_provisioning_valid (sqlite3 *db,
     const WylFactOfflineRestoreJournal *journal,
-    const WylFactOfflineRestoreJournalGraph *graph)
+    const WylFactOfflineRestoreJournalGraph *graph, gboolean historical)
 {
   /* Reopen checks durable history against a floor: normal lifecycle work may
    * have advanced the graph or tenant since publication.  The scoped writer
    * must check the exact active/unsealed postcondition before its COMMIT. */
   sqlite3_stmt *stmt = NULL;
   wyrelog_error_t rc = prepare_stmt (db,
-          "SELECT EXISTS(SELECT 1 FROM main.fact_graph_provisioning AS p "
-          "JOIN main.fact_graphs AS g ON g.tenant_id=p.tenant_id "
-          "AND g.graph_id=p.graph_id JOIN main.tenants AS t ON "
-          "t.tenant_id=p.tenant_id WHERE p.tenant_id=?1 AND p.graph_id=?2 "
-          "AND p.op_uuid=?3 AND p.store_uuid=?4 AND p.stage_basename=?5 "
-          "AND p.expected_lifecycle_generation=?6 "
-          "AND p.expected_reconciliation_generation=?7 "
-          "AND p.phase='active' AND p.attempt=0 "
-          "AND g.store_uuid=?4 "
+          "SELECT EXISTS(SELECT 1 FROM main.fact_graphs AS g "
+          "JOIN main.tenants AS t ON t.tenant_id=g.tenant_id "
+          "WHERE g.tenant_id=?1 AND g.graph_id=?2 AND g.store_uuid=?4 "
           "AND g.lifecycle_state IN ('active','sealed','degraded') "
           "AND ?6<9223372036854775807 "
           "AND g.lifecycle_generation>=?6+1 "
@@ -12236,7 +12230,14 @@ tenant_published_provisioning_valid (sqlite3 *db,
           "AND ?8<9223372036854775806 "
           "AND t.lifecycle_generation>=?8+2 "
           "AND t.reconciliation_generation>=?9 "
-          "AND t.sealed_generation>=1) "
+          "AND t.sealed_generation>=1 "
+          "AND (?12=1 OR EXISTS(SELECT 1 FROM "
+          "main.fact_graph_provisioning AS p WHERE "
+          "p.tenant_id=?1 AND p.graph_id=?2 AND p.op_uuid=?3 "
+          "AND p.store_uuid=?4 AND p.stage_basename=?5 "
+          "AND p.expected_lifecycle_generation=?6 "
+          "AND p.expected_reconciliation_generation=?7 "
+          "AND p.phase='active' AND p.attempt=0))) "
           "AND NOT EXISTS(SELECT 1 FROM main.fact_graph_provisioning "
           "WHERE op_uuid=?10) "
           "AND NOT EXISTS(SELECT 1 FROM main.fact_offline_restore_tenant_claims "
@@ -12259,7 +12260,8 @@ tenant_published_provisioning_valid (sqlite3 *db,
       || sqlite3_bind_int64 (stmt, 9,
       journal->destination_tenant_reconciliation_generation) != SQLITE_OK
       || bind_text (stmt, 10, graph->old_provisioning_uuid) != WYRELOG_E_OK
-      || bind_text (stmt, 11, journal->operation_uuid) != WYRELOG_E_OK))
+      || bind_text (stmt, 11, journal->operation_uuid) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 12, historical ? 1 : 0) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   gboolean matches = step == SQLITE_ROW && sqlite3_column_int (stmt, 0) == 1;
@@ -12268,6 +12270,79 @@ tenant_published_provisioning_valid (sqlite3 *db,
     return rc;
   return step == SQLITE_ROW ?
          (matches ? WYRELOG_E_OK : WYRELOG_E_POLICY) : WYRELOG_E_IO;
+}
+
+/* A published tenant vector may cease to be current only when one later,
+ * fully selected tenant operation names every replacement as its predecessor.
+ * The caller validates that later journal and all of its immutable rows in
+ * the same connection snapshot. A pending v6 reservation is not a successor. */
+static wyrelog_error_t
+tenant_published_has_successor (sqlite3 *db,
+    const WylFactOfflineRestoreJournal *prior, gboolean *out_successor)
+{
+  *out_successor = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db,
+          "SELECT journal_blob FROM main.fact_offline_restore_journals "
+          "WHERE tenant_id=?1 AND scope='tenant' AND operation_uuid!=?2;",
+          &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, prior->tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, prior->operation_uuid) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const void *blob = sqlite3_column_blob (stmt, 0);
+    int length = sqlite3_column_bytes (stmt, 0);
+    if (blob == NULL || length <= 0) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    g_autoptr (GBytes) encoded = g_bytes_new (blob, length);
+    g_auto (WylFactOfflineRestoreJournal) next = { 0 };
+    rc = wyl_fact_offline_restore_journal_decode (encoded, &next);
+    if (rc != WYRELOG_E_OK)
+      break;
+    if (next.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION
+        && next.version !=
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION)
+      continue;
+    if (next.graphs == NULL || next.graphs->len != prior->graphs->len
+        || next.destination_tenant_lifecycle_generation <=
+        prior->destination_tenant_lifecycle_generation + 2
+        || next.destination_tenant_reconciliation_generation <
+        prior->destination_tenant_reconciliation_generation)
+      continue;
+    gboolean matches = TRUE;
+    for (guint i = 0; i < next.graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *old_graph =
+          g_ptr_array_index (prior->graphs, i);
+      const WylFactOfflineRestoreJournalGraph *new_graph =
+          g_ptr_array_index (next.graphs, i);
+      if (g_strcmp0 (old_graph->graph_id, new_graph->graph_id) != 0
+          || g_strcmp0 (old_graph->store_uuid, new_graph->store_uuid) != 0
+          || g_strcmp0 (old_graph->replacement_provisioning_uuid,
+          new_graph->old_provisioning_uuid) != 0
+          || new_graph->destination_lifecycle_generation <=
+          old_graph->destination_lifecycle_generation + 1
+          || new_graph->destination_reconciliation_generation <
+          old_graph->destination_reconciliation_generation) {
+        matches = FALSE;
+        break;
+      }
+    }
+    if (matches) {
+      if (*out_successor) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+      *out_successor = TRUE;
+    }
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -12308,6 +12383,7 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
     gboolean tenant_published = journal.version ==
         WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION;
     gboolean tenant_terminal = tenant_selected || tenant_published;
+    gboolean published_historical = FALSE;
     if (tenant_terminal
         && (g_strcmp0 (operation, journal.operation_uuid) != 0
         || g_strcmp0 ((const gchar *) sqlite3_column_text (journals, 1),
@@ -12370,6 +12446,12 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
       if (rc != WYRELOG_E_OK)
         break;
     }
+    if (tenant_published) {
+      rc = tenant_published_has_successor (db, &journal,
+              &published_historical);
+      if (rc != WYRELOG_E_OK)
+        break;
+    }
     sqlite3_reset (rows);
     sqlite3_clear_bindings (rows);
     rc = bind_text (rows, 1, operation);
@@ -12424,7 +12506,8 @@ tenant_restore_replacement_validate_rows (sqlite3 *db)
       if (rc == WYRELOG_E_OK && tenant_selected)
         rc = tenant_selected_provisioning_valid (db, &journal, graph);
       if (rc == WYRELOG_E_OK && tenant_published)
-        rc = tenant_published_provisioning_valid (db, &journal, graph);
+        rc = tenant_published_provisioning_valid (db, &journal, graph,
+                published_historical);
     }
     if (rc == WYRELOG_E_OK && row_step != SQLITE_DONE)
       rc = WYRELOG_E_IO;
@@ -41354,6 +41437,11 @@ wyl_policy_store_graph_restore_select_with_effect
   if (matched && rc == WYRELOG_E_OK)
     rc = restore_selection_postcondition_locked (store, row,
             selected_journal);
+  /* A graph-local handoff cannot erase the current provisioning named by
+   * a historical tenant publication until graph successor edges are part of
+   * the tenant history validator. Keep that decision inside this CAS. */
+  if (matched && rc == WYRELOG_E_OK)
+    rc = tenant_restore_replacement_validate_rows (store->db);
   if (matched && rc == WYRELOG_E_OK) {
     WylPolicyOfflineRestoreRecord *stored = NULL;
     rc = offline_restore_load_locked (store, row->operation_uuid, &stored);
