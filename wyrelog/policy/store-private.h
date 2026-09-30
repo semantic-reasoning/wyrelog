@@ -3576,6 +3576,21 @@ wyrelog_error_t wyl_policy_store_tenant_restore_select_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* v7 selected tenant FINALIZE records UNKNOWN before cleanup and completes
+ * only after a caller-held root lease proves the filesystem effect. */
+typedef enum
+{
+  WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_BEGIN = 1,
+  WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_COMPLETE,
+} WylPolicyTenantRestoreSelectedFinalizeStep;
+wyrelog_error_t wyl_policy_store_tenant_restore_selected_finalize_step
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    const gchar *graph_id, WylPolicyTenantRestoreSelectedFinalizeStep step,
+    WylPolicyTenantRestoreSelectionEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Typed v5 COMMIT SYNC_STAGED journal step. BEGIN durably records UNKNOWN
  * before any effect. COMPLETE runs its proof/effect callback inside a fresh
  * fenced policy transaction and advances only after proven durability. */

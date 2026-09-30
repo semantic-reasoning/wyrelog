@@ -3241,6 +3241,14 @@ tenant_reserve_test_effect (GBytes *journal, const GPtrArray *uuids,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+reject_tenant_finalize_effect (GBytes *journal, gpointer user_data)
+{
+  g_assert_nonnull (journal);
+  (*(guint *) user_data)++;
+  return WYRELOG_E_POLICY;
+}
+
 /* Import the exact post-selection SQL image to exercise reopen validation
  * before the scoped tenant selection writer exists. */
 static void
@@ -4415,6 +4423,254 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                 g_assert_cmpint (sqlite3_column_int (selected_count, 1), ==, 2);
                 g_assert_cmpint (sqlite3_column_int (selected_count, 2), ==, 0);
                 sqlite3_finalize (selected_count);
+                if (g_str_has_suffix (mode, "select-finalize-policy")) {
+                  WylPolicyOfflineRestoreRecord *selected_record = NULL;
+                  WylPolicyOfflineRestoreRecord *pending_record = NULL;
+                  WylPolicyOfflineRestoreRecord *ignored = NULL;
+                  WylPolicyOfflineRestoreStoreResult step_result =
+                      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+                  g_assert_cmpint (wyl_policy_store_offline_restore_load
+                        (f.fixture.policy, session_operation,
+                      &selected_record), ==, WYRELOG_E_OK);
+                  selected_record->revision--;
+                  g_assert_cmpint (wyl_policy_store_tenant_restore_selected_finalize_step
+                        (f.fixture.policy, selected_record, first,
+                      WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_BEGIN,
+                      NULL, NULL, &step_result, &ignored), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (step_result, ==,
+                      WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
+                  g_assert_null (ignored);
+                  selected_record->revision++;
+                  g_assert_cmpint (wyl_policy_store_tenant_restore_selected_finalize_step
+                        (f.fixture.policy, selected_record, first,
+                      WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_BEGIN,
+                      NULL, NULL, &step_result, &pending_record), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpint (step_result, ==,
+                      WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+                  g_assert_cmpuint (pending_record->revision, ==, 35);
+                  g_assert_cmpint (wyl_policy_store_tenant_restore_selected_finalize_step
+                        (f.fixture.policy, pending_record, second,
+                      WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_BEGIN,
+                      NULL, NULL, &step_result, &ignored), ==,
+                      WYRELOG_E_POLICY);
+                  g_assert_null (ignored);
+                  guint effect_calls = 0;
+                  g_assert_cmpint (wyl_policy_store_tenant_restore_selected_finalize_step
+                        (f.fixture.policy, pending_record, first,
+                      WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_COMPLETE,
+                      reject_tenant_finalize_effect, &effect_calls,
+                      &step_result, &ignored), ==, WYRELOG_E_POLICY);
+                  g_assert_cmpuint (effect_calls, ==, 1);
+                  g_assert_null (ignored);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_auto (WylFactOfflineRestoreJournal) reopened = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &reopened), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (reopened.revision, ==, 35);
+                  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                      g_ptr_array_index (reopened.graphs, 0))->attempt, ==,
+                      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+                  wyl_policy_offline_restore_record_free (pending_record);
+                  wyl_policy_offline_restore_record_free (selected_record);
+                }
+                if (g_str_has_suffix (mode, "select-finalize-both")
+                    || g_str_has_suffix (mode, "select-finalize-reverse")) {
+                  gboolean reverse = g_str_has_suffix (mode,
+                          "select-finalize-reverse");
+                  const gchar *finalize_first = reverse ? second : first;
+                  const gchar *finalize_second = reverse ? first : second;
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, finalize_first, 34, 0,
+                      &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+                  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                      g_ptr_array_index (f.committed.graphs,
+                      reverse ? 1 : 0))->transition_state,
+                      ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, finalize_second, 36, 0,
+                      &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 38);
+                  for (guint graph_index = 0; graph_index < 2;
+                      graph_index++)
+                    g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                        g_ptr_array_index (f.committed.graphs,
+                        graph_index))->transition_state,
+                        ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                }
+                if (g_str_has_suffix (mode, "select-finalize-partial")
+                    || g_str_has_suffix (mode,
+                    "select-finalize-terminal")) {
+#ifdef WYL_TEST_HANDLE_SEAMS
+                  const gchar *failure = g_str_has_suffix (mode,
+                          "select-finalize-partial") ?
+                      "restore-selected-after-companion-unlink" :
+                      "restore-selected-after-rollback-unlink";
+                  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+                    (fail_retain_once, &failure);
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), ==,
+                      WYRELOG_E_IO);
+                  g_assert_null (failure);
+                  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
+                    (NULL, NULL);
+                  g_assert_null (f.committed.graphs);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &pending), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (pending.revision, ==, 35);
+                  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                      g_ptr_array_index (pending.graphs, 0))->attempt, ==,
+                      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 35, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+#endif
+                }
+                if (g_str_has_suffix (mode, "select-finalize-foreign")) {
+                  g_autofree gchar *intruder = graph_file_path (&f.fixture,
+                          second, "foreign-finalize-sidecar");
+                  g_assert_true (g_file_set_contents (intruder,
+                      "foreign", -1, NULL));
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), !=,
+                      WYRELOG_E_OK);
+                  g_assert_null (f.committed.graphs);
+                  g_auto (WylFactOfflineRestoreJournal) unchanged = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &unchanged), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (unchanged.revision, ==, 34);
+                  g_assert_cmpint (g_remove (intruder), ==, 0);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+                }
+                if (g_str_has_suffix (mode, "select-finalize-response")) {
+                  WylPolicyOfflineRestoreRecord *selected_record = NULL;
+                  WylPolicyOfflineRestoreRecord *pending_record = NULL;
+                  WylPolicyOfflineRestoreStoreResult step_result =
+                      WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+                  g_assert_cmpint (wyl_policy_store_offline_restore_load
+                        (f.fixture.policy, session_operation,
+                      &selected_record), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_tenant_restore_selected_finalize_step
+                        (f.fixture.policy, selected_record, first,
+                      WYL_POLICY_TENANT_RESTORE_SELECTED_FINALIZE_BEGIN,
+                      NULL, NULL, &step_result, &pending_record), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (pending_record->revision, ==, 35);
+#ifdef WYL_TEST_HANDLE_SEAMS
+                  wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+                      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+#endif
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 35, 0, &f.committed), ==,
+                      WYRELOG_E_IO);
+                  g_assert_null (f.committed.graphs);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_auto (WylFactOfflineRestoreJournal) reopened = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &reopened), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (reopened.revision, ==, 36);
+                  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                      g_ptr_array_index (reopened.graphs, 0))->transition_state,
+                      ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+                  wyl_policy_offline_restore_record_free (pending_record);
+                  wyl_policy_offline_restore_record_free (selected_record);
+                }
+                if (g_str_has_suffix (mode,
+                    "select-finalize-begin-response")) {
+#ifdef WYL_TEST_HANDLE_SEAMS
+                  wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+                      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), ==,
+                      WYRELOG_E_IO);
+                  g_assert_null (f.committed.graphs);
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &pending), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (pending.revision, ==, 35);
+                  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+                      g_ptr_array_index (pending.graphs, 0))->attempt, ==,
+                      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 35, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+#endif
+                }
+                if (g_str_has_suffix (mode, "select-finalize-stale")) {
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 33, 0, &f.committed), !=,
+                      WYRELOG_E_OK);
+                  g_assert_null (f.committed.graphs);
+                  g_auto (WylFactOfflineRestoreJournal) unchanged = { 0 };
+                  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+                        (f.fixture.policy, session_operation, &unchanged), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (unchanged.revision, ==, 34);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+                }
               }
             }
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -6291,6 +6547,24 @@ main (int argc, char **argv)
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/commit-response",
       "retain-sync-dir-publish-sync-companion-select-commit-response", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-policy",
+      "retain-sync-dir-publish-sync-companion-select-finalize-policy", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-both",
+      "retain-sync-dir-publish-sync-companion-select-finalize-both", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-reverse",
+      "retain-sync-dir-publish-sync-companion-select-finalize-reverse", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-partial",
+      "retain-sync-dir-publish-sync-companion-select-finalize-partial", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-terminal",
+      "retain-sync-dir-publish-sync-companion-select-finalize-terminal", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-foreign",
+      "retain-sync-dir-publish-sync-companion-select-finalize-foreign", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-response",
+      "retain-sync-dir-publish-sync-companion-select-finalize-response", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-begin-response",
+      "retain-sync-dir-publish-sync-companion-select-finalize-begin-response", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/finalize-stale",
+      "retain-sync-dir-publish-sync-companion-select-finalize-stale", test_tenant_commit_sync_staged_both);
 #endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/foreign",
       "retain-sync-dir-publish-sync-companion-foreign", test_tenant_commit_sync_staged_both);
