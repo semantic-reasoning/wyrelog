@@ -44,7 +44,7 @@ MATRIX_ENTRIES = (
 # Raising a ceiling means editing this table, which is the point: a deadline
 # may only move when someone states the measurement that moved it.
 SERIALIZED_AGGREGATES = (
-    ("policy-graph-authority", 90),
+    ("policy-graph-authority", 120),
     ("policy-graph-authority-pre-windows-provisioning-migration", 90),
     ("policy-graph-authority-windows-provisioning-migration", 90),
     ("fact-store", 60),
@@ -67,7 +67,12 @@ MEASUREMENT_EVIDENCE = {
         "durations_seconds": (35.52, 9.68),
         "spread_seconds": 25.84,
         "max_seconds": 35.52,
-        "ceiling": 90,
+        "timeout_samples": ({
+            "run": 36699119807,
+            "seconds": 90.72,
+            "matrix": "fact_store=disabled, secure_bridge=disabled, duckdb_source=prebuilt",
+        },),
+        "ceiling": 120,
         "runs": (34870495011, 34875727837),
     },
     "policy-graph-authority-pre-windows-provisioning-migration": {
