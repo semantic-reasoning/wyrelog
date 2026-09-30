@@ -25,6 +25,7 @@
 #include "wyrelog/fact/offline-backup-source-private.h"
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
 #include "wyrelog/fact/offline-restore-begin-private.h"
+#include "wyrelog/fact/offline-restore-prepare-private.h"
 #include "wyrelog/fact/offline-restore-dry-run-private.h"
 #include "wyrelog/fact/offline-restore-commit-authority-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
@@ -1127,6 +1128,31 @@ begin_proof_collision (gpointer data)
 }
 #endif
 
+typedef struct
+{
+  WylFactOfflineBackupBundle *bundle;
+  guint revalidations;
+} PreparePartialInput;
+
+static wyrelog_error_t
+prepare_partial_read (const gchar *graph_id, guint64 offset,
+    guint8 *buffer, gsize capacity, gsize *out_read, gpointer data)
+{
+  PreparePartialInput *input = data;
+  return wyl_fact_offline_backup_bundle_read_at (input->bundle, graph_id,
+             offset, buffer, capacity, out_read);
+}
+
+static wyrelog_error_t
+prepare_partial_revalidate (gpointer data)
+{
+  PreparePartialInput *input = data;
+  input->revalidations++;
+  if (input->revalidations == 4)
+    return WYRELOG_E_IO;
+  return wyl_fact_offline_backup_bundle_revalidate (input->bundle);
+}
+
 static void
 test_restore_begin_authenticated (void)
 {
@@ -1285,6 +1311,83 @@ test_restore_begin_authenticated (void)
         alpha_before);
     assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
         zeta_before);
+    WylFactReplaySchedulerConfig config;
+    wyl_fact_replay_scheduler_config_defaults (&config);
+    g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+    g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
+        &scheduler), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle, operation, 2, 0,
+        NULL, &committed), ==, WYRELOG_E_BUSY);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle,
+        "018f22d0-7b6d-7a5b-8c31-123456789ad3", 1, 0,
+        NULL, &committed), ==, WYRELOG_E_NOT_FOUND);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
+        "UPDATE fact_relation_schema_columns SET visible=1-visible "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (wyl_policy_store_get_db
+          (fixture.policy)), >, 0);
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle, operation, 1, 0,
+        NULL, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
+        "UPDATE fact_relation_schema_columns SET visible=1-visible "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    guint64 prepare_revision = 1;
+    if (selected == NULL) {
+      PreparePartialInput partial = { .bundle = bundle };
+      const WylFactOfflineRestoreTenantInput callbacks = {
+        prepare_partial_read, prepare_partial_revalidate,
+      };
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+            (fixture.policy, fixture.root, fixture.runtime, "tenant-a",
+          capture.manifest, operation, 1, 0, &callbacks, &partial,
+          &committed), ==, WYRELOG_E_IO);
+      g_assert_null (committed.graphs);
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, 2);
+      prepare_revision = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+    }
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle, operation,
+        prepare_revision, 0,
+        NULL, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==,
+        1 + 2 * committed.graphs->len);
+    for (guint i = 0; i < committed.graphs->len; i++) {
+      WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (committed.graphs, i);
+      g_assert_true (graph->replay_preflighted);
+    }
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+    if (selected != NULL)
+      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+          zeta_before);
+    guint64 prepared_revision = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_autoptr (GCancellable) cancelled = g_cancellable_new ();
+    g_cancellable_cancel (cancelled);
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle, operation,
+        prepared_revision, 0, cancelled, &committed), ==,
+        WYRELOG_E_CANCELLED);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+        fixture.root, fixture.runtime, scheduler, bundle, operation,
+        prepared_revision, 0, NULL, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, prepared_revision);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+        WYRELOG_E_OK);
     g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
     remove_tree (bundle_root);
     destination_capture_clear (&capture);
