@@ -211,6 +211,25 @@ check_provisioning (GraphRollback *rollback)
 }
 
 static wyrelog_error_t
+check_journal (GraphRollback *rollback)
+{
+  WylFactOfflineRestoreJournal current = { 0 };
+  g_autoptr (GBytes) expected_bytes = NULL;
+  g_autoptr (GBytes) current_bytes = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load
+        (rollback->policy, rollback->journal.operation_uuid, &current);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&rollback->journal,
+            &expected_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&current, &current_bytes);
+  if (rc == WYRELOG_E_OK && !g_bytes_equal (expected_bytes, current_bytes))
+    rc = WYRELOG_E_BUSY;
+  wyl_fact_offline_restore_journal_clear (&current);
+  return rc;
+}
+
+static wyrelog_error_t
 check_current (GraphRollback *rollback)
 {
   wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
@@ -224,20 +243,8 @@ check_current (GraphRollback *rollback)
   if (rc == WYRELOG_E_OK && rollback->pair != NULL)
     rc = wyl_fact_graph_provisioned_pair_revalidate_in_directory
           (rollback->pair, &rollback->directory);
-  WylFactOfflineRestoreJournal current = { 0 };
-  g_autoptr (GBytes) expected_bytes = NULL;
-  g_autoptr (GBytes) current_bytes = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_offline_restore_journal_store_load (rollback->policy,
-            rollback->journal.operation_uuid, &current);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_offline_restore_journal_encode (&rollback->journal,
-            &expected_bytes);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_offline_restore_journal_encode (&current, &current_bytes);
-  if (rc == WYRELOG_E_OK && !g_bytes_equal (expected_bytes, current_bytes))
-    rc = WYRELOG_E_BUSY;
-  wyl_fact_offline_restore_journal_clear (&current);
+    rc = check_journal (rollback);
   return rc;
 }
 
@@ -532,6 +539,28 @@ wyl_fact_offline_restore_graph_rollback_run
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_runtime_manager_quiesce (runtime_manager,
             &rollback.key, drain_timeout_us, &rollback.quiescence);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (rollback.lease,
+            &rollback.resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = check_policy (&rollback);
+    if (rc == WYRELOG_E_OK)
+      rc = check_journal (&rollback);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed
+            (runtime_manager, &rollback.key, drain_timeout_us,
+              &rollback.quiescence);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (rollback.lease,
+              &rollback.resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = check_policy (&rollback);
+    if (rc == WYRELOG_E_OK)
+      rc = check_journal (&rollback);
+    if (rc != WYRELOG_E_OK)
+      g_clear_pointer (&rollback.quiescence,
+          wyl_fact_graph_quiescence_token_release);
+  }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
             rollback.journal.tenant_id,

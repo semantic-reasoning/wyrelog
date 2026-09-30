@@ -173,6 +173,26 @@ check_policy (WylFactOfflineRestoreValidationSession *session)
 }
 
 static wyrelog_error_t
+check_reacquire_authority (WylFactOfflineRestoreValidationSession *session)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (session->lease, &session->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_policy (session);
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (session->policy,
+            session->journal.operation_uuid, &current);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&current, &encoded);
+  if (rc == WYRELOG_E_OK
+      && !g_bytes_equal (encoded, session->encoded_journal))
+    rc = WYRELOG_E_BUSY;
+  return rc;
+}
+
+static wyrelog_error_t
 provisioning_record (WylFactOfflineRestoreValidationSession *session,
     const WylFactOfflineRestoreJournalGraph *expected,
     gchar **out_uuid, GBytes **out_evidence)
@@ -364,6 +384,18 @@ session_new
     gint64 remaining = drain_timeout_us > 0 ? MAX ((gint64) 0, deadline - g_get_monotonic_time ()) : drain_timeout_us;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_runtime_manager_quiesce (session->runtime, &graph->key, remaining, &graph->quiescence);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      rc = check_reacquire_authority (session);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed
+              (session->runtime, &graph->key, remaining,
+                &graph->quiescence);
+      if (rc == WYRELOG_E_OK)
+        rc = check_reacquire_authority (session);
+      if (rc != WYRELOG_E_OK)
+        g_clear_pointer (&graph->quiescence,
+            wyl_fact_graph_quiescence_token_release);
+    }
     if (rc == WYRELOG_E_OK)
       rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
               session->journal.tenant_id, expected->graph_id, FALSE, &graph->directory);

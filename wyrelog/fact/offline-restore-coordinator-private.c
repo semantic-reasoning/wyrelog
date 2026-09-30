@@ -368,9 +368,9 @@ import_check_destination (wyl_policy_store_t *policy,
 {
   wyrelog_error_t rc = wyl_fact_offline_backup_source_revalidate (destination);
   WylFactGraphRuntimeStatus status = { 0 };
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK && runtime != NULL)
     rc = wyl_fact_graph_runtime_manager_get_status (runtime, key, &status);
-  if (rc == WYRELOG_E_OK
+  if (rc == WYRELOG_E_OK && runtime != NULL
       && (status.state == WYL_FACT_GRAPH_RUNTIME_ABANDONED
       || status.admission != WYL_FACT_GRAPH_ADMISSION_CLOSED
       || status.operation_active || status.active_engine_calls != 0
@@ -501,6 +501,23 @@ wyl_fact_offline_restore_graph_import_run
       ? MAX ((gint64) 0, deadline - g_get_monotonic_time ()) : drain_timeout_us;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_runtime_manager_quiesce (runtime_manager, &key, remaining, &quiescence);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = wyl_fact_root_writer_lease_verify (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = import_check_destination (policy, NULL, NULL, destination,
+              &journal, journal_bytes);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed
+            (runtime_manager, &key, remaining, &quiescence);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_verify (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = import_check_destination (policy, NULL, NULL, destination,
+              &journal, journal_bytes);
+    if (rc != WYRELOG_E_OK)
+      g_clear_pointer (&quiescence,
+          wyl_fact_graph_quiescence_token_release);
+  }
   if (rc == WYRELOG_E_OK)
     rc = import_check_destination (policy, runtime_manager, &key, destination, &journal, journal_bytes);
   if (rc == WYRELOG_E_OK)
@@ -839,6 +856,24 @@ wyl_fact_offline_restore_tenant_import_run
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_runtime_manager_quiesce (runtime_manager, &key,
               remaining, &token);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      rc = wyl_fact_root_writer_lease_verify (lease);
+      if (rc == WYRELOG_E_OK)
+        rc = tenant_import_check_destination (policy, NULL, &journal);
+      if (rc == WYRELOG_E_OK)
+        rc = tenant_import_check_journal (policy, &journal);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed
+              (runtime_manager, &key, remaining, &token);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_root_writer_lease_verify (lease);
+      if (rc == WYRELOG_E_OK)
+        rc = tenant_import_check_destination (policy, NULL, &journal);
+      if (rc == WYRELOG_E_OK)
+        rc = tenant_import_check_journal (policy, &journal);
+      if (rc != WYRELOG_E_OK)
+        g_clear_pointer (&token, wyl_fact_graph_quiescence_token_release);
+    }
     if (rc == WYRELOG_E_OK)
       g_ptr_array_add (tokens, token);
     wyl_fact_graph_key_clear (&key);
