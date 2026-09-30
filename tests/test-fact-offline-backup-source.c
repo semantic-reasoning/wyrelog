@@ -5323,6 +5323,10 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
             if (g_str_equal (mode,
                 "retain-sync-dir-publish-sync-driver")) {
               wyl_fact_offline_restore_journal_clear (&f.committed);
+              g_clear_pointer (&f.fixture.runtime,
+                  wyl_fact_graph_runtime_manager_unref);
+              g_assert_cmpint (wyl_fact_graph_runtime_manager_new
+                    (&f.fixture.runtime), ==, WYRELOG_E_OK);
               g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
                     (f.fixture.policy, f.fixture.root, f.fixture.runtime,
                   session_operation, 32, 0, &f.committed), ==,
