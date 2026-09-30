@@ -124,6 +124,14 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_finalize_graph_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Publish the complete finalized tenant vector through the scoped policy
+ * transaction only while every graph has exact TERMINAL file shape. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_promote_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Linux-only, read-only inspection of an imported durable graph mode-A COMMIT
  * state. All lease, resolver, directory, runtime and witness handles remain
  * private and are released on return. Normal mode-A COMMIT admission and

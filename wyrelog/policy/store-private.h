@@ -3591,6 +3591,15 @@ wyrelog_error_t wyl_policy_store_tenant_restore_selected_finalize_step
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* Publish a fully finalized selected tenant restore and release its claim in
+ * one fenced policy transaction.  The effect must only prove file shape. */
+wyrelog_error_t wyl_policy_store_tenant_restore_selected_promote_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyTenantRestoreSelectionEffectFunc terminal_shape_check,
+    gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
 /* Typed v5 COMMIT SYNC_STAGED journal step. BEGIN durably records UNKNOWN
  * before any effect. COMPLETE runs its proof/effect callback inside a fresh
  * fenced policy transaction and advances only after proven durability. */

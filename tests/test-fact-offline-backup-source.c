@@ -3249,6 +3249,14 @@ reject_tenant_finalize_effect (GBytes *journal, gpointer user_data)
   return WYRELOG_E_POLICY;
 }
 
+static wyrelog_error_t
+accept_tenant_promotion_effect (GBytes *journal, gpointer user_data)
+{
+  g_assert_nonnull (journal);
+  (*(guint *) user_data)++;
+  return WYRELOG_E_OK;
+}
+
 /* Import the exact post-selection SQL image to exercise reopen validation
  * before the scoped tenant selection writer exists. */
 static void
@@ -4563,6 +4571,187 @@ test_tenant_commit_sync_staged_both (gconstpointer data)
                 g_assert_cmpint (sqlite3_column_int (selected_count, 1), ==, 2);
                 g_assert_cmpint (sqlite3_column_int (selected_count, 2), ==, 0);
                 sqlite3_finalize (selected_count);
+                gboolean promote_driver = g_str_has_prefix (mode,
+                        "retain-sync-dir-publish-sync-companion-select-promote-driver");
+                if (g_str_has_suffix (mode, "select-promote-policy")
+                    || promote_driver) {
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, first, 34, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 36);
+                  wyl_fact_offline_restore_journal_clear (&f.committed);
+                  g_assert_cmpint (wyl_fact_offline_restore_tenant_finalize_graph_run
+                        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                      session_operation, second, 36, 0, &f.committed), ==,
+                      WYRELOG_E_OK);
+                  g_assert_cmpuint (f.committed.revision, ==, 38);
+                  if (promote_driver) {
+                    if (g_str_has_suffix (mode,
+                        "promote-driver-stale")) {
+                      wyl_fact_offline_restore_journal_clear (&f.committed);
+                      g_assert_cmpint (wyl_fact_offline_restore_tenant_promote_run
+                            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                          session_operation, 37, 0, &f.committed), !=,
+                          WYRELOG_E_OK);
+                      g_assert_null (f.committed.graphs);
+                    }
+                    if (g_str_has_suffix (mode,
+                        "promote-driver-foreign")) {
+                      g_autofree gchar *intruder = graph_file_path
+                            (&f.fixture, second, "foreign-promotion-sidecar");
+                      g_assert_true (g_file_set_contents (intruder,
+                          "foreign", -1, NULL));
+                      wyl_fact_offline_restore_journal_clear (&f.committed);
+                      g_assert_cmpint (wyl_fact_offline_restore_tenant_promote_run
+                            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                          session_operation, 38, 0, &f.committed), !=,
+                          WYRELOG_E_OK);
+                      g_assert_null (f.committed.graphs);
+                      g_assert_cmpint (g_remove (intruder), ==, 0);
+                    }
+                    const gchar *fault_sql = NULL;
+                    if (g_str_has_suffix (mode, "promote-driver-graph-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE UPDATE ON main.fact_graphs WHEN "
+                          "NEW.graph_id='zeta' AND "
+                          "NEW.lifecycle_state='active' BEGIN "
+                          "SELECT RAISE(ABORT,'graph fault'); END;";
+                    else if (g_str_has_suffix (mode,
+                        "promote-driver-provision-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE UPDATE ON main.fact_graph_provisioning "
+                          "WHEN NEW.graph_id='zeta' AND "
+                          "NEW.phase='active' BEGIN "
+                          "SELECT RAISE(ABORT,'provision fault'); END;";
+                    else if (g_str_has_suffix (mode,
+                        "promote-driver-row-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE UPDATE ON main.fact_tenant_restore_replacements "
+                          "WHEN NEW.graph_id='zeta' AND "
+                          "NEW.phase='verified' BEGIN "
+                          "SELECT RAISE(ABORT,'row fault'); END;";
+                    else if (g_str_has_suffix (mode,
+                        "promote-driver-tenant-begin-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE UPDATE ON main.tenants WHEN "
+                          "NEW.lifecycle_state='unsealing' BEGIN "
+                          "SELECT RAISE(ABORT,'tenant begin fault'); END;";
+                    else if (g_str_has_suffix (mode,
+                        "promote-driver-tenant-finish-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE UPDATE ON main.tenants WHEN "
+                          "NEW.lifecycle_state='active' BEGIN "
+                          "SELECT RAISE(ABORT,'tenant finish fault'); END;";
+                    else if (g_str_has_suffix (mode,
+                        "promote-driver-claim-fail"))
+                      fault_sql = "CREATE TEMP TRIGGER fail_tenant_promotion "
+                          "BEFORE DELETE ON main.fact_offline_restore_tenant_claims "
+                          "BEGIN SELECT RAISE(ABORT,'claim fault'); END;";
+                    if (fault_sql != NULL) {
+                      g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                            (f.fixture.policy), fault_sql,
+                          NULL, NULL, NULL), ==, SQLITE_OK);
+                      wyl_fact_offline_restore_journal_clear (&f.committed);
+                      g_assert_cmpint (wyl_fact_offline_restore_tenant_promote_run
+                            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                          session_operation, 38, 0, &f.committed), !=,
+                          WYRELOG_E_OK);
+                      g_assert_null (f.committed.graphs);
+                      g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db
+                            (f.fixture.policy),
+                          "DROP TRIGGER fail_tenant_promotion;",
+                          NULL, NULL, NULL), ==, SQLITE_OK);
+                      WylPolicyOfflineRestoreRecord *rolled_back = NULL;
+                      g_assert_cmpint (wyl_policy_store_offline_restore_load
+                            (f.fixture.policy, session_operation,
+                          &rolled_back), ==, WYRELOG_E_OK);
+                      g_assert_cmpuint (rolled_back->revision, ==, 38);
+                      wyl_policy_offline_restore_record_free (rolled_back);
+                      sqlite3_stmt *tuple = NULL;
+                      g_assert_cmpint (sqlite3_prepare_v2
+                            (wyl_policy_store_get_db (f.fixture.policy),
+                          "SELECT (SELECT count(*) FROM "
+                          "fact_tenant_restore_replacements WHERE "
+                          "phase='selected_pending_cleanup'),"
+                          "(SELECT count(*) FROM fact_graph_provisioning "
+                          "WHERE phase='restore_selected'),"
+                          "(SELECT count(*) FROM fact_offline_restore_tenant_claims "
+                          "WHERE operation_uuid=?1);", -1, &tuple,
+                          NULL), ==, SQLITE_OK);
+                      g_assert_cmpint (sqlite3_bind_text (tuple, 1,
+                          session_operation, -1, SQLITE_TRANSIENT), ==,
+                          SQLITE_OK);
+                      g_assert_cmpint (sqlite3_step (tuple), ==, SQLITE_ROW);
+                      g_assert_cmpint (sqlite3_column_int (tuple, 0), ==, 2);
+                      g_assert_cmpint (sqlite3_column_int (tuple, 1), ==, 2);
+                      g_assert_cmpint (sqlite3_column_int (tuple, 2), ==, 1);
+                      sqlite3_finalize (tuple);
+                    }
+                    gboolean ambiguous = g_str_has_suffix (mode,
+                            "promote-driver-commit-response");
+#ifdef WYL_TEST_HANDLE_SEAMS
+                    if (ambiguous)
+                      wyl_policy_store_offline_restore_fail_once
+                        (f.fixture.policy,
+                          WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+#endif
+                    wyl_fact_offline_restore_journal_clear (&f.committed);
+                    g_assert_cmpint (wyl_fact_offline_restore_tenant_promote_run
+                          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+                        session_operation, 38, 0, &f.committed), ==,
+                        ambiguous ? WYRELOG_E_IO : WYRELOG_E_OK);
+                    if (ambiguous)
+                      g_assert_null (f.committed.graphs);
+                    else {
+                      g_assert_cmpuint (f.committed.version, ==,
+                          WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
+                      g_assert_cmpuint (f.committed.revision, ==, 39);
+                    }
+                  } else {
+                    WylPolicyOfflineRestoreRecord *expected = NULL;
+                    WylPolicyOfflineRestoreRecord *committed = NULL;
+                    WylPolicyOfflineRestoreStoreResult result =
+                        WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+                    guint effect_calls = 0;
+                    g_assert_cmpint (wyl_policy_store_offline_restore_load
+                          (f.fixture.policy, session_operation, &expected), ==,
+                        WYRELOG_E_OK);
+                    g_assert_cmpint (wyl_policy_store_tenant_restore_selected_promote_with_effect
+                          (f.fixture.policy, expected,
+                        accept_tenant_promotion_effect, &effect_calls,
+                        &result, &committed), ==, WYRELOG_E_OK);
+                    g_assert_cmpint (result, ==,
+                        WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+                    g_assert_cmpuint (effect_calls, ==, 1);
+                    g_assert_nonnull (committed);
+                    g_assert_cmpuint (committed->revision, ==, 39);
+                    wyl_policy_offline_restore_record_free (committed);
+                    wyl_policy_offline_restore_record_free (expected);
+                  }
+                  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+                  g_assert_cmpint (wyl_policy_store_open (policy_path,
+                      &f.fixture.policy), ==, WYRELOG_E_OK);
+                  g_assert_cmpint (wyl_policy_store_create_schema
+                        (f.fixture.policy), ==, WYRELOG_E_OK);
+                  WylPolicyOfflineRestoreRecord *published_record = NULL;
+                  g_assert_cmpint (wyl_policy_store_offline_restore_load
+                        (f.fixture.policy, session_operation,
+                      &published_record), ==, WYRELOG_E_OK);
+                  g_assert_cmpuint (published_record->revision, ==, 39);
+                  wyl_policy_offline_restore_record_free (published_record);
+                  g_clear_pointer (&f.session,
+                      wyl_fact_offline_restore_validation_session_free);
+                  for (guint i = 0; i < 2; i++)
+                    g_clear_pointer (&f.snapshots[i],
+                        wyl_fact_graph_snapshot_unref);
+                  g_clear_object (&f.cancel);
+                  g_clear_pointer (&f.journal_before, g_bytes_unref);
+                  destination_capture_clear (&f.capture);
+                  fixture_clear (&f.fixture);
+                  return;
+                }
                 if (g_str_has_prefix (mode,
                     "retain-sync-dir-publish-sync-companion-select-published-schema")) {
                   tenant_published_schema_fixture (f.fixture.policy,
@@ -6876,6 +7065,30 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion-schema-phase", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/both",
       "retain-sync-dir-publish-sync-companion-select", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-policy",
+      "retain-sync-dir-publish-sync-companion-select-promote-policy", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-stale",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-stale", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-foreign",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-foreign", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-graph-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-graph-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-provision-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-provision-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-row-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-row-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-tenant-begin-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-tenant-begin-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-tenant-finish-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-tenant-finish-fail", test_tenant_commit_sync_staged_both);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-claim-fail",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-claim-fail", test_tenant_commit_sync_staged_both);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/promote-driver-commit-response",
+      "retain-sync-dir-publish-sync-companion-select-promote-driver-commit-response", test_tenant_commit_sync_staged_both);
+#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema",
       "retain-sync-dir-publish-sync-companion-select-published-schema", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-replacement-select/published-schema-claim",
