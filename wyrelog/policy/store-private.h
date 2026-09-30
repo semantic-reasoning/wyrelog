@@ -3566,6 +3566,12 @@ wyrelog_error_t wyl_policy_store_tenant_restore_reserve_replacements_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* Prove exact v6 COMMIT journal/claim, sealed old ACTIVE authority, and the
+ * complete replacement-row vector in one read-only transaction. */
+wyrelog_error_t wyl_policy_store_tenant_restore_reacquire_v6_prove
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal);
+
 /* The callback proves the complete post-publish filesystem vector under a
  * root writer lease and quiescence for every tenant graph. Its phases are in
  * journal graph order. A reserved selected graph may be linked and synced;
