@@ -281,6 +281,8 @@ wyrelog/fact/offline-restore-commit-authority-private.c
 wyrelog/fact/offline-restore-commit-authority-private.h
 wyrelog/fact/offline-restore-coordinator-private.c
 wyrelog/fact/offline-restore-coordinator-private.h
+wyrelog/fact/offline-restore-dry-run-private.c
+wyrelog/fact/offline-restore-dry-run-private.h
 wyrelog/fact/offline-restore-journal-private.c
 wyrelog/fact/offline-restore-journal-private.h
 wyrelog/fact/offline-restore-journal-stage-private.c

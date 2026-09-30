@@ -36,6 +36,18 @@ wyl_fact_graph_directory_pre_stage_inventory
 }
 
 wyrelog_error_t
+wyl_fact_graph_provisioned_pair_main_identity
+  (WylFactGraphProvisionedPair *pair,
+    WylFactArtifactInventoryIdentity *out_identity)
+{
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (pair == NULL || out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
 wyl_fact_graph_directory_restore_inventory
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,

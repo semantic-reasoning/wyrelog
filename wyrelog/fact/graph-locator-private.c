@@ -2139,6 +2139,23 @@ wyl_fact_graph_provisioned_pair_revalidate_in_directory
 #endif
 }
 
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_main_identity
+  (WylFactGraphProvisionedPair *pair,
+    WylFactArtifactInventoryIdentity *out_identity)
+{
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (pair == NULL || out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc == WYRELOG_E_OK) {
+    out_identity->domain = pair->expected_device;
+    out_identity->object = pair->expected_inode;
+  }
+  return rc;
+}
+
 WylFactGraphProvisionedPair *
 wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair *pair)
 {
