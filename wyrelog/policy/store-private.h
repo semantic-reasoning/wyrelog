@@ -3572,6 +3572,12 @@ wyrelog_error_t wyl_policy_store_tenant_restore_reacquire_v6_prove
   (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *expected_journal);
 
+/* Prove exact selected v7 COMMIT authority, including the selected
+ * replacement/provisioning vector and sealed graph policy snapshot. */
+wyrelog_error_t wyl_policy_store_tenant_restore_reacquire_v7_prove
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal);
+
 /* The callback proves the complete post-publish filesystem vector under a
  * root writer lease and quiescence for every tenant graph. Its phases are in
  * journal graph order. A reserved selected graph may be linked and synced;

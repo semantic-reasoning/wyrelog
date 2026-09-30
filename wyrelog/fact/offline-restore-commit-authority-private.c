@@ -262,6 +262,43 @@ tenant_commit_v6_quiesce (wyl_policy_store_t *policy,
 }
 
 static wyrelog_error_t
+tenant_commit_v7_quiesce (wyl_policy_store_t *policy,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver,
+    WylFactGraphRuntimeManager *runtime,
+    const WylPolicyOfflineRestoreRecord *expected,
+    const WylFactGraphKey *key, gint64 timeout_us,
+    WylFactGraphQuiescenceToken **out_token)
+{
+  wyrelog_error_t rc = wyl_fact_graph_runtime_manager_quiesce (runtime,
+          key, timeout_us, out_token);
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return rc;
+  rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_tenant_restore_reacquire_v7_prove (policy,
+            expected);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed (runtime,
+            key, timeout_us, out_token);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_tenant_restore_reacquire_v7_prove (policy,
+            expected);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_token, wyl_fact_graph_quiescence_token_release);
+  return rc;
+}
+
+static wyrelog_error_t
 tenant_bind_prove_graph (TenantBindEffect *context,
     const WylFactOfflineRestoreJournal *journal,
     const WylFactOfflineRestoreJournalGraph *graph,
@@ -2035,8 +2072,8 @@ wyl_fact_offline_restore_tenant_finalize_graph_run
         rc = WYRELOG_E_BUSY;
     }
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &item->key,
-              remaining, &item->quiescence);
+      rc = tenant_commit_v7_quiesce (policy, lease, &resolver, runtime,
+              expected, &item->key, remaining, &item->quiescence);
     if (rc == WYRELOG_E_OK)
       rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
               journal.tenant_id, graph->graph_id, FALSE, &item->directory);
@@ -2200,8 +2237,8 @@ wyl_fact_offline_restore_tenant_promote_run
         rc = WYRELOG_E_BUSY;
     }
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &item->key,
-              remaining, &item->quiescence);
+      rc = tenant_commit_v7_quiesce (policy, lease, &resolver, runtime,
+              expected, &item->key, remaining, &item->quiescence);
     if (rc == WYRELOG_E_OK)
       rc = wyl_policy_store_open_fact_graph_directory (policy, fact_root,
               journal.tenant_id, graph->graph_id, FALSE, &item->directory);
