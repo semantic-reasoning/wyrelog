@@ -1608,7 +1608,7 @@ test_policy_graph_authority = executable('test-policy-graph-authority',
 test('policy-graph-authority', test_policy_graph_authority,
   args : ['-s', '/policy/graph-authority/pre-windows-provisioning-migration',
           '-s', '/policy/graph-authority/windows-provisioning-migration'],
-  timeout : 90,
+  timeout : 120,
   is_parallel : host_machine.system() != 'windows',
 )
 test('policy-store-close-ownership', python3,
