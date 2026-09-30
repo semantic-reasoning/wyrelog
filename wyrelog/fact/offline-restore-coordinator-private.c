@@ -935,6 +935,10 @@ wyl_fact_offline_restore_tenant_preflight_run
       || expected_revision >= G_MAXINT64 || job_context == NULL
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
   g_auto (WylFactOfflineRestoreJournal) observed = { 0 };
   wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load (policy,
           operation_uuid, &observed);
@@ -968,4 +972,5 @@ wyl_fact_offline_restore_tenant_preflight_run
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
+#endif
 }

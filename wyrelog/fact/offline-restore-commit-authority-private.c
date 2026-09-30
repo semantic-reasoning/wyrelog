@@ -2601,6 +2601,10 @@ static wyrelog_error_t (*sync_retained_checkpoint) (const gchar *, gpointer);
 static gpointer sync_retained_checkpoint_data;
 static wyrelog_error_t (*publish_checkpoint) (const gchar *, gpointer);
 static gpointer publish_checkpoint_data;
+#ifndef __linux__
+static wyrelog_error_t (*finalize_checkpoint) (const gchar *, gpointer);
+static gpointer finalize_checkpoint_data;
+#endif
 
 void
 wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
