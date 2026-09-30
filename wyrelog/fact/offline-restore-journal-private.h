@@ -16,6 +16,7 @@ G_BEGIN_DECLS
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION 5u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION 6u
 #define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION 7u
+#define WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION 8u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS 1024u
 #define WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES (8u * 1024u * 1024u)
 #define WYL_FACT_OFFLINE_RESTORE_MAX_TEXT 1024u
@@ -246,6 +247,10 @@ wyrelog_error_t wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id);
 wyrelog_error_t wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id);
+/* Pure v7 to v8 all-graph publication image. Only a scoped policy writer may
+ * durably commit it with all provisioning/lifecycle rows and claim release. */
+wyrelog_error_t wyl_fact_offline_restore_journal_mark_tenant_selected_published
+  (WylFactOfflineRestoreJournal *journal);
 wyrelog_error_t wyl_fact_offline_restore_journal_decide
   (WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreDecision decision);
