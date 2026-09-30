@@ -426,6 +426,39 @@ tenant_replacement_binding (void)
   g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&journal,
       "alpha", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+        (&journal, "alpha"), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&selected, &journal));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+        (&journal, "zeta"), ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) pending_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &pending_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (pending_blob,
+      &pending), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+        (&journal, "alpha"), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&pending, &journal));
+  g_autoptr (GBytes) finalized_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &finalized_blob), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (finalized_blob,
+      &finalized), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_tenant_selected_finalize
+        (&finalized, "zeta"), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&journal, &finalized));
+  g_assert_cmpint (wyl_fact_offline_restore_journal_complete_tenant_selected_finalize
+        (&finalized, "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&finalized), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_INSPECT_ONLY);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_begin_attempt (&finalized,
+      "zeta", WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE), ==,
+      WYRELOG_E_POLICY);
   WylFactOfflineRestoreJournalGraph *changed = g_ptr_array_index
         (selected.graphs, 0);
   g_autofree gchar *original_store = g_strdup (changed->store_uuid);
@@ -440,7 +473,7 @@ tenant_replacement_binding (void)
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
       &invalid), ==, WYRELOG_E_INVALID);
   selected.replacement_selected_pending_cleanup = TRUE;
-  changed->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE;
+  changed->pending_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE;
   changed->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&selected,
       &invalid), ==, WYRELOG_E_INVALID);
