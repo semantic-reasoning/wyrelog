@@ -10177,6 +10177,33 @@ wyl_policy_store_bind_fact_root_authorized (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_check_fact_root_observational (wyl_policy_store_t *store,
+    const gchar *fact_root, WylFactRootWriterLease *lease,
+    WylFactGraphResolver *resolver)
+{
+  if (store == NULL || store->db == NULL || fact_root == NULL
+      || fact_root[0] == '\0' || lease == NULL || resolver == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc == WYRELOG_E_OK && store->fact_root_path != NULL) {
+    if (g_strcmp0 (store->fact_root_path, fact_root) != 0)
+      return WYRELOG_E_POLICY;
+    rc = wyl_fact_graph_resolver_revalidate (&store->fact_root_resolver);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+              &store->fact_root_resolver);
+  }
+  return rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_open_fact_graph_directory (wyl_policy_store_t *store,
     const gchar *fact_root, const gchar *tenant_id, const gchar *graph_id,
     gboolean create, WylFactGraphDirectory *out_directory)

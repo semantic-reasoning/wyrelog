@@ -1,4 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include "test-exit-status.h"
 
 #include <glib.h>
@@ -16,8 +21,10 @@
 #include "wyrelog/fact/graph-artifact-transition-posix-private.h"
 #include "wyrelog/fact/offline-backup-generation-private.h"
 #include "wyrelog/fact/offline-backup-manifest-private.h"
+#include "wyrelog/fact/offline-backup-bundle-private.h"
 #include "wyrelog/fact/offline-backup-source-private.h"
 #include "wyrelog/fact/offline-restore-coordinator-private.h"
+#include "wyrelog/fact/offline-restore-dry-run-private.h"
 #include "wyrelog/fact/offline-restore-commit-authority-private.h"
 #include "wyrelog/fact/offline-restore-journal-private.h"
 #include "wyrelog/fact/offline-restore-journal-store-private.h"
@@ -39,6 +46,8 @@ typedef struct
 
 static gchar *graph_file_path (BackupFixture *fixture,
     const gchar *graph_id, const gchar *basename);
+static wyrelog_error_t session_build_engine (const WylFactGraphKey *key,
+    WylEngine **out_engine, gpointer data);
 
 static void
 remove_tree (const gchar *path)
@@ -786,6 +795,316 @@ test_generation_multi_graph_order (void)
   wyl_fact_offline_backup_manifest_clear (&manifest);
   destination_capture_clear (&capture);
   fixture_clear (&fixture);
+}
+
+static void
+assert_dry_run_graph_namespace_unchanged (BackupFixture *fixture,
+    const gchar *graph_id, GHashTable *before)
+{
+  g_autofree gchar *main_path = graph_file_path (fixture, graph_id,
+          "facts.duckdb");
+  g_autofree gchar *directory = g_path_get_dirname (main_path);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GDir) dir = g_dir_open (directory, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (dir);
+  guint count = 0;
+  for (const gchar *name; (name = g_dir_read_name (dir)) != NULL;) {
+    GBytes *expected = g_hash_table_lookup (before, name);
+    g_assert_nonnull (expected);
+    g_autofree gchar *path = g_build_filename (directory, name, NULL);
+    g_autofree gchar *contents = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (path, &contents, &length, &error));
+    g_assert_no_error (error);
+    g_autoptr (GBytes) current = g_bytes_new (contents, length);
+    g_assert_true (g_bytes_equal (expected, current));
+    count++;
+  }
+  g_assert_cmpuint (count, ==, g_hash_table_size (before));
+}
+
+static GHashTable *
+capture_dry_run_graph_namespace (BackupFixture *fixture,
+    const gchar *graph_id)
+{
+  GHashTable *files = g_hash_table_new_full (g_str_hash, g_str_equal,
+          g_free, (GDestroyNotify) g_bytes_unref);
+  g_autofree gchar *main_path = graph_file_path (fixture, graph_id,
+          "facts.duckdb");
+  g_autofree gchar *directory = g_path_get_dirname (main_path);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GDir) dir = g_dir_open (directory, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (dir);
+  for (const gchar *name; (name = g_dir_read_name (dir)) != NULL;) {
+    g_autofree gchar *path = g_build_filename (directory, name, NULL);
+    g_autofree gchar *contents = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (path, &contents, &length, &error));
+    g_assert_no_error (error);
+    g_hash_table_insert (files, g_strdup (name),
+        g_bytes_new_take (g_steal_pointer (&contents), length));
+  }
+  return files;
+}
+
+static void
+test_restore_dry_run_read_only (void)
+{
+#ifndef __linux__
+  return;
+#else
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-offline-restore-dry-run-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "alpha");
+  create_graph (&fixture, "zeta");
+  seal_graph (&fixture, "alpha");
+  seal_graph (&fixture, "zeta");
+  seal_tenant (&fixture);
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graphs[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh
+          (fixture.runtime, &key, session_build_engine, NULL, NULL), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture.runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  DestinationCapture capture;
+  destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, &capture), ==, WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *bundle_root = g_dir_make_tmp
+        ("wyl-offline-restore-dry-run-bundle-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (bundle_root);
+  g_autofree gchar *manifest_path = g_build_filename (bundle_root,
+          "manifest", NULL);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (capture.manifest,
+          &manifest_length);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < capture.completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (capture.completed_graphs, i);
+    GBytes *bytes = g_ptr_array_index (capture.artifact_bytes, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+        &component), ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+    gsize length = 0;
+    const gchar *data = g_bytes_get_data (bytes, &length);
+    g_assert_true (g_file_set_contents (path, data, length, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (checksum, manifest_data, manifest_length);
+  guint8 digest[32];
+  gsize digest_length = sizeof digest;
+  g_checksum_get_digest (checksum, digest, &digest_length);
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root,
+      digest, &bundle), ==, WYRELOG_E_OK);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  g_autofree gchar *policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_autofree gchar *policy_before = NULL;
+  gsize policy_length = 0;
+  g_assert_true (g_file_get_contents (policy_path, &policy_before,
+      &policy_length, &error));
+  g_assert_no_error (error);
+  g_autofree gchar *main_before = NULL;
+  gsize main_length = 0;
+  g_assert_true (g_file_get_contents (main_path, &main_before,
+      &main_length, &error));
+  g_assert_no_error (error);
+  g_autoptr (GHashTable) alpha_before =
+      capture_dry_run_graph_namespace (&fixture, "alpha");
+  g_autoptr (GHashTable) zeta_before =
+      capture_dry_run_graph_namespace (&fixture, "zeta");
+  WylFactGraphKey sibling = { 0 };
+  WylFactGraphRuntimeStatus sibling_before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&sibling, "tenant-a", "zeta"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture.runtime, &sibling, &sibling_before), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreDryRunReport report = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, &report), ==,
+      WYRELOG_E_OK);
+  g_assert_true (report.observed_eligible_for_staging);
+  g_assert_false (report.publication_eligible);
+  g_assert_cmpint (report.replay_result, ==,
+      WYL_FACT_OFFLINE_RESTORE_REPLAY_NOT_RUN);
+  g_assert_cmpuint (report.graphs->len, ==, 2);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (report.graphs->len, ==, 1);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  WylFactGraphRuntimeManager *empty_runtime = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&empty_runtime), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, empty_runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  wyl_fact_graph_runtime_manager_unref (empty_runtime);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, NULL, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_INVALID);
+  g_assert_false (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_autofree gchar *main_after = NULL;
+  gsize after_length = 0;
+  g_assert_true (g_file_get_contents (main_path, &main_after,
+      &after_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpmem (main_before, main_length, main_after, after_length);
+  assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+      alpha_before);
+  assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+      zeta_before);
+  g_autofree gchar *policy_after = NULL;
+  gsize policy_after_length = 0;
+  g_assert_true (g_file_get_contents (policy_path, &policy_after,
+      &policy_after_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpmem (policy_before, policy_length, policy_after,
+      policy_after_length);
+  WylFactGraphRuntimeStatus sibling_after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (fixture.runtime, &sibling, &sibling_after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (sibling_before.operation_generation, ==,
+      sibling_after.operation_generation);
+  g_assert_cmpuint (sibling_before.engine_generation, ==,
+      sibling_after.engine_generation);
+  g_assert_cmpint (sibling_before.admission, ==, sibling_after.admission);
+  wyl_fact_graph_runtime_status_clear (&sibling_before);
+  wyl_fact_graph_runtime_status_clear (&sibling_after);
+  wyl_fact_graph_key_clear (&sibling);
+  wyl_policy_store_t *fresh_policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fresh_policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fresh_policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_autofree gchar *other_root = wyl_test_make_secure_fact_root
+        ("wyl-offline-restore-dry-run-other-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (wyl_policy_store_bind_fact_root (fresh_policy,
+      other_root), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (fresh_policy);
+  remove_tree (other_root);
+  WylFactOfflineBackupManifest changed_manifest = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_decode (capture.manifest,
+      &changed_manifest), ==, WYRELOG_E_OK);
+  gboolean changed_alpha = FALSE;
+  for (guint i = 0; i < changed_manifest.artifacts->len; i++) {
+    WylFactOfflineBackupArtifact *artifact =
+        g_ptr_array_index (changed_manifest.artifacts, i);
+    if (g_strcmp0 (artifact->graph_id, "alpha") == 0) {
+      g_free (artifact->schema_digest);
+      artifact->schema_digest = g_strdup_printf ("sha256:%064d", 0);
+      changed_alpha = TRUE;
+    }
+  }
+  g_assert_true (changed_alpha);
+  g_autoptr (GBytes) changed_bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode
+        (&changed_manifest, &changed_bytes), ==, WYRELOG_E_OK);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  gsize changed_length = 0;
+  const guint8 *changed_data = g_bytes_get_data (changed_bytes,
+          &changed_length);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) changed_data, changed_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  g_autoptr (GChecksum) changed_checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (changed_checksum, changed_data, changed_length);
+  gsize changed_digest_length = sizeof digest;
+  g_checksum_get_digest (changed_checksum, digest, &changed_digest_length);
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root,
+      digest, &bundle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  g_assert_true (((WylFactOfflineRestoreDryRunGraph *)
+      g_ptr_array_index (report.graphs, 0))->schema_transition_required);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  wyl_fact_offline_backup_manifest_clear (&changed_manifest);
+  g_autofree gchar *wal = graph_file_path (&fixture, "alpha",
+          "facts.duckdb.wal");
+  g_assert_true (g_file_set_contents (wal, "foreign", -1, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (wal, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_COLLISION);
+  g_assert_false (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_assert_cmpint (g_remove (wal), ==, 0);
+  g_autofree gchar *alpha_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode ("alpha",
+      &alpha_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *alpha_name = g_strdup_printf ("graph-%s.duckdb",
+          alpha_component);
+  g_autofree gchar *alpha_backup = g_build_filename (bundle_root,
+          alpha_name, NULL);
+  gint backup_fd = g_open (alpha_backup, O_WRONLY, 0);
+  g_assert_cmpint (backup_fd, >=, 0);
+  g_assert_cmpint (pwrite (backup_fd, "X", 1, 0), ==, 1);
+  g_assert_cmpint (close (backup_fd), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_BUNDLE);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  g_assert_cmpint (g_remove (manifest_path), ==, 0);
+  for (guint i = 0; i < capture.completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (capture.completed_graphs, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+        &component), ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+    g_assert_cmpint (g_remove (path), ==, 0);
+  }
+  g_assert_cmpint (g_rmdir (bundle_root), ==, 0);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
 }
 
 static void
@@ -7734,6 +8053,8 @@ main (int argc, char **argv)
       test_generation_empty_tenant);
   g_test_add_func ("/fact-offline-backup-source/generation-multi-graph",
       test_generation_multi_graph_order);
+  g_test_add_func ("/fact-offline-backup-source/restore-dry-run-read-only",
+      test_restore_dry_run_read_only);
   g_test_add_func ("/fact-offline-backup-source/restore-staging-coordinator",
       test_tenant_restore_staging_coordinator);
   g_test_add_func

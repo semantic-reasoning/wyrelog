@@ -1545,6 +1545,11 @@ wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_bind_fact_root_authorized
   (wyl_policy_store_t * store, const gchar * fact_root,
     WylFactRootWriterLease * lease);
+/* Verify root authority without binding an otherwise unbound policy handle.
+ * This is for read-only offline preflight under a retained writer lease. */
+wyrelog_error_t wyl_policy_store_check_fact_root_observational
+  (wyl_policy_store_t *store, const gchar *fact_root,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver);
 wyrelog_error_t wyl_policy_store_open_fact_graph_directory
   (wyl_policy_store_t * store, const gchar * fact_root,
     const gchar * tenant_id, const gchar * graph_id, gboolean create,

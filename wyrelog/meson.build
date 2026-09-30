@@ -155,6 +155,7 @@ if get_option('enable_fact_store').allowed()
     'fact/offline-backup-source-private.c',
     'fact/offline-restore-commit-authority-private.c',
     'fact/offline-restore-coordinator-private.c',
+    'fact/offline-restore-dry-run-private.c',
     'fact/offline-restore-rollback-private.c',
     'fact/legacy-store-identity-private.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay-store-private.c',

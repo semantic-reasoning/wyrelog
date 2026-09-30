@@ -408,6 +408,10 @@ wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate
 wyrelog_error_t wyl_fact_graph_provisioned_pair_revalidate_in_directory
   (WylFactGraphProvisionedPair *pair,
     const WylFactGraphDirectory *directory);
+/* Copy the held ACTIVE main identity after a fresh exact pair revalidation. */
+wyrelog_error_t wyl_fact_graph_provisioned_pair_main_identity
+  (WylFactGraphProvisionedPair *pair,
+    WylFactArtifactInventoryIdentity *out_identity);
 
 typedef struct WylFactGraphProvisionedRestoreWitness
     WylFactGraphProvisionedRestoreWitness;
