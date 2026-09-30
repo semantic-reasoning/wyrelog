@@ -351,6 +351,39 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &graph->key,
               remaining, &graph->quiescence);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      g_autoptr (WylPolicyFactBackupSnapshot) repeated = NULL;
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+              &resolver);
+      if (rc == WYRELOG_E_OK)
+        rc = scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT ?
+            wyl_policy_store_read_fact_backup_snapshot (policy,
+                manifest.tenant_id, &repeated) :
+            wyl_policy_store_read_fact_graph_backup_snapshot (policy,
+                manifest.tenant_id, selected_graph_id, &repeated);
+      if (rc == WYRELOG_E_OK && !target_matches (repeated, &manifest,
+          scope, selected_graph_id))
+        rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed
+              (runtime, &graph->key, remaining, &graph->quiescence);
+      g_clear_pointer (&repeated, wyl_policy_fact_backup_snapshot_free);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+                &resolver);
+      if (rc == WYRELOG_E_OK)
+        rc = scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT ?
+            wyl_policy_store_read_fact_backup_snapshot (policy,
+                manifest.tenant_id, &repeated) :
+            wyl_policy_store_read_fact_graph_backup_snapshot (policy,
+                manifest.tenant_id, selected_graph_id, &repeated);
+      if (rc == WYRELOG_E_OK && !target_matches (repeated, &manifest,
+          scope, selected_graph_id))
+        rc = WYRELOG_E_POLICY;
+      if (rc != WYRELOG_E_OK)
+        g_clear_pointer (&graph->quiescence,
+            wyl_fact_graph_quiescence_token_release);
+    }
     g_autoptr (GPtrArray) provisioning = NULL;
     if (rc == WYRELOG_E_OK)
       rc = wyl_policy_store_graph_provisioning_list_for_graph (policy,

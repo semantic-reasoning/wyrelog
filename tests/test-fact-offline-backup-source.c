@@ -1296,6 +1296,10 @@ test_restore_begin_authenticated (void)
     g_assert_cmpint (sqlite3_finalize (no_claim), ==, SQLITE_OK);
     g_assert_cmpint (g_remove (collision), ==, 0);
 #endif
+    g_clear_pointer (&fixture.runtime,
+        wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+        ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
         fixture.root, fixture.runtime, bundle, scopes[pass], selected,
         operation, TRUE, 0, &committed), ==, WYRELOG_E_OK);
@@ -2764,8 +2768,7 @@ test_graph_scoped_session (gconstpointer data)
       : wyl_fact_offline_restore_validation_session_new
         (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
           session_operation, 2, 0, &f.session);
-  gboolean constructor_failure = g_str_equal (mode, "selected-provision")
-      || g_str_equal (mode, "missing-selected-runtime");
+  gboolean constructor_failure = g_str_equal (mode, "selected-provision");
   if (constructor_failure) {
     g_assert_cmpint (rc, !=, WYRELOG_E_OK);
     g_assert_null (f.session);
@@ -2889,11 +2892,94 @@ test_restore_validation_session_constructor_rejects (gconstpointer data)
   wyrelog_error_t rc = wyl_fact_offline_restore_validation_session_new
         (f.fixture.policy, f.fixture.root, f.fixture.runtime, f.capture.manifest,
           session_operation, revision, 0, &f.session);
+  if (g_str_equal (f.mode, "missing-runtime")) {
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    WylFactGraphKey key = { 0 };
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EMPTY);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (status.queryable);
+    g_assert_cmpuint (status.operation_generation, ==, 0);
+    g_assert_cmpuint (status.engine_generation, ==, 0);
+    wyl_fact_graph_runtime_status_clear (&status);
+    g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+    g_assert_cmpint (f.result.status, ==,
+        WYL_FACT_OFFLINE_RESTORE_VALIDATION_STAGED_VALIDATED);
+    g_clear_pointer (&f.session,
+        wyl_fact_offline_restore_validation_session_free);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    wyl_fact_graph_runtime_status_clear (&status);
+    wyl_fact_graph_key_clear (&key);
+    session_fixture_clear (&f);
+    return;
+  }
   g_assert_cmpint (rc, !=, WYRELOG_E_OK);
-  if (g_str_equal (f.mode, "missing-runtime"))
-    g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (f.session);
   session_assert_authority (&f, FALSE);
+  session_fixture_clear (&f);
+}
+
+static void
+test_restore_validation_session_fresh_runtime (gconstpointer data)
+{
+  const gchar *selected = data;
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "success", selected);
+  for (guint i = 0; i < 2; i++)
+    g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+  g_clear_pointer (&f.fixture.runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      f.capture.manifest, session_operation, selected == NULL ? 3 : 2, 0,
+      &f.session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (session_run_worker (&f), ==, WYRELOG_E_OK);
+  g_assert_cmpint (f.result.status, ==,
+      WYL_FACT_OFFLINE_RESTORE_VALIDATION_STAGED_VALIDATED);
+  WylFactGraphKey sibling = { 0 };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&sibling, "tenant-a", "zeta"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (f.fixture.runtime, &sibling, &status), ==,
+      selected == NULL ? WYRELOG_E_OK : WYRELOG_E_NOT_FOUND);
+  if (selected == NULL) {
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EMPTY);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (status.queryable);
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&sibling);
+  session_fixture_clear (&f);
+}
+
+static void
+test_restore_validation_session_missing_runtime_policy_drift (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "missing-runtime");
+  mutate_tenant_after_snapshot (&f.capture);
+  g_assert_cmpint (wyl_fact_offline_restore_validation_session_new
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      f.capture.manifest, session_operation, 3, 0, &f.session), !=,
+      WYRELOG_E_OK);
+  g_assert_null (f.session);
+  WylFactGraphKey key = { 0 };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", "zeta"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+        (f.fixture.runtime, &key, &status), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_graph_runtime_status_clear (&status);
+  wyl_fact_graph_key_clear (&key);
   session_fixture_clear (&f);
 }
 #endif
@@ -3059,7 +3145,7 @@ test_graph_rollback (gconstpointer data)
   GStatBuf sibling_before = { 0 }, sibling_after = { 0 };
   g_assert_cmpint (g_stat (sibling, &sibling_before), ==, 0);
   guint64 revision = 2;
-  if (!g_str_equal (mode, "fresh")) {
+  if (!g_str_equal (mode, "fresh") && !g_str_equal (mode, "restart")) {
     rollback_test_advance (&f, FALSE);
     rollback_test_advance (&f, TRUE);
     revision = 4;
@@ -3072,6 +3158,14 @@ test_graph_rollback (gconstpointer data)
             "policy.db", NULL);
     g_assert_cmpint (wyl_policy_store_open (policy_path,
         &f.fixture.policy), ==, WYRELOG_E_OK);
+  }
+  if (g_str_equal (mode, "restart")) {
+    for (guint i = 0; i < 2; i++)
+      g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+    g_clear_pointer (&f.fixture.runtime,
+        wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+        ==, WYRELOG_E_OK);
   }
   WylFactOfflineRestoreJournal committed = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
@@ -3468,7 +3562,13 @@ import_read (guint64 offset, guint8 *buffer, gsize capacity,
     gsize *out_read, gpointer data)
 {
   ImportInput *input = data;
-  session_assert_authority (input->fixture, TRUE);
+  if (g_str_equal (input->mode, "missing-runtime")) {
+    WylFactRootWriterLease *competing = NULL;
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire
+          (input->fixture->fixture.root, &competing), ==, WYRELOG_E_BUSY);
+    wyl_fact_root_writer_lease_release (competing);
+  } else
+    session_assert_authority (input->fixture, TRUE);
   g_assert_cmpuint (offset, ==, input->offset);
   g_assert_cmpuint (capacity, >, 0);
   g_assert_cmpuint (capacity, <=, 64 * 1024);
@@ -3528,7 +3628,13 @@ static wyrelog_error_t
 import_revalidate (gpointer data)
 {
   ImportInput *input = data;
-  session_assert_authority (input->fixture, TRUE);
+  if (g_str_equal (input->mode, "missing-runtime")) {
+    WylFactRootWriterLease *competing = NULL;
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire
+          (input->fixture->fixture.root, &competing), ==, WYRELOG_E_BUSY);
+    wyl_fact_root_writer_lease_release (competing);
+  } else
+    session_assert_authority (input->fixture, TRUE);
   input->validations++;
   if (g_str_equal (input->mode, "revalidate-before")
       || (g_str_equal (input->mode, "revalidate-after") && input->validations == 2))
@@ -6606,6 +6712,14 @@ test_tenant_external_import (gconstpointer data)
       g_ptr_array_index (partial.graphs, 0))->staged_main_identity));
   g_assert_true (artifact_identity_is_zero (&((WylFactOfflineRestoreJournalGraph *)
       g_ptr_array_index (partial.graphs, 1))->staged_main_identity));
+  if (g_str_equal (mode, "restart")) {
+    for (guint i = 0; i < 2; i++)
+      g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+    g_clear_pointer (&f.fixture.runtime,
+        wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+        ==, WYRELOG_E_OK);
+  }
   test_input.fail_validation = 0;
   test_input.validations = 0;
   g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
@@ -6668,7 +6782,8 @@ test_tenant_external_import (gconstpointer data)
         g_ptr_array_index (f.capture.artifact_bytes, i)));
   }
   wyl_fact_offline_restore_journal_clear (&f.committed);
-  if (g_strcmp0 (mode, "straight") == 0) {
+  if (g_strcmp0 (mode, "straight") == 0
+      || g_strcmp0 (mode, "restart") == 0) {
     TenantPreflightTestJob straight = { &f, 3, f.capture.manifest };
     g_assert_cmpint (tenant_preflight_test_worker (&straight), ==,
         WYRELOG_E_OK);
@@ -6739,6 +6854,12 @@ test_tenant_external_import (gconstpointer data)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
       WYRELOG_E_OK);
+  for (guint i = 0; i < 2; i++)
+    g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+  g_clear_pointer (&f.fixture.runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+      ==, WYRELOG_E_OK);
   job.revision = preflight_partial.revision;
   g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
   g_assert_cmpuint (f.committed.revision, ==, 5);
@@ -6875,8 +6996,36 @@ test_graph_import (gconstpointer data)
   wyl_fact_graph_quiescence_token_release (token);
   gboolean success = g_str_equal (mode, "success")
       || g_str_equal (mode, "construction-reopen")
-      || g_str_equal (mode, "import-historical") || g_str_has_prefix (mode, "sibling-");
+      || g_str_equal (mode, "import-historical")
+      || g_str_equal (mode, "missing-runtime")
+      || g_str_has_prefix (mode, "sibling-");
   g_assert_cmpint (rc == WYRELOG_E_OK, ==, success);
+  if (g_str_equal (mode, "missing-runtime")) {
+    WylFactGraphRuntimeStatus acquired = { 0 };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (empty_runtime, &selected, &acquired), ==, WYRELOG_E_OK);
+    g_assert_cmpint (acquired.state, ==, WYL_FACT_GRAPH_RUNTIME_EMPTY);
+    g_assert_cmpint (acquired.admission, ==,
+        WYL_FACT_GRAPH_ADMISSION_CLOSED);
+    g_assert_false (acquired.queryable);
+    wyl_fact_graph_runtime_status_clear (&acquired);
+    g_assert_cmpuint (f.committed.revision, ==, 2);
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &sibling, &after), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (before.operation_generation, ==,
+        after.operation_generation);
+    g_assert_cmpuint (before.engine_generation, ==, after.engine_generation);
+    wyl_fact_graph_runtime_status_clear (&before);
+    wyl_fact_graph_runtime_status_clear (&after);
+    wyl_fact_graph_key_clear (&sibling);
+    wyl_fact_graph_key_clear (&selected);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = session_journal_bytes (&f);
+    session_fixture_clear (&f);
+    return;
+  }
   if (g_str_equal (mode, "token-held"))
     g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
   if (g_str_equal (mode, "late-journal"))
@@ -6957,7 +7106,7 @@ test_graph_import (gconstpointer data)
       || g_str_has_prefix (mode, "graph-") || g_str_equal (mode, "stale")
       || g_str_equal (mode, "unsealed") || g_str_equal (mode, "untrusted")
       || g_str_equal (mode, "unconfirmed") || g_str_equal (mode, "tenant")
-      || g_str_equal (mode, "expected-main-absent") || g_str_equal (mode, "missing-runtime")
+      || g_str_equal (mode, "expected-main-absent")
       || g_str_equal (mode, "token-held") || g_str_equal (mode, "construction-gap")) {
     g_assert_cmpuint (input.validations, ==, 0);
     g_assert_cmpuint (input.reads, ==, 0);
@@ -8118,6 +8267,8 @@ main (int argc, char **argv)
 #ifdef __linux__
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/straight",
       "straight", test_tenant_external_import);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/restart",
+      "restart", test_tenant_external_import);
   g_test_add_func ("/fact-offline-backup-source/tenant-provisioned-binding",
       test_tenant_provisioned_binding);
   g_test_add_func ("/fact-offline-backup-source/tenant-commit-resume-v5",
@@ -8364,6 +8515,8 @@ main (int argc, char **argv)
       test_graph_import_authority_accessor);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/fresh",
       "fresh", test_graph_rollback);
+  g_test_add_data_func ("/fact-offline-backup-source/rollback/restart",
+      "restart", test_graph_rollback);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/pending-present",
       "pending-present", test_graph_rollback);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/pending-absent",
@@ -8473,6 +8626,12 @@ main (int argc, char **argv)
             session_runs[i], NULL);
     g_test_add_data_func (path, session_runs[i], test_restore_validation_session_run);
   }
+  g_test_add_data_func ("/fact-offline-backup-source/session/fresh-runtime-tenant",
+      NULL, test_restore_validation_session_fresh_runtime);
+  g_test_add_data_func ("/fact-offline-backup-source/session/fresh-runtime-graph",
+      "alpha", test_restore_validation_session_fresh_runtime);
+  g_test_add_func ("/fact-offline-backup-source/session/missing-runtime-policy-drift",
+      test_restore_validation_session_missing_runtime_policy_drift);
   const gchar *session_rejections[] = { "unknown-entry", "foreign-stage",
                                         "operation-sidecar", "foreign-provision", "missing-stage",
                                         "main-absence-violated", "stale-revision", "unstaged", "graph-scope",
