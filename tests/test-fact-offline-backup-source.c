@@ -1219,6 +1219,23 @@ test_restore_begin_authenticated (void)
     g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
           (fixture.policy, operation, &committed), ==,
         WYRELOG_E_NOT_FOUND);
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
+        "UPDATE fact_relation_schema_columns SET visible=1-visible "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (wyl_policy_store_get_db
+          (fixture.policy)), >, 0);
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &committed), ==,
+        WYRELOG_E_NOT_FOUND);
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
+        "UPDATE fact_relation_schema_columns SET visible=1-visible "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
 #ifdef WYL_TEST_HANDLE_SEAMS
     g_autofree gchar *collision = graph_file_path (&fixture, "alpha",
             "facts.duckdb.wal");
