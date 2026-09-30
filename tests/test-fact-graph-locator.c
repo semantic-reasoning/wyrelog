@@ -1049,6 +1049,100 @@ test_posix_provisioned_pair_authority (void)
 }
 
 static void
+test_posix_pre_stage_inventory (void)
+{
+  g_autofree gchar *root = make_root ();
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphProvisionedPair *pair = NULL;
+  WylFactArtifactInventoryIdentity empty = { 0 };
+  WylFactGraphPreStageInventory observed = { 0 };
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+      &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &empty, &observed), ==, WYRELOG_E_OK);
+  g_assert_false (observed.main_present);
+
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+          "facts.duckdb", NULL);
+#ifndef __APPLE__
+  create_provisioned_pair (companion, main_path);
+  GStatBuf st = { 0 };
+  g_assert_cmpint (g_stat (main_path, &st), ==, 0);
+  WylFactArtifactInventoryIdentity expected = {
+    .domain = (guint64) st.st_dev, .object = (guint64) st.st_ino,
+  };
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&graph, exact_operation_uuid, &pair), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_OK);
+  g_assert_true (observed.main_present);
+  g_assert_cmpuint (observed.main_identity.object, ==, expected.object);
+  g_autofree gchar *lock = g_build_filename (graph_path,
+          "facts.duckdb.lock", NULL);
+  g_assert_true (g_file_set_contents (lock, "lock", -1, NULL));
+  g_assert_cmpint (g_chmod (lock, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (g_remove (lock), ==, 0);
+  g_autofree gchar *foreign = g_build_filename (graph_path, "foreign", NULL);
+  g_assert_true (g_file_set_contents (foreign, "x", -1, NULL));
+  g_assert_cmpint (g_chmod (foreign, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_POLICY);
+  g_assert_false (observed.main_present);
+  g_assert_cmpint (g_remove (foreign), ==, 0);
+  WylFactArtifactInventoryIdentity wrong = expected;
+  wrong.object++;
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &wrong, &observed), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *sidecar = g_build_filename (graph_path,
+          "facts.duckdb.wal", NULL);
+  g_assert_true (g_file_set_contents (sidecar, "wal", -1, NULL));
+  g_assert_cmpint (g_chmod (sidecar, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (sidecar), ==, 0);
+  g_autofree gchar *foreign_companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070545.sqlite", NULL);
+  g_assert_true (g_file_set_contents (foreign_companion, "foreign", -1,
+      NULL));
+  g_assert_cmpint (g_chmod (foreign_companion, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (foreign_companion), ==, 0);
+  g_autofree gchar *stage = g_build_filename (graph_path,
+          "restore-01890f47-3c4b-7cc2-b8c4-dc0c0c070546.duckdb", NULL);
+  g_assert_true (g_file_set_contents (stage, "stage", -1, NULL));
+  g_assert_cmpint (g_chmod (stage, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, pair, &expected, &observed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (stage), ==, 0);
+  wyl_fact_graph_provisioned_pair_free (pair);
+#else
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &empty, &observed), ==, WYRELOG_E_OK);
+#endif
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  remove_tree (root);
+}
+
+static void
 test_posix_provisioned_restore_witness (void)
 {
 #ifdef __APPLE__
@@ -2286,6 +2380,8 @@ main (int argc, char **argv)
       test_posix_resolver_open_provisioned_final_exact);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-pair-authority",
       test_posix_provisioned_pair_authority);
+  g_test_add_func ("/fact-graph-locator/posix/pre-stage-inventory",
+      test_posix_pre_stage_inventory);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-witness",
       test_posix_provisioned_restore_witness);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-dual-witness",

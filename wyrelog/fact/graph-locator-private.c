@@ -1257,38 +1257,40 @@ restore_inventory_authority (WylFactGraphResolver *resolver,
   return wyl_fact_graph_provisioned_pair_revalidate (pair);
 }
 
-wyrelog_error_t
-wyl_fact_graph_directory_restore_inventory
+static wyrelog_error_t
+restore_inventory_capture
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
     const gchar *operation_uuid,
     const WylFactArtifactInventoryIdentity *expected_stage,
     const WylFactArtifactInventoryIdentity *expected_main,
-    WylFactGraphRestoreInventory *out_inventory)
+    gboolean pre_stage, WylFactGraphRestoreInventory *out_inventory)
 {
   if (out_inventory != NULL)
     memset (out_inventory, 0, sizeof *out_inventory);
   if (resolver == NULL || directory == NULL || lease == NULL
-      || operation_uuid == NULL || expected_stage == NULL
-      || expected_main == NULL || out_inventory == NULL)
+      || expected_main == NULL || out_inventory == NULL
+      || (pre_stage ? operation_uuid != NULL || expected_stage != NULL
+                    : operation_uuid == NULL || expected_stage == NULL))
     return WYRELOG_E_INVALID;
-  if (!restore_inventory_identity_valid (expected_stage)
-      || !restore_inventory_identity_valid (expected_main)
-      || expected_stage->object == 0)
+  if ((!pre_stage && (!restore_inventory_identity_valid (expected_stage)
+      || expected_stage->object == 0))
+      || !restore_inventory_identity_valid (expected_main))
     return WYRELOG_E_INVALID;
   gboolean present = expected_main->domain != 0 || expected_main->object != 0;
   if (present != (pair != NULL))
     return WYRELOG_E_INVALID;
   WylFactArtifactTransitionNames names = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
-        (operation_uuid, &names);
+  wyrelog_error_t rc = pre_stage ? WYRELOG_E_OK
+      : wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
   if (rc == WYRELOG_E_OK)
     rc = restore_inventory_authority (resolver, directory, lease, pair,
             expected_main);
 
   /* Fixed slots bound memory, descriptors and enumeration to four accepted
    * entries plus dot entries. Never derive or adopt a foreign companion. */
-  const gchar *allowed[4] = { names.stage, present ? "facts.duckdb" : NULL,
+  const gchar *allowed[4] = { pre_stage ? NULL : names.stage,
+                              present ? "facts.duckdb" : NULL,
                               NULL, "facts.duckdb.lock" };
 #ifndef __APPLE__
   if (pair != NULL)
@@ -1373,7 +1375,7 @@ wyl_fact_graph_directory_restore_inventory
       rc = WYRELOG_E_POLICY;
   }
   if (rc == WYRELOG_E_OK
-      && (pins[0] < 0 || (present && pins[1] < 0)
+      && ((!pre_stage && pins[0] < 0) || (present && pins[1] < 0)
       || (allowed[2] != NULL && pins[2] < 0)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
@@ -1428,8 +1430,10 @@ wyl_fact_graph_directory_restore_inventory
     { .domain = directory->graph_device, .object = directory->graph_inode };
     result.observation.guard_identity = (WylFactArtifactInventoryIdentity)
     { .domain = resolver->device, .object = resolver->inode };
-    result.stage_identity = *expected_stage;
-    result.stage_bytes = stats[0].st_size;
+    if (!pre_stage) {
+      result.stage_identity = *expected_stage;
+      result.stage_bytes = stats[0].st_size;
+    }
     result.main_identity = *expected_main;
     result.main_present = present;
   }
@@ -1443,6 +1447,41 @@ wyl_fact_graph_directory_restore_inventory
   wyl_fact_artifact_transition_names_clear (&names);
   if (rc == WYRELOG_E_OK)
     *out_inventory = result;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphRestoreInventory *out_inventory)
+{
+  return restore_inventory_capture (resolver, directory, lease, pair,
+             operation_uuid, expected_stage, expected_main, FALSE, out_inventory);
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_pre_stage_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphPreStageInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (out_inventory == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactGraphRestoreInventory captured = { 0 };
+  wyrelog_error_t rc = restore_inventory_capture (resolver, directory, lease,
+          pair, NULL, NULL, expected_main, TRUE, &captured);
+  if (rc == WYRELOG_E_OK) {
+    out_inventory->observation = captured.observation;
+    out_inventory->main_identity = captured.main_identity;
+    out_inventory->main_present = captured.main_present;
+  }
   return rc;
 }
 
