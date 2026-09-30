@@ -3579,6 +3579,13 @@ wyrelog_error_t wyl_policy_store_tenant_restore_companion_sync_with_effect
     const gchar *graph_id, WylPolicyTenantRestoreCompanionEffectFunc effect,
     gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Read the exact v6 reservation phases in journal graph order from one
+ * fenced policy snapshot. The caller owns the returned string array. */
+wyrelog_error_t wyl_policy_store_tenant_restore_replacement_phases_load
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    GPtrArray **out_phases);
+
 /* Select every bound replacement in one fenced policy transaction. The
  * callback proves the complete dual-companion filesystem vector under the
  * caller's root writer lease and all-graph quiescence; it must not mutate
