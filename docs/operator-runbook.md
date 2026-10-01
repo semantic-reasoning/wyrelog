@@ -1707,10 +1707,13 @@ wyctl --daemon-url "$BASE_URL" fact schema register \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 
 printf 'value\n1\n2\n3\n' >/tmp/fact.tsv
-curl -fsS -X POST \
-  -H "Authorization: Bearer $(cat "$TOKEN")" \
-  --data-binary @/tmp/fact.tsv \
-  "$BASE_URL/facts/$TENANT/$GRAPH/fact:append?tenant=$TENANT&namespace=examples&schema_version=1&batch_id=fact-1&idempotency_key=fact-1&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+wyctl --daemon-url "$BASE_URL" fact put \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace examples --relation fact --schema-version 1 \
+  --batch-id fact-1 --idempotency-key fact-1 \
+  --format tsv --input /tmp/fact.tsv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 
 wyctl --daemon-url "$BASE_URL" datalog query \
   --tenant "$TENANT" --graph "$GRAPH" \
@@ -1719,10 +1722,13 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 
 printf 'value\n1\n' >/tmp/fact-retract.tsv
-curl -fsS -X POST \
-  -H "Authorization: Bearer $(cat "$TOKEN")" \
-  --data-binary @/tmp/fact-retract.tsv \
-  "$BASE_URL/facts/$TENANT/$GRAPH/fact:retract?tenant=$TENANT&namespace=examples&schema_version=1&batch_id=fact-r1&idempotency_key=fact-r1&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+wyctl --daemon-url "$BASE_URL" fact retract \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace examples --relation fact --schema-version 1 \
+  --batch-id fact-r1 --idempotency-key fact-r1 \
+  --format tsv --input /tmp/fact-retract.tsv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 
 wyctl --daemon-url "$BASE_URL" datalog query \
   --tenant "$TENANT" --graph "$GRAPH" \
@@ -1734,6 +1740,13 @@ wyctl --daemon-url "$BASE_URL" datalog query \
 The first query returns values `1`, `2`, and `3`. The query after the retract
 returns only `2` and `3`; the raw atom `fact(1)` is not deleted through a
 separate `/api/facts` API.
+
+`wyctl fact put` and `wyctl fact retract` print a one-line receipt,
+`action=<put|retract> batch_id=... operation_id=... replay=<true|false>
+mutation_class=... effect=unknown`, or a `committed-reconciling` line when the
+commit is still reconciling. `replay=true` is the route's `"inserted":false`.
+The JSON responses below are the HTTP route's body, which also carries the
+deltas that the receipt omits.
 
 A retract that matches nothing answers exactly like one that matched. Retract
 `9`, which was never appended, and the response is (elided to the fields

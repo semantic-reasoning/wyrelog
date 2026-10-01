@@ -180,9 +180,9 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 63:
+    if len(invocations) != 65:
         errors.append(
-            f"{runbook}: expected 63 reviewed wyctl invocations, found "
+            f"{runbook}: expected 65 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(
