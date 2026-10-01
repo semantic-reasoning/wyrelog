@@ -2303,13 +2303,17 @@ The daemon's error code is printed on stderr for every remote failure.
     --guard-loc-class trusted --guard-risk 29
   ```
 
-  Arm `wr.audit.read` for the auditor through the guarded policy-transition
-  endpoint, using the MFA-authenticated operator token:
+  Arm `wr.audit.read` for the auditor with `wyctl policy
+  permission-transition`, using the MFA-authenticated operator token. A
+  skip-MFA token is refused with exit status 4:
 
   ```sh
-  { printf 'Authorization: Bearer '; cat /run/wyrelog/operator.token; printf '\n'; } \
-    | curl -fsS -X POST -H @- \
-      "http://127.0.0.1:8765/policy/permissions/transition?subject=auditor&perm=wr.audit.read&scope=__wr_default&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+  wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
+    --subject auditor --perm wr.audit.read --scope __wr_default \
+    --event grant \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp "$(date +%s)" \
+    --guard-loc-class trusted --guard-risk 29
   ```
 
   Then use the auditor's MFA-issued token, not the operator token:
