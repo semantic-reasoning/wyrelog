@@ -81,6 +81,12 @@ REQUIRED_GUARDS = {
 GUARD_OPTIONS = {
     "--guard-timestamp", "--guard-loc-class", "--guard-risk",
 }
+# Option values wyctl validates locally.  The location classes mirror
+# wyl_guard_loc_class_is_valid (wyrelog/wyl-permission-scope.c); an
+# example passing any other value exits 2 before reaching the daemon.
+OPTION_VALUES = {
+    "--guard-loc-class": {"trusted", "semi_trusted", "public", "untrusted"},
+}
 
 
 def runbook_invocations(path: Path) -> list[tuple[int, list[str]]]:
@@ -151,6 +157,21 @@ def command_and_options(arguments: list[str]) -> tuple[tuple[str, ...], list[str
     raise AssertionError(f"unknown runbook command path beginning {root!r}")
 
 
+def option_values(arguments: list[str]) -> list[tuple[str, str]]:
+    """Pair each documented --option with its value, in either form."""
+    pairs: list[tuple[str, str]] = []
+    for position, token in enumerate(arguments):
+        if not token.startswith("--"):
+            continue
+        if "=" in token:
+            option, value = token.split("=", 1)
+            pairs.append((option, value))
+        elif position + 1 < len(arguments) \
+                and not arguments[position + 1].startswith("--"):
+            pairs.append((token, arguments[position + 1]))
+    return pairs
+
+
 def supported_options(wyctl: Path, path: tuple[str, ...]) -> set[str]:
     environment = os.environ.copy()
     environment["LC_ALL"] = "C"
@@ -209,6 +230,13 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
                 errors.append(
                     f"{runbook}:{line}: {path} does not support "
                     f"{', '.join(missing)}")
+            for option, value in option_values(command_arguments):
+                accepted = OPTION_VALUES.get(option)
+                if accepted is not None and value not in accepted:
+                    errors.append(
+                        f"{runbook}:{line}: {path} passes {option} "
+                        f"{value!r}; wyctl accepts "
+                        f"{', '.join(sorted(accepted))}")
         except AssertionError as exc:
             errors.append(f"{runbook}:{line}: {exc}")
     return errors

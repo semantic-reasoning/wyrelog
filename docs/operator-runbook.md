@@ -370,7 +370,7 @@ wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
     --scope login \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network \
+    --guard-loc-class trusted \
     --guard-risk 10
 ```
 
@@ -2326,17 +2326,17 @@ The daemon's error code is printed on stderr for every remote failure.
     --subject alice --perm site.policy.read --scope tenant-a \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
     --subject alice --perm site.policy.read --scope tenant-a --event grant \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
     --subject alice --perm site.policy.read --scope tenant-a \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 10
   ```
 
 - Grant a role or list service principals. Both operations require a live
@@ -2347,12 +2347,12 @@ The daemon's error code is printed on stderr for every remote failure.
     --subject alice --role wr.system_admin --scope __wr_default \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 service-principal list \
     --tenant __wr_default \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
-    --guard-loc-class internal_network --guard-risk 10
+    --guard-loc-class trusted --guard-risk 10
   ```
 
 - Audit query:
