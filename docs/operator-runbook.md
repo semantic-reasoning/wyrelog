@@ -485,6 +485,73 @@ refused with `mfa_enroll_subject_not_found`, and service principals (`svc:`)
 are never enrollable. Enrollment does not grant roles or permissions; it only
 attaches a TOTP factor.
 
+### Deactivating a User
+
+There is no user record to delete and no `wyctl` command that disables a human
+subject. A user's authority is the set of role memberships and direct
+permissions held by the subject, so deactivation means taking each of them
+away. Run every step with an MFA-assured administrator token.
+
+1. Establish what the subject holds. Neither `wyctl` nor the daemon lists a
+   subject's roles or direct permissions, and the audit trail does not record
+   who received a grant: a `role_grant` or `permission_grant` event stores the
+   granting administrator in `subject_id`, the scope in `resource_id` and the
+   role or permission in `deny_origin`. Keep your own record of grants;
+   deactivation can only revoke what you can name.
+
+2. Disarm each permission you armed for the subject. Revoking a grant does not
+   clear its armed state, so if the same grant is made again later it is
+   immediately effective, without the MFA-assured arming step. Disarming first
+   means a later re-grant stays dormant until it is armed again:
+
+   ```sh
+   wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
+     --subject bob --perm wr.datalog.query --scope acme --event revoke \
+     --access-token-file /run/wyrelog/admin.token \
+     --guard-timestamp "$(date +%s)" \
+     --guard-loc-class trusted --guard-risk 29
+   ```
+
+   Exit status 3 with `invalid_policy_mutation` means the permission was not
+   armed at that scope; continue.
+
+3. Revoke every role membership and every direct permission, including
+   `wr.login.skip_mfa` if the subject still holds it (see "Revoking bootstrap
+   MFA bypass"):
+
+   ```sh
+   wyctl --daemon-url http://127.0.0.1:8765 policy role-revoke \
+     --subject bob --role wr.viewer --scope acme \
+     --access-token-file /run/wyrelog/admin.token \
+     --guard-timestamp "$(date +%s)" \
+     --guard-loc-class trusted --guard-risk 29
+   wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
+     --subject bob --perm wr.datalog.query --scope acme \
+     --access-token-file /run/wyrelog/admin.token \
+     --guard-timestamp "$(date +%s)" \
+     --guard-loc-class trusted --guard-risk 29
+   ```
+
+   Both commands print `ok` whether or not the subject held the grant, so
+   `ok` does not confirm that the grant existed.
+
+Revocation takes effect on the subject's next request. Tokens already issued
+to the subject stay valid but are evaluated against the updated policy, so a
+request that the revoked grant authorized is now denied; a request already
+authorized when the revocation commits may still finish.
+
+An administrator cannot confirm the result with `policy explain`: a decision
+about another human subject is refused with `decide_denied`. The subject's own
+`policy explain` prints `deny` for a revoked permission.
+
+Deactivation does not stop the subject from authenticating. The TOTP
+enrollment remains, so the subject can still log in and verify a code, and
+receives a token that carries no authority. `wyctl mfa enroll` refuses the
+subject with `409 mfa_already_enrolled`; the enrollment can only be replaced
+with the offline `wyctl mfa reset` (see "Recovery and Reset"). To reactivate
+the subject, grant the roles or permissions again and arm the ones you
+disarmed; the existing enrollment is reused.
+
 ### Offline Maintenance Defaults via GSettings
 
 Direct `--store` / `--keyprovider` enrollment, including their GSettings
