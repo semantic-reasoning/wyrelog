@@ -513,7 +513,10 @@ away. Run every step with an MFA-assured administrator token.
    ```
 
    Exit status 3 with `invalid_policy_mutation` means the permission was not
-   armed at that scope; continue.
+   armed at that scope; continue. This step does not apply to the
+   guard-catalogue permissions, such as `wr.audit.read` and `wr.sys.admin`:
+   their decisions ignore the armed state, so disarming them changes nothing
+   and a re-grant is effective immediately (#1320).
 
 3. Revoke every role membership and every direct permission, including
    `wr.login.skip_mfa` if the subject still holds it (see "Revoking bootstrap
