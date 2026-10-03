@@ -3433,6 +3433,20 @@ system-wide defaults layer.
 | `default-policy-store` | `s` | `""` | Backs offline `--store` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
 | `default-keyprovider` | `s` | `""` | Backs offline `--keyprovider` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
 
+`--timeout-ms`, or `default-timeout-ms` when it is omitted, bounds every
+daemon request a command sends: connecting, uploading the request (a fact
+batch included), and reading the answer. The default is 2000 ms and the
+limit is 60000 ms, so wyctl cannot wait for an operation that takes longer
+than a minute; raise the value for large fact batches, heavy queries, or
+long erasures, as the forget example above does. A request that runs out of
+time exits like any other transport failure, and the daemon may still have
+completed it. For policy grants, revokes and transitions, fact put and
+retract, fact forget, graph seal, and tenant create, seal and unseal, wyctl
+adds a line saying that the outcome is unknown and how to find out; other
+commands, including the service-principal and service-credential changes,
+report only the failure, so check the daemon's state before repeating them.
+The online `wyctl mfa enroll` requests are not bounded yet.
+
 Example: configure the operator workstation once and let wyctl invocations
 in that same account and settings-backend environment pick up the defaults.
 These per-user values are not automatically inherited by `sudo wyctl`.
@@ -3632,7 +3646,9 @@ change). These are examples, not a complete list, and one code can appear
 with more than one exit status. When the response carries no code, these
 commands fall back to `invalid_policy_mutation` (exit 3),
 `policy_mutation_denied` (exit 4), `policy_mutation_failed` (exit 5), or
-`policy_auth_required` (exit 6). Unlike the commands above, they print `ok`
-for any successful response without reading its body, and a request the
-client refuses before sending it exits 3, not 2. As with every command,
-`wyctl`'s own argument errors exit 2.
+`policy_auth_required` (exit 6). When no readable answer arrived, or the
+daemon reported a server error, they add a line saying the outcome is unknown
+and whether repeating the command is safe. Unlike the commands above, they
+print `ok` for any successful response without reading its body, and a
+request the client refuses before sending it exits 3, not 2. As with every
+command, `wyctl`'s own argument errors exit 2.

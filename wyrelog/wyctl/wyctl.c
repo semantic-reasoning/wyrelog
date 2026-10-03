@@ -5195,6 +5195,15 @@ run_auth_logout (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
+  /* #1324: logout read neither --timeout-ms nor default-timeout-ms. */
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
   if (!wyctl_check_proxy_environment ())
     return 1;
   g_autoptr (WyctlTokenFileLock) lock = NULL;
@@ -5220,6 +5229,7 @@ run_auth_logout (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 1;
   }
   sodium_memzero (access, strlen (access));
+  wyl_client_set_timeout_ms (client, timeout_ms);
   if (wyl_client_logout (client) != WYRELOG_E_OK) {
     g_autofree gchar *code = wyl_client_dup_last_error_code (client);
     g_printerr ("wyctl: logout failed: %s; local token files were retained\n",
