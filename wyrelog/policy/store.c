@@ -41595,10 +41595,10 @@ wyl_policy_store_tenant_restore_reacquire_v7_prove
     gboolean pending = graph->transition_state ==
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
-        && (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
-        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
-        || graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
-        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+        && ((graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE)
+        || (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE));
     gboolean finalized = graph->transition_state ==
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
         && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
