@@ -4226,6 +4226,78 @@ test_fact_mutation_times_out (void)
   assert_fact_mutation_unknown ("retract", 0, NULL, 0);
 }
 
+/*
+ * #1324: auth logout never read --timeout-ms, so it waited however long
+ * the daemon took and accepted any value for the flag.  The test daemon
+ * answers 200 well after the 500 ms budget: before the fix the logout
+ * waited, succeeded and removed both token files; now it gives up, keeps
+ * them, and the server's captured request shows it was sent.
+ */
+static void
+test_auth_logout_times_out (void)
+{
+  g_autofree gchar *access_path = write_token_with_mode ("access-1", 0600);
+  g_autofree gchar *refresh_path = write_token_with_mode ("refresh-1", 0600);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = 200, .body = "{}",
+    .delay_ms = 2000,
+  };
+  GThread *thread = g_thread_new ("logout", policy_mutation_server_thread,
+          &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url, "--timeout-ms", "500",
+    "auth", "logout", "--tenant", "__wr_default", "--token-file",
+    access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint wait_status = 0;
+  run_child (argv, &out, &err, &wait_status);
+  stop_test_server (thread, cancel);
+  g_autofree gchar *request = server.request;
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==,
+      "wyctl: logout failed: logout_failed; local token files were "
+      "retained\n");
+  g_assert_nonnull (request);
+  g_assert_true (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+  g_unlink (access_path);
+  g_unlink (refresh_path);
+}
+
+/* The flag is now validated like every other command's, before anything
+ * is read or sent. */
+static void
+test_auth_logout_rejects_invalid_timeout (void)
+{
+  g_autofree gchar *access_path = write_token_with_mode ("access-1", 0600);
+  g_autofree gchar *refresh_path = write_token_with_mode ("refresh-1", 0600);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1",
+    "--timeout-ms", "60001", "auth", "logout", "--tenant", "__wr_default",
+    "--token-file", access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint wait_status = 0;
+  run_child (argv, &out, &err, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: invalid timeout\n");
+  g_assert_true (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+  g_unlink (access_path);
+  g_unlink (refresh_path);
+}
+
 static void
 test_fact_forget_unknown_outcome (void)
 {
@@ -5162,6 +5234,10 @@ main (int argc, char **argv)
       test_fact_forget_times_out);
   g_test_add_func ("/wyctl/fact-mutation-times-out",
       test_fact_mutation_times_out);
+  g_test_add_func ("/wyctl/auth-logout-times-out",
+      test_auth_logout_times_out);
+  g_test_add_func ("/wyctl/auth-logout-rejects-invalid-timeout",
+      test_auth_logout_rejects_invalid_timeout);
   g_test_add_func ("/wyctl/fact-forget-unknown-outcome",
       test_fact_forget_unknown_outcome);
   g_test_add_func ("/wyctl/fact-forget-unreadable-success",
