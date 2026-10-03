@@ -1930,6 +1930,11 @@ typedef struct
   GCancellable *cancel;
   guint status;
   const gchar *body;
+  /* Wait this long after reading the request before answering.  With
+   * headers_first the status line and headers go out at once and only the
+   * body waits, so the client is cancelled mid-response (#1324). */
+  guint delay_ms;
+  gboolean headers_first;
   gchar *request;
 } PolicyMutationServer;
 
@@ -1942,6 +1947,11 @@ typedef struct
   const gchar *token;
   gint expected_exit;
   const gchar *expected_code;
+  /* The daemon may have applied the change: wyctl adds its outcome hint. */
+  gboolean expect_hint;
+  /* Answer this late; the command then runs with --timeout-ms 500. */
+  guint delay_ms;
+  gboolean headers_first;
 } PolicyMutationErrorCase;
 
 /*
@@ -1954,24 +1964,46 @@ typedef struct
  * daemon on those statuses would fail here.  Exit codes are unchanged.
  */
 static const PolicyMutationErrorCase policy_mutation_error_cases[] = {
-  {403, "{\"error\":\"policy_denied\"}", NULL, 4, "policy_denied"},
-  {403, "{\"error\":\"tenant_denied\"}", NULL, 4, "tenant_denied"},
+  {403, "{\"error\":\"policy_denied\"}", NULL, 4, "policy_denied",
+   FALSE, 0, FALSE},
+  {403, "{\"error\":\"tenant_denied\"}", NULL, 4, "tenant_denied",
+   FALSE, 0, FALSE},
   {403, "{\"error\":\"policy_mutation_denied\"}", NULL, 4,
-   "policy_mutation_denied"},
-  {403, "{}", NULL, 4, "policy_mutation_denied"},
-  {403, "{\"error\":\"Policy-Denied\"}", NULL, 4, "policy_mutation_denied"},
-  {409, "{\"error\":\"tenant_sealed\"}", NULL, 4, "tenant_sealed"},
-  {400, "{\"error\":\"invalid_policy_auth\"}", NULL, 3, "invalid_policy_auth"},
-  {400, "{}", NULL, 3, "invalid_policy_mutation"},
-  {401, "{\"error\":\"tenant_invalid\"}", NULL, 6, "tenant_invalid"},
-  {401, "{}", NULL, 6, "policy_auth_required"},
+   "policy_mutation_denied", FALSE, 0, FALSE},
+  {403, "{}", NULL, 4, "policy_mutation_denied", FALSE, 0, FALSE},
+  {403, "{\"error\":\"Policy-Denied\"}", NULL, 4, "policy_mutation_denied",
+   FALSE, 0, FALSE},
+  {409, "{\"error\":\"tenant_sealed\"}", NULL, 4, "tenant_sealed",
+   FALSE, 0, FALSE},
+  {400, "{\"error\":\"invalid_policy_auth\"}", NULL, 3, "invalid_policy_auth",
+   FALSE, 0, FALSE},
+  {400, "{}", NULL, 3, "invalid_policy_mutation", FALSE, 0, FALSE},
+  {401, "{\"error\":\"tenant_invalid\"}", NULL, 6, "tenant_invalid",
+   FALSE, 0, FALSE},
+  {401, "{}", NULL, 6, "policy_auth_required", FALSE, 0, FALSE},
   {500, "{\"error\":\"policy_write_cleanup_failed\"}", NULL, 5,
-   "policy_write_cleanup_failed"},
-  {500, "{}", NULL, 5, "policy_mutation_failed"},
+   "policy_write_cleanup_failed", TRUE, 0, FALSE},
+  {500, "{}", NULL, 5, "policy_mutation_failed", TRUE, 0, FALSE},
   /* A code containing the bearer token is withheld by the client. */
   {403, "{\"error\":\"x_scrubsecret\"}", "scrubsecret", 4,
-   "policy_mutation_denied"},
-  {0, NULL, NULL, 5, "policy_mutation_failed"},
+   "policy_mutation_denied", FALSE, 0, FALSE},
+  {0, NULL, NULL, 5, "policy_mutation_failed", TRUE, 0, FALSE},
+};
+
+/*
+ * #1324: these commands sent without the client's timeout, so a daemon that
+ * accepted the request and never answered held wyctl indefinitely.  The
+ * daemon answers 403 well after the 500 ms budget: before the fix wyctl
+ * waited for it and exited 4 with policy_denied, so the exit status alone
+ * proves the request was abandoned in time, and the server's captured
+ * request proves it got there rather than being refused.  When the 403
+ * headers arrive before the stall the refusal is known, so no hint.
+ */
+static const PolicyMutationErrorCase policy_mutation_timeout_cases[] = {
+  {403, "{\"error\":\"policy_denied\"}", NULL, 5, "policy_mutation_failed",
+   TRUE, 2000, FALSE},
+  {403, "{\"error\":\"policy_denied\"}", NULL, 5, "policy_mutation_failed",
+   FALSE, 2000, TRUE},
 };
 
 static void
@@ -1979,61 +2011,93 @@ assert_policy_mutation_error (const gchar *command,
     const PolicyMutationErrorCase *error_case, gint wait_status,
     const gchar *stdout_buf, const gchar *stderr_buf)
 {
+  g_autofree gchar *hint = g_strcmp0 (command, "permission-transition") == 0
+      ? g_strdup ("wyctl: the transition outcome is unknown; the subject's "
+          "`wyctl policy explain` shows whether the permission is armed, and "
+          "repeating an applied transition fails with "
+          "invalid_policy_mutation\n")
+      : g_strdup_printf ("wyctl: the policy %s outcome is unknown; repeating "
+          "the same command is safe\n", command);
   g_autofree gchar *expected_stderr =
-      g_strdup_printf ("wyctl: policy %s failed: %s\n", command,
-          error_case->expected_code);
+      g_strdup_printf ("wyctl: policy %s failed: %s\n%s", command,
+          error_case->expected_code, error_case->expect_hint ? hint : "");
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, error_case->expected_exit);
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_cmpstr (stderr_buf, ==, expected_stderr);
 }
 
+/* Sleep in short steps so that stop_test_server's cancel ends a long
+ * delay at once instead of holding the join for its full length. */
+static void
+policy_mutation_server_wait (const PolicyMutationServer *server)
+{
+  for (guint waited = 0; waited < server->delay_ms; waited += 10) {
+    if (g_cancellable_is_cancelled (server->cancel))
+      return;
+    g_usleep (10 * 1000);
+  }
+}
+
 static gpointer
 policy_mutation_server_thread (gpointer data)
 {
   PolicyMutationServer *server = data;
-  g_autoptr (GError) error = NULL;
-  g_autoptr (GSocketConnection) conn =
-      g_socket_listener_accept (server->listener, NULL, server->cancel, &error);
-  if (conn == NULL)
-    return NULL;
-
   gchar buffer[8192];
-  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
-  GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
-  /* Read until the headers and the Content-Length body have both arrived:
-   * a client may send the body in a separate segment. */
   gsize have = 0;
-  while (have < sizeof buffer - 1) {
-    gssize n = g_input_stream_read (input, buffer + have,
-            sizeof buffer - 1 - have, NULL, NULL);
-    if (n <= 0)
-      break;
-    have += (gsize) n;
-    buffer[have] = '\0';
-    const gchar *end = strstr (buffer, "\r\n\r\n");
-    if (end == NULL)
-      continue;
-    const gchar *length = g_strstr_len (buffer, end - buffer,
-            "Content-Length:");
-    if (length == NULL)
-      length = g_strstr_len (buffer, end - buffer, "content-length:");
-    gsize want = length != NULL
-        ? (gsize) g_ascii_strtoull (length + strlen ("Content-Length:"),
-            NULL, 10) : 0;
-    if (have >= (gsize) (end + 4 - buffer) + want)
-      break;
+  g_autoptr (GSocketConnection) conn = NULL;
+  GOutputStream *output = NULL;
+  /* A connection that delivers nothing must not be answered as if it had
+   * carried the request: keep accepting until one does. */
+  while (have == 0) {
+    g_autoptr (GError) error = NULL;
+    g_clear_object (&conn);
+    conn = g_socket_listener_accept (server->listener, NULL, server->cancel,
+            &error);
+    if (conn == NULL)
+      return NULL;
+    GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
+    output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
+    /* Read until the headers and the Content-Length body have both
+     * arrived: a client may send the body in a separate segment. */
+    while (have < sizeof buffer - 1) {
+      gssize n = g_input_stream_read (input, buffer + have,
+              sizeof buffer - 1 - have, NULL, NULL);
+      if (n <= 0)
+        break;
+      have += (gsize) n;
+      buffer[have] = '\0';
+      const gchar *end = strstr (buffer, "\r\n\r\n");
+      if (end == NULL)
+        continue;
+      const gchar *length = g_strstr_len (buffer, end - buffer,
+              "Content-Length:");
+      if (length == NULL)
+        length = g_strstr_len (buffer, end - buffer, "content-length:");
+      gsize want = length != NULL
+          ? (gsize) g_ascii_strtoull (length + strlen ("Content-Length:"),
+              NULL, 10) : 0;
+      if (have >= (gsize) (end + 4 - buffer) + want)
+        break;
+    }
   }
-  if (have > 0)
-    server->request = g_strndup (buffer, have);
+  server->request = g_strndup (buffer, have);
 
   const gchar *body = server->body != NULL ? server->body : "{}";
   g_autofree gchar *response =
       g_strdup_printf ("HTTP/1.1 %u OK\r\nContent-Type: application/json\r\n"
           "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
           server->status, strlen (body), body);
-  (void) g_output_stream_write (output, response, strlen (response), NULL,
-      NULL);
+  gsize split = 0;
+  if (server->headers_first) {
+    split = (gsize) (strstr (response, "\r\n\r\n") + 4 - response);
+    (void) g_output_stream_write_all (output, response, split, NULL, NULL,
+        NULL);
+    (void) g_output_stream_flush (output, NULL, NULL);
+  }
+  policy_mutation_server_wait (server);
+  (void) g_output_stream_write_all (output, response + split,
+      strlen (response) - split, NULL, NULL, NULL);
   (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
   return NULL;
 }
@@ -2213,6 +2277,8 @@ run_policy_permission_status_case (const gchar *command,
     .cancel = accept_cancel,
     .status = error_case->status,
     .body = error_case->body,
+    .delay_ms = error_case->delay_ms,
+    .headers_first = error_case->headers_first,
   };
   GThread *server_thread = NULL;
   if (error_case->status != 0)
@@ -2225,7 +2291,7 @@ run_policy_permission_status_case (const gchar *command,
     "--daemon-url",
     daemon_url,
     "--timeout-ms",
-    "1000",
+    error_case->delay_ms > 0 ? "500" : "1000",
     "policy",
     (gchar *) command,
     "--subject",
@@ -2256,6 +2322,8 @@ run_policy_permission_status_case (const gchar *command,
 
   assert_policy_mutation_error (command, error_case, wait_status, stdout_buf,
       stderr_buf);
+  if (error_case->status != 0)
+    g_assert_nonnull (server.request);
 
   g_free (server.request);
   g_unlink (token_path);
@@ -2786,6 +2854,8 @@ run_policy_role_status_case (const gchar *command,
     .cancel = accept_cancel,
     .status = error_case->status,
     .body = error_case->body,
+    .delay_ms = error_case->delay_ms,
+    .headers_first = error_case->headers_first,
   };
   GThread *server_thread = NULL;
   if (error_case->status != 0)
@@ -2798,7 +2868,7 @@ run_policy_role_status_case (const gchar *command,
     "--daemon-url",
     daemon_url,
     "--timeout-ms",
-    "1000",
+    error_case->delay_ms > 0 ? "500" : "1000",
     "policy",
     (gchar *) command,
     "--subject",
@@ -2827,6 +2897,8 @@ run_policy_role_status_case (const gchar *command,
 
   assert_policy_mutation_error (command, error_case, wait_status, stdout_buf,
       stderr_buf);
+  if (error_case->status != 0)
+    g_assert_nonnull (server.request);
 
   g_free (server.request);
   g_unlink (token_path);
@@ -2846,6 +2918,23 @@ test_policy_role_revoke_status_errors (void)
   for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
     run_policy_role_status_case ("role-revoke",
         &policy_mutation_error_cases[i]);
+}
+
+static void
+test_policy_mutation_timeouts (void)
+{
+  static const gchar *const permission_commands[] = {
+    "permission-grant", "permission-revoke", "permission-transition",
+  };
+  static const gchar *const role_commands[] = { "role-grant", "role-revoke" };
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_timeout_cases); i++) {
+    for (gsize c = 0; c < G_N_ELEMENTS (permission_commands); c++)
+      run_policy_permission_status_case (permission_commands[c],
+          &policy_mutation_timeout_cases[i]);
+    for (gsize c = 0; c < G_N_ELEMENTS (role_commands); c++)
+      run_policy_role_status_case (role_commands[c],
+          &policy_mutation_timeout_cases[i]);
+  }
 }
 
 static void
@@ -4923,6 +5012,8 @@ main (int argc, char **argv)
       test_policy_role_grant_status_errors);
   g_test_add_func ("/wyctl/policy-role-revoke-status-errors",
       test_policy_role_revoke_status_errors);
+  g_test_add_func ("/wyctl/policy-mutation-timeouts",
+      test_policy_mutation_timeouts);
   g_test_add_func ("/wyctl/audit-help", test_audit_help);
   g_test_add_func ("/wyctl/audit-validation", test_audit_validation);
   g_test_add_func ("/wyctl/audit-query", test_audit_query);
