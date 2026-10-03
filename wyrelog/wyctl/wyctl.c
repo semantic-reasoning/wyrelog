@@ -1651,6 +1651,21 @@ policy_mutation_exit (WylClient *client, const gchar *command,
   g_autofree gchar *code = wyl_client_dup_last_error_code (client);
   g_printerr ("wyctl: policy %s failed: %s\n", command,
       code != NULL ? code : fallback);
+  /* No answer, a success status with an unread body, or a server error:
+   * the daemon may have applied the change (#1324).  The same test as the
+   * graph seal and fact forget hints. */
+  guint status = wyl_client_get_last_http_status (client);
+  if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
+      || status / 100 == 5) {
+    if (g_strcmp0 (command, "permission-transition") == 0)
+      g_printerr ("wyctl: the transition outcome is unknown; the subject's "
+          "`wyctl policy explain` shows whether the permission is armed, "
+          "and repeating an applied transition fails with "
+          "invalid_policy_mutation\n");
+    else
+      g_printerr ("wyctl: the policy %s outcome is unknown; repeating the "
+          "same command is safe\n", command);
+  }
   return exit_code;
 }
 

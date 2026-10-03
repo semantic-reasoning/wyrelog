@@ -279,6 +279,7 @@ typedef struct
   GMutex mutex;
   gboolean done;
   guint timeout_ms;
+  GThread *thread;
 } WylClientTimeout;
 
 static gpointer
@@ -300,6 +301,53 @@ client_timeout_thread_func (gpointer data)
   return NULL;
 }
 
+/* Arm the client's request deadline: a fresh cancellable per request, since
+ * a cancelled one stays cancelled, and a thread that cancels it when
+ * timeout_ms elapses.  A zero timeout leaves the request unbounded. */
+static void
+client_timeout_begin (WylClient *client, WylClientTimeout *timeout)
+{
+  *timeout = (WylClientTimeout) {
+    .timeout_ms = client->timeout_ms,
+  };
+  if (client->timeout_ms == 0)
+    return;
+  timeout->cancellable = g_cancellable_new ();
+  g_cond_init (&timeout->cond);
+  g_mutex_init (&timeout->mutex);
+  timeout->thread = g_thread_new ("wyl-client-timeout",
+          client_timeout_thread_func, timeout);
+}
+
+/* Disarm and join, so the thread never outlives the caller's frame. */
+static void
+client_timeout_end (WylClientTimeout *timeout)
+{
+  if (timeout->thread != NULL) {
+    g_mutex_lock (&timeout->mutex);
+    timeout->done = TRUE;
+    g_cond_signal (&timeout->cond);
+    g_mutex_unlock (&timeout->mutex);
+    g_thread_join (g_steal_pointer (&timeout->thread));
+    g_mutex_clear (&timeout->mutex);
+    g_cond_clear (&timeout->cond);
+  }
+  g_clear_object (&timeout->cancellable);
+}
+
+/* soup_session_send_and_read bounded by the client's timeout (#1324). */
+static GBytes *
+client_session_send_and_read (WylClient *client, SoupMessage *message,
+    GError **error)
+{
+  WylClientTimeout timeout;
+  client_timeout_begin (client, &timeout);
+  GBytes *body = soup_session_send_and_read (client->session, message,
+          timeout.cancellable, error);
+  client_timeout_end (&timeout);
+  return body;
+}
+
 static wyrelog_error_t
 client_send_message_collect (WylClient *client, SoupMessage *message,
     GBytes **out_body, guint *out_status)
@@ -313,31 +361,7 @@ client_send_message_collect (WylClient *client, SoupMessage *message,
     *out_status = 0;
 
   g_autoptr (GError) error = NULL;
-  g_autoptr (GCancellable) cancellable =
-      client->timeout_ms > 0 ? g_cancellable_new () : NULL;
-  WylClientTimeout timeout = {
-    .cancellable = cancellable,
-    .timeout_ms = client->timeout_ms,
-  };
-  GThread *timeout_thread = NULL;
-  if (cancellable != NULL) {
-    g_cond_init (&timeout.cond);
-    g_mutex_init (&timeout.mutex);
-    timeout_thread = g_thread_new ("wyl-client-timeout",
-            client_timeout_thread_func, &timeout);
-  }
-
-  GBytes *body = soup_session_send_and_read (client->session, message,
-          cancellable, &error);
-  if (timeout_thread != NULL) {
-    g_mutex_lock (&timeout.mutex);
-    timeout.done = TRUE;
-    g_cond_signal (&timeout.cond);
-    g_mutex_unlock (&timeout.mutex);
-    g_thread_join (timeout_thread);
-    g_mutex_clear (&timeout.mutex);
-    g_cond_clear (&timeout.cond);
-  }
+  GBytes *body = client_session_send_and_read (client, message, &error);
   guint status = soup_message_get_status (message);
   client_store_remote_response (client, status, body);
   if (out_status != NULL)
@@ -365,19 +389,9 @@ client_send_message_collect_bounded (WylClient *client, SoupMessage *message,
     *out_status = 0;
 
   g_autoptr (GError) error = NULL;
-  g_autoptr (GCancellable) cancellable =
-      client->timeout_ms > 0 ? g_cancellable_new () : NULL;
-  WylClientTimeout timeout = {
-    .cancellable = cancellable,
-    .timeout_ms = client->timeout_ms,
-  };
-  GThread *timeout_thread = NULL;
-  if (cancellable != NULL) {
-    g_cond_init (&timeout.cond);
-    g_mutex_init (&timeout.mutex);
-    timeout_thread = g_thread_new ("wyl-client-timeout",
-            client_timeout_thread_func, &timeout);
-  }
+  WylClientTimeout timeout;
+  client_timeout_begin (client, &timeout);
+  GCancellable *cancellable = timeout.cancellable;
 
   wyrelog_error_t rc = WYRELOG_E_IO;
   g_autoptr (GInputStream) stream = soup_session_send (client->session, message,
@@ -428,15 +442,7 @@ client_send_message_collect_bounded (WylClient *client, SoupMessage *message,
     }
   }
 
-  if (timeout_thread != NULL) {
-    g_mutex_lock (&timeout.mutex);
-    timeout.done = TRUE;
-    g_cond_signal (&timeout.cond);
-    g_mutex_unlock (&timeout.mutex);
-    g_thread_join (timeout_thread);
-    g_mutex_clear (&timeout.mutex);
-    g_cond_clear (&timeout.cond);
-  }
+  client_timeout_end (&timeout);
   return rc;
 }
 
@@ -926,7 +932,7 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body =
-      soup_session_send_and_read (client->session, message, NULL, &error);
+      client_session_send_and_read (client, message, &error);
   guint status = soup_message_get_status (message);
   /* #1323: record the response so the last-error accessors report the
    * daemon's code for these calls, as client.h documents. */
