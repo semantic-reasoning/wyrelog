@@ -39695,7 +39695,10 @@ restore_replacement_authority_locked (wyl_policy_store_t *store,
           "AND p.op_uuid=?11 AND p.phase='active' "
           "AND (SELECT COUNT(*) FROM main.fact_graph_provisioning AS active "
           "WHERE active.tenant_id=g.tenant_id AND active.graph_id=g.graph_id "
-          "AND active.phase='active')=1);", &stmt);
+          "AND active.phase='active')=1 AND "
+          "(SELECT COUNT(*) FROM main.fact_graph_provisioning AS all_rows "
+          "WHERE all_rows.tenant_id=g.tenant_id AND "
+          "all_rows.graph_id=g.graph_id)=1);", &stmt);
   gsize blob_len = 0;
   const guint8 *blob = g_bytes_get_data (r->journal_blob, &blob_len);
   if (rc == WYRELOG_E_OK
@@ -39939,6 +39942,130 @@ restore_replacement_same_identity
          b->graph_reconciliation_generation
          && a->journal_revision == b->journal_revision
          && a->attempt == b->attempt;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_reacquire_v2_prove
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row)
+{
+  if (store == NULL || operation_uuid == NULL || expected_journal == NULL
+      || expected_row == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  rc = offline_restore_load_locked (store, operation_uuid, &record);
+  if (rc == WYRELOG_E_OK && !g_bytes_equal (record->journal_blob,
+      expected_journal))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    rc = offline_restore_claim_matches_locked (store, record);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_replacement_load_locked (store, operation_uuid, &row);
+  if (rc == WYRELOG_E_OK
+      && (!restore_replacement_same_identity (row, expected_row)
+      || g_strcmp0 (row->phase, expected_row->phase) != 0))
+    rc = WYRELOG_E_BUSY;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) canonical = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (record->journal_blob,
+            &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+  const WylFactOfflineRestoreJournalGraph *graph = rc == WYRELOG_E_OK
+      && journal.graphs != NULL && journal.graphs->len == 1
+      ? g_ptr_array_index (journal.graphs, 0) : NULL;
+  g_autofree gchar *basename = row == NULL ? NULL :
+      g_strdup_printf ("provision-%s.sqlite", row->replacement_uuid);
+  if (rc == WYRELOG_E_OK && (!g_bytes_equal (canonical,
+      record->journal_blob)
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || journal.confirmation !=
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal.manifest_trust !=
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || journal.policy_generation_published
+      || journal.lifecycle_handoff_complete
+      || journal.revision != record->revision
+      || graph == NULL || record->graph_count != 1
+      || g_strcmp0 (journal.operation_uuid, operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, record->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id,
+      record->selected_graph_id) != 0
+      || memcmp (journal.manifest_sha256,
+      record->manifest_sha256, 32) != 0
+      || graph->expected_main_absent
+      || g_strcmp0 (graph->graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->store_uuid, row->store_uuid) != 0
+      || g_strcmp0 (graph->old_provisioning_uuid,
+      row->old_provisioning_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, row->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id, row->graph_id) != 0
+      || g_strcmp0 (journal.operation_uuid, row->operation_uuid) != 0
+      || journal.destination_tenant_lifecycle_generation !=
+      row->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      row->tenant_reconciliation_generation
+      || graph->destination_lifecycle_generation !=
+      row->graph_lifecycle_generation
+      || graph->destination_reconciliation_generation !=
+      row->graph_reconciliation_generation
+      || row->journal_revision == 0
+      || row->journal_revision > journal.revision
+      || g_strcmp0 (row->companion_basename, basename) != 0
+      || g_strcmp0 (row->old_provisioning_uuid,
+      row->replacement_uuid) == 0
+      || (g_strcmp0 (row->phase, "reserved") != 0
+      && g_strcmp0 (row->phase, "companion_synced") != 0)))
+    rc = WYRELOG_E_POLICY;
+  gboolean authorized = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyGraphRestoreReplacementReservation reservation = {
+      .operation_uuid = row->operation_uuid,
+      .tenant_id = row->tenant_id,
+      .graph_id = row->graph_id,
+      .old_provisioning_uuid = row->old_provisioning_uuid,
+      .store_uuid = row->store_uuid,
+      .tenant_lifecycle_generation = row->tenant_lifecycle_generation,
+      .tenant_reconciliation_generation = row->tenant_reconciliation_generation,
+      .graph_lifecycle_generation = row->graph_lifecycle_generation,
+      .graph_reconciliation_generation = row->graph_reconciliation_generation,
+      .journal_revision = journal.revision,
+      .journal_blob = record->journal_blob,
+    };
+    rc = restore_replacement_authority_locked (store, &reservation,
+            &authorized);
+  }
+  if (rc == WYRELOG_E_OK && !authorized)
+    rc = WYRELOG_E_POLICY;
+  g_autofree gchar *digest = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = active_fact_schema_digest_unlocked (store, journal.tenant_id,
+            journal.selected_graph_id, &digest);
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (digest, graph->schema_digest) != 0)
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_graph_restore_replacement_record_free (row);
+  wyl_policy_offline_restore_record_free (record);
+  wyrelog_error_t rollback_rc = publication_transaction_abort_owned (store);
+  if (rollback_rc != WYRELOG_E_OK)
+    rc = rollback_rc;
+  wyl_policy_store_coordinator_fence_clear (&fence);
+  return rc;
 }
 
 static gboolean
@@ -41840,6 +41967,119 @@ restore_selection_postcondition_locked (wyl_policy_store_t *store,
     return rc;
   return step == SQLITE_ROW ?
          (matches ? WYRELOG_E_OK : WYRELOG_E_POLICY) : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_restore_reacquire_v3_prove
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row)
+{
+  if (store == NULL || operation_uuid == NULL || expected_journal == NULL
+      || expected_row == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  WylPolicyGraphRestoreReplacementRecord *row = NULL;
+  rc = offline_restore_load_locked (store, operation_uuid, &record);
+  if (rc == WYRELOG_E_OK && !g_bytes_equal (record->journal_blob,
+      expected_journal))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    rc = offline_restore_claim_matches_locked (store, record);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_replacement_load_locked (store, operation_uuid, &row);
+  if (rc == WYRELOG_E_OK
+      && (!restore_replacement_same_identity (row, expected_row)
+      || g_strcmp0 (row->phase, expected_row->phase) != 0))
+    rc = WYRELOG_E_BUSY;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_autoptr (GBytes) canonical = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (record->journal_blob,
+            &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+  const WylFactOfflineRestoreJournalGraph *graph = rc == WYRELOG_E_OK
+      && journal.graphs != NULL && journal.graphs->len == 1
+      ? g_ptr_array_index (journal.graphs, 0) : NULL;
+  gboolean pending = graph != NULL
+      && graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+      && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+      && ((graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE)
+      || (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+      && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE));
+  gboolean finalized = graph != NULL
+      && graph->transition_state ==
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED
+      && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+      && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      && graph->transition_terminal;
+  if (rc == WYRELOG_E_OK && (!g_bytes_equal (canonical,
+      record->journal_blob)
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || journal.confirmation !=
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal.manifest_trust !=
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || !journal.replacement_selected_pending_cleanup
+      || journal.policy_generation_published
+      || journal.lifecycle_handoff_complete
+      || journal.revision != record->revision || record->graph_count != 1
+      || graph == NULL || graph->expected_main_absent
+      || !graph->replay_preflighted || (!pending && !finalized)
+      || g_strcmp0 (journal.operation_uuid, operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, record->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id,
+      record->selected_graph_id) != 0
+      || memcmp (journal.manifest_sha256,
+      record->manifest_sha256, 32) != 0
+      || g_strcmp0 (journal.tenant_id, row->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->graph_id, row->graph_id) != 0
+      || g_strcmp0 (graph->store_uuid, row->store_uuid) != 0
+      || g_strcmp0 (graph->old_provisioning_uuid,
+      row->old_provisioning_uuid) != 0
+      || journal.destination_tenant_lifecycle_generation !=
+      row->tenant_lifecycle_generation
+      || journal.destination_tenant_reconciliation_generation !=
+      row->tenant_reconciliation_generation
+      || graph->destination_lifecycle_generation !=
+      row->graph_lifecycle_generation
+      || graph->destination_reconciliation_generation !=
+      row->graph_reconciliation_generation
+      || g_strcmp0 (row->phase, "selected_pending_cleanup") != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_selection_postcondition_locked (store, row, record);
+  g_autofree gchar *digest = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = active_fact_schema_digest_unlocked (store, journal.tenant_id,
+            journal.selected_graph_id, &digest);
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (digest, graph->schema_digest) != 0)
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_graph_restore_replacement_record_free (row);
+  wyl_policy_offline_restore_record_free (record);
+  wyrelog_error_t rollback_rc = publication_transaction_abort_owned (store);
+  if (rollback_rc != WYRELOG_E_OK)
+    rc = rollback_rc;
+  wyl_policy_store_coordinator_fence_clear (&fence);
+  return rc;
 }
 
 wyrelog_error_t

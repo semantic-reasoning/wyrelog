@@ -3027,6 +3027,48 @@ check_persisted (wyl_policy_store_t *policy, const gchar *operation_uuid,
 }
 
 static wyrelog_error_t
+graph_commit_quiesce (wyl_policy_store_t *policy,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    GBytes *encoded,
+    const WylPolicyGraphRestoreReplacementRecord *row,
+    gboolean selected, const WylFactGraphKey *key, gint64 timeout_us,
+    WylFactGraphQuiescenceToken **out_token)
+{
+  wyrelog_error_t rc = wyl_fact_graph_runtime_manager_quiesce (runtime,
+          key, timeout_us, out_token);
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return rc;
+  rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = selected ? wyl_policy_store_graph_restore_reacquire_v3_prove
+          (policy, operation_uuid, encoded, row)
+        : wyl_policy_store_graph_restore_reacquire_v2_prove
+          (policy, operation_uuid, encoded, row);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_quiesce_missing_closed (runtime,
+            key, timeout_us, out_token);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = selected ? wyl_policy_store_graph_restore_reacquire_v3_prove
+          (policy, operation_uuid, encoded, row)
+        : wyl_policy_store_graph_restore_reacquire_v2_prove
+          (policy, operation_uuid, encoded, row);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_token, wyl_fact_graph_quiescence_token_release);
+  return rc;
+}
+
+static wyrelog_error_t
 open_shape (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease,
     const WylFactOfflineRestoreJournal *journal,
@@ -3111,8 +3153,9 @@ wyl_fact_offline_restore_graph_commit_inspect
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -3261,8 +3304,9 @@ wyl_fact_offline_restore_graph_commit_select_replacement_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -3443,8 +3487,9 @@ wyl_fact_offline_restore_graph_commit_companion_recover
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -3718,8 +3763,9 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -4135,8 +4181,9 @@ wyl_fact_offline_restore_graph_commit_retain_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -4405,8 +4452,9 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -4748,8 +4796,9 @@ wyl_fact_offline_restore_graph_commit_publish_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -4960,8 +5009,9 @@ wyl_fact_offline_restore_graph_commit_finalize_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,
@@ -5181,8 +5231,9 @@ wyl_fact_offline_restore_graph_commit_promote_run
     rc = wyl_fact_graph_key_init (&key, journal.tenant_id,
             journal.selected_graph_id);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_runtime_manager_quiesce (runtime, &key,
-            drain_timeout_us, &quiescence);
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, TRUE, &key, drain_timeout_us,
+            &quiescence);
   WylFactGraphLocator locator = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, journal.tenant_id,

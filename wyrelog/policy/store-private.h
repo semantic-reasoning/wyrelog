@@ -3510,6 +3510,17 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_reserve
 wyrelog_error_t wyl_policy_store_graph_restore_replacement_load
   (wyl_policy_store_t *store, const gchar *operation_uuid,
     WylPolicyGraphRestoreReplacementRecord **out_record);
+
+/* Prove exact graph v2 COMMIT journal/claim, replacement row, sealed target
+ * graph and its old ACTIVE provisioning in one read-only transaction. */
+wyrelog_error_t wyl_policy_store_graph_restore_reacquire_v2_prove
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row);
+wyrelog_error_t wyl_policy_store_graph_restore_reacquire_v3_prove
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    GBytes *expected_journal,
+    const WylPolicyGraphRestoreReplacementRecord *expected_row);
 /* Storage primitive for a future sealed restore driver. The caller must
  * separately prove a durable post-PUBLISH dual filesystem witness under the
  * root lease and quiescence before invoking this CAS. No current mode-A
