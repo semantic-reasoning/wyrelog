@@ -1427,7 +1427,7 @@ A granted permission is dormant until it is armed. Before the loop above,
 wr.graph.manage --resource "$TENANT" --access-token-file "$TOKEN"` prints
 `deny` with `reason=not_armed`; afterwards it prints `allow`. The arming
 events, `grant` and `reset`, need the MFA-assured token: the bootstrap token
-is refused with exit 4 and `policy_mutation_denied`. A transition the state
+is refused with exit 4 and `policy_denied`. A transition the state
 machine refuses, such as arming an already armed permission when the loop is
 re-run, exits 3 with `invalid_policy_mutation`; `policy explain` shows the
 current state.
@@ -3621,3 +3621,18 @@ and 6 for authentication failures. A successful policy check whose decision
 is `deny` still prints `deny` and exits 1; `policy explain` exits 0 for a
 successfully retrieved decision. Human login, refresh, logout, and status
 retain their existing exit codes and include the daemon error code when present.
+
+`policy permission-grant`, `permission-revoke`, `permission-transition`,
+`role-grant`, and `role-revoke` also print the daemon's error code. The code
+is what separates refusals that share an exit status. For example, exit 4
+may come with `policy_denied` (the caller lacks the authority, or the
+MFA-assured session, that the operation needs at that scope),
+`tenant_denied`, or `policy_mutation_denied` (the policy store refused the
+change). These are examples, not a complete list, and one code can appear
+with more than one exit status. When the response carries no code, these
+commands fall back to `invalid_policy_mutation` (exit 3),
+`policy_mutation_denied` (exit 4), `policy_mutation_failed` (exit 5), or
+`policy_auth_required` (exit 6). Unlike the commands above, they print `ok`
+for any successful response without reading its body, and a request the
+client refuses before sending it exits 3, not 2. As with every command,
+`wyctl`'s own argument errors exit 2.

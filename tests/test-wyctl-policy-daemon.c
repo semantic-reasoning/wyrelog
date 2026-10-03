@@ -733,7 +733,7 @@ main (void)
         || WEXITSTATUS (transition_status) != 4
         || g_strcmp0 (transition_stdout, "") != 0
         || g_strcmp0 (transition_stderr, "wyctl: policy permission-transition "
-        "failed: policy_mutation_denied\n") != 0) {
+        "failed: policy_denied\n") != 0) {
       g_printerr ("skip-MFA permission-transition: status %d\n"
           "stdout: %s\nstderr: %s\n", transition_status,
           transition_stdout ? transition_stdout : "(null)",

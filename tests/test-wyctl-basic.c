@@ -1933,6 +1933,61 @@ typedef struct
   gchar *request;
 } PolicyMutationServer;
 
+/* One daemon answer to a policy mutation and what wyctl must make of it.
+ * status 0 means nothing listens at the daemon URL. */
+typedef struct
+{
+  guint status;
+  const gchar *body;
+  const gchar *token;
+  gint expected_exit;
+  const gchar *expected_code;
+} PolicyMutationErrorCase;
+
+/*
+ * #1323: the policy mutation commands printed one fixed string per client
+ * error class, so every 403 read policy_mutation_denied whether the daemon
+ * refused the caller (policy_denied), the tenant (tenant_denied) or the
+ * mutation itself.  wyctl now prints the daemon's code and keeps the fixed
+ * string only as the fallback for a body without one.  The codes chosen for
+ * 400 and 401 differ from those fallbacks, so a helper that ignored the
+ * daemon on those statuses would fail here.  Exit codes are unchanged.
+ */
+static const PolicyMutationErrorCase policy_mutation_error_cases[] = {
+  {403, "{\"error\":\"policy_denied\"}", NULL, 4, "policy_denied"},
+  {403, "{\"error\":\"tenant_denied\"}", NULL, 4, "tenant_denied"},
+  {403, "{\"error\":\"policy_mutation_denied\"}", NULL, 4,
+   "policy_mutation_denied"},
+  {403, "{}", NULL, 4, "policy_mutation_denied"},
+  {403, "{\"error\":\"Policy-Denied\"}", NULL, 4, "policy_mutation_denied"},
+  {409, "{\"error\":\"tenant_sealed\"}", NULL, 4, "tenant_sealed"},
+  {400, "{\"error\":\"invalid_policy_auth\"}", NULL, 3, "invalid_policy_auth"},
+  {400, "{}", NULL, 3, "invalid_policy_mutation"},
+  {401, "{\"error\":\"tenant_invalid\"}", NULL, 6, "tenant_invalid"},
+  {401, "{}", NULL, 6, "policy_auth_required"},
+  {500, "{\"error\":\"policy_write_cleanup_failed\"}", NULL, 5,
+   "policy_write_cleanup_failed"},
+  {500, "{}", NULL, 5, "policy_mutation_failed"},
+  /* A code containing the bearer token is withheld by the client. */
+  {403, "{\"error\":\"x_scrubsecret\"}", "scrubsecret", 4,
+   "policy_mutation_denied"},
+  {0, NULL, NULL, 5, "policy_mutation_failed"},
+};
+
+static void
+assert_policy_mutation_error (const gchar *command,
+    const PolicyMutationErrorCase *error_case, gint wait_status,
+    const gchar *stdout_buf, const gchar *stderr_buf)
+{
+  g_autofree gchar *expected_stderr =
+      g_strdup_printf ("wyctl: policy %s failed: %s\n", command,
+          error_case->expected_code);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, error_case->expected_exit);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_cmpstr (stderr_buf, ==, expected_stderr);
+}
+
 static gpointer
 policy_mutation_server_thread (gpointer data)
 {
@@ -2133,8 +2188,8 @@ test_policy_permission_revoke_success (void)
 }
 
 static void
-run_policy_permission_status_case (const gchar *command, guint status,
-    gint expected_exit, const gchar *expected_stderr_marker)
+run_policy_permission_status_case (const gchar *command,
+    const PolicyMutationErrorCase *error_case)
 {
   gboolean transition = g_strcmp0 (command, "permission-transition") == 0;
   g_autofree gchar *token_path = NULL;
@@ -2144,7 +2199,9 @@ run_policy_permission_status_case (const gchar *command, guint status,
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
-  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_autofree gchar *token_text = g_strdup_printf ("%s\n",
+          error_case->token != NULL ? error_case->token : "token-1");
+  g_assert_true (g_file_set_contents (token_path, token_text, -1, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
@@ -2154,11 +2211,15 @@ run_policy_permission_status_case (const gchar *command, guint status,
   PolicyMutationServer server = {
     .listener = listener,
     .cancel = accept_cancel,
-    .status = status,
-    .body = "{}",
+    .status = error_case->status,
+    .body = error_case->body,
   };
-  GThread *server_thread = g_thread_new ("policy-mutation",
-          policy_mutation_server_thread, &server);
+  GThread *server_thread = NULL;
+  if (error_case->status != 0)
+    server_thread = g_thread_new ("policy-mutation",
+            policy_mutation_server_thread, &server);
+  else
+    g_socket_listener_close (listener);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -2190,12 +2251,11 @@ run_policy_permission_status_case (const gchar *command, guint status,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  stop_test_server (server_thread, accept_cancel);
+  if (server_thread != NULL)
+    stop_test_server (server_thread, accept_cancel);
 
-  g_assert_false (wait_status_is_success (wait_status));
-  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
-  g_assert_cmpstr (stdout_buf, ==, "");
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1, expected_stderr_marker));
+  assert_policy_mutation_error (command, error_case, wait_status, stdout_buf,
+      stderr_buf);
 
   g_free (server.request);
   g_unlink (token_path);
@@ -2204,27 +2264,17 @@ run_policy_permission_status_case (const gchar *command, guint status,
 static void
 test_policy_permission_grant_status_errors (void)
 {
-  run_policy_permission_status_case ("permission-grant", 400, 3,
-      "wyctl: policy permission-grant failed: invalid_policy_mutation");
-  run_policy_permission_status_case ("permission-grant", 401, 6,
-      "wyctl: policy permission-grant failed: policy_auth_required");
-  run_policy_permission_status_case ("permission-grant", 403, 4,
-      "wyctl: policy permission-grant failed: policy_mutation_denied");
-  run_policy_permission_status_case ("permission-grant", 500, 5,
-      "wyctl: policy permission-grant failed: policy_mutation_failed");
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
+    run_policy_permission_status_case ("permission-grant",
+        &policy_mutation_error_cases[i]);
 }
 
 static void
 test_policy_permission_revoke_status_errors (void)
 {
-  run_policy_permission_status_case ("permission-revoke", 400, 3,
-      "wyctl: policy permission-revoke failed: invalid_policy_mutation");
-  run_policy_permission_status_case ("permission-revoke", 401, 6,
-      "wyctl: policy permission-revoke failed: policy_auth_required");
-  run_policy_permission_status_case ("permission-revoke", 403, 4,
-      "wyctl: policy permission-revoke failed: policy_mutation_denied");
-  run_policy_permission_status_case ("permission-revoke", 500, 5,
-      "wyctl: policy permission-revoke failed: policy_mutation_failed");
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
+    run_policy_permission_status_case ("permission-revoke",
+        &policy_mutation_error_cases[i]);
 }
 
 static void
@@ -2237,14 +2287,9 @@ test_policy_permission_transition_success (void)
 static void
 test_policy_permission_transition_status_errors (void)
 {
-  run_policy_permission_status_case ("permission-transition", 400, 3,
-      "wyctl: policy permission-transition failed: invalid_policy_mutation");
-  run_policy_permission_status_case ("permission-transition", 401, 6,
-      "wyctl: policy permission-transition failed: policy_auth_required");
-  run_policy_permission_status_case ("permission-transition", 403, 4,
-      "wyctl: policy permission-transition failed: policy_mutation_denied");
-  run_policy_permission_status_case ("permission-transition", 500, 5,
-      "wyctl: policy permission-transition failed: policy_mutation_failed");
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
+    run_policy_permission_status_case ("permission-transition",
+        &policy_mutation_error_cases[i]);
 }
 
 /*
@@ -2717,8 +2762,8 @@ test_policy_role_revoke_success (void)
 }
 
 static void
-run_policy_role_status_case (const gchar *command, guint status,
-    gint expected_exit, const gchar *expected_stderr_marker)
+run_policy_role_status_case (const gchar *command,
+    const PolicyMutationErrorCase *error_case)
 {
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
@@ -2727,7 +2772,9 @@ run_policy_role_status_case (const gchar *command, guint status,
   g_assert_no_error (error);
   g_assert_cmpint (fd, >=, 0);
   g_assert_true (g_close (fd, NULL));
-  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_autofree gchar *token_text = g_strdup_printf ("%s\n",
+          error_case->token != NULL ? error_case->token : "token-1");
+  g_assert_true (g_file_set_contents (token_path, token_text, -1, &error));
   g_assert_no_error (error);
   g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
@@ -2737,11 +2784,15 @@ run_policy_role_status_case (const gchar *command, guint status,
   PolicyMutationServer server = {
     .listener = listener,
     .cancel = accept_cancel,
-    .status = status,
-    .body = "{}",
+    .status = error_case->status,
+    .body = error_case->body,
   };
-  GThread *server_thread = g_thread_new ("policy-mutation",
-          policy_mutation_server_thread, &server);
+  GThread *server_thread = NULL;
+  if (error_case->status != 0)
+    server_thread = g_thread_new ("policy-mutation",
+            policy_mutation_server_thread, &server);
+  else
+    g_socket_listener_close (listener);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
     "--daemon-url",
@@ -2771,12 +2822,11 @@ run_policy_role_status_case (const gchar *command, guint status,
   gint wait_status = 0;
 
   run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
-  stop_test_server (server_thread, accept_cancel);
+  if (server_thread != NULL)
+    stop_test_server (server_thread, accept_cancel);
 
-  g_assert_false (wait_status_is_success (wait_status));
-  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
-  g_assert_cmpstr (stdout_buf, ==, "");
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1, expected_stderr_marker));
+  assert_policy_mutation_error (command, error_case, wait_status, stdout_buf,
+      stderr_buf);
 
   g_free (server.request);
   g_unlink (token_path);
@@ -2785,27 +2835,17 @@ run_policy_role_status_case (const gchar *command, guint status,
 static void
 test_policy_role_grant_status_errors (void)
 {
-  run_policy_role_status_case ("role-grant", 400, 3,
-      "wyctl: policy role-grant failed: invalid_policy_mutation");
-  run_policy_role_status_case ("role-grant", 401, 6,
-      "wyctl: policy role-grant failed: policy_auth_required");
-  run_policy_role_status_case ("role-grant", 403, 4,
-      "wyctl: policy role-grant failed: policy_mutation_denied");
-  run_policy_role_status_case ("role-grant", 500, 5,
-      "wyctl: policy role-grant failed: policy_mutation_failed");
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
+    run_policy_role_status_case ("role-grant",
+        &policy_mutation_error_cases[i]);
 }
 
 static void
 test_policy_role_revoke_status_errors (void)
 {
-  run_policy_role_status_case ("role-revoke", 400, 3,
-      "wyctl: policy role-revoke failed: invalid_policy_mutation");
-  run_policy_role_status_case ("role-revoke", 401, 6,
-      "wyctl: policy role-revoke failed: policy_auth_required");
-  run_policy_role_status_case ("role-revoke", 403, 4,
-      "wyctl: policy role-revoke failed: policy_mutation_denied");
-  run_policy_role_status_case ("role-revoke", 500, 5,
-      "wyctl: policy role-revoke failed: policy_mutation_failed");
+  for (gsize i = 0; i < G_N_ELEMENTS (policy_mutation_error_cases); i++)
+    run_policy_role_status_case ("role-revoke",
+        &policy_mutation_error_cases[i]);
 }
 
 static void
