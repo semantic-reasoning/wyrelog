@@ -2661,29 +2661,128 @@ main (void)
    * through to WYRELOG_E_IO -- a transport code, the class a caller retries,
    * on a condition that never clears.  POLICY, not CONFLICT: error.h scopes
    * CONFLICT to an idempotency-key collision and excludes authority
-   * failures, and the daemon's only 409 here is tenant_sealed.  The body is
-   * set for realism but not asserted: the mock supplies it, so checking it
-   * would only confirm the fixture.
-   *
-   * Codes 64 and 65 are free in the modulo-256 space, not merely as
-   * literals: this binary's exit status is truncated to 8 bits, so 562 would
-   * have surfaced as 50 and been indistinguishable from the assertion that
-   * already returns 50.
+   * failures, and the daemon's only 409 here is tenant_sealed.
    */
   http.status = 409;
   http.body = "{\"error\":\"tenant_sealed\"}";
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
       "scope", 123, "public", 49) != WYRELOG_E_POLICY)
     return wyl_test_normalize_exit_status (64);
+  if (!client_last_response_is (local_client, 409, "tenant_sealed"))
+    return wyl_test_normalize_exit_status (640);
   /* The role path shares the helper; this guards a future split of it. */
   if (wyl_client_policy_role_grant (local_client, "target", "reader",
       "scope", 123, "public", 49) != WYRELOG_E_POLICY)
     return wyl_test_normalize_exit_status (65);
+  if (!client_last_response_is (local_client, 409, "tenant_sealed"))
+    return wyl_test_normalize_exit_status (641);
+  /*
+   * #1323: the mutation helper sent its request without recording the
+   * response, so the last-error accessors that client.h promises for these
+   * calls stayed empty, and wyctl could only print a fixed string per
+   * status.  A 403 carries the distinction an operator needs: an
+   * authorization refusal and a store refusal both map to POLICY.
+   */
+  http.status = 403;
+  http.body = "{\"error\":\"policy_denied\"}";
+  if (wyl_client_policy_permission_revoke (local_client, "target", "read",
+      "login", 123, "public", 49) != WYRELOG_E_POLICY)
+    return wyl_test_normalize_exit_status (642);
+  if (!client_last_response_is (local_client, 403, "policy_denied"))
+    return wyl_test_normalize_exit_status (643);
+  http.body = "{\"error\":\"tenant_denied\"}";
+  if (wyl_client_policy_role_revoke (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return wyl_test_normalize_exit_status (644);
+  if (!client_last_response_is (local_client, 403, "tenant_denied"))
+    return wyl_test_normalize_exit_status (645);
+  http.body = "{\"error\":\"policy_denied\"}";
+  if (wyl_client_policy_permission_transition (local_client, "target",
+      "read", "scope", "grant", 123, "public", 49) != WYRELOG_E_POLICY)
+    return wyl_test_normalize_exit_status (646);
+  if (!client_last_response_is (local_client, 403, "policy_denied"))
+    return wyl_test_normalize_exit_status (647);
+  /* A body that is not a bare {"error":"..."} envelope keeps the status
+   * and yields no code, so callers fall back to their own wording. */
+  http.status = 400;
+  http.body = "{}";
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+      "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+    return wyl_test_normalize_exit_status (648);
+  if (!client_last_response_is (local_client, 400, NULL))
+    return wyl_test_normalize_exit_status (649);
+  /* With no body the mock answers "[]": malformed, not absent. */
   http.body = NULL;
   http.status = 500;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
       "scope", 123, "public", 49) != WYRELOG_E_IO)
     return wyl_test_normalize_exit_status (528);
+  if (!client_last_response_is (local_client, 500, NULL))
+    return wyl_test_normalize_exit_status (650);
+  /* Each call replaces the previous diagnostics: a success clears them,
+   * and so does a call refused locally, including the transition wrapper's
+   * own NULL-event check, which returns before the shared helper. */
+  http.status = 403;
+  http.body = "{\"error\":\"policy_denied\"}";
+  if (wyl_client_policy_role_grant (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY
+      || !client_last_response_is (local_client, 403, "policy_denied"))
+    return wyl_test_normalize_exit_status (651);
+  http.status = 0;
+  http.body = NULL;
+  if (wyl_client_policy_role_grant (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_OK
+      || !client_last_response_is (local_client, 200, NULL))
+    return wyl_test_normalize_exit_status (652);
+  http.status = 403;
+  http.body = "{\"error\":\"policy_denied\"}";
+  if (wyl_client_policy_role_grant (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return wyl_test_normalize_exit_status (653);
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+      "scope", 123, "public", 101) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL))
+    return wyl_test_normalize_exit_status (654);
+  if (wyl_client_policy_role_grant (local_client, "target", "reader",
+      "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return wyl_test_normalize_exit_status (655);
+  if (wyl_client_policy_permission_transition (local_client, "target",
+      "read", "scope", NULL, 123, "public", 49) != WYRELOG_E_INVALID
+      || !client_last_response_is (local_client, 0, NULL))
+    return wyl_test_normalize_exit_status (656);
+  /* A code containing the caller's bearer token is withheld.  The
+   * production tokens in this test contain '-', which the code parser
+   * never accepts, so use a token made of code characters. */
+  {
+    g_autofree gchar *scrub_base_url = wyl_client_dup_base_url (local_client);
+    g_autoptr (WylClient) scrub_client = NULL;
+    if (wyl_client_new (scrub_base_url, &scrub_client) != WYRELOG_E_OK
+        || wyl_client_set_bearer_credentials (scrub_client, "scrubsecret",
+        "__wr_default") != WYRELOG_E_OK)
+      return wyl_test_normalize_exit_status (657);
+    http.status = 403;
+    http.body = "{\"error\":\"x_scrubsecret\"}";
+    if (wyl_client_policy_permission_grant (scrub_client, "target", "read",
+        "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+      return wyl_test_normalize_exit_status (658);
+    if (!client_last_response_is (scrub_client, 403, NULL))
+      return wyl_test_normalize_exit_status (659);
+  }
+  /* A refused connection never yields a status or a code. */
+  {
+    g_autoptr (WylClient) refused_client = NULL;
+    if (wyl_client_new ("http://127.0.0.1:1", &refused_client)
+        != WYRELOG_E_OK
+        || wyl_client_set_bearer_credentials (refused_client, "access-r",
+        "__wr_default") != WYRELOG_E_OK)
+      return wyl_test_normalize_exit_status (660);
+    if (wyl_client_policy_permission_grant (refused_client, "target", "read",
+        "scope", 123, "public", 49) != WYRELOG_E_IO)
+      return wyl_test_normalize_exit_status (661);
+    if (!client_last_response_is (refused_client, 0, NULL))
+      return wyl_test_normalize_exit_status (662);
+  }
+  http.body = NULL;
   http.status = 0;
 
   g_autoptr (WylAuditIter) guarded_audit_iter = NULL;
