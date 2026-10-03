@@ -2646,6 +2646,16 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
           guard_timestamp, opts.guard_loc_class, guard_risk, &result);
   int exit_rc = fact_remote_exit (client, action, rc,
           retract ? "fact_retract_failed" : "fact_append_failed");
+  /* No answer, a success status with an unread body, or a server error:
+   * the batch may have been applied (#1324).  The same test as the policy
+   * mutation, graph seal and fact forget hints. */
+  guint status = wyl_client_get_last_http_status (client);
+  if (exit_rc != 0 && ((rc == WYRELOG_E_IO && (status == 0
+      || status / 100 == 2)) || status / 100 == 5))
+    g_printerr ("wyctl: the %s outcome is unknown; re-running the same "
+        "command with the same --batch-id and --idempotency-key is safe, and "
+        "replay=true then means it was applied\n",
+        retract ? "retract" : "put");
   if (exit_rc == 0) {
     if (wyl_client_fact_append_result_get_reconcile (result)) {
       g_print ("committed-reconciling operation_id=%s batch_id=%s"

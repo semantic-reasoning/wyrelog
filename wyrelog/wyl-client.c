@@ -1887,8 +1887,7 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
   wyl_client_clear_last_http_error (client);
 
   g_autoptr (GError) error = NULL;
-  GBytes *body = soup_session_send_and_read (client->session, message, NULL,
-          &error);
+  GBytes *body = client_session_send_and_read (client, message, &error);
   if (body == NULL)
     return WYRELOG_E_IO;
 
@@ -3382,8 +3381,8 @@ wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
 
   wyl_client_clear_last_http_error (client);
   g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) body = soup_session_send_and_read (client->session,
-          message, NULL, &error);
+  g_autoptr (GBytes) body = client_session_send_and_read (client, message,
+          &error);
   if (body == NULL)
     return WYRELOG_E_IO;
   guint status = soup_message_get_status (message);

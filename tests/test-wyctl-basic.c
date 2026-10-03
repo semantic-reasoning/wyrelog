@@ -3945,9 +3945,12 @@ fact_forget_run_clear (FactForgetRun *run)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (FactForgetRun, fact_forget_run_clear);
 
+/* As run_fact_forget_case, but the fake daemon answers DELAY_MS late and
+ * the command then runs with --timeout-ms 500 instead of 2000. */
 static void
-run_fact_forget_case (guint status, const gchar *body,
-    const gchar *const *extra, gboolean configured, FactForgetRun *run)
+run_fact_forget_case_delayed (guint status, const gchar *body,
+    guint delay_ms, const gchar *const *extra, gboolean configured,
+    FactForgetRun *run)
 {
   g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
   g_autoptr (GSocketListener) listener = NULL;
@@ -3955,6 +3958,7 @@ run_fact_forget_case (guint status, const gchar *body,
   g_autoptr (GCancellable) cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener, .cancel = cancel, .status = status, .body = body,
+    .delay_ms = delay_ms,
   };
   g_autofree gchar *xdg = NULL;
   g_auto (GStrv) envp = NULL;
@@ -3981,7 +3985,7 @@ run_fact_forget_case (guint status, const gchar *body,
     g_ptr_array_add (argv, daemon_url);
   }
   g_ptr_array_add (argv, "--timeout-ms");
-  g_ptr_array_add (argv, "2000");
+  g_ptr_array_add (argv, delay_ms > 0 ? "500" : "2000");
   g_ptr_array_add (argv, "fact");
   g_ptr_array_add (argv, "forget");
   for (const gchar *const *arg = extra != NULL ? extra : target; *arg != NULL;
@@ -4007,6 +4011,13 @@ run_fact_forget_case (guint status, const gchar *body,
   g_unlink (token_path);
   if (xdg != NULL)
     remove_dir_recursive (xdg);
+}
+
+static void
+run_fact_forget_case (guint status, const gchar *body,
+    const gchar *const *extra, gboolean configured, FactForgetRun *run)
+{
+  run_fact_forget_case_delayed (status, body, 0, extra, configured, run);
 }
 
 static void
@@ -4102,6 +4113,117 @@ test_fact_forget_status_errors (void)
     g_assert_cmpstr (run.out, ==, "");
     g_assert_cmpstr (run.err, ==, expected);
   }
+}
+
+/*
+ * #1324: forget sent without the client's timeout.  A 403 that arrives
+ * after the 500 ms budget made wyctl wait for it and exit 4; now the
+ * request is abandoned, and since the erase may have committed, the
+ * outcome is reported as unknown.
+ */
+static void
+test_fact_forget_times_out (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_forget_case_delayed (403, "{\"error\":\"fact_forget_denied\"}",
+      2000, NULL, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_nonnull (run.request);
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==,
+      "wyctl: fact forget failed: fact_forget_failed\n"
+      FACT_FORGET_UNKNOWN_HINT);
+}
+
+/* Run `wyctl fact ACTION` with a one-row CSV batch, so the request reaches
+ * the fake daemon, which answers STATUS with BODY after DELAY_MS.  STATUS 0
+ * means nothing listens.  A delayed answer runs with --timeout-ms 500. */
+static void
+run_fact_mutation_case (const gchar *action, guint status, const gchar *body,
+    guint delay_ms, gint *out_exit, gchar **out_stdout, gchar **out_stderr,
+    gchar **out_request)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autofree gchar *input_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-fact-rows-XXXXXX.csv", &input_path,
+          &error);
+  g_assert_no_error (error);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (input_path, "value\n1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = status, .body = body,
+    .delay_ms = delay_ms,
+  };
+  GThread *thread = NULL;
+  if (status != 0)
+    thread = g_thread_new ("fact-mutation", policy_mutation_server_thread,
+            &server);
+  else
+    g_socket_listener_close (listener);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url,
+    "--timeout-ms", delay_ms > 0 ? "500" : "2000",
+    "fact", (gchar *) action, "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--batch-id", "b1", "--idempotency-key", "k1", "--format", "csv",
+    "--input", input_path, "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL,
+  };
+  run_child (argv, out_stdout, out_stderr, out_exit);
+  if (thread != NULL)
+    stop_test_server (thread, cancel);
+  *out_request = server.request;
+  g_unlink (input_path);
+  g_unlink (token_path);
+}
+
+/*
+ * #1324: fact put and retract sent without the client's timeout, so a late
+ * 403 made wyctl wait and exit 4.  Now the request is abandoned in time,
+ * and because the daemon may have applied the batch, wyctl says how to find
+ * out: the same keys replay instead of applying twice.  A refused
+ * connection leaves the outcome just as unknown to the client.
+ */
+static void
+assert_fact_mutation_unknown (const gchar *action, guint status,
+    const gchar *body, guint delay_ms)
+{
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = NULL;
+  run_fact_mutation_case (action, status, body, delay_ms, &wait_status, &out,
+      &err, &request);
+  g_autofree gchar *expected = g_strdup_printf (
+    "wyctl: fact %s failed: fact_%s_failed\n"
+    "wyctl: the %s outcome is unknown; re-running the same command with the "
+    "same --batch-id and --idempotency-key is safe, and replay=true then "
+    "means it was applied\n", action,
+    g_strcmp0 (action, "put") == 0 ? "append" : "retract", action);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 5);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, expected);
+  if (status != 0)
+    g_assert_nonnull (request);
+}
+
+static void
+test_fact_mutation_times_out (void)
+{
+  assert_fact_mutation_unknown ("put", 403,
+      "{\"error\":\"fact_append_denied\"}", 2000);
+  assert_fact_mutation_unknown ("retract", 403,
+      "{\"error\":\"fact_retract_denied\"}", 2000);
+  assert_fact_mutation_unknown ("put", 0, NULL, 0);
+  assert_fact_mutation_unknown ("retract", 0, NULL, 0);
 }
 
 static void
@@ -5036,6 +5158,10 @@ main (int argc, char **argv)
       test_fact_forget_audit_failed_bare);
   g_test_add_func ("/wyctl/fact-forget-status-errors",
       test_fact_forget_status_errors);
+  g_test_add_func ("/wyctl/fact-forget-times-out",
+      test_fact_forget_times_out);
+  g_test_add_func ("/wyctl/fact-mutation-times-out",
+      test_fact_mutation_times_out);
   g_test_add_func ("/wyctl/fact-forget-unknown-outcome",
       test_fact_forget_unknown_outcome);
   g_test_add_func ("/wyctl/fact-forget-unreadable-success",
