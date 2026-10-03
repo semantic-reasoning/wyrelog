@@ -508,7 +508,7 @@ else
   bootstrap_status=$?
 fi
 case "$bootstrap_arm" in
-  *"wyctl: policy permission-transition failed: policy_mutation_denied"*) ;;
+  *"wyctl: policy permission-transition failed: policy_denied"*) ;;
   *) bootstrap_status=unexpected ;;
 esac
 if [ "$bootstrap_status" != 4 ]; then

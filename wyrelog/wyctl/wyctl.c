@@ -1617,6 +1617,43 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   return 3;
 }
 
+/*
+ * Report a policy mutation's outcome.  The exit status depends only on the
+ * client's error class, as it always has; the message names the daemon's
+ * own error code when the response carried one (#1323), so an
+ * authorization refusal (policy_denied), a tenant refusal and a refused
+ * mutation are told apart.  The fixed per-class string remains the fallback
+ * whenever no code is available: a refusal made locally, a transport
+ * failure, a body without a parseable code, or a code the client withheld
+ * because it contained a credential.
+ */
+static int
+policy_mutation_exit (WylClient *client, const gchar *command,
+    wyrelog_error_t rc)
+{
+  if (rc == WYRELOG_E_OK) {
+    g_print ("ok\n");
+    return 0;
+  }
+
+  const gchar *fallback = "policy_mutation_failed";
+  int exit_code = 5;
+  if (rc == WYRELOG_E_INVALID) {
+    fallback = "invalid_policy_mutation";
+    exit_code = 3;
+  } else if (rc == WYRELOG_E_AUTH) {
+    fallback = "policy_auth_required";
+    exit_code = 6;
+  } else if (rc == WYRELOG_E_POLICY) {
+    fallback = "policy_mutation_denied";
+    exit_code = 4;
+  }
+  g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+  g_printerr ("wyctl: policy %s failed: %s\n", command,
+      code != NULL ? code : fallback);
+  return exit_code;
+}
+
 static int
 run_policy_permission_mutation_command (const WyctlOptions *global_opts,
     const gchar *command, gint argc, gchar **argv)
@@ -1769,24 +1806,7 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
     return 3;
   }
 
-  if (rc == WYRELOG_E_OK) {
-    g_print ("ok\n");
-    return 0;
-  }
-  if (rc == WYRELOG_E_INVALID) {
-    g_printerr ("wyctl: policy %s failed: invalid_policy_mutation\n", command);
-    return 3;
-  }
-  if (rc == WYRELOG_E_AUTH) {
-    g_printerr ("wyctl: policy %s failed: policy_auth_required\n", command);
-    return 6;
-  }
-  if (rc == WYRELOG_E_POLICY) {
-    g_printerr ("wyctl: policy %s failed: policy_mutation_denied\n", command);
-    return 4;
-  }
-  g_printerr ("wyctl: policy %s failed: policy_mutation_failed\n", command);
-  return 5;
+  return policy_mutation_exit (client, command, rc);
 }
 
 static int
@@ -1909,24 +1929,7 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
     return 3;
   }
 
-  if (rc == WYRELOG_E_OK) {
-    g_print ("ok\n");
-    return 0;
-  }
-  if (rc == WYRELOG_E_INVALID) {
-    g_printerr ("wyctl: policy %s failed: invalid_policy_mutation\n", command);
-    return 3;
-  }
-  if (rc == WYRELOG_E_AUTH) {
-    g_printerr ("wyctl: policy %s failed: policy_auth_required\n", command);
-    return 6;
-  }
-  if (rc == WYRELOG_E_POLICY) {
-    g_printerr ("wyctl: policy %s failed: policy_mutation_denied\n", command);
-    return 4;
-  }
-  g_printerr ("wyctl: policy %s failed: policy_mutation_failed\n", command);
-  return 5;
+  return policy_mutation_exit (client, command, rc);
 }
 
 static int
