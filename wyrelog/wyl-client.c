@@ -927,10 +927,13 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body =
       soup_session_send_and_read (client->session, message, NULL, &error);
+  guint status = soup_message_get_status (message);
+  /* #1323: record the response so the last-error accessors report the
+   * daemon's code for these calls, as client.h documents. */
+  client_store_remote_response (client, status, body);
   if (body == NULL)
     return WYRELOG_E_IO;
 
-  guint status = soup_message_get_status (message);
   if (status >= 200 && status < 300)
     return WYRELOG_E_OK;
   if (status == 400)
@@ -1788,8 +1791,12 @@ wyl_client_policy_permission_transition (WylClient *client,
     const gchar *event, gint64 guard_timestamp, const gchar *guard_loc_class,
     gint64 guard_risk)
 {
-  if (event == NULL)
+  if (event == NULL) {
+    /* Refused before the shared helper, which would clear diagnostics. */
+    if (client != NULL && WYL_IS_CLIENT (client))
+      wyl_client_clear_last_http_error (client);
     return WYRELOG_E_INVALID;
+  }
   return client_policy_mutation_request (client,
              "policy/permissions/transition", subject, "perm", perm, scope, event,
              guard_timestamp, guard_loc_class, guard_risk);
