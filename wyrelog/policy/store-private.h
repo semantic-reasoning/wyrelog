@@ -3583,6 +3583,14 @@ wyrelog_error_t wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 
+/* Reprove an already complete v5 old-provisioning vector without changing
+ * the journal. The callback runs with the claim, graph set, and ACTIVE rows
+ * pinned by the same coordinator fence and policy transaction as binding. */
+wyrelog_error_t wyl_policy_store_tenant_restore_prove_bound_old_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data);
+
 /* Atomically bind the complete tenant replacement UUID vector and its
  * reservation rows. The callback proves every post-publish filesystem shape
  * while the caller holds the root lease and all graph quiescence tokens. */

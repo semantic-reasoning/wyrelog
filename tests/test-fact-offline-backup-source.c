@@ -4297,6 +4297,198 @@ test_tenant_provisioned_binding (void)
   session_fixture_clear (&f);
 }
 
+static void
+test_tenant_provisioned_binding_all (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+
+  if (g_str_equal (mode, "stale")) {
+    g_autoptr (GBytes) before = session_journal_bytes (&f);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, 4, 0, &f.committed), ==, WYRELOG_E_BUSY);
+    g_assert_null (f.committed.graphs);
+    g_autoptr (GBytes) after = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (before, after));
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = g_bytes_ref (after);
+    session_fixture_clear (&f);
+    return;
+  }
+
+  if (g_str_equal (mode, "partial-generation")) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, "alpha", 5, 0, &f.committed), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    g_clear_pointer (&f.journal_before, g_bytes_unref);
+    f.journal_before = session_journal_bytes (&f);
+    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+    gint previous = 0;
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        0, &previous), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_graphs SET "
+        "reconciliation_generation=reconciliation_generation+1 "
+        "WHERE tenant_id='tenant-a' AND graph_id='zeta';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        previous, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, 6, 0, &f.committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (f.committed.graphs);
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        0, &previous), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_graphs SET "
+        "reconciliation_generation=reconciliation_generation-1 "
+        "WHERE tenant_id='tenant-a' AND graph_id='zeta';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        previous, NULL), ==, SQLITE_OK);
+    g_autoptr (GBytes) after = session_journal_bytes (&f);
+    g_assert_true (g_bytes_equal (f.journal_before, after));
+    session_fixture_clear (&f);
+    return;
+  }
+
+  if (g_str_equal (mode, "restart")) {
+#ifdef WYL_TEST_HANDLE_SEAMS
+    wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, "alpha", 5, 0, &f.committed), ==, WYRELOG_E_IO);
+    g_assert_null (f.committed.graphs);
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *path = g_build_filename (f.fixture.root,
+            "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (path, &f.fixture.policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+        WYRELOG_E_OK);
+    g_auto (WylFactOfflineRestoreJournal) recovered = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (f.fixture.policy, session_operation, &recovered), ==,
+        WYRELOG_E_OK);
+    g_autoptr (GBytes) before = NULL;
+    g_autoptr (GBytes) after = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&recovered,
+        &before), ==, WYRELOG_E_OK);
+    const WylFactOfflineRestoreJournalGraph *alpha =
+        g_ptr_array_index (recovered.graphs, 0);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+          (&recovered, "zeta", alpha->old_provisioning_uuid), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&recovered,
+        &after), ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (before, after));
+#endif
+  }
+  guint64 revision = g_str_equal (mode, "restart") ? 6 : 5;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "lost-response")) {
+    wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, 5, 0, &f.committed), ==, WYRELOG_E_IO);
+    g_assert_null (f.committed.graphs);
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *path = g_build_filename (f.fixture.root,
+            "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (path, &f.fixture.policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+        WYRELOG_E_OK);
+    revision = 6;
+  }
+#endif
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 7);
+  g_assert_cmpuint (f.committed.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION);
+  g_assert_cmpint (f.committed.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  for (guint i = 0; i < f.committed.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (f.committed.graphs, i);
+    g_assert_nonnull (graph->old_provisioning_uuid);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 7, 0, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, 7);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+static void
+test_tenant_provisioned_binding_all_replay_rejects (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 5, 0, &f.committed), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  g_autofree gchar *stage = NULL;
+  guint8 original = 0;
+  if (g_str_equal (mode, "missing-claim")) {
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f.fixture.policy),
+        "DELETE FROM fact_offline_restore_tenant_claims WHERE "
+        "tenant_id='tenant-a';", NULL, NULL, NULL), ==, SQLITE_OK);
+  } else {
+    stage = session_stage_path (&f, "zeta");
+    gint fd = g_open (stage, O_RDWR, 0);
+    g_assert_cmpint (fd, >=, 0);
+    g_assert_cmpint (read (fd, &original, 1), ==, 1);
+    guint8 changed = original ^ 1;
+    g_assert_cmpint (lseek (fd, 0, SEEK_SET), ==, 0);
+    g_assert_cmpint (write (fd, &changed, 1), ==, 1);
+    g_assert_cmpint (fsync (fd), ==, 0);
+    g_assert_cmpint (close (fd), ==, 0);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 7, 0, &f.committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (f.committed.graphs);
+  if (stage != NULL) {
+    gint fd = g_open (stage, O_RDWR, 0);
+    g_assert_cmpint (fd, >=, 0);
+    g_assert_cmpint (write (fd, &original, 1), ==, 1);
+    g_assert_cmpint (fsync (fd), ==, 0);
+    g_assert_cmpint (close (fd), ==, 0);
+  }
+  if (g_str_equal (mode, "missing-claim")) {
+    g_autofree gchar *sql = g_strdup_printf (
+      "INSERT INTO fact_offline_restore_tenant_claims(tenant_id,operation_uuid) "
+      "VALUES('tenant-a','%s');", session_operation);
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f.fixture.policy),
+        sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  }
+  g_autoptr (GBytes) after = session_journal_bytes (&f);
+  g_assert_true (g_bytes_equal (f.journal_before, after));
+  session_fixture_clear (&f);
+}
+
 static void import_restore_journal_for_test (wyl_policy_store_t *policy,
     const WylFactOfflineRestoreJournal *journal);
 
@@ -7200,6 +7392,9 @@ static void
 test_tenant_provisioned_binding_rejects (gconstpointer data)
 {
   const gchar *mode = data;
+  gboolean all = g_str_has_prefix (mode, "all-");
+  if (all)
+    mode += 4;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
   TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
@@ -7230,6 +7425,33 @@ test_tenant_provisioned_binding_rejects (gconstpointer data)
         NULL, NULL, NULL), ==, SQLITE_OK);
     g_assert_cmpint (sqlite3_changes (wyl_policy_store_get_db
           (f.fixture.policy)), >, 0);
+  } else if (g_str_equal (mode, "sibling-generation")) {
+    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+    gint previous = 0;
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        0, &previous), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_graphs SET "
+        "reconciliation_generation=reconciliation_generation+1 "
+        "WHERE tenant_id='tenant-a' AND graph_id='zeta';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        previous, NULL), ==, SQLITE_OK);
+  } else if (g_str_equal (mode, "wrong-active-uuid")) {
+    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+    gint previous = 0;
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        0, &previous), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_graph_provisioning SET "
+        "op_uuid='77777777-7777-7777-8777-777777777777',"
+        "stage_basename='provision-77777777-7777-7777-8777-777777777777.sqlite' "
+        "WHERE tenant_id='tenant-a' AND graph_id='zeta';",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_ENABLE_TRIGGER,
+        previous, NULL), ==, SQLITE_OK);
   } else if (g_str_equal (mode, "extra-graph-row")) {
     g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (f.fixture.policy),
         "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
@@ -7264,13 +7486,19 @@ test_tenant_provisioned_binding_rejects (gconstpointer data)
     g_assert_cmpuint (calls, ==, 1);
     g_assert_null (stored);
     wyl_policy_offline_restore_record_free (raw);
-  } else
+  } else if (all)
+    rc = wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+            session_operation, 5, 0, &f.committed);
+  else
     rc = wyl_fact_offline_restore_tenant_bind_provisioned_old_run
           (f.fixture.policy, f.fixture.root, f.fixture.runtime,
             session_operation, "alpha", 5, 0, &f.committed);
   if (g_str_equal (mode, "commit-response")
       || g_str_equal (mode, "effect-refused"))
     g_assert_cmpint (rc, ==, WYRELOG_E_IO);
+  else if (g_str_equal (mode, "wrong-active-uuid"))
+    g_assert_cmpint (rc, ==, WYRELOG_E_NOT_FOUND);
   else
     g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
   g_assert_null (f.committed.graphs);
@@ -9413,6 +9641,22 @@ main (int argc, char **argv)
       "restart", test_tenant_external_import);
   g_test_add_func ("/fact-offline-backup-source/tenant-provisioned-binding",
       test_tenant_provisioned_binding);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all",
+      "all", test_tenant_provisioned_binding_all);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/stale",
+      "stale", test_tenant_provisioned_binding_all);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/partial-generation",
+      "partial-generation", test_tenant_provisioned_binding_all);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/replay-missing-claim",
+      "missing-claim", test_tenant_provisioned_binding_all_replay_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/replay-stage-substitution",
+      "stage-substitution", test_tenant_provisioned_binding_all_replay_rejects);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/restart",
+      "restart", test_tenant_provisioned_binding_all);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/lost-response",
+      "lost-response", test_tenant_provisioned_binding_all);
+#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-resume-v5",
       NULL, test_tenant_commit_resume_v5);
   g_test_add_data_func
@@ -9640,6 +9884,16 @@ main (int argc, char **argv)
       "sibling-schema", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/extra-graph-row",
       "extra-graph-row", test_tenant_provisioned_binding_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all-stage-substitution",
+      "all-sibling-stage-content", test_tenant_provisioned_binding_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all-schema-drift",
+      "all-sibling-schema", test_tenant_provisioned_binding_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all-sibling-generation",
+      "all-sibling-generation", test_tenant_provisioned_binding_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all-wrong-active-uuid",
+      "all-wrong-active-uuid", test_tenant_provisioned_binding_rejects);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/all-extra-graph",
+      "all-extra-graph-row", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/missing-claim",
       "missing-claim", test_tenant_provisioned_binding_rejects);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-provisioned-binding/effect-refused",

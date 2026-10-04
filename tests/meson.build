@@ -350,8 +350,13 @@ if get_option('enable_fact_store').allowed() and \
   )
   test('fact-offline-backup-source', test_offline_backup_source,
     args : ['-x', '/fact-offline-backup-source/coordinator',
-            '-x', '/fact-offline-backup-source/import'],
-    timeout : 120,
+            '-x', '/fact-offline-backup-source/import',
+            '-x', '/fact-offline-backup-source/tenant-provisioned-binding'],
+    timeout : 900,
+  )
+  test('fact-offline-restore-tenant-old-binding', test_offline_backup_source,
+    args : ['-r', '/fact-offline-backup-source/tenant-provisioned-binding'],
+    timeout : 90,
   )
   test('fact-offline-restore-graph-coordinator', test_offline_backup_source,
     args : ['-r', '/fact-offline-backup-source/coordinator'],

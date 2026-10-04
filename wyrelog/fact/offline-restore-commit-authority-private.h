@@ -38,6 +38,16 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_bind_provisioned_old_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Complete the old ACTIVE provisioning vector in canonical graph order.
+ * A lost CAS response is resolved from the durable journal; only unbound
+ * entries are retried. A terminal policy handle returns its error and the
+ * caller must reopen it before retrying. No COMMIT or artifact publication. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Drive one v5 tenant COMMIT SYNC_STAGED step while every graph retains its
  * exact READY file pair. Earlier siblings may have completed their own stage
  * sync; their journal latch is historical and is not reconstructed from a
