@@ -374,6 +374,34 @@ check_relation_schema_registration_and_validation (void)
   if (duplicate_rc != WYRELOG_E_POLICY)
     return 21;
 
+  /* A hidden staged version leaves the sole visible alias queryable. A
+   * second visible version makes an unactivated relation ambiguous. */
+  wyl_policy_fact_relation_query_info_t query = { 0 };
+  if (wyl_policy_store_load_fact_relation_query (store, "tenant-a",
+      "graph-main", "orders_by_status", &query) != WYRELOG_E_OK
+      || query.schema_version != 1)
+    return 211;
+  wyl_policy_fact_relation_query_info_clear (&query);
+  const wyl_policy_fact_relation_schema_query_t v3_query[] = {
+    {"orders_v3", "wr.fact.read", 1000},
+  };
+  wyl_policy_fact_relation_schema_options_t visible_v3 = opts;
+  visible_v3.schema_version = 3;
+  visible_v3.queries = v3_query;
+  visible_v3.n_queries = G_N_ELEMENTS (v3_query);
+  if (wyl_policy_store_register_fact_relation_schema (store, &visible_v3)
+      != WYRELOG_E_OK
+      || wyl_policy_store_load_fact_relation_query (store, "tenant-a",
+      "graph-main", "orders_by_status", &query) != WYRELOG_E_NOT_FOUND
+      || wyl_policy_store_load_fact_relation_query (store, "tenant-a",
+      "graph-main", "orders_v3", &query) != WYRELOG_E_NOT_FOUND)
+    return 212;
+
+  if (wyl_policy_store_load_fact_relation_query (store, "tenant-a",
+      "graph-main", "nullable_values", &query) != WYRELOG_E_OK)
+    return 213;
+  wyl_policy_fact_relation_query_info_clear (&query);
+
   opts.namespace_id = "wr.internal";
   if (wyl_policy_store_register_fact_relation_schema (store, &opts)
       != WYRELOG_E_INVALID)
@@ -382,6 +410,9 @@ check_relation_schema_registration_and_validation (void)
   if (wyl_policy_store_seal_fact_graph (store, "tenant-a", "graph-main")
       != WYRELOG_E_OK)
     return 23;
+  if (wyl_policy_store_load_fact_relation_query (store, "tenant-a",
+      "graph-main", "nullable_values", &query) != WYRELOG_E_NOT_FOUND)
+    return 231;
   if (wyl_fact_schema_validate_batch (store, &good_batch, NULL)
       != WYRELOG_E_NOT_FOUND)
     return 24;
