@@ -3441,10 +3441,11 @@ than a minute; raise the value for large fact batches, heavy queries, or
 long erasures, as the forget example above does. A request that runs out of
 time exits like any other transport failure, and the daemon may still have
 completed it. For policy grants, revokes and transitions, fact put and
-retract, fact forget, graph seal, and tenant create, seal and unseal, wyctl
-adds a line saying that the outcome is unknown and how to find out; other
-commands, including the service-principal and service-credential changes,
-report only the failure, so check the daemon's state before repeating them.
+retract, fact forget, fact schema register, fact quota configure, graph
+create and seal, and tenant create, seal and unseal, wyctl adds a line
+saying that the outcome is unknown and how to find out; other commands,
+including the service-principal and service-credential changes, report only
+the failure, so check the daemon's state before repeating them.
 The online `wyctl mfa enroll` requests are not bounded yet.
 
 Example: configure the operator workstation once and let wyctl invocations

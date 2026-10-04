@@ -2176,6 +2176,12 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
           graph, guard_timestamp, opts.guard_loc_class, guard_risk);
   int exit_rc = fact_remote_exit (client, "graph create", rc,
           "graph_create_failed");
+  /* An identical repeat resumes an interrupted create (#1332). */
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the graph create outcome is unknown; repeating the "
+        "same command is safe and finishes an interrupted create, "
+        "graph_exists then means the graph exists, and `wyctl graph list "
+        "--tenant %s` shows it\n", tenant);
   if (exit_rc == 0)
     g_print ("ok\n");
   return exit_rc;
@@ -2518,6 +2524,13 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
           "schema_register_failed");
+  /* Any registered schema refuses a repeat, and no route reads one back,
+   * so a refusal cannot confirm the columns (#1332). */
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the schema register outcome is unknown; repeating "
+        "the same command is safe, and schema_already_registered then means "
+        "the relation already has a schema, possibly from an earlier "
+        "registration, whose columns wyctl cannot show\n");
   if (exit_rc == 0)
     g_print ("ok\n");
   return exit_rc;
@@ -3332,6 +3345,11 @@ run_fact_quota (const WyctlOptions *global_opts, gboolean configure,
   int exit_rc = fact_remote_exit (client,
           configure ? "fact quota configure" : "fact quota status", rc,
           "fact_quota_failed");
+  /* Every dimension's limit is set absolutely, so a repeat is safe (#1332). */
+  if (configure && exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the quota configure outcome is unknown; repeating "
+        "the same command is safe, and `wyctl fact quota status --tenant %s "
+        "--dimension %s` shows the limit in force\n", tenant, dimension);
   if (exit_rc == 0 && g_strcmp0 (dimension, "logical_bytes") == 0) {
     g_print ("tenant=%s dimension=logical_bytes row_limit=", logical_status.tenant_id);
     if (logical_status.has_limit)

@@ -4435,13 +4435,15 @@ test_fact_forget_ignores_configured_target (void)
 }
 
 /* Run wyctl with ARGS against a one-request fake daemon answering STATUS
- * with BODY.  An argument "@TOKEN@" is replaced by a protected token file
- * holding "token-1"; DAEMON_URL NULL means the fake daemon's own URL.  With
- * CONFIGURED, GSettings supplies default-tenant "t", default-graph "orders"
- * and that token file as access-token-file. */
+ * with BODY, DELAY_MS late.  An argument "@TOKEN@" is replaced by a
+ * protected token file holding "token-1"; DAEMON_URL NULL means the fake
+ * daemon's own URL.  With CONFIGURED, GSettings supplies default-tenant "t",
+ * default-graph "orders" and that token file as access-token-file.  A
+ * delayed answer runs the command with --timeout-ms 500, otherwise 2000. */
 static void
-run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
-    const gchar *const *args, gboolean configured, FactForgetRun *run)
+run_fake_daemon_case_delayed (guint status, const gchar *body,
+    guint delay_ms, const gchar *daemon_url, const gchar *const *args,
+    gboolean configured, FactForgetRun *run)
 {
   g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
   g_autofree gchar *xdg = NULL;
@@ -4460,6 +4462,7 @@ run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
   g_autoptr (GCancellable) cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener, .cancel = cancel, .status = status, .body = body,
+    .delay_ms = delay_ms,
   };
   GThread *thread = g_thread_new ("fake-daemon",
           policy_mutation_server_thread, &server);
@@ -4469,7 +4472,7 @@ run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
   g_ptr_array_add (argv, (gpointer) (daemon_url != NULL ? daemon_url
       : server_url));
   g_ptr_array_add (argv, "--timeout-ms");
-  g_ptr_array_add (argv, "2000");
+  g_ptr_array_add (argv, delay_ms > 0 ? "500" : "2000");
   for (const gchar *const *arg = args; *arg != NULL; arg++)
     g_ptr_array_add (argv, g_strcmp0 (*arg, "@TOKEN@") == 0
         ? (gpointer) token_path : (gpointer) *arg);
@@ -4485,6 +4488,15 @@ run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
   g_unlink (token_path);
   if (xdg != NULL)
     remove_dir_recursive (xdg);
+}
+
+/* run_fake_daemon_case_delayed with an immediate answer. */
+static void
+run_fake_daemon_case (guint status, const gchar *body, const gchar *daemon_url,
+    const gchar *const *args, gboolean configured, FactForgetRun *run)
+{
+  run_fake_daemon_case_delayed (status, body, 0, daemon_url, args,
+      configured, run);
 }
 
 #define FACT_STATUS_READY_BODY \
@@ -4722,6 +4734,91 @@ test_fact_verify (void)
 #define GRAPH_GUARDS \
   "--guard-timestamp", "123", "--guard-loc-class", "trusted", \
   "--guard-risk", "29"
+
+/*
+ * #1332: a request that runs out of time may still have been applied, so
+ * these mutating commands now say how to find out instead of reporting
+ * only the failure.  The test daemon answers 403 after the 500 ms budget:
+ * before the change wyctl already gave up (#1324) but printed only the
+ * failure line, so the exact stderr comparison is what fails, and the
+ * captured request shows the command reached the daemon.
+ */
+#define GRAPH_CREATE_UNKNOWN \
+  "wyctl: the graph create outcome is unknown; repeating the same command " \
+  "is safe and finishes an interrupted create, graph_exists then means the " \
+  "graph exists, and `wyctl graph list --tenant t` shows it\n"
+#define SCHEMA_REGISTER_UNKNOWN \
+  "wyctl: the schema register outcome is unknown; repeating the same " \
+  "command is safe, and schema_already_registered then means the relation " \
+  "already has a schema, possibly from an earlier registration, whose " \
+  "columns wyctl cannot show\n"
+#define QUOTA_CONFIGURE_UNKNOWN \
+  "wyctl: the quota configure outcome is unknown; repeating the same " \
+  "command is safe, and `wyctl fact quota status --tenant t --dimension " \
+  "graph_count` shows the limit in force\n"
+
+static void
+assert_unknown_outcome_case (guint status, guint delay_ms,
+    const gchar *const *args, const gchar *request_prefix,
+    const gchar *expected_err)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case_delayed (status, "{\"error\":\"denied_late\"}",
+      delay_ms, NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, request_prefix));
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==, expected_err);
+}
+
+static void
+test_graph_schema_quota_unknown_outcome (void)
+{
+  static const gchar *const graph_create[] = {
+    "graph", "create", "--tenant", "t", "--graph", "g",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const schema_register[] = {
+    "fact", "schema", "register", "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--columns", "value:int64", "--max-rows", "10",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  static const gchar *const quota_configure[] = {
+    "fact", "quota", "configure", "--tenant", "t", "--limit", "5",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  assert_unknown_outcome_case (403, 2000, graph_create,
+      "POST /graphs/create?",
+      "wyctl: graph create failed: graph_create_failed\n"
+      GRAPH_CREATE_UNKNOWN);
+  /* A server error may follow the commit just as a lost answer may. */
+  assert_unknown_outcome_case (500, 0, graph_create, "POST /graphs/create?",
+      "wyctl: graph create failed: denied_late\n" GRAPH_CREATE_UNKNOWN);
+  assert_unknown_outcome_case (403, 2000, schema_register,
+      "POST /facts/schema/register",
+      "wyctl: fact schema register failed: schema_register_failed\n"
+      SCHEMA_REGISTER_UNKNOWN);
+  assert_unknown_outcome_case (403, 2000, quota_configure,
+      "POST /facts/quota?",
+      "wyctl: fact quota configure failed: fact_quota_failed\n"
+      QUOTA_CONFIGURE_UNKNOWN);
+
+  /* Reading a quota changes nothing, so its failure carries no line. */
+  static const gchar *const quota_status[] = {
+    "fact", "quota", "status", "--tenant", "t",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) status_run = { 0 };
+  run_fake_daemon_case (500, "{\"error\":\"denied_late\"}", NULL,
+      quota_status, FALSE, &status_run);
+  assert_fact_forget_exit (&status_run, 5);
+  g_assert_nonnull (status_run.request);
+  g_assert_cmpstr (status_run.out, ==, "");
+  g_assert_cmpstr (status_run.err, ==,
+      "wyctl: fact quota status failed: denied_late\n");
+}
 
 static void
 test_graph_list (void)
@@ -5234,6 +5331,8 @@ main (int argc, char **argv)
       test_fact_forget_times_out);
   g_test_add_func ("/wyctl/fact-mutation-times-out",
       test_fact_mutation_times_out);
+  g_test_add_func ("/wyctl/graph-schema-quota-unknown-outcome",
+      test_graph_schema_quota_unknown_outcome);
   g_test_add_func ("/wyctl/auth-logout-times-out",
       test_auth_logout_times_out);
   g_test_add_func ("/wyctl/auth-logout-rejects-invalid-timeout",
