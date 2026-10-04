@@ -1617,6 +1617,19 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   return 3;
 }
 
+/* Whether a failed request's outcome is unknown: no readable answer (a
+ * transport failure, which a timeout is, or a success status whose body
+ * could not be read) or a server error, which may follow a commit.  The
+ * daemon may then have applied the change, so mutating commands say how to
+ * find out (#1324, #1332). */
+static gboolean
+wyctl_remote_outcome_unknown (WylClient *client, wyrelog_error_t rc)
+{
+  guint status = wyl_client_get_last_http_status (client);
+  return (rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
+         || status / 100 == 5;
+}
+
 /*
  * Report a policy mutation's outcome.  The exit status depends only on the
  * client's error class, as it always has; the message names the daemon's
@@ -1654,9 +1667,7 @@ policy_mutation_exit (WylClient *client, const gchar *command,
   /* No answer, a success status with an unread body, or a server error:
    * the daemon may have applied the change (#1324).  The same test as the
    * graph seal and fact forget hints. */
-  guint status = wyl_client_get_last_http_status (client);
-  if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
-      || status / 100 == 5) {
+  if (wyctl_remote_outcome_unknown (client, rc)) {
     if (g_strcmp0 (command, "permission-transition") == 0)
       g_printerr ("wyctl: the transition outcome is unknown; the subject's "
           "`wyctl policy explain` shows whether the permission is armed, "
@@ -2337,9 +2348,7 @@ run_graph_seal (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_print ("tenant=%s graph=%s sealed=true\n", tenant, graph);
     return 0;
   }
-  guint status = wyl_client_get_last_http_status (client);
-  if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
-      || status / 100 == 5)
+  if (wyctl_remote_outcome_unknown (client, rc))
     g_printerr ("wyctl: the seal outcome is unknown; `wyctl graph list` "
         "shows whether the graph is sealed\n");
   return exit_rc;
@@ -2649,9 +2658,7 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
   /* No answer, a success status with an unread body, or a server error:
    * the batch may have been applied (#1324).  The same test as the policy
    * mutation, graph seal and fact forget hints. */
-  guint status = wyl_client_get_last_http_status (client);
-  if (exit_rc != 0 && ((rc == WYRELOG_E_IO && (status == 0
-      || status / 100 == 2)) || status / 100 == 5))
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
     g_printerr ("wyctl: the %s outcome is unknown; re-running the same "
         "command with the same --batch-id and --idempotency-key is safe, and "
         "replay=true then means it was applied\n",
@@ -3102,9 +3109,7 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
     /* No response, a success status with an unreadable body, or a server
      * error: the erase may have committed, since the daemon records its
      * intent first and a failed cleanup after the commit answers 500. */
-    guint status = wyl_client_get_last_http_status (client);
-    if ((rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
-        || status / 100 == 5)
+    if (wyctl_remote_outcome_unknown (client, rc))
       g_printerr ("wyctl: the forget outcome is unknown; re-run the same "
           "command, and a 404 fact_batch_not_found then means the batch is "
           "already erased or never existed\n");
@@ -6562,8 +6567,7 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
    * that same change is repeated. */
   gboolean pending = g_strcmp0 (error_code,
           "tenant_mutation_unavailable") == 0;
-  gboolean unknown = (rc == WYRELOG_E_IO && (status == 0 || status / 100 == 2))
-      || status / 100 == 5;
+  gboolean unknown = wyctl_remote_outcome_unknown (client, rc);
   /* A seal's own id is the key to its repair, whatever the failure: print
    * it as a fact before any advice. */
   if (sealing)
