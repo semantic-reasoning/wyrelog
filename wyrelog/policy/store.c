@@ -19942,7 +19942,18 @@ policy_fact_backup_graph_snapshot_free (
     return;
   wyl_policy_graph_authority_record_free (graph->authority);
   g_free (graph->active_schema_digest);
+  g_clear_pointer (&graph->active_schema_selections, g_ptr_array_unref);
   g_free (graph);
+}
+
+void
+wyl_policy_fact_schema_selection_free (WylPolicyFactSchemaSelection *selection)
+{
+  if (selection == NULL)
+    return;
+  g_free (selection->namespace_id);
+  g_free (selection->relation_name);
+  g_free (selection);
 }
 
 void
@@ -19993,7 +20004,8 @@ backup_digest_string (GChecksum *checksum, const gchar *value)
  * big-endian fixed-width integers, and u32-length-prefixed UTF-8 strings. */
 static wyrelog_error_t
 active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
-    const gchar *tenant_id, const gchar *graph_id, gchar **out_digest)
+    const gchar *tenant_id, const gchar *graph_id,
+    const GPtrArray *selections, gchar **out_digest)
 {
   *out_digest = NULL;
   g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
@@ -20002,6 +20014,45 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
   if (!backup_digest_string (checksum, "wyrelog.fact.active-schema.v1"))
     return WYRELOG_E_INTERNAL;
 
+  /* A selected vector changes only which registered version is read.  The
+   * graph's active rows remain untouched until the final policy transaction. */
+  g_autoptr (GString) selection_cte = NULL;
+  if (selections != NULL) {
+    if (selections->len > 4096)
+      return WYRELOG_E_POLICY;
+    selection_cte = g_string_new
+          ("WITH sel(namespace_id,relation_name,schema_version) AS (VALUES ");
+    for (guint i = 0; i < selections->len; i++) {
+      const WylFactOfflineBackupSchemaSelection *item =
+          g_ptr_array_index ((GPtrArray *) selections, i);
+      if (item == NULL || item->namespace_id == NULL
+          || item->relation_name == NULL || item->schema_version == 0)
+        return WYRELOG_E_POLICY;
+      if (i != 0) {
+        const WylFactOfflineBackupSchemaSelection *previous =
+            g_ptr_array_index ((GPtrArray *) selections, i - 1);
+        if (g_strcmp0 (previous->namespace_id, item->namespace_id) > 0
+            || (g_strcmp0 (previous->namespace_id, item->namespace_id) == 0
+            && g_strcmp0 (previous->relation_name, item->relation_name) >= 0))
+          return WYRELOG_E_POLICY;
+        g_string_append_c (selection_cte, ',');
+      }
+      gchar *quoted_ns = sqlite3_mprintf ("%Q", item->namespace_id);
+      gchar *quoted_relation = sqlite3_mprintf ("%Q", item->relation_name);
+      if (quoted_ns == NULL || quoted_relation == NULL) {
+        sqlite3_free (quoted_ns);
+        sqlite3_free (quoted_relation);
+        return WYRELOG_E_NOMEM;
+      }
+      g_string_append_printf (selection_cte, "(%s,%s,%u)", quoted_ns,
+          quoted_relation, item->schema_version);
+      sqlite3_free (quoted_ns);
+      sqlite3_free (quoted_relation);
+    }
+    if (selections->len == 0)
+      g_string_append (selection_cte, "(NULL,NULL,NULL)");
+    g_string_append (selection_cte, ") ");
+  }
   sqlite3_stmt *stmt = NULL;
   static const gchar *authority_sql =
       "SELECT namespace_id,relation_name,active_schema_version,"
@@ -20027,11 +20078,25 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
         || g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 5),
         "none") != 0)
       rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && selections != NULL) {
+      const WylFactOfflineBackupSchemaSelection *item =
+          authority_count < selections->len ?
+          g_ptr_array_index ((GPtrArray *) selections, authority_count) : NULL;
+      if (item == NULL
+          || g_strcmp0 (item->namespace_id,
+          (const gchar *) sqlite3_column_text (stmt, 0)) != 0
+          || g_strcmp0 (item->relation_name,
+          (const gchar *) sqlite3_column_text (stmt, 1)) != 0)
+        rc = WYRELOG_E_POLICY;
+    }
     authority_count++;
   }
   if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
     rc = WYRELOG_E_IO;
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && selections != NULL
+      && authority_count != selections->len)
+    rc = WYRELOG_E_POLICY;
 
   static const gchar *relation_sql =
       "SELECT a.namespace_id,n.visibility,a.relation_name,"
@@ -20051,8 +20116,24 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
       "WHERE a.tenant_id=? AND a.graph_id=? "
       "ORDER BY a.namespace_id COLLATE BINARY,a.relation_name COLLATE BINARY;";
   stmt = NULL;
-  if (rc == WYRELOG_E_OK)
-    rc = prepare_stmt (store->db, relation_sql, &stmt);
+  if (rc == WYRELOG_E_OK){
+    g_autofree gchar *selected_sql = NULL;
+    if (selections != NULL) {
+      g_auto (GStrv) versions = g_strsplit (relation_sql,
+              "a.active_schema_version", -1);
+      g_autofree gchar *versioned = g_strjoinv
+            ("sel.schema_version", versions);
+      g_auto (GStrv) joins = g_strsplit (versioned,
+              "FROM fact_relation_activation a JOIN", -1);
+      g_autofree gchar *joined = g_strjoinv
+            ("FROM fact_relation_activation a JOIN sel ON "
+              "sel.namespace_id=a.namespace_id AND "
+              "sel.relation_name=a.relation_name JOIN", joins);
+      selected_sql = g_strconcat (selection_cte->str, joined, NULL);
+    }
+    rc = prepare_stmt (store->db,
+            selected_sql == NULL ? relation_sql : selected_sql, &stmt);
+  }
   if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
       || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
     rc = WYRELOG_E_IO;
@@ -20103,8 +20184,24 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
       "ORDER BY c.namespace_id COLLATE BINARY,c.relation_name COLLATE BINARY,"
       "c.column_index;";
   stmt = NULL;
-  if (rc == WYRELOG_E_OK)
-    rc = prepare_stmt (store->db, column_sql, &stmt);
+  if (rc == WYRELOG_E_OK){
+    g_autofree gchar *selected_sql = NULL;
+    if (selections != NULL) {
+      g_auto (GStrv) versions = g_strsplit (column_sql,
+              "a.active_schema_version", -1);
+      g_autofree gchar *versioned = g_strjoinv
+            ("sel.schema_version", versions);
+      g_auto (GStrv) joins = g_strsplit (versioned,
+              "FROM fact_relation_activation a JOIN", -1);
+      g_autofree gchar *joined = g_strjoinv
+            ("FROM fact_relation_activation a JOIN sel ON "
+              "sel.namespace_id=a.namespace_id AND "
+              "sel.relation_name=a.relation_name JOIN", joins);
+      selected_sql = g_strconcat (selection_cte->str, joined, NULL);
+    }
+    rc = prepare_stmt (store->db,
+            selected_sql == NULL ? column_sql : selected_sql, &stmt);
+  }
   if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
       || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
     rc = WYRELOG_E_IO;
@@ -20154,8 +20251,24 @@ active_fact_schema_digest_unlocked (wyl_policy_store_t *store,
       "ORDER BY q.namespace_id COLLATE BINARY,q.relation_name COLLATE BINARY,"
       "q.query_name COLLATE BINARY;";
   stmt = NULL;
-  if (rc == WYRELOG_E_OK)
-    rc = prepare_stmt (store->db, query_sql, &stmt);
+  if (rc == WYRELOG_E_OK){
+    g_autofree gchar *selected_sql = NULL;
+    if (selections != NULL) {
+      g_auto (GStrv) versions = g_strsplit (query_sql,
+              "a.active_schema_version", -1);
+      g_autofree gchar *versioned = g_strjoinv
+            ("sel.schema_version", versions);
+      g_auto (GStrv) joins = g_strsplit (versioned,
+              "FROM fact_relation_activation a JOIN", -1);
+      g_autofree gchar *joined = g_strjoinv
+            ("FROM fact_relation_activation a JOIN sel ON "
+              "sel.namespace_id=a.namespace_id AND "
+              "sel.relation_name=a.relation_name JOIN", joins);
+      selected_sql = g_strconcat (selection_cte->str, joined, NULL);
+    }
+    rc = prepare_stmt (store->db,
+            selected_sql == NULL ? query_sql : selected_sql, &stmt);
+  }
   if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
       || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK))
     rc = WYRELOG_E_IO;
@@ -20210,7 +20323,56 @@ wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
   if (!wyl_policy_store_fact_replay_snapshot_is_current (store))
     return WYRELOG_E_BUSY;
   return active_fact_schema_digest_unlocked (store, tenant_id, graph_id,
-             out_digest);
+             NULL, out_digest);
+}
+
+wyrelog_error_t
+wyl_policy_store_fact_graph_selected_schema_digest_in_replay_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const GPtrArray *selections, gchar **out_digest)
+{
+  if (out_digest != NULL)
+    *out_digest = NULL;
+  if (store == NULL || tenant_id == NULL || graph_id == NULL
+      || selections == NULL || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_store_fact_replay_snapshot_is_current (store))
+    return WYRELOG_E_BUSY;
+  return active_fact_schema_digest_unlocked (store, tenant_id, graph_id,
+             selections, out_digest);
+}
+
+wyrelog_error_t
+wyl_policy_store_fact_graph_selected_schema_digest
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const GPtrArray *selections, gchar **out_digest)
+{
+  if (out_digest != NULL)
+    *out_digest = NULL;
+  if (store == NULL || store->db == NULL || tenant_id == NULL
+      || graph_id == NULL || selections == NULL || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  if (sqlite3_get_autocommit (store->db) == 0) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  if (sqlite3_exec (store->db, "BEGIN DEFERRED;", NULL, NULL, NULL)
+      != SQLITE_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    return WYRELOG_E_IO;
+  }
+  wyrelog_error_t rc = active_fact_schema_digest_unlocked (store,
+          tenant_id, graph_id, selections, out_digest);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_exec (store->db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK) {
+    (void) sqlite3_exec (store->db, "ROLLBACK;", NULL, NULL, NULL);
+    g_clear_pointer (out_digest, g_free);
+  }
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -20258,7 +20420,31 @@ read_fact_backup_snapshot_unlocked (wyl_policy_store_t *store,
     graph->authority = g_ptr_array_index (authorities, i);
     g_ptr_array_index (authorities, i) = NULL;
     rc = active_fact_schema_digest_unlocked (store, tenant_id,
-            graph->authority->graph_id, &graph->active_schema_digest);
+            graph->authority->graph_id, NULL, &graph->active_schema_digest);
+    g_autoptr (GPtrArray) active = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_list_active_fact_relations (store, tenant_id,
+              graph->authority->graph_id, &active);
+    if (rc == WYRELOG_E_OK) {
+      graph->active_schema_selections = g_ptr_array_new_with_free_func
+            ((GDestroyNotify) wyl_policy_fact_schema_selection_free);
+      for (guint j = 0; j < active->len; j++) {
+        const WylPolicyRelationActivationRecord *record =
+            g_ptr_array_index (active, j);
+        if (!record->has_active_schema_version
+            || record->active_schema_version == 0
+            || record->active_schema_version > G_MAXUINT32) {
+          rc = WYRELOG_E_POLICY;
+          break;
+        }
+        WylPolicyFactSchemaSelection *selection = g_new0
+              (WylPolicyFactSchemaSelection, 1);
+        selection->namespace_id = g_strdup (record->namespace_id);
+        selection->relation_name = g_strdup (record->relation_name);
+        selection->schema_version = (guint32) record->active_schema_version;
+        g_ptr_array_add (graph->active_schema_selections, selection);
+      }
+    }
     if (rc == WYRELOG_E_OK)
       g_ptr_array_add (snapshot->graphs, graph);
     else
@@ -23645,10 +23831,15 @@ wyl_policy_store_load_fact_relation_query (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   static const gchar *sql =
-      "SELECT namespace_id, relation_name, schema_version, query_name, "
-      "required_permission_id, max_rows "
-      "FROM fact_relation_query_allowlist "
-      "WHERE tenant_id = ? AND graph_id = ? AND query_name = ?;";
+      "SELECT q.namespace_id, q.relation_name, q.schema_version, "
+      "q.query_name, q.required_permission_id, q.max_rows "
+      "FROM fact_relation_query_allowlist q "
+      "JOIN fact_relation_activation a ON a.tenant_id=q.tenant_id "
+      "AND a.graph_id=q.graph_id AND a.namespace_id=q.namespace_id "
+      "AND a.relation_name=q.relation_name "
+      "AND a.active_schema_version=q.schema_version "
+      "AND a.lifecycle_state='active' AND a.pending_schema_version IS NULL "
+      "WHERE q.tenant_id = ? AND q.graph_id = ? AND q.query_name = ?;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -38862,7 +39053,7 @@ wyl_policy_store_offline_restore_load (wyl_policy_store_t *store,
 }
 
 static gboolean offline_restore_begin_policy_valid
-  (const WylPolicyOfflineRestoreRecord *record,
+  (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *record,
     const WylPolicyFactBackupSnapshot *snapshot,
     const GPtrArray *provisioning);
 
@@ -38883,7 +39074,7 @@ offline_restore_run_begin_proof_locked
             record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
             ? record->selected_graph_id : NULL, &provisioning);
   if (rc == WYRELOG_E_OK && !offline_restore_begin_policy_valid
-        (record, snapshot, provisioning))
+        (store, record, snapshot, provisioning))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = proof (snapshot, provisioning, proof_data);
@@ -39078,7 +39269,7 @@ offline_restore_create (wyl_policy_store_t *store,
 
 static gboolean
 offline_restore_begin_policy_valid
-  (const WylPolicyOfflineRestoreRecord *record,
+  (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *record,
     const WylPolicyFactBackupSnapshot *snapshot,
     const GPtrArray *provisioning)
 {
@@ -39169,8 +39360,21 @@ offline_restore_begin_policy_valid
         || graph->transition_terminal || graph->resume_forbidden
         || graph->durability_unprovable_acknowledged
         || g_strcmp0 (selected->active_schema_digest,
-        graph->schema_digest) != 0)
+        (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
       return FALSE;
+  }
+  for (guint i = 0; i < journal.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, i);
+    if (graph->old_schema_digest != NULL) {
+      g_autofree gchar *selected_digest = NULL;
+      if (active_fact_schema_digest_unlocked (store, journal.tenant_id,
+          graph->graph_id, graph->schema_selections,
+          &selected_digest) != WYRELOG_E_OK
+          || g_strcmp0 (selected_digest, graph->schema_digest) != 0)
+        return FALSE;
+    }
   }
   return TRUE;
 }
@@ -40055,9 +40259,10 @@ wyl_policy_store_graph_restore_reacquire_v2_prove
   g_autofree gchar *digest = NULL;
   if (rc == WYRELOG_E_OK)
     rc = active_fact_schema_digest_unlocked (store, journal.tenant_id,
-            journal.selected_graph_id, &digest);
+            journal.selected_graph_id, NULL, &digest);
   if (rc == WYRELOG_E_OK
-      && g_strcmp0 (digest, graph->schema_digest) != 0)
+      && g_strcmp0 (digest, (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
     rc = WYRELOG_E_POLICY;
   wyl_policy_graph_restore_replacement_record_free (row);
   wyl_policy_offline_restore_record_free (record);
@@ -40397,9 +40602,10 @@ tenant_restore_bind_authority_locked (wyl_policy_store_t *store,
         g_ptr_array_index (journal->graphs, i);
     g_autofree gchar *current_schema_digest = NULL;
     rc = active_fact_schema_digest_unlocked (store, journal->tenant_id,
-            graph->graph_id, &current_schema_digest);
+            graph->graph_id, NULL, &current_schema_digest);
     if (rc == WYRELOG_E_OK
-        && g_strcmp0 (current_schema_digest, graph->schema_digest) != 0)
+        && g_strcmp0 (current_schema_digest, (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
       rc = WYRELOG_E_POLICY;
   }
 
@@ -41657,9 +41863,10 @@ tenant_restore_selected_validate_locked (wyl_policy_store_t *store,
         g_ptr_array_index (journal->graphs, i);
     g_autofree gchar *digest = NULL;
     rc = active_fact_schema_digest_unlocked (store, journal->tenant_id,
-            graph->graph_id, &digest);
+            graph->graph_id, NULL, &digest);
     if (rc == WYRELOG_E_OK
-        && g_strcmp0 (digest, graph->schema_digest) != 0)
+        && g_strcmp0 (digest, (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
       rc = WYRELOG_E_POLICY;
   }
   return rc;
@@ -41778,7 +41985,8 @@ wyl_policy_store_tenant_restore_reacquire_v7_prove
         || authority->reconciliation_generation !=
         graph->destination_reconciliation_generation
         || g_strcmp0 (entry->active_schema_digest,
-        graph->schema_digest) != 0)
+        (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
       rc = WYRELOG_E_POLICY;
   }
   wyl_policy_fact_backup_snapshot_free (snapshot);
@@ -42069,9 +42277,10 @@ wyl_policy_store_graph_restore_reacquire_v3_prove
   g_autofree gchar *digest = NULL;
   if (rc == WYRELOG_E_OK)
     rc = active_fact_schema_digest_unlocked (store, journal.tenant_id,
-            journal.selected_graph_id, &digest);
+            journal.selected_graph_id, NULL, &digest);
   if (rc == WYRELOG_E_OK
-      && g_strcmp0 (digest, graph->schema_digest) != 0)
+      && g_strcmp0 (digest, (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
     rc = WYRELOG_E_POLICY;
   wyl_policy_graph_restore_replacement_record_free (row);
   wyl_policy_offline_restore_record_free (record);
@@ -42631,6 +42840,86 @@ tenant_promotion_initial_matches (sqlite3 *db,
          (matches ? WYRELOG_E_OK : WYRELOG_E_POLICY) : WYRELOG_E_IO;
 }
 
+static wyrelog_error_t
+restore_promote_selected_schema_locked (wyl_policy_store_t *store,
+    const gchar *tenant_id,
+    const WylFactOfflineRestoreJournalGraph *graph)
+{
+  g_autofree gchar *old_digest = NULL;
+  wyrelog_error_t rc = active_fact_schema_digest_unlocked (store,
+          tenant_id, graph->graph_id, NULL, &old_digest);
+  const gchar *expected_old = graph->old_schema_digest == NULL ?
+      graph->schema_digest : graph->old_schema_digest;
+  if (rc != WYRELOG_E_OK || g_strcmp0 (old_digest, expected_old) != 0)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  if (g_strcmp0 (old_digest, graph->schema_digest) == 0)
+    return WYRELOG_E_OK;
+  if (graph->schema_selections == NULL)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *selected_digest = NULL;
+  rc = active_fact_schema_digest_unlocked (store, tenant_id,
+          graph->graph_id, graph->schema_selections, &selected_digest);
+  if (rc != WYRELOG_E_OK || g_strcmp0 (selected_digest,
+      graph->schema_digest) != 0)
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  for (guint i = 0; i < graph->schema_selections->len; i++) {
+    const WylFactOfflineBackupSchemaSelection *item =
+        g_ptr_array_index (graph->schema_selections, i);
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_relation_activation SET lifecycle_state='activating',"
+            "pending_schema_version=?5,activation_generation="
+            "activation_generation+1,updated_at=unixepoch() WHERE "
+            "tenant_id=?1 AND graph_id=?2 AND namespace_id=?3 AND "
+            "relation_name=?4 AND lifecycle_state='active' AND "
+            "pending_schema_version IS NULL AND "
+            "activation_generation<9223372036854775805;", &stmt);
+    if (rc == WYRELOG_E_OK
+        && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+        || bind_text (stmt, 2, graph->graph_id) != WYRELOG_E_OK
+        || bind_text (stmt, 3, item->namespace_id) != WYRELOG_E_OK
+        || bind_text (stmt, 4, item->relation_name) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 5, item->schema_version) != SQLITE_OK))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "UPDATE fact_relation_activation SET lifecycle_state='active',"
+            "active_schema_version=?5,pending_schema_version=NULL,"
+            "activation_generation=activation_generation+1,"
+            "updated_at=unixepoch() WHERE tenant_id=?1 AND graph_id=?2 "
+            "AND namespace_id=?3 AND relation_name=?4 "
+            "AND lifecycle_state='activating' AND pending_schema_version=?5;",
+            &stmt);
+    if (rc == WYRELOG_E_OK
+        && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+        || bind_text (stmt, 2, graph->graph_id) != WYRELOG_E_OK
+        || bind_text (stmt, 3, item->namespace_id) != WYRELOG_E_OK
+        || bind_text (stmt, 4, item->relation_name) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 5, item->schema_version) != SQLITE_OK))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  g_autofree gchar *new_digest = NULL;
+  rc = active_fact_schema_digest_unlocked (store, tenant_id,
+          graph->graph_id, NULL, &new_digest);
+  return rc != WYRELOG_E_OK ? rc :
+         g_strcmp0 (new_digest, graph->schema_digest) == 0 ?
+         WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_policy_store_tenant_restore_selected_promote_with_effect
   (wyl_policy_store_t *store,
@@ -42754,6 +43043,10 @@ wyl_policy_store_tenant_restore_selected_promote_with_effect
   if (rc == WYRELOG_E_OK && exact)
     rc = wyl_fact_offline_restore_journal_encode (&published,
             &published_blob);
+  for (guint i = 0; rc == WYRELOG_E_OK && exact
+      && i < selected.graphs->len; i++)
+    rc = restore_promote_selected_schema_locked (store,
+            selected.tenant_id, g_ptr_array_index (selected.graphs, i));
   WylPolicyOfflineRestoreRecord desired = { 0 };
   if (rc == WYRELOG_E_OK && exact) {
     desired = *current;
@@ -42947,12 +43240,16 @@ wyl_policy_store_graph_restore_selected_promote_with_effect
   g_autofree gchar *current_schema_digest = NULL;
   if (matched && rc == WYRELOG_E_OK)
     rc = active_fact_schema_digest_unlocked (store, row->tenant_id,
-            row->graph_id, &current_schema_digest);
+            row->graph_id, NULL, &current_schema_digest);
   if (matched && rc == WYRELOG_E_OK
-      && g_strcmp0 (current_schema_digest, graph->schema_digest) != 0)
+      && g_strcmp0 (current_schema_digest, (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0)
     rc = WYRELOG_E_POLICY;
   if (matched && rc == WYRELOG_E_OK)
     rc = terminal_shape_check (row, effect_data);
+  if (matched && rc == WYRELOG_E_OK)
+    rc = restore_promote_selected_schema_locked (store, row->tenant_id,
+            graph);
   if (matched && rc == WYRELOG_E_OK)
     rc = restore_selection_cas_journal_locked (store->db, stored,
             &published_record);

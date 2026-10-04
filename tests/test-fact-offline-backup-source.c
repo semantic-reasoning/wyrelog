@@ -11,6 +11,7 @@
 #include <gio/gio.h>
 #include <string.h>
 #include <stdio.h>
+#include <duckdb.h>
 #ifndef G_OS_WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -1163,13 +1164,38 @@ test_restore_begin_authenticated (void)
   const WylFactOfflineRestoreScope scopes[] = {
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
   };
   for (guint pass = 0; pass < G_N_ELEMENTS (scopes); pass++) {
+    const gboolean schema_transition = pass >= 2;
     BackupFixture fixture = { 0 };
     fixture_init (&fixture, "wyl-offline-restore-begin-XXXXXX");
     create_tenant (&fixture);
     create_graph (&fixture, "alpha");
     create_graph (&fixture, "zeta");
+    if (schema_transition) {
+      const gchar *selected_graphs[] = { "alpha", "zeta" };
+      const guint count = scopes[pass] == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+          ? 2 : 1;
+      for (guint i = 0; i < count; i++) {
+        const wyl_policy_fact_relation_schema_column_t columns[] = {
+          { "id", "symbol", FALSE, TRUE },
+        };
+        const wyl_policy_fact_relation_schema_query_t queries[] = {
+          { "items_v2", "wr.datalog.query", 1000 },
+        };
+        const wyl_policy_fact_relation_schema_options_t schema = {
+          .tenant_id = "tenant-a", .graph_id = selected_graphs[i],
+          .namespace_id = "backup", .relation_name = "items",
+          .schema_version = 2, .relation_visible = TRUE,
+          .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+          .queries = queries, .n_queries = G_N_ELEMENTS (queries),
+        };
+        g_assert_cmpint (wyl_policy_store_register_fact_relation_schema
+              (fixture.policy, &schema), ==, WYRELOG_E_OK);
+      }
+    }
     seal_graph (&fixture, "alpha");
     seal_graph (&fixture, "zeta");
     seal_tenant (&fixture);
@@ -1194,6 +1220,35 @@ test_restore_begin_authenticated (void)
     g_assert_cmpint (wyl_fact_offline_backup_generate (source,
         &capture_destination, &capture), ==, WYRELOG_E_OK);
     g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+    if (schema_transition) {
+      const gchar *selected_graphs[] = { "alpha", "zeta" };
+      const guint count = scopes[pass] == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+          ? 2 : 1;
+      for (guint i = 0; i < count; i++) {
+        WylPolicyRelationActivationRecord *active = NULL;
+        g_assert_cmpint (wyl_policy_store_read_relation_activation
+              (fixture.policy, "tenant-a", selected_graphs[i], "backup",
+            "items", &active), ==, WYRELOG_E_OK);
+        g_assert_cmpint (active->lifecycle_state, ==,
+            WYL_POLICY_RELATION_ACTIVATION_ACTIVE);
+        WylPolicyAuthorityMutationResult mutation;
+        g_assert_cmpint (wyl_policy_store_transition_relation_activation
+              (fixture.policy, "tenant-a", selected_graphs[i], "backup",
+            "items", WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+            active->activation_generation,
+            WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+            TRUE, 1, TRUE, 2, "none", &mutation), ==, WYRELOG_E_OK);
+        g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+        g_assert_cmpint (wyl_policy_store_transition_relation_activation
+              (fixture.policy, "tenant-a", selected_graphs[i], "backup",
+            "items", WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+            active->activation_generation + 1,
+            WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+            TRUE, 2, FALSE, 0, "none", &mutation), ==, WYRELOG_E_OK);
+        g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+        wyl_policy_relation_activation_record_free (active);
+      }
+    }
     g_autoptr (GError) error = NULL;
     g_autofree gchar *bundle_root = g_dir_make_tmp
           ("wyl-offline-restore-begin-bundle-XXXXXX", &error);
@@ -1230,6 +1285,19 @@ test_restore_begin_authenticated (void)
     g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
     g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root,
         digest, &bundle), ==, WYRELOG_E_OK);
+    if (schema_transition) {
+      WylFactOfflineRestoreDryRunReport report = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+          fixture.root, fixture.runtime, bundle, scopes[pass],
+          scopes[pass] == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+            ? "alpha" : NULL, &report), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (report.graphs->len, ==,
+          scopes[pass] == WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT ? 2 : 1);
+      for (guint i = 0; i < report.graphs->len; i++)
+        g_assert_true (((WylFactOfflineRestoreDryRunGraph *)
+            g_ptr_array_index (report.graphs, i))->schema_transition_required);
+      wyl_fact_offline_restore_dry_run_report_clear (&report);
+    }
     g_autoptr (GHashTable) alpha_before =
         capture_dry_run_graph_namespace (&fixture, "alpha");
     g_autoptr (GHashTable) zeta_before =
@@ -1240,6 +1308,32 @@ test_restore_begin_authenticated (void)
         "018f22d0-7b6d-7a5b-8c31-123456789ad1" :
         "018f22d0-7b6d-7a5b-8c31-123456789ad2";
     WylFactOfflineRestoreJournal committed = { 0 };
+    if (schema_transition) {
+      /* The selected definition is wrong even though the old active v2
+       * version and sealed graph authority are unchanged. */
+      sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+      g_assert_cmpint (sqlite3_exec (db,
+          "UPDATE fact_relation_schema_columns SET column_type='int64' "
+          "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
+          "AND namespace_id='backup' AND relation_name='items' "
+          "AND schema_version=1 AND column_index=0;",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+      g_assert_cmpint (sqlite3_changes (db), ==, 1);
+      g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+          fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+          operation, TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.graphs);
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &committed), ==,
+          WYRELOG_E_NOT_FOUND);
+      g_assert_cmpint (sqlite3_exec (db,
+          "UPDATE fact_relation_schema_columns SET column_type='symbol' "
+          "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
+          "AND namespace_id='backup' AND relation_name='items' "
+          "AND schema_version=1 AND column_index=0;",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+      g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    }
     g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
         fixture.root, fixture.runtime, bundle, scopes[pass], selected,
         operation, FALSE, 0, &committed), ==, WYRELOG_E_POLICY);
@@ -1344,6 +1438,15 @@ test_restore_begin_authenticated (void)
         fixture.root, fixture.runtime, scheduler, bundle, operation, 1, 0,
         NULL, &committed), ==, WYRELOG_E_POLICY);
     g_assert_null (committed.graphs);
+    if (schema_transition) {
+      WylPolicyRelationActivationRecord *active = NULL;
+      g_assert_cmpint (wyl_policy_store_read_relation_activation
+            (fixture.policy, "tenant-a", "alpha", "backup", "items",
+          &active), ==, WYRELOG_E_OK);
+      g_assert_true (active->has_active_schema_version);
+      g_assert_cmpuint (active->active_schema_version, ==, 2);
+      wyl_policy_relation_activation_record_free (active);
+    }
     g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (fixture.policy),
         "UPDATE fact_relation_schema_columns SET visible=1-visible "
         "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
@@ -1431,6 +1534,16 @@ create_restore_journal_for_manifest_internal (BackupFixture *fixture, GBytes *ma
     WylFactOfflineRestoreTargetGraph *target = g_new0
           (WylFactOfflineRestoreTargetGraph, 1);
     target->graph_id = g_strdup (authority->graph_id);
+    if (mode != NULL && g_str_has_prefix (mode, "schema-transition")) {
+      WylPolicyFactBackupSnapshot *snapshot = NULL;
+      g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot
+            (fixture->policy, "tenant-a", authority->graph_id,
+          &snapshot), ==, WYRELOG_E_OK);
+      const WylPolicyFactBackupGraphSnapshot *entry =
+          g_ptr_array_index (snapshot->graphs, 0);
+      target->old_schema_digest = g_strdup (entry->active_schema_digest);
+      wyl_policy_fact_backup_snapshot_free (snapshot);
+    }
     target->lifecycle_generation = MAX (authority->lifecycle_generation,
             (guint64) 1);
     target->reconciliation_generation = MAX
@@ -1843,6 +1956,25 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
   const gchar *graphs[] = { "alpha", "zeta" };
   for (guint i = 0; i < 2; i++) {
     create_graph (&f->fixture, graphs[i]);
+    if (g_str_has_prefix (mode, "schema-transition")) {
+      const wyl_policy_fact_relation_schema_column_t selected_columns[] = {
+        { "id", "symbol", FALSE, TRUE },
+      };
+      const wyl_policy_fact_relation_schema_query_t selected_queries[] = {
+        { "items_v2", "wr.datalog.query", 1000 },
+      };
+      const wyl_policy_fact_relation_schema_options_t selected_schema = {
+        .tenant_id = "tenant-a", .graph_id = graphs[i],
+        .namespace_id = "backup", .relation_name = "items",
+        .schema_version = 2, .relation_visible = TRUE,
+        .columns = selected_columns,
+        .n_columns = G_N_ELEMENTS (selected_columns),
+        .queries = selected_queries,
+        .n_queries = G_N_ELEMENTS (selected_queries),
+      };
+      g_assert_cmpint (wyl_policy_store_register_fact_relation_schema
+            (f->fixture.policy, &selected_schema), ==, WYRELOG_E_OK);
+    }
     /* Populate the active projection so session success proves real replay. */
     g_autoptr (wyl_fact_store_t) store = NULL;
     g_assert_cmpint (wyl_fact_store_open_provisioned_graph (f->fixture.policy,
@@ -1913,6 +2045,32 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
   g_assert_cmpint (wyl_fact_offline_backup_generate (source,
       &capture_destination, &f->capture), ==, WYRELOG_E_OK);
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  if (g_str_has_prefix (mode, "schema-transition")) {
+    const guint count = selected_graph == NULL ? 2 : 1;
+    for (guint i = 0; i < count; i++) {
+      const gchar *id = selected_graph == NULL ? graphs[i] : selected_graph;
+      WylPolicyRelationActivationRecord *active = NULL;
+      g_assert_cmpint (wyl_policy_store_read_relation_activation
+            (f->fixture.policy, "tenant-a", id, "backup", "items",
+          &active), ==, WYRELOG_E_OK);
+      WylPolicyAuthorityMutationResult mutation;
+      g_assert_cmpint (wyl_policy_store_transition_relation_activation
+            (f->fixture.policy, "tenant-a", id, "backup", "items",
+          WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+          active->activation_generation,
+          WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+          TRUE, 1, TRUE, 2, "none", &mutation), ==, WYRELOG_E_OK);
+      g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+      g_assert_cmpint (wyl_policy_store_transition_relation_activation
+            (f->fixture.policy, "tenant-a", id, "backup", "items",
+          WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+          active->activation_generation + 1,
+          WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+          TRUE, 2, FALSE, 0, "none", &mutation), ==, WYRELOG_E_OK);
+      g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+      wyl_policy_relation_activation_record_free (active);
+    }
+  }
   if (g_str_equal (mode, "coordinator/import-historical")) {
     /* Capture A first, then append real data B in place, preserving the
      * provisioned inode, store identity and relation schema. */
@@ -2175,7 +2333,9 @@ test_restore_publication_authority (gconstpointer data)
 {
   SessionFixture f = { 0 };
   f.selected_graph = "alpha";
-  session_fixture_init_selected (&f, "success", f.selected_graph);
+  session_fixture_init_selected (&f,
+      g_str_equal (data, "schema-transition")
+      ? "schema-transition-graph" : "success", f.selected_graph);
   f.record_preflight = TRUE;
   g_assert_cmpint (wyl_fact_offline_restore_validation_session_new_for_preflight
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
@@ -2190,7 +2350,8 @@ test_restore_publication_authority (gconstpointer data)
   if (g_str_equal (data, "policy"))
     mutate_tenant_after_snapshot (&f.capture);
   wyrelog_error_t rc = publication_authority_run_worker (&f);
-  if (!g_str_equal (data, "success")) {
+  if (!g_str_equal (data, "success")
+      && !g_str_equal (data, "schema-transition")) {
     g_assert_cmpint (rc, !=, WYRELOG_E_OK);
     g_assert_cmpuint (f.publication_callbacks, ==, 0);
     session_assert_authority (&f, FALSE);
@@ -3147,7 +3308,9 @@ test_graph_rollback (gconstpointer data)
 {
   const gchar *mode = data;
   SessionFixture f = { 0 };
-  session_fixture_init_selected (&f, "success", "zeta");
+  session_fixture_init_selected (&f,
+      g_str_equal (mode, "schema-transition")
+      ? "schema-transition-graph" : "success", "zeta");
   g_autofree gchar *stage = session_stage_path (&f, "zeta");
   g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
   g_autofree gchar *sibling = graph_file_path (&f.fixture, "alpha",
@@ -3189,6 +3352,14 @@ test_graph_rollback (gconstpointer data)
   g_assert_cmpint (g_stat (sibling, &sibling_after), ==, 0);
   g_assert_cmpuint (sibling_after.st_ino, ==, sibling_before.st_ino);
   g_assert_cmpint (sibling_after.st_size, ==, sibling_before.st_size);
+  if (g_str_equal (mode, "schema-transition")) {
+    WylPolicyRelationActivationRecord *active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_relation_activation
+          (f.fixture.policy, "tenant-a", "zeta", "backup", "items",
+        &active), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (active->active_schema_version, ==, 2);
+    wyl_policy_relation_activation_record_free (active);
+  }
   wyl_fact_offline_restore_journal_clear (&committed);
   g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
@@ -3256,8 +3427,10 @@ static void
 test_tenant_rollback_two_graphs (gconstpointer data)
 {
   gboolean partial = g_strcmp0 (data, "partial") == 0;
+  gboolean schema_transition = g_strcmp0 (data, "schema-transition") == 0;
   SessionFixture f = { 0 };
-  session_fixture_init (&f, partial ? "partial-staging" : "success");
+  session_fixture_init (&f, partial ? "partial-staging" :
+      schema_transition ? "schema-transition-tenant" : "success");
   g_autofree gchar *alpha_stage = session_stage_path (&f, "alpha");
   g_autofree gchar *zeta_stage = session_stage_path (&f, "zeta");
   g_assert_true (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
@@ -3276,6 +3449,17 @@ test_tenant_rollback_two_graphs (gconstpointer data)
       WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
   g_assert_false (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
   g_assert_false (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+  if (schema_transition) {
+    const gchar *graphs[] = { "alpha", "zeta" };
+    for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+      WylPolicyRelationActivationRecord *active = NULL;
+      g_assert_cmpint (wyl_policy_store_read_relation_activation
+            (f.fixture.policy, "tenant-a", graphs[i], "backup", "items",
+          &active), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (active->active_schema_version, ==, 2);
+      wyl_policy_relation_activation_record_free (active);
+    }
+  }
   guint64 revision = committed.revision;
   wyl_fact_offline_restore_journal_clear (&committed);
   g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
@@ -4127,10 +4311,12 @@ tenant_sync_test_begin_effect (GBytes *journal, const GPtrArray *active_uuids,
 }
 
 static void
-test_tenant_commit_resume_v5 (void)
+test_tenant_commit_resume_v5 (gconstpointer data)
 {
   SessionFixture f = { 0 };
-  session_fixture_init (&f, "success");
+  gboolean schema_transition = data != NULL;
+  session_fixture_init (&f, schema_transition ?
+      "schema-transition-tenant" : "success");
   TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
   g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
   wyl_fact_offline_restore_journal_clear (&f.committed);
@@ -4284,6 +4470,17 @@ test_tenant_commit_resume_v5 (void)
       session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
   g_assert_cmpuint (f.committed.revision, ==, revision);
   wyl_fact_offline_restore_journal_clear (&f.committed);
+  if (schema_transition) {
+    for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+      WylPolicyRelationActivationRecord *active = NULL;
+      g_assert_cmpint (wyl_policy_store_read_relation_activation
+            (f.fixture.policy, "tenant-a", graphs[i], "backup", "items",
+          &active), ==, WYRELOG_E_OK);
+      g_assert_true (active->has_active_schema_version);
+      g_assert_cmpuint (active->active_schema_version, ==, 1);
+      wyl_policy_relation_activation_record_free (active);
+    }
+  }
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
@@ -7785,13 +7982,305 @@ selected_promotion_shape_for_test
 }
 
 static void
+test_graph_populated_schema_transition_roundtrip (void)
+{
+#ifndef __linux__
+  return;
+#else
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "restore-populated-graph-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "alpha");
+  create_graph (&fixture, "zeta");
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "id", "symbol", FALSE, TRUE },
+  };
+  const wyl_policy_fact_relation_schema_query_t queries[] = {
+    { "items_v2", "wr.datalog.query", 1000 },
+  };
+  const wyl_policy_fact_relation_schema_options_t v2 = {
+    .tenant_id = "tenant-a", .graph_id = "alpha",
+    .namespace_id = "backup", .relation_name = "items",
+    .schema_version = 2, .relation_visible = TRUE,
+    .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+    .queries = queries, .n_queries = G_N_ELEMENTS (queries),
+  };
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema
+        (fixture.policy, &v2), ==, WYRELOG_E_OK);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open_provisioned_graph (fixture.policy,
+      fixture.root, "tenant-a", "alpha", TRUE, &store), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_options_t v1 = {
+    .tenant_id = "tenant-a", .graph_id = "alpha",
+    .namespace_id = "backup", .relation_name = "items",
+    .schema_version = 1, .relation_visible = TRUE,
+    .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+  };
+  const wyl_fact_value_t values[] = {
+    { .type = WYL_FACT_VALUE_SYMBOL, .as.text = "restored-row" },
+  };
+  const wyl_fact_row_t rows[] = { { values, G_N_ELEMENTS (values) } };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "restored-batch", .tenant_id = "tenant-a",
+    .graph_id = "alpha", .namespace_id = "backup",
+    .relation_name = "items", .schema_version = 1, .source = "test",
+    .idempotency_key = "roundtrip", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &v1, &batch,
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  seal_graph (&fixture, "alpha");
+  seal_graph (&fixture, "zeta");
+  seal_tenant (&fixture);
+  const gchar *ids[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (ids); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", ids[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh
+          (fixture.runtime, &key, session_build_engine, NULL, NULL),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture.runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  DestinationCapture capture;
+  destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, &capture), ==, WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  WylPolicyRelationActivationRecord *active = NULL;
+  g_assert_cmpint (wyl_policy_store_read_relation_activation
+        (fixture.policy, "tenant-a", "alpha", "backup", "items",
+      &active), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation
+        (fixture.policy, "tenant-a", "alpha", "backup", "items",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+      active->activation_generation,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+      TRUE, 1, TRUE, 2, "none", &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_relation_activation
+        (fixture.policy, "tenant-a", "alpha", "backup", "items",
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+      active->activation_generation + 1,
+      WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+      TRUE, 2, FALSE, 0, "none", &mutation), ==, WYRELOG_E_OK);
+  wyl_policy_relation_activation_record_free (active);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *bundle_root = g_dir_make_tmp
+        ("restore-populated-bundle-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *manifest_path = g_build_filename (bundle_root,
+          "manifest", NULL);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (capture.manifest,
+          &manifest_length);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < capture.completed_graphs->len; i++) {
+    const gchar *id = g_ptr_array_index (capture.completed_graphs, i);
+    GBytes *bytes = g_ptr_array_index (capture.artifact_bytes, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (id,
+        &component), ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+    gsize length = 0;
+    const gchar *data = g_bytes_get_data (bytes, &length);
+    g_assert_true (g_file_set_contents (path, data, length, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (checksum, manifest_data, manifest_length);
+  guint8 digest[32];
+  gsize digest_length = sizeof digest;
+  g_checksum_get_digest (checksum, digest, &digest_length);
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root,
+      digest, &bundle), ==, WYRELOG_E_OK);
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-123456789af1";
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", operation, TRUE, 0,
+      &journal), ==, WYRELOG_E_OK);
+  guint64 revision = journal.revision;
+  wyl_fact_offline_restore_journal_clear (&journal);
+  WylFactReplaySchedulerConfig config;
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+      fixture.root, fixture.runtime, scheduler, bundle, operation,
+      revision, 0, NULL, &journal), ==, WYRELOG_E_OK);
+  g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (journal.graphs, 0))->replay_preflighted);
+  g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *old_uuid = NULL;
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+        (fixture.policy), "SELECT op_uuid FROM fact_graph_provisioning "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha' AND phase='active';",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  old_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+  revision = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_provisioned_old
+        (&journal, "alpha", old_uuid), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreStoreResult result = 0;
+  g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (fixture.policy, revision, &journal, &result, &bound), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  WylPolicyGraphRestoreReplacementRecord *replacement = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture.policy, &bound, &result, &replacement), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_policy_graph_restore_replacement_record_free (replacement);
+  /* Graph replacement COMMIT is admitted through its reserved companion.
+   * The generic journal decision helper only admits absent-main graphs. */
+  bound.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  bound.revision++;
+  import_restore_journal_for_test (fixture.policy, &bound);
+  revision = bound.revision;
+  for (guint step = 0; step < 16; step++) {
+    g_auto (WylFactOfflineRestoreJournal) next = { 0 };
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (bound.graphs, 0);
+    wyrelog_error_t rc = WYRELOG_E_INVALID;
+    switch (graph->next_op) {
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
+        rc = wyl_fact_offline_restore_graph_commit_sync_staged_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+                revision, 0, &next);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN:
+        rc = wyl_fact_offline_restore_graph_commit_retain_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+                revision, 0, &next);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR:
+        rc = wyl_fact_offline_restore_graph_commit_sync_retained_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+                revision, 0, &next);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH:
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
+        rc = wyl_fact_offline_restore_graph_commit_publish_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+                revision, 0, &next);
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    revision = next.revision;
+    wyl_fact_offline_restore_journal_clear (&bound);
+    bound = next;
+    memset (&next, 0, sizeof next);
+    graph = g_ptr_array_index (bound.graphs, 0);
+    if (graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE)
+      break;
+  }
+  WylPolicyGraphRestoreReplacementRecord *companion = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      revision, 0, &companion), ==, WYRELOG_E_OK);
+  wyl_policy_graph_restore_replacement_record_free (companion);
+  g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      revision, 0, &selected), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      selected.revision, 0, &finalized), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) promoted = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      finalized.revision, 0, &promoted), ==, WYRELOG_E_OK);
+  g_assert_true (promoted.policy_generation_published);
+  g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_read_relation_activation
+        (fixture.policy, "tenant-a", "alpha", "backup", "items",
+      &active), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (active->active_schema_version, ==, 1);
+  wyl_policy_relation_activation_record_free (active);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  duckdb_database db;
+  duckdb_connection connection;
+  duckdb_result query = { 0 };
+  g_assert_cmpint (duckdb_open (main_path, &db), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_connect (db, &connection), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_query (connection,
+      "SELECT COUNT(*) FROM fact_event_log WHERE batch_id='restored-batch';",
+      &query), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_value_int64 (&query, 0, 0), ==, 1);
+  duckdb_destroy_result (&query);
+  duckdb_disconnect (&connection);
+  duckdb_close (&db);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+static void
 test_graph_restore_replacement_reservation (gconstpointer data)
 {
   gboolean ambiguous_commit = g_strcmp0 (data, "commit-response") == 0;
+  gboolean schema_transition = g_strcmp0 (data, "schema-transition") == 0;
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "restore-replacement-XXXXXX");
   create_tenant (&fixture);
   create_graph (&fixture, "alpha");
+  if (schema_transition) {
+    const wyl_policy_fact_relation_schema_column_t columns[] = {
+      { "id", "symbol", FALSE, TRUE },
+    };
+    const wyl_policy_fact_relation_schema_query_t queries[] = {
+      { "items_v2", "wr.datalog.query", 1000 },
+    };
+    const wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = "tenant-a", .graph_id = "alpha",
+      .namespace_id = "backup", .relation_name = "items",
+      .schema_version = 2, .relation_visible = TRUE,
+      .columns = columns, .n_columns = G_N_ELEMENTS (columns),
+      .queries = queries, .n_queries = G_N_ELEMENTS (queries),
+    };
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema
+          (fixture.policy, &schema), ==, WYRELOG_E_OK);
+  }
   seal_graph (&fixture, "alpha");
   seal_tenant (&fixture);
 
@@ -7844,18 +8333,70 @@ test_graph_restore_replacement_reservation (gconstpointer data)
     .schema_digest = schema_graph->active_schema_digest, .logical_bytes = 10,
     .physical_bytes = 4096, .checksum = "sha256:alpha",
   };
+  if (schema_transition) {
+    artifact.schema_selections = g_ptr_array_new_with_free_func
+          ((GDestroyNotify) wyl_fact_offline_backup_schema_selection_free);
+    WylFactOfflineBackupSchemaSelection *selection = g_new0
+          (WylFactOfflineBackupSchemaSelection, 1);
+    selection->namespace_id = g_strdup ("backup");
+    selection->relation_name = g_strdup ("items");
+    selection->schema_version = 1;
+    g_ptr_array_add (artifact.schema_selections, selection);
+  }
   g_assert_cmpint (wyl_fact_offline_backup_manifest_add (&manifest,
       &artifact), ==, WYRELOG_E_OK);
+  g_clear_pointer (&artifact.schema_selections, g_ptr_array_unref);
   g_autoptr (GBytes) manifest_bytes = NULL;
   g_assert_cmpint (wyl_fact_offline_backup_manifest_encode (&manifest,
       &manifest_bytes), ==, WYRELOG_E_OK);
   wyl_fact_offline_backup_manifest_clear (&manifest);
   wyl_policy_fact_backup_snapshot_free (schema_snapshot);
+  if (schema_transition) {
+    WylPolicyRelationActivationRecord *active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        &active), ==, WYRELOG_E_OK);
+    WylPolicyAuthorityMutationResult mutation;
+    g_assert_cmpint (wyl_policy_store_transition_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+        active->activation_generation,
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+        TRUE, 1, TRUE, 2, "none", &mutation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    g_assert_cmpint (wyl_policy_store_transition_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+        active->activation_generation + 1,
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+        TRUE, 2, FALSE, 0, "none", &mutation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    wyl_policy_relation_activation_record_free (active);
+    wyl_policy_fact_relation_query_info_t query = { 0 };
+    g_assert_cmpint (wyl_policy_store_load_fact_relation_query
+          (fixture.policy, "tenant-a", "alpha", "items", &query), ==,
+        WYRELOG_E_NOT_FOUND);
+    g_assert_cmpint (wyl_policy_store_load_fact_relation_query
+          (fixture.policy, "tenant-a", "alpha", "items_v2", &query), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (query.schema_version, ==, 2);
+    wyl_policy_fact_relation_query_info_clear (&query);
+  }
   g_autoptr (GPtrArray) targets = g_ptr_array_new_with_free_func
         ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
   WylFactOfflineRestoreTargetGraph *target = g_new0
         (WylFactOfflineRestoreTargetGraph, 1);
   target->graph_id = g_strdup ("alpha");
+  if (schema_transition) {
+    WylPolicyFactBackupSnapshot *snapshot = NULL;
+    g_assert_cmpint (wyl_policy_store_read_fact_graph_backup_snapshot
+          (fixture.policy, "tenant-a", "alpha", &snapshot), ==,
+        WYRELOG_E_OK);
+    const WylPolicyFactBackupGraphSnapshot *entry =
+        g_ptr_array_index (snapshot->graphs, 0);
+    target->old_schema_digest = g_strdup (entry->active_schema_digest);
+    wyl_policy_fact_backup_snapshot_free (snapshot);
+  }
   target->lifecycle_generation = authority->lifecycle_generation;
   target->reconciliation_generation = authority->reconciliation_generation;
   target->expected_main_absent = FALSE;
@@ -8719,6 +9260,61 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       finalized.revision + 1, 0, &promoted), ==, WYRELOG_E_POLICY);
+  if (schema_transition) {
+    sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_relation_schema_columns SET column_type='int64' "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
+        "AND namespace_id='backup' AND relation_name='items' "
+        "AND schema_version=1 AND column_index=0;",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+        finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
+    WylPolicyRelationActivationRecord *active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        &active), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (active->active_schema_version, ==, 2);
+    wyl_policy_relation_activation_record_free (active);
+    g_assert_cmpint (sqlite3_exec (db,
+        "UPDATE fact_relation_schema_columns SET column_type='symbol' "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
+        "AND namespace_id='backup' AND relation_name='items' "
+        "AND schema_version=1 AND column_index=0;",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    /* Abort the second activation update after the first has run inside
+     * promotion. The surrounding policy transaction must restore v2. */
+    g_assert_cmpint (sqlite3_exec (db,
+        "CREATE TEMP TRIGGER fail_selected_activation "
+        "BEFORE UPDATE ON fact_relation_activation "
+        "WHEN OLD.lifecycle_state='activating' "
+        "AND NEW.active_schema_version=1 "
+        "BEGIN SELECT RAISE(ABORT,'activation fault'); END;",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
+          (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+        finalized.revision, 0, &promoted), !=, WYRELOG_E_OK);
+    WylPolicyRelationActivationRecord *after_fault = NULL;
+    g_assert_cmpint (wyl_policy_store_read_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        &after_fault), ==, WYRELOG_E_OK);
+    g_assert_cmpint (after_fault->lifecycle_state, ==,
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVE);
+    g_assert_cmpuint (after_fault->active_schema_version, ==, 2);
+    wyl_policy_relation_activation_record_free (after_fault);
+    g_auto (WylFactOfflineRestoreJournal) after_fault_journal = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation_uuid, &after_fault_journal), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (after_fault_journal.revision, ==, finalized.revision);
+    g_assert_false (after_fault_journal.policy_generation_published);
+    g_assert_cmpint (sqlite3_exec (db,
+        "DROP TRIGGER fail_selected_activation;", NULL, NULL, NULL), ==,
+        SQLITE_OK);
+  }
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (ambiguous_commit)
     wyl_policy_store_offline_restore_fail_once (fixture.policy,
@@ -8771,6 +9367,24 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_cmpint (sqlite3_exec (reopened_db, "ROLLBACK;", NULL, NULL,
       NULL), ==, SQLITE_OK);
 #endif
+  if (schema_transition) {
+    WylPolicyRelationActivationRecord *active = NULL;
+    g_assert_cmpint (wyl_policy_store_read_relation_activation
+          (fixture.policy, "tenant-a", "alpha", "backup", "items",
+        &active), ==, WYRELOG_E_OK);
+    g_assert_true (active->has_active_schema_version);
+    g_assert_cmpuint (active->active_schema_version, ==, 1);
+    wyl_policy_relation_activation_record_free (active);
+    wyl_policy_fact_relation_query_info_t query = { 0 };
+    g_assert_cmpint (wyl_policy_store_load_fact_relation_query
+          (fixture.policy, "tenant-a", "alpha", "items_v2", &query), ==,
+        WYRELOG_E_NOT_FOUND);
+    g_assert_cmpint (wyl_policy_store_load_fact_relation_query
+          (fixture.policy, "tenant-a", "alpha", "items", &query), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (query.schema_version, ==, 1);
+    wyl_policy_fact_relation_query_info_clear (&query);
+  }
   wyl_policy_graph_restore_replacement_record_free (replayed);
   wyl_policy_graph_restore_replacement_record_free (reserved);
   wyl_policy_graph_authority_record_free (authority);
@@ -8799,8 +9413,11 @@ main (int argc, char **argv)
       "restart", test_tenant_external_import);
   g_test_add_func ("/fact-offline-backup-source/tenant-provisioned-binding",
       test_tenant_provisioned_binding);
-  g_test_add_func ("/fact-offline-backup-source/tenant-commit-resume-v5",
-      test_tenant_commit_resume_v5);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-resume-v5",
+      NULL, test_tenant_commit_resume_v5);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/tenant-schema-transition-commit",
+      "schema-transition", test_tenant_commit_resume_v5);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/fresh",
       "fresh", test_tenant_commit_sync_staged_first);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-sync-staged/pending",
@@ -9060,6 +9677,9 @@ main (int argc, char **argv)
   g_test_add_data_func ("/fact-offline-backup-source/rollback/restart",
       "restart", test_graph_rollback);
   g_test_add_data_func
+    ("/fact-offline-backup-source/rollback/schema-transition",
+      "schema-transition", test_graph_rollback);
+  g_test_add_data_func
     ("/fact-offline-backup-source/rollback/restart-pending",
       "restart-pending", test_graph_rollback);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/pending-present",
@@ -9070,6 +9690,9 @@ main (int argc, char **argv)
       test_graph_rollback_absent_main);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/tenant-two-graphs",
       "complete", test_tenant_rollback_two_graphs);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/rollback/tenant-schema-transition",
+      "schema-transition", test_tenant_rollback_two_graphs);
   g_test_add_data_func ("/fact-offline-backup-source/rollback/tenant-partial",
       "partial", test_tenant_rollback_two_graphs);
   g_test_add_func ("/fact-offline-backup-source/rollback/tenant-partial-progress",
@@ -9178,6 +9801,9 @@ main (int argc, char **argv)
   }
   g_test_add_data_func ("/fact-offline-backup-source/publication-authority/success",
       "success", test_restore_publication_authority);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/publication-authority/schema-transition",
+      "schema-transition", test_restore_publication_authority);
   g_test_add_data_func ("/fact-offline-backup-source/publication-authority/corrupt",
       "corrupt", test_restore_publication_authority);
   g_test_add_data_func ("/fact-offline-backup-source/publication-authority/policy",
@@ -9229,6 +9855,12 @@ main (int argc, char **argv)
       NULL, test_graph_restore_replacement_reservation);
   g_test_add_data_func ("/fact-offline-backup-source/restore-replacement-restart",
       "restart", test_graph_restore_replacement_reservation);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-replacement-schema-transition",
+      "schema-transition", test_graph_restore_replacement_reservation);
+  g_test_add_func
+    ("/fact-offline-backup-source/restore-populated-graph-schema-transition",
+      test_graph_populated_schema_transition_roundtrip);
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_test_add_data_func
     ("/fact-offline-backup-source/restore-replacement-commit-response",

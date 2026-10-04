@@ -28,5 +28,13 @@ wyrelog_error_t wyl_fact_offline_restore_stage_replay_validate
     const wyl_policy_fact_graph_info_t *graph_info,
     const gchar *expected_schema_digest,
     WylFactReplayJobContext *job_context, gchar **out_schema_digest);
+wyrelog_error_t wyl_fact_offline_restore_stage_replay_validate_selected
+  (wyl_policy_store_t *policy, WylFactOfflineRestoreStageReader *reader,
+    guint64 expected_bytes, const gchar *expected_checksum,
+    const WylFactStoreIdentity *expected_identity,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *old_schema_digest, const gchar *expected_schema_digest,
+    const GPtrArray *schema_selections,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest);
 
 G_END_DECLS

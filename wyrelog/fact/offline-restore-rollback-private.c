@@ -118,7 +118,8 @@ check_policy (GraphRollback *rollback)
         || record->format_version != expected->format_version
         || record->path_encoding_version != expected->path_encoding_version
         || g_strcmp0 (current->active_schema_digest,
-        expected->schema_digest) != 0)
+        (expected->old_schema_digest == NULL ? expected->schema_digest
+        : expected->old_schema_digest)) != 0)
       rc = WYRELOG_E_POLICY;
   }
   g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);

@@ -111,6 +111,65 @@ round_trip_and_scope (void)
 }
 
 static void
+schema_transition_round_trip (void)
+{
+  WylFactOfflineBackupManifest manifest = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_init
+        (&manifest, "tenant-a", 7), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) selections = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_backup_schema_selection_free);
+  WylFactOfflineBackupSchemaSelection *selected = g_new0
+        (WylFactOfflineBackupSchemaSelection, 1);
+  selected->namespace_id = g_strdup ("shop");
+  selected->relation_name = g_strdup ("orders");
+  selected->schema_version = 2;
+  g_ptr_array_add (selections, selected);
+  WylFactOfflineBackupArtifact artifact = {
+    .graph_id = "alpha", .store_uuid = "store-alpha",
+    .format_version = 1, .path_encoding_version = 1,
+    .schema_digest = "schema-new", .logical_bytes = 10,
+    .physical_bytes = 4096, .checksum = "sha256:alpha",
+    .schema_selections = selections,
+  };
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_add
+        (&manifest, &artifact), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) manifest_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_manifest_encode
+        (&manifest, &manifest_blob), ==, WYRELOG_E_OK);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  WylFactOfflineRestoreTargetGraph *target = g_ptr_array_index (targets, 0);
+  target->old_schema_digest = g_strdup ("schema-old");
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal,
+      manifest_blob, OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha",
+      31, 32, targets, WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&journal, &encoded), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournal decoded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (encoded, &decoded), ==, WYRELOG_E_OK);
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (decoded.graphs, 0);
+  g_assert_cmpstr (graph->old_schema_digest, ==, "schema-old");
+  g_assert_cmpstr (graph->schema_digest, ==, "schema-new");
+  g_assert_cmpuint (graph->schema_selections->len, ==, 1);
+  const WylFactOfflineBackupSchemaSelection *actual =
+      g_ptr_array_index (graph->schema_selections, 0);
+  g_assert_cmpstr (actual->namespace_id, ==, "shop");
+  g_assert_cmpstr (actual->relation_name, ==, "orders");
+  g_assert_cmpuint (actual->schema_version, ==, 2);
+  g_autoptr (GBytes) reencoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&decoded, &reencoded), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (encoded, reencoded));
+  wyl_fact_offline_restore_journal_clear (&decoded);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  wyl_fact_offline_backup_manifest_clear (&manifest);
+}
+
+static void
 provisioned_handoff_binding (void)
 {
   g_autoptr (GBytes) manifest = manifest_bytes (FALSE);
@@ -1102,6 +1161,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/offline-restore/round-trip-scope",
       round_trip_and_scope);
+  g_test_add_func ("/fact/offline-restore/schema-transition-round-trip",
+      schema_transition_round_trip);
   g_test_add_func ("/fact/offline-restore/provisioned-handoff-binding",
       provisioned_handoff_binding);
   g_test_add_func ("/fact/offline-restore/tenant-provisioned-binding",

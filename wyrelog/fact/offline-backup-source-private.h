@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "fact/graph-artifact-inventory-private.h"
+#include "fact/offline-backup-manifest-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "fact/runtime-private.h"
 #include "wyrelog/error.h"
@@ -22,6 +23,7 @@ typedef struct
   guint64 format_version;
   guint64 path_encoding_version;
   const gchar *schema_digest;
+  const GPtrArray *schema_selections;
   guint64 logical_bytes;
   guint64 physical_bytes;
 } WylFactOfflineBackupSourceArtifact;

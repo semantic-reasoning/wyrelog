@@ -14,6 +14,8 @@ journal_graph_free (WylFactOfflineRestoreJournalGraph *graph)
   g_free (graph->graph_id);
   g_free (graph->store_uuid);
   g_free (graph->schema_digest);
+  g_free (graph->old_schema_digest);
+  g_clear_pointer (&graph->schema_selections, g_ptr_array_unref);
   g_free (graph->checksum);
   g_free (graph->old_provisioning_uuid);
   g_free (graph->replacement_provisioning_uuid);
@@ -27,6 +29,7 @@ wyl_fact_offline_restore_target_graph_free
   if (graph == NULL)
     return;
   g_free (graph->graph_id);
+  g_free (graph->old_schema_digest);
   g_free (graph);
 }
 
@@ -288,6 +291,10 @@ copy_graph (const WylFactOfflineBackupArtifact *artifact,
   graph->graph_id = g_strdup (artifact->graph_id);
   graph->store_uuid = g_strdup (artifact->store_uuid);
   graph->schema_digest = g_strdup (artifact->schema_digest);
+  graph->old_schema_digest = g_strdup (target->old_schema_digest);
+  graph->schema_selections =
+      wyl_fact_offline_backup_schema_selections_copy
+        (artifact->schema_selections);
   graph->checksum = g_strdup (artifact->checksum);
   graph->format_version = artifact->format_version;
   graph->path_encoding_version = artifact->path_encoding_version;
@@ -301,7 +308,10 @@ copy_graph (const WylFactOfflineBackupArtifact *artifact,
   graph->transition_state = WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY;
   graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED;
   if (graph->graph_id == NULL || graph->store_uuid == NULL
-      || graph->schema_digest == NULL || graph->checksum == NULL) {
+      || graph->schema_digest == NULL || graph->checksum == NULL
+      || graph->schema_selections == NULL
+      || (target->old_schema_digest != NULL
+      && graph->old_schema_digest == NULL)) {
     journal_graph_free (graph);
     return NULL;
   }
@@ -566,6 +576,9 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
     if (graph == NULL || !bounded_text (graph->graph_id)
         || !bounded_text (graph->store_uuid)
         || !bounded_text (graph->schema_digest)
+        || (graph->old_schema_digest != NULL
+        && (!bounded_text (graph->old_schema_digest)
+        || graph->schema_selections == NULL))
         || !bounded_text (graph->checksum)
         || graph->format_version == 0 || graph->path_encoding_version == 0
         || graph->destination_lifecycle_generation == 0
@@ -870,6 +883,13 @@ wyl_fact_offline_restore_journal_encode
       g_string_append_c (text, '|');
       g_string_append (text, graph->replacement_provisioning_uuid);
     }
+    if (graph->old_schema_digest != NULL) {
+      g_autofree gchar *old = encode_text (graph->old_schema_digest);
+      g_autofree gchar *selection =
+          wyl_fact_offline_backup_schema_selections_encode
+            (graph->schema_selections);
+      g_string_append_printf (text, "|%s|%s", old, selection);
+    }
     g_string_append_c (text, '\n');
   }
   guint8 checksum_bytes[32];
@@ -942,12 +962,13 @@ decode_graph (const gchar *line, guint version)
   if (!g_str_has_prefix (line, "graph="))
     return NULL;
   g_auto (GStrv) fields = g_strsplit (line + 6, "|", -1);
-  if (g_strv_length (fields)
-      != (version ==
+  guint base_fields = (version ==
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION
       || version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION
       || version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION ? 22
-      : version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION ? 21 : 20)
+      : version >= WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION ? 21 : 20);
+  guint field_count = g_strv_length (fields);
+  if ((field_count != base_fields && field_count != base_fields + 2)
       || strlen (fields[13]) != 5
       || strlen (fields[19]) != 2)
     return NULL;
@@ -995,6 +1016,14 @@ decode_graph (const gchar *line, guint version)
       || version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION
       || version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION))
     graph->replacement_provisioning_uuid = g_strdup (fields[21]);
+  if (valid && field_count == base_fields + 2) {
+    graph->old_schema_digest = decode_text (fields[base_fields]);
+    graph->schema_selections =
+        wyl_fact_offline_backup_schema_selections_decode
+          (fields[base_fields + 1]);
+    valid = graph->old_schema_digest != NULL
+        && graph->schema_selections != NULL;
+  }
   graph->transition_state = (WylFactArtifactMainTransitionState) state;
   graph->next_op = (WylFactArtifactMainTransitionOp) next;
   graph->pending_op = (WylFactArtifactMainTransitionOp) operation;

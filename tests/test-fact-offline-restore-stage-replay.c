@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/root-writer-lease-private.h"
 #include "wyrelog/fact/secure-duckdb-bridge-private.h"
@@ -33,6 +34,8 @@ typedef struct
   gchar *stage_path;
   gchar *checksum;
   gchar *schema_digest;
+  gchar *selected_schema_digest;
+  GPtrArray *schema_selections;
   guint64 bytes;
   wyl_policy_store_t *policy;
   WylFactGraphLocator locator;
@@ -84,7 +87,8 @@ query (duckdb_connection connection, const gchar *sql)
 }
 
 static void
-fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed)
+fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
+    gboolean selected_schema)
 {
   memset (f, 0, sizeof *f);
   f->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
@@ -113,6 +117,36 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed)
   wyl_policy_fact_relation_schema_options_t relation = schema ();
   g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (f->policy,
       &relation), ==, WYRELOG_E_OK);
+  if (selected_schema) {
+    const wyl_policy_fact_relation_schema_query_t selected_queries[] = {
+      { "items_v2", "wr.datalog.query", 1000 },
+    };
+    relation.schema_version = 2;
+    relation.queries = selected_queries;
+    relation.n_queries = G_N_ELEMENTS (selected_queries);
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (f->policy,
+        &relation), ==, WYRELOG_E_OK);
+    relation.queries = NULL;
+    relation.n_queries = 0;
+    WylPolicyAuthorityMutationResult activation =
+        WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+    g_assert_cmpint (wyl_policy_store_reserve_relation_activation
+          (f->policy, tenant, graph, "shop", "items", &activation), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (activation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    g_assert_cmpint (wyl_policy_store_transition_relation_activation
+          (f->policy, tenant, graph, "shop", "items",
+        WYL_POLICY_RELATION_ACTIVATION_UNBOUND, 0,
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVATING,
+        FALSE, 0, TRUE, 1, "none", &activation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (activation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    g_assert_cmpint (wyl_policy_store_transition_relation_activation
+          (f->policy, tenant, graph, "shop", "items",
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVATING, 1,
+        WYL_POLICY_RELATION_ACTIVATION_ACTIVE,
+        TRUE, 1, FALSE, 0, "none", &activation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (activation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  }
   f->source_path = g_build_filename (f->root, "source.duckdb", NULL);
   wyl_fact_store_t *source = NULL;
   g_assert_cmpint (wyl_fact_store_open (f->source_path, &source), ==,
@@ -151,7 +185,8 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed)
   };
   const wyl_fact_store_batch_t batch = {
     .batch_id = "batch-1", .tenant_id = tenant, .graph_id = graph,
-    .namespace_id = "shop", .relation_name = "items", .schema_version = 1,
+    .namespace_id = "shop", .relation_name = "items",
+    .schema_version = selected_schema ? 2 : 1,
     .source = "test", .idempotency_key = "one",
     .op = WYL_FACT_STORE_OP_ASSERT, .rows = rows,
     .n_rows = G_N_ELEMENTS (rows),
@@ -185,6 +220,20 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed)
   WylPolicyFactBackupGraphSnapshot *entry = g_ptr_array_index
         (snapshot->graphs, 0);
   f->schema_digest = g_strdup (entry->active_schema_digest);
+  if (selected_schema) {
+    f->schema_selections = g_ptr_array_new_with_free_func
+          ((GDestroyNotify) wyl_fact_offline_backup_schema_selection_free);
+    WylFactOfflineBackupSchemaSelection *selection = g_new0
+          (WylFactOfflineBackupSchemaSelection, 1);
+    selection->namespace_id = g_strdup ("shop");
+    selection->relation_name = g_strdup ("items");
+    selection->schema_version = 2;
+    g_ptr_array_add (f->schema_selections, selection);
+    g_assert_cmpint (wyl_policy_store_fact_graph_selected_schema_digest
+          (f->policy, tenant, graph, f->schema_selections,
+        &f->selected_schema_digest), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (f->schema_digest, !=, f->selected_schema_digest);
+  }
   wyl_policy_fact_backup_snapshot_free (snapshot);
   f->info = (wyl_policy_fact_graph_info_t) {
     .tenant_id = tenant, .graph_id = graph, .schema_version = 1, .sealed = TRUE,
@@ -236,7 +285,7 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed)
 static void
 fixture_init (Fixture *f, gboolean drop_projection)
 {
-  fixture_init_internal (f, drop_projection, TRUE);
+  fixture_init_internal (f, drop_projection, TRUE, FALSE);
 }
 
 static void
@@ -254,6 +303,8 @@ fixture_clear (Fixture *f)
   g_free (f->stage_path);
   g_free (f->checksum);
   g_free (f->schema_digest);
+  g_free (f->selected_schema_digest);
+  g_clear_pointer (&f->schema_selections, g_ptr_array_unref);
 }
 
 typedef struct
@@ -269,9 +320,11 @@ replay_job (WylFactReplayJobContext *context, gpointer user_data)
 {
   ReplayCall *call = user_data;
   Fixture *f = call->fixture;
-  return wyl_fact_offline_restore_stage_replay_validate (f->policy,
+  return wyl_fact_offline_restore_stage_replay_validate_selected (f->policy,
              f->reader, f->bytes, f->checksum, &f->identity, &f->info,
-             f->schema_digest, context, &call->digest);
+             f->schema_digest, f->selected_schema_digest == NULL
+             ? f->schema_digest : f->selected_schema_digest,
+             f->schema_selections, context, &call->digest);
 }
 
 static wyrelog_error_t
@@ -306,6 +359,31 @@ test_stage_replay (void)
   g_free (call.digest);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
         (f.reader, f.bytes, f.checksum), ==, WYRELOG_E_OK);
+  fixture_clear (&f);
+}
+
+static void
+test_stage_replay_selected_schema (void)
+{
+  Fixture f;
+  fixture_init_internal (&f, FALSE, TRUE, TRUE);
+  ReplayCall call = { .fixture = &f };
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (call.digest, ==, f.selected_schema_digest);
+  g_clear_pointer (&call.digest, g_free);
+
+  gchar original = f.schema_digest[7];
+  f.schema_digest[7] = original == 'a' ? 'b' : 'a';
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_POLICY);
+  g_assert_null (call.digest);
+  f.schema_digest[7] = original;
+
+  /* A missing target version must refuse before reading the supplied rows. */
+  WylFactOfflineBackupSchemaSelection *selection =
+      g_ptr_array_index (f.schema_selections, 0);
+  selection->schema_version = 3;
+  g_assert_cmpint (run_replay (&call), ==, WYRELOG_E_POLICY);
+  g_assert_null (call.digest);
   fixture_clear (&f);
 }
 
@@ -375,7 +453,7 @@ test_stage_replay_failures (gconstpointer data)
 {
   const gchar *mode = data;
   Fixture f;
-  fixture_init_internal (&f, FALSE, !g_str_equal (mode, "unsealed"));
+  fixture_init_internal (&f, FALSE, !g_str_equal (mode, "unsealed"), FALSE);
   g_autoptr (GCancellable) cancel = g_cancellable_new ();
   ReplayCall call = { .fixture = &f, .cancellable = cancel };
   Probe probe = { .fixture = &f };
@@ -459,6 +537,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact-stage-replay/success", test_stage_replay);
+  g_test_add_func ("/fact-stage-replay/selected-schema",
+      test_stage_replay_selected_schema);
   g_test_add_func ("/fact-stage-replay/missing-projection",
       test_stage_replay_requires_projection);
   const gchar *modes[] = { "identity", "digest", "unsealed", "limit",

@@ -39,7 +39,8 @@ canonical_sha256 (const gchar *value)
 static gboolean
 manifest_supported (const WylFactOfflineBackupManifest *manifest)
 {
-  if (manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_VERSION
+  if ((manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_VERSION
+      && manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_LEGACY_VERSION)
       || manifest->tenant_id == NULL || *manifest->tenant_id == '\0'
       || manifest->policy_generation == 0
       || manifest->artifacts == NULL || manifest->artifacts->len == 0

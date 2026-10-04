@@ -48,6 +48,27 @@ identity_is_zero (const WylFactArtifactInventoryIdentity *identity)
 }
 
 static gboolean
+schema_selections_equal (const GPtrArray *left, const GPtrArray *right)
+{
+  guint left_len = left == NULL ? 0 : left->len;
+  guint right_len = right == NULL ? 0 : right->len;
+  if (left_len != right_len)
+    return FALSE;
+  for (guint i = 0; i < left_len; i++) {
+    const WylFactOfflineBackupSchemaSelection *a =
+        g_ptr_array_index ((GPtrArray *) left, i);
+    const WylFactOfflineBackupSchemaSelection *b =
+        g_ptr_array_index ((GPtrArray *) right, i);
+    if (a == NULL || b == NULL
+        || g_strcmp0 (a->namespace_id, b->namespace_id) != 0
+        || g_strcmp0 (a->relation_name, b->relation_name) != 0
+        || a->schema_version != b->schema_version)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
 source_artifact_matches (const WylFactOfflineBackupSourceArtifact *source,
     const WylFactOfflineBackupArtifact *manifest,
     const WylFactOfflineRestoreJournalGraph *journal)
@@ -61,8 +82,13 @@ source_artifact_matches (const WylFactOfflineBackupSourceArtifact *source,
          && source->format_version == journal->format_version
          && source->path_encoding_version == manifest->path_encoding_version
          && source->path_encoding_version == journal->path_encoding_version
-         && g_strcmp0 (source->schema_digest, manifest->schema_digest) == 0
-         && g_strcmp0 (source->schema_digest, journal->schema_digest) == 0
+         && g_strcmp0 (manifest->schema_digest, journal->schema_digest) == 0
+         && g_strcmp0 (source->schema_digest,
+             journal->old_schema_digest == NULL ? journal->schema_digest
+             : journal->old_schema_digest) == 0
+         && (journal->old_schema_digest == NULL
+         || schema_selections_equal (manifest->schema_selections,
+         journal->schema_selections))
          && source->logical_bytes == manifest->logical_bytes
          && source->logical_bytes == journal->logical_bytes
          && source->physical_bytes == manifest->physical_bytes
@@ -390,7 +416,9 @@ import_check_destination (wyl_policy_store_t *policy,
       || g_strcmp0 (artifact.store_uuid, graph->store_uuid) != 0
       || artifact.format_version != graph->format_version
       || artifact.path_encoding_version != graph->path_encoding_version
-      || g_strcmp0 (artifact.schema_digest, graph->schema_digest) != 0
+      || g_strcmp0 (artifact.schema_digest,
+      graph->old_schema_digest == NULL ? graph->schema_digest
+          : graph->old_schema_digest) != 0
       || authority.tenant_lifecycle_generation != journal->destination_tenant_lifecycle_generation
       || authority.tenant_reconciliation_generation != journal->destination_tenant_reconciliation_generation
       || authority.graph_lifecycle_generation != graph->destination_lifecycle_generation
@@ -624,7 +652,8 @@ tenant_import_check_destination (wyl_policy_store_t *policy,
         || authority->format_version != graph->format_version
         || authority->path_encoding_version != graph->path_encoding_version
         || g_strcmp0 (entry->active_schema_digest,
-        graph->schema_digest) != 0
+        (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0
         || authority->lifecycle_generation !=
         graph->destination_lifecycle_generation
         || authority->reconciliation_generation !=
@@ -651,7 +680,9 @@ tenant_import_check_destination (wyl_policy_store_t *policy,
       graph->store_uuid) != 0
       || artifact.format_version != graph->format_version
       || artifact.path_encoding_version != graph->path_encoding_version
-      || g_strcmp0 (artifact.schema_digest, graph->schema_digest) != 0
+      || g_strcmp0 (artifact.schema_digest,
+      graph->old_schema_digest == NULL ? graph->schema_digest
+          : graph->old_schema_digest) != 0
       || authority.tenant_lifecycle_generation !=
       journal->destination_tenant_lifecycle_generation
       || authority.tenant_reconciliation_generation !=
