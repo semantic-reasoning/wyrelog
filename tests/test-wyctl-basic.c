@@ -4435,15 +4435,16 @@ test_fact_forget_ignores_configured_target (void)
 }
 
 /* Run wyctl with ARGS against a one-request fake daemon answering STATUS
- * with BODY, DELAY_MS late.  An argument "@TOKEN@" is replaced by a
- * protected token file holding "token-1"; DAEMON_URL NULL means the fake
- * daemon's own URL.  With CONFIGURED, GSettings supplies default-tenant "t",
- * default-graph "orders" and that token file as access-token-file.  A
- * delayed answer runs the command with --timeout-ms 500, otherwise 2000. */
+ * with BODY, DELAY_MS late (only the body, with HEADERS_FIRST).  An argument
+ * "@TOKEN@" is replaced by a protected token file holding "token-1";
+ * DAEMON_URL NULL means the fake daemon's own URL.  With CONFIGURED,
+ * GSettings supplies default-tenant "t", default-graph "orders" and that
+ * token file as access-token-file.  A delayed answer runs the command with
+ * --timeout-ms 500, otherwise 2000. */
 static void
-run_fake_daemon_case_delayed (guint status, const gchar *body,
-    guint delay_ms, const gchar *daemon_url, const gchar *const *args,
-    gboolean configured, FactForgetRun *run)
+run_fake_daemon_case_full (guint status, const gchar *body, guint delay_ms,
+    gboolean headers_first, const gchar *daemon_url,
+    const gchar *const *args, gboolean configured, FactForgetRun *run)
 {
   g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
   g_autofree gchar *xdg = NULL;
@@ -4462,7 +4463,7 @@ run_fake_daemon_case_delayed (guint status, const gchar *body,
   g_autoptr (GCancellable) cancel = g_cancellable_new ();
   PolicyMutationServer server = {
     .listener = listener, .cancel = cancel, .status = status, .body = body,
-    .delay_ms = delay_ms,
+    .delay_ms = delay_ms, .headers_first = headers_first,
   };
   GThread *thread = g_thread_new ("fake-daemon",
           policy_mutation_server_thread, &server);
@@ -4488,6 +4489,16 @@ run_fake_daemon_case_delayed (guint status, const gchar *body,
   g_unlink (token_path);
   if (xdg != NULL)
     remove_dir_recursive (xdg);
+}
+
+/* run_fake_daemon_case_full with the whole answer sent at once. */
+static void
+run_fake_daemon_case_delayed (guint status, const gchar *body,
+    guint delay_ms, const gchar *daemon_url, const gchar *const *args,
+    gboolean configured, FactForgetRun *run)
+{
+  run_fake_daemon_case_full (status, body, delay_ms, FALSE, daemon_url, args,
+      configured, run);
 }
 
 /* run_fake_daemon_case_delayed with an immediate answer. */
@@ -4818,6 +4829,193 @@ test_graph_schema_quota_unknown_outcome (void)
   g_assert_cmpstr (status_run.out, ==, "");
   g_assert_cmpstr (status_run.err, ==,
       "wyctl: fact quota status failed: denied_late\n");
+}
+
+/*
+ * #1332: the service-principal and service-credential changes reported only
+ * the failure.  Disable, issue, rotate and revoke are keyed by a request
+ * id, and wyctl mints one when --request-id is omitted, but printed it only
+ * on success -- after a lost answer the operator had no id to repeat or
+ * recover with.  Each now prints the id it sent on any failure the daemon
+ * could have seen, and an outcome-unknown line when no readable answer
+ * arrived or the daemon reported a server error.
+ *
+ * "@ID@" in an expectation stands for the request id the fake daemon
+ * received, read back from the JSON body, so the test proves wyctl prints
+ * the id it actually sent.
+ */
+static gchar *
+request_body_request_id (const gchar *request)
+{
+  const gchar *key = g_strstr_len (request, -1, "\"request_id\":\"");
+  if (key == NULL)
+    return NULL;
+  key += strlen ("\"request_id\":\"");
+  const gchar *end = strchr (key, '"');
+  return end != NULL ? g_strndup (key, (gsize) (end - key)) : NULL;
+}
+
+static void
+assert_service_change_case (guint status, const gchar *body, guint delay_ms,
+    gboolean headers_first, const gchar *const *args, gint expected_exit,
+    const gchar *request_prefix, const gchar *expected_err)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case_full (status, body, delay_ms, headers_first, NULL,
+      args, FALSE, &run);
+  assert_fact_forget_exit (&run, expected_exit);
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, request_prefix));
+  g_assert_cmpstr (run.out, ==, "");
+  g_autofree gchar *expected = NULL;
+  if (strstr (expected_err, "@ID@") != NULL) {
+    g_autofree gchar *id = request_body_request_id (run.request);
+    g_assert_nonnull (id);
+    g_auto (GStrv) parts = g_strsplit (expected_err, "@ID@", -1);
+    expected = g_strjoinv (id, parts);
+  } else {
+    expected = g_strdup (expected_err);
+  }
+  g_assert_cmpstr (run.err, ==, expected);
+}
+
+#define SERVICE_GUARDS \
+  "--access-token-file", "@TOKEN@", "--guard-timestamp", "123", \
+  "--guard-loc-class", "public", "--guard-risk", "10"
+#define LATE_403 "{\"error\":\"denied_late\"}"
+#define ISSUE_UNKNOWN(verb) \
+  "wyctl: the service-credential " verb " outcome is unknown; `wyctl " \
+  "service-credential recover --request-id @ID@ --tenant __wr_default` " \
+  "reports what the daemon recorded for it, and if it finds no such " \
+  "operation, or the daemon offers no recover, re-run the same command " \
+  "with --request-id @ID@, never a new id\n"
+
+static void
+test_service_change_unknown_outcome (void)
+{
+  /* A bare file name, as issue and rotate require; nothing is published
+   * when the change fails. */
+  const gchar *destination = "wyctl-1332-absent.cred";
+  g_unlink (destination);
+  static const gchar *const principal_create[] = {
+    "service-principal", "create", "--subject", "svc:tenant-a:worker",
+    "--display-name", "Worker", "--tenant", "__wr_default", SERVICE_GUARDS,
+    NULL,
+  };
+  static const gchar *const principal_disable[] = {
+    "service-principal", "disable", "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default", SERVICE_GUARDS, NULL,
+  };
+  const gchar *const credential_issue[] = {
+    "service-credential", "issue", "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default", "--destination", destination,
+    "--expires-at-us", "1893456000000000", SERVICE_GUARDS, NULL,
+  };
+  const gchar *const credential_rotate[] = {
+    "service-credential", "rotate", "--credential-id",
+    "wlc_000000000000000000000000001", "--tenant", "__wr_default",
+    "--destination", destination, "--expires-at-us", "1893456000000000",
+    SERVICE_GUARDS, NULL,
+  };
+  static const gchar *const credential_revoke[] = {
+    "service-credential", "revoke", "--credential-id",
+    "wlc_000000000000000000000000001", "--tenant", "__wr_default",
+    SERVICE_GUARDS, NULL,
+  };
+
+  assert_service_change_case (403, LATE_403, 2000, FALSE, principal_create, 5,
+      "POST /service-principals",
+      "wyctl: service-principal create failed: "
+      "service_principal_create_failed\n"
+      "wyctl: the service-principal create outcome is unknown; repeating the "
+      "same command is safe, service_principal_exists then means the "
+      "principal exists, and `wyctl service-principal list` shows its "
+      "state\n");
+  assert_service_change_case (403, LATE_403, 2000, FALSE, principal_disable,
+      5, "POST /service-principals",
+      "wyctl: service-principal disable failed: "
+      "service_principal_disable_failed\n"
+      "wyctl: service-principal disable request_id=@ID@\n"
+      "wyctl: the service-principal disable outcome is unknown; repeat the "
+      "same command with --request-id @ID@, not a new id, and `wyctl "
+      "service-principal list` shows whether it is disabled\n");
+  assert_service_change_case (403, LATE_403, 2000, FALSE, credential_issue, 5,
+      "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
+      "wyctl: service-credential issue failed: "
+      "service_credential_issue_failed\n"
+      "wyctl: service-credential issue request_id=@ID@\n"
+      ISSUE_UNKNOWN ("issue"));
+  assert_service_change_case (403, LATE_403, 2000, FALSE, credential_rotate,
+      5, "POST /service-credentials/wlc_000000000000000000000000001/rotate",
+      "wyctl: service-credential rotate failed: "
+      "service_credential_rotate_failed\n"
+      "wyctl: service-credential rotate request_id=@ID@\n"
+      ISSUE_UNKNOWN ("rotate"));
+  assert_service_change_case (403, LATE_403, 2000, FALSE, credential_revoke,
+      5, "DELETE /service-credentials/wlc_000000000000000000000000001",
+      "wyctl: service-credential revoke failed: "
+      "service_credential_revoke_failed\n"
+      "wyctl: service-credential revoke request_id=@ID@\n"
+      "wyctl: the service-credential revoke outcome is unknown; repeat the "
+      "same command with --request-id @ID@, not a new id, and the line it "
+      "then prints shows the credential's state\n");
+
+  /* A server error may follow the commit just as a lost answer may. */
+  assert_service_change_case (500, LATE_403, 0, FALSE, credential_issue, 5,
+      "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
+      "wyctl: service-credential issue failed: denied_late\n"
+      "wyctl: service-credential issue request_id=@ID@\n"
+      ISSUE_UNKNOWN ("issue"));
+  /* A refusal whose headers arrived is known, so no outcome line; the id is
+   * still printed, since the daemon saw it. */
+  assert_service_change_case (403, LATE_403, 2000, TRUE, credential_revoke,
+      4, "DELETE /service-credentials/wlc_000000000000000000000000001",
+      "wyctl: service-credential revoke failed: "
+      "service_credential_revoke_failed\n"
+      "wyctl: service-credential revoke request_id=@ID@\n");
+  /* After a conflict the id is the one not to reuse for other inputs. */
+  static const gchar *const explicit_issue_args[] = {
+    "service-credential", "issue", "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default", "--destination", "@DEST@",
+    "--expires-at-us", "1893456000000000", "--request-id",
+    "222222222222222222222222222", SERVICE_GUARDS, NULL,
+  };
+  const gchar *explicit_issue[G_N_ELEMENTS (explicit_issue_args)];
+  for (gsize i = 0; i < G_N_ELEMENTS (explicit_issue_args); i++)
+    explicit_issue[i] = g_strcmp0 (explicit_issue_args[i], "@DEST@") == 0
+        ? destination : explicit_issue_args[i];
+  assert_service_change_case (409,
+      "{\"error\":\"service_credential_conflict\"}",
+      0, FALSE, explicit_issue, 5,
+      "POST /service-principals/svc%3Atenant-a%3Aworker/credentials",
+      "wyctl: service-credential issue failed: service_credential_conflict\n"
+      "wyctl: service-credential issue "
+      "request_id=222222222222222222222222222\n");
+  g_assert_false (g_file_test (destination, G_FILE_TEST_EXISTS));
+}
+
+/* An id the client refuses never reaches the daemon, so none is printed. */
+static void
+test_service_change_invalid_request_id (void)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "revoke", "--credential-id",
+    "wlc_000000000000000000000000001", "--tenant", "__wr_default",
+    "--request-id", "not-a-request-id", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "public",
+    "--guard-risk", "10", NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint wait_status = 0;
+  run_child (argv, &out, &err, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_null (strstr (err, "request_id="));
+  g_unlink (token_path);
 }
 
 static void
@@ -5333,6 +5531,10 @@ main (int argc, char **argv)
       test_fact_mutation_times_out);
   g_test_add_func ("/wyctl/graph-schema-quota-unknown-outcome",
       test_graph_schema_quota_unknown_outcome);
+  g_test_add_func ("/wyctl/service-change-unknown-outcome",
+      test_service_change_unknown_outcome);
+  g_test_add_func ("/wyctl/service-change-invalid-request-id",
+      test_service_change_invalid_request_id);
   g_test_add_func ("/wyctl/auth-logout-times-out",
       test_auth_logout_times_out);
   g_test_add_func ("/wyctl/auth-logout-rejects-invalid-timeout",

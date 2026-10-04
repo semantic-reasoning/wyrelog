@@ -1630,6 +1630,26 @@ wyctl_remote_outcome_unknown (WylClient *client, wyrelog_error_t rc)
          || status / 100 == 5;
 }
 
+/* Whether a failed request may have reached the daemon: it answered, or the
+ * transport failed after the request was handed to it.  A request the client
+ * refused locally never left. */
+static gboolean
+wyctl_remote_request_sent (WylClient *client, wyrelog_error_t rc)
+{
+  return rc == WYRELOG_E_IO || wyl_client_get_last_http_status (client) != 0;
+}
+
+/* The keyed service changes repeat safely only with the id they first sent,
+ * which wyctl may have minted, so name it on any failure the daemon could
+ * have seen (#1332). */
+static void
+wyctl_print_service_request_id (WylClient *client, wyrelog_error_t rc,
+    const gchar *command, const gchar *request_id)
+{
+  if (rc != WYRELOG_E_OK && wyctl_remote_request_sent (client, rc))
+    g_printerr ("wyctl: %s request_id=%s\n", command, request_id);
+}
+
 /*
  * Report a policy mutation's outcome.  The exit status depends only on the
  * client's error class, as it always has; the message names the daemon's
@@ -5334,6 +5354,21 @@ service_credential_resolve_request_id (const gchar *request_id_arg,
   return buf;
 }
 
+/* Issue and rotate replay under the same id.  Recover only reads what the
+ * daemon recorded for the id; when it has nothing, or the daemon has no
+ * operation store to ask, the same command with the same id is the way on
+ * (#1332). */
+static void
+wyctl_print_credential_unknown (const gchar *verb, const gchar *request_id,
+    const gchar *tenant)
+{
+  g_printerr ("wyctl: the service-credential %s outcome is unknown; `wyctl "
+      "service-credential recover --request-id %s --tenant %s` reports what "
+      "the daemon recorded for it, and if it finds no such operation, or the "
+      "daemon offers no recover, re-run the same command with --request-id "
+      "%s, never a new id\n", verb, request_id, tenant, request_id);
+}
+
 static int
 run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -5432,6 +5467,10 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
           guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
   int exit_rc = fact_remote_exit (client, "service-credential issue", rc,
           "service_credential_issue_failed");
+  wyctl_print_service_request_id (client, rc, "service-credential issue",
+      request_id);
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    wyctl_print_credential_unknown ("issue", request_id, tenant);
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;
@@ -5529,6 +5568,10 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
           tenant, guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
   int exit_rc = fact_remote_exit (client, "service-credential rotate", rc,
           "service_credential_rotate_failed");
+  wyctl_print_service_request_id (client, rc, "service-credential rotate",
+      request_id);
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    wyctl_print_credential_unknown ("rotate", request_id, tenant);
   if (exit_rc == 0)
     print_service_credential_receipt (&receipt);
   return exit_rc;
@@ -5622,6 +5665,12 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
           guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal create", rc,
           "service_principal_create_failed");
+  /* A repeat answers service_principal_exists once it exists (#1332). */
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the service-principal create outcome is unknown; "
+        "repeating the same command is safe, service_principal_exists then "
+        "means the principal exists, and `wyctl service-principal list` "
+        "shows its state\n");
   if (exit_rc == 0)
     print_service_principal_row (&principal);
   return exit_rc;
@@ -5771,6 +5820,13 @@ run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
           guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal disable", rc,
           "service_principal_disable_failed");
+  wyctl_print_service_request_id (client, rc, "service-principal disable",
+      request_id);
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the service-principal disable outcome is unknown; "
+        "repeat the same command with --request-id %s, not a new id, and "
+        "`wyctl service-principal list` shows whether it is disabled\n",
+        request_id);
   if (exit_rc == 0)
     g_print ("subject_id=%s disabled=yes\n", opts.subject);
   return exit_rc;
@@ -5970,6 +6026,12 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
           opts.guard_loc_class, guard_risk, &credential);
   int exit_rc = fact_remote_exit (client, "service-credential revoke", rc,
           "service_credential_revoke_failed");
+  wyctl_print_service_request_id (client, rc, "service-credential revoke",
+      request_id);
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the service-credential revoke outcome is unknown; "
+        "repeat the same command with --request-id %s, not a new id, and the "
+        "line it then prints shows the credential's state\n", request_id);
   if (exit_rc == 0) {
     const gchar *credential_id =
         credential.credential_id != NULL ? credential.credential_id : "-";

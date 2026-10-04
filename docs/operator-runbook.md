@@ -975,9 +975,10 @@ wyctl service-principal disable \
 ```
 
 When `--request-id` is omitted, `wyctl` mints one canonical ID and sends it in
-the strict request body. If the connection drops or the daemon returns 500/503,
-retry with the same explicit ID; using a new ID creates a distinct authorized
-attempt. HTTP 409 means that the key is already bound to a conflicting request
+the strict request body. On any failure the daemon could have seen, `wyctl`
+prints `service-principal disable request_id=<id>` with the ID it sent. If the
+connection drops or the daemon returns 500/503, retry with that ID; using a
+new ID creates a distinct authorized attempt. HTTP 409 means that the key is already bound to a conflicting request
 and must not be reused for different inputs. The response
 `X-Wyrelog-Request-Id` is only per-attempt correlation and is never a substitute
 for `--request-id`.
@@ -985,7 +986,9 @@ for `--request-id`.
 ### Idempotency
 
 `--request-id` is optional; omit it and `wyctl` mints a fresh canonical
-request id. Reusing the same `--request-id` with identical inputs is a safe
+request id. Issue, rotate and revoke print `<command> request_id=<id>` with the
+id they sent on any failure the daemon could have seen, so a minted id is never
+lost. Reusing the same `--request-id` with identical inputs is a safe
 retry: the daemon
 returns the same operation, credential, and receipt and never mints a
 second secret. Supply a stable `--request-id` when a previous invocation
@@ -1000,6 +1003,11 @@ reserved. Do not mint a replacement id to get around either response. HTTP
 500/503 can occur after the credential mutation has committed
 but before escrow publication or delivery finishes; keep the original request
 id, inspect `service-credential status`/`recover`, and retry only with that id.
+After a timeout or a server error, `wyctl` names `service-credential recover
+--request-id <id> --tenant <tenant>`, which only reports what the daemon
+recorded for that id (see "Publication failure and orphan recovery"); if it
+finds no such operation, or the daemon offers no `recover`, re-run the same
+command with that id.
 The daemon emits a static, secret-free policy diagnostic naming the refusal
 check when `WYL_LOG=policy:debug` is enabled.
 
@@ -3442,10 +3450,11 @@ long erasures, as the forget example above does. A request that runs out of
 time exits like any other transport failure, and the daemon may still have
 completed it. For policy grants, revokes and transitions, fact put and
 retract, fact forget, fact schema register, fact quota configure, graph
-create and seal, and tenant create, seal and unseal, wyctl adds a line
-saying that the outcome is unknown and how to find out; other commands,
-including the service-principal and service-credential changes, report only
-the failure, so check the daemon's state before repeating them.
+create and seal, tenant create, seal and unseal, service-principal create
+and disable, and service-credential issue, rotate and revoke, wyctl adds a
+line saying that the outcome is unknown and how to find out; other commands,
+such as `auth logout`, report only the failure, so check the daemon's state
+before repeating them.
 The online `wyctl mfa enroll` requests are not bounded yet.
 
 Example: configure the operator workstation once and let wyctl invocations
