@@ -514,7 +514,6 @@ valid_journal (const WylFactOfflineRestoreJournal *journal)
       && journal->selected_graph_id != NULL)
       || (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
       && (journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
-      || journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK
       || journal->policy_generation_published
       || journal->lifecycle_handoff_complete))
       || (journal->version ==
@@ -1511,9 +1510,6 @@ wyl_fact_offline_restore_journal_decide (WylFactOfflineRestoreJournal *journal,
         return WYRELOG_E_POLICY;
     }
   }
-  if (journal->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
-      && decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK)
-    return WYRELOG_E_POLICY;
   journal->decision = decision;
   if (decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK) {
     for (guint i = 0; i < journal->graphs->len; i++) {

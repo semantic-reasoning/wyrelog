@@ -268,6 +268,16 @@ tenant_provisioned_binding (void)
   g_autoptr (GBytes) partial = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
       &partial), ==, WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) abort_partial = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (partial,
+      &abort_partial), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&abort_partial,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) abort_bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&abort_partial,
+      &abort_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&abort_partial),
+      ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_ROLLBACK);
   g_auto (WylFactOfflineRestoreJournal) resumed = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_decode (partial,
       &resumed), ==, WYRELOG_E_OK);
