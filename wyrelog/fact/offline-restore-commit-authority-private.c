@@ -1221,12 +1221,13 @@ tenant_publish_effect (GBytes *canonical_journal,
 }
 #endif
 
-wyrelog_error_t
-wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+static wyrelog_error_t
+tenant_bind_provisioned_old_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
     const gchar *graph_id, guint64 expected_revision,
-    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed,
+    gboolean prove_bound)
 {
   if (out_committed != NULL)
     wyl_fact_offline_restore_journal_clear (out_committed);
@@ -1283,8 +1284,9 @@ wyl_fact_offline_restore_tenant_bind_provisioned_old_run
     if (g_strcmp0 (graph->graph_id, graph_id) == 0)
       selected = graph;
   }
-  if (rc == WYRELOG_E_OK
-      && (selected == NULL || selected->old_provisioning_uuid != NULL))
+  if (rc == WYRELOG_E_OK && (selected == NULL
+      || (selected->old_provisioning_uuid != NULL && !prove_bound)
+      || (selected->old_provisioning_uuid == NULL && prove_bound)))
     rc = WYRELOG_E_POLICY;
   g_autoptr (GPtrArray) provisioning = NULL;
   if (rc == WYRELOG_E_OK)
@@ -1353,15 +1355,20 @@ wyl_fact_offline_restore_tenant_bind_provisioned_old_run
       .lease = lease, .resolver = &resolver, .runtime = runtime,
       .graphs = held, .graph_count = graph_count,
     };
-    rc = wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
-          (policy, expected, graph_id, old_uuid, tenant_bind_effect,
-            &effect, &result, &committed);
+    if (prove_bound) {
+      rc = wyl_policy_store_tenant_restore_prove_bound_old_with_effect
+            (policy, expected, tenant_bind_effect, &effect);
+    } else
+      rc = wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
+            (policy, expected, graph_id, old_uuid, tenant_bind_effect,
+              &effect, &result, &committed);
   }
-  if (rc == WYRELOG_E_OK
+  if (rc == WYRELOG_E_OK && !prove_bound
       && result != WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED)
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_offline_restore_journal_decode (committed->journal_blob,
+    rc = wyl_fact_offline_restore_journal_decode ((prove_bound ? expected :
+            committed)->journal_blob,
             out_committed);
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
@@ -1377,6 +1384,212 @@ wyl_fact_offline_restore_tenant_bind_provisioned_old_run
   wyl_policy_offline_restore_record_free (expected);
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  return tenant_bind_provisioned_old_run (policy, fact_root, runtime,
+             operation_uuid, graph_id, expected_revision, drain_timeout_us,
+             out_committed, FALSE);
+}
+
+/* Compare a reloaded journal with exactly one permitted binding transition.
+ * Rebuilding the image through the journal codec also rejects unrelated
+ * changes to the manifest, graph state, or already bound siblings. */
+static wyrelog_error_t
+tenant_bind_matches_next (const WylFactOfflineRestoreJournal *before,
+    const WylFactOfflineRestoreJournal *after, const gchar *graph_id)
+{
+  g_autoptr (GBytes) before_bytes = NULL;
+  g_autoptr (GBytes) expected_bytes = NULL;
+  g_autoptr (GBytes) after_bytes = NULL;
+  g_auto (WylFactOfflineRestoreJournal) expected = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (before,
+          &before_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (before_bytes, &expected);
+  const gchar *old_uuid = NULL;
+  if (rc == WYRELOG_E_OK) {
+    if (after->graphs == NULL || before->graphs == NULL
+        || after->graphs->len != before->graphs->len)
+      return WYRELOG_E_BUSY;
+    for (guint i = 0; i < after->graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (after->graphs, i);
+      if (g_strcmp0 (graph->graph_id, graph_id) == 0)
+        old_uuid = graph->old_provisioning_uuid;
+    }
+    if (old_uuid == NULL)
+      return WYRELOG_E_BUSY;
+    rc = wyl_fact_offline_restore_journal_bind_tenant_provisioned_old
+          (&expected, graph_id, old_uuid);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&expected, &expected_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (after, &after_bytes);
+  if (rc == WYRELOG_E_OK && !g_bytes_equal (expected_bytes, after_bytes))
+    rc = WYRELOG_E_BUSY;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || expected_revision == 0
+      || expected_revision >= G_MAXINT64 || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  g_auto (WylFactOfflineRestoreJournal) current = { 0 };
+  WylPolicyOfflineRestoreRecord *record = NULL;
+  g_autoptr (GBytes) canonical = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load (policy,
+          operation_uuid, &current);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+            &record);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_encode (&current, &canonical);
+  if (rc == WYRELOG_E_OK && (current.revision != expected_revision
+      || !g_bytes_equal (canonical, record->journal_blob)))
+    rc = WYRELOG_E_BUSY;
+  wyl_policy_offline_restore_record_free (record);
+  if (rc == WYRELOG_E_OK && (current.scope !=
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || (current.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
+      && current.version !=
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION)
+      || current.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || current.graphs == NULL || current.graphs->len == 0))
+    rc = WYRELOG_E_POLICY;
+
+  gboolean seen_unbound = FALSE;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < current.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (current.graphs, i);
+    if (graph->expected_main_absent || !graph->replay_preflighted
+        || graph->transition_state !=
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || (seen_unbound && graph->old_provisioning_uuid != NULL)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    if (graph->old_provisioning_uuid == NULL)
+      seen_unbound = TRUE;
+  }
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  for (guint i = 0; rc == WYRELOG_E_OK && i < current.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (current.graphs, i);
+    if (graph->old_provisioning_uuid != NULL)
+      continue;
+    gint64 remaining = drain_timeout_us;
+    if (deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0) {
+        rc = WYRELOG_E_BUSY;
+        break;
+      }
+    }
+    g_autofree gchar *graph_id = g_strdup (graph->graph_id);
+    g_auto (WylFactOfflineRestoreJournal) next = { 0 };
+    wyrelog_error_t bind_rc =
+        wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+          (policy, fact_root, runtime, operation_uuid, graph_id,
+            current.revision, remaining, &next);
+    if (bind_rc != WYRELOG_E_OK) {
+      rc = wyl_fact_offline_restore_journal_store_load (policy,
+              operation_uuid, &next);
+      if (rc != WYRELOG_E_OK)
+        break;
+      WylPolicyOfflineRestoreRecord *loaded = NULL;
+      g_autoptr (GBytes) reloaded_bytes = NULL;
+      rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+              &loaded);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_offline_restore_journal_encode (&next,
+                &reloaded_bytes);
+      if (rc == WYRELOG_E_OK && !g_bytes_equal (reloaded_bytes,
+          loaded->journal_blob))
+        rc = WYRELOG_E_BUSY;
+      wyl_policy_offline_restore_record_free (loaded);
+      if (rc != WYRELOG_E_OK)
+        break;
+      g_autoptr (GBytes) current_bytes = NULL;
+      rc = wyl_fact_offline_restore_journal_encode (&current, &current_bytes);
+      if (rc != WYRELOG_E_OK)
+        break;
+      if (g_bytes_equal (current_bytes, reloaded_bytes)) {
+        rc = bind_rc;
+        break;
+      }
+    }
+    rc = tenant_bind_matches_next (&current, &next, graph_id);
+    if (rc != WYRELOG_E_OK)
+      break;
+    wyl_fact_offline_restore_journal_clear (&current);
+    current = next;
+    memset (&next, 0, sizeof next);
+  }
+  if (rc == WYRELOG_E_OK) {
+    gint64 remaining = drain_timeout_us;
+    if (deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0)
+        rc = WYRELOG_E_BUSY;
+    }
+    if (rc != WYRELOG_E_OK)
+      goto done;
+    const WylFactOfflineRestoreJournalGraph *first =
+        g_ptr_array_index (current.graphs, 0);
+    g_auto (WylFactOfflineRestoreJournal) proven = { 0 };
+    rc = tenant_bind_provisioned_old_run (policy, fact_root, runtime,
+            operation_uuid, first->graph_id, current.revision,
+            remaining, &proven, TRUE);
+    if (rc == WYRELOG_E_OK) {
+      g_autoptr (GBytes) actual = NULL;
+      g_autoptr (GBytes) expected = NULL;
+      rc = wyl_fact_offline_restore_journal_encode (&current, &expected);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_offline_restore_journal_encode (&proven, &actual);
+      if (rc == WYRELOG_E_OK && !g_bytes_equal (expected, actual))
+        rc = WYRELOG_E_BUSY;
+    }
+  }
+  if (rc == WYRELOG_E_OK
+      && current.version !=
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    *out_committed = current;
+    memset (&current, 0, sizeof current);
+  }
+done:
   return rc;
 #endif
 }
