@@ -8,6 +8,7 @@
 #include "wyrelog/error.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-artifact-inventory-private.h"
+#include "wyrelog/fact/offline-backup-manifest-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -497,8 +498,19 @@ typedef struct
  * active relation-schema set; registered but inactive versions are excluded. */
 typedef struct
 {
+  gchar *namespace_id;
+  gchar *relation_name;
+  guint32 schema_version;
+} WylPolicyFactSchemaSelection;
+
+void wyl_policy_fact_schema_selection_free
+  (WylPolicyFactSchemaSelection *selection);
+
+typedef struct
+{
   WylPolicyGraphAuthorityRecord *authority;
   gchar *active_schema_digest;
+  GPtrArray *active_schema_selections;
 } WylPolicyFactBackupGraphSnapshot;
 
 typedef struct
@@ -2901,6 +2913,13 @@ wyrelog_error_t
 wyl_policy_store_fact_graph_active_schema_digest_in_replay_snapshot
   (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
     gchar **out_digest);
+wyrelog_error_t
+wyl_policy_store_fact_graph_selected_schema_digest_in_replay_snapshot
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const GPtrArray *selections, gchar **out_digest);
+wyrelog_error_t wyl_policy_store_fact_graph_selected_schema_digest
+  (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id,
+    const GPtrArray *selections, gchar **out_digest);
 wyrelog_error_t wyl_policy_store_load_fact_relation_query
   (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * graph_id, const gchar * query_name,

@@ -145,6 +145,12 @@ wyrelog_error_t wyl_fact_replay_validate_replay_store_for_restore
     const wyl_policy_fact_graph_info_t *graph_info,
     const gchar *expected_schema_digest,
     WylFactReplayJobContext *job_context, gchar **out_schema_digest);
+wyrelog_error_t wyl_fact_replay_validate_replay_store_for_restore_selected
+  (wyl_policy_store_t *policy, WylFactReplayStore **inout_store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *old_schema_digest, const gchar *expected_schema_digest,
+    const GPtrArray *schema_selections,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest);
 #if defined(WYL_TEST_HANDLE_SEAMS)
 typedef enum
 {

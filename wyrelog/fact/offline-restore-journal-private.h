@@ -130,6 +130,7 @@ typedef struct
   gchar *graph_id;
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
+  gchar *old_schema_digest;
   gboolean expected_main_absent;
   WylFactArtifactInventoryIdentity expected_main_identity;
 } WylFactOfflineRestoreTargetGraph;
@@ -141,6 +142,8 @@ typedef struct
   guint64 format_version;
   guint64 path_encoding_version;
   gchar *schema_digest;
+  gchar *old_schema_digest;
+  GPtrArray *schema_selections;
   guint64 logical_bytes;
   guint64 physical_bytes;
   gchar *checksum;

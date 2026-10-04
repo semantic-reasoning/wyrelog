@@ -27,6 +27,7 @@ typedef struct
   guint64 format_version;
   guint64 path_encoding_version;
   gchar *schema_digest;
+  GPtrArray *schema_selections;
   gchar *provisioning_uuid;
   GBytes *provisioning_evidence;
   guint64 lifecycle_generation;
@@ -70,6 +71,7 @@ offline_backup_graph_free (OfflineBackupGraph *graph)
   g_free (graph->graph_id);
   g_free (graph->store_uuid);
   g_free (graph->schema_digest);
+  g_clear_pointer (&graph->schema_selections, g_ptr_array_unref);
   g_free (graph->provisioning_uuid);
   g_clear_pointer (&graph->provisioning_evidence, g_bytes_unref);
   g_free (graph);
@@ -151,7 +153,7 @@ graph_record_is_backup_source (const WylPolicyGraphAuthorityRecord *record)
 
 static OfflineBackupGraph *
 offline_backup_graph_new (const WylPolicyGraphAuthorityRecord *record,
-    const gchar *schema_digest)
+    const gchar *schema_digest, const GPtrArray *schema_selections)
 {
   OfflineBackupGraph *graph = g_try_new0 (OfflineBackupGraph, 1);
   if (graph == NULL)
@@ -160,6 +162,19 @@ offline_backup_graph_new (const WylPolicyGraphAuthorityRecord *record,
   graph->graph_id = g_strdup (record->graph_id);
   graph->store_uuid = g_strdup (record->store_uuid);
   graph->schema_digest = g_strdup (schema_digest);
+  graph->schema_selections = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_backup_schema_selection_free);
+  for (guint i = 0; schema_selections != NULL
+      && i < schema_selections->len; i++) {
+    const WylPolicyFactSchemaSelection *source =
+        g_ptr_array_index ((GPtrArray *) schema_selections, i);
+    WylFactOfflineBackupSchemaSelection *selection = g_new0
+          (WylFactOfflineBackupSchemaSelection, 1);
+    selection->namespace_id = g_strdup (source->namespace_id);
+    selection->relation_name = g_strdup (source->relation_name);
+    selection->schema_version = source->schema_version;
+    g_ptr_array_add (graph->schema_selections, selection);
+  }
   if (graph->tenant_id == NULL || graph->graph_id == NULL
       || graph->store_uuid == NULL || graph->schema_digest == NULL) {
     offline_backup_graph_free (graph);
@@ -599,7 +614,8 @@ offline_backup_source_new (wyl_policy_store_t *policy,
     if (rc != WYRELOG_E_OK)
       break;
     OfflineBackupGraph *graph = offline_backup_graph_new (record,
-            graph_snapshot->active_schema_digest);
+            graph_snapshot->active_schema_digest,
+            graph_snapshot->active_schema_selections);
     if (graph == NULL) {
       rc = WYRELOG_E_NOMEM;
       break;
@@ -702,6 +718,7 @@ wyl_fact_offline_backup_source_get (const WylFactOfflineBackupSource *source,
   out_artifact->format_version = graph->format_version;
   out_artifact->path_encoding_version = graph->path_encoding_version;
   out_artifact->schema_digest = graph->schema_digest;
+  out_artifact->schema_selections = graph->schema_selections;
   out_artifact->logical_bytes = graph->logical_bytes;
   out_artifact->physical_bytes = graph->physical_bytes;
   return TRUE;

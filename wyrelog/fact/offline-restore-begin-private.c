@@ -80,7 +80,8 @@ target_matches (const WylPolicyFactBackupSnapshot *snapshot,
 {
   if (snapshot == NULL || snapshot->tenant == NULL
       || snapshot->graphs == NULL || snapshot->graphs->len == 0
-      || manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_VERSION
+      || (manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_VERSION
+      && manifest->version != WYL_FACT_OFFLINE_BACKUP_MANIFEST_LEGACY_VERSION)
       || snapshot->tenant->lifecycle_state !=
       WYL_POLICY_TENANT_LIFECYCLE_SEALED
       || !snapshot->tenant->sealed_compatibility
@@ -107,8 +108,6 @@ target_matches (const WylPolicyFactBackupSnapshot *snapshot,
         || authority->last_error_class != WYL_POLICY_GRAPH_ERROR_NONE
         || !authority->has_store_identity
         || g_strcmp0 (authority->store_uuid, artifact->store_uuid) != 0
-        || g_strcmp0 (entry->active_schema_digest,
-        artifact->schema_digest) != 0
         || authority->format_version != artifact->format_version
         || authority->path_encoding_version != artifact->path_encoding_version
         || artifact->format_version != WYL_FACT_STORE_FORMAT_VERSION
@@ -333,6 +332,38 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
   if (rc == WYRELOG_E_OK && !target_matches (snapshot, &manifest, scope,
       selected_graph_id))
     rc = WYRELOG_E_POLICY;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < manifest.artifacts->len; i++) {
+    const WylFactOfflineBackupArtifact *artifact =
+        g_ptr_array_index (manifest.artifacts, i);
+    if (scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        && g_strcmp0 (selected_graph_id, artifact->graph_id) != 0)
+      continue;
+    if (manifest.version == WYL_FACT_OFFLINE_BACKUP_MANIFEST_LEGACY_VERSION) {
+      const WylPolicyFactBackupGraphSnapshot *entry = NULL;
+      for (guint j = 0; j < snapshot->graphs->len; j++) {
+        const WylPolicyFactBackupGraphSnapshot *candidate =
+            g_ptr_array_index (snapshot->graphs, j);
+        if (g_strcmp0 (candidate->authority->graph_id,
+            artifact->graph_id) == 0)
+          entry = candidate;
+      }
+      if (entry == NULL) {
+        rc = WYRELOG_E_POLICY;
+        continue;
+      }
+      if (g_strcmp0 (entry->active_schema_digest,
+          artifact->schema_digest) != 0)
+        rc = WYRELOG_E_POLICY;
+    } else {
+      g_autofree gchar *selected_digest = NULL;
+      rc = wyl_policy_store_fact_graph_selected_schema_digest (policy,
+              manifest.tenant_id, artifact->graph_id,
+              artifact->schema_selections, &selected_digest);
+      if (rc == WYRELOG_E_OK && g_strcmp0 (selected_digest,
+          artifact->schema_digest) != 0)
+        rc = WYRELOG_E_POLICY;
+    }
+  }
   gint64 now = g_get_monotonic_time ();
   gint64 deadline = drain_timeout_us > 0 ?
       (drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
@@ -408,6 +439,8 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
       WylFactOfflineRestoreTargetGraph *target = g_new0
             (WylFactOfflineRestoreTargetGraph, 1);
       target->graph_id = g_strdup (authority->graph_id);
+      if (manifest.version == WYL_FACT_OFFLINE_BACKUP_MANIFEST_VERSION)
+        target->old_schema_digest = g_strdup (entry->active_schema_digest);
       target->lifecycle_generation = authority->lifecycle_generation;
       target->reconciliation_generation =
           authority->reconciliation_generation;

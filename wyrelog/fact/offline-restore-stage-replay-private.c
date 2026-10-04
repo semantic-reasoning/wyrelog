@@ -14,6 +14,22 @@ wyl_fact_offline_restore_stage_replay_validate
     const gchar *expected_schema_digest,
     WylFactReplayJobContext *job_context, gchar **out_schema_digest)
 {
+  return wyl_fact_offline_restore_stage_replay_validate_selected (policy,
+             reader, expected_bytes, expected_checksum, expected_identity,
+             graph_info, expected_schema_digest, expected_schema_digest, NULL,
+             job_context, out_schema_digest);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_stage_replay_validate_selected
+  (wyl_policy_store_t *policy, WylFactOfflineRestoreStageReader *reader,
+    guint64 expected_bytes, const gchar *expected_checksum,
+    const WylFactStoreIdentity *expected_identity,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *old_schema_digest, const gchar *expected_schema_digest,
+    const GPtrArray *schema_selections,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest)
+{
   if (out_schema_digest != NULL)
     *out_schema_digest = NULL;
   if (policy == NULL || reader == NULL || expected_bytes == 0
@@ -36,7 +52,7 @@ wyl_fact_offline_restore_stage_replay_validate
     return rc;
   /* The consuming validator closes/destroys the provider on every path,
    * including invalid snapshot/digest input and cancellation. */
-  return wyl_fact_replay_validate_replay_store_for_restore (policy, &store,
-             graph_info, expected_schema_digest, job_context,
-             out_schema_digest);
+  return wyl_fact_replay_validate_replay_store_for_restore_selected (policy,
+             &store, graph_info, old_schema_digest, expected_schema_digest,
+             schema_selections, job_context, out_schema_digest);
 }

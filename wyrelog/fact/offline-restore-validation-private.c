@@ -289,6 +289,27 @@ selected_manifest_artifact (const WylFactOfflineBackupManifest *manifest,
 }
 
 static gboolean
+manifest_schema_selections_match (const GPtrArray *manifest,
+    const GPtrArray *journal)
+{
+  if (manifest == NULL || journal == NULL
+      || manifest->len != journal->len)
+    return FALSE;
+  for (guint i = 0; i < manifest->len; i++) {
+    const WylFactOfflineBackupSchemaSelection *a =
+        g_ptr_array_index ((GPtrArray *) manifest, i);
+    const WylFactOfflineBackupSchemaSelection *b =
+        g_ptr_array_index ((GPtrArray *) journal, i);
+    if (a == NULL || b == NULL
+        || g_strcmp0 (a->namespace_id, b->namespace_id) != 0
+        || g_strcmp0 (a->relation_name, b->relation_name) != 0
+        || a->schema_version != b->schema_version)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
 manifest_matches_journal (const WylFactOfflineBackupManifest *manifest,
     const WylFactOfflineRestoreJournal *journal)
 {
@@ -310,7 +331,10 @@ manifest_matches_journal (const WylFactOfflineBackupManifest *manifest,
         || g_strcmp0 (artifact->schema_digest, graph->schema_digest) != 0
         || artifact->logical_bytes != graph->logical_bytes
         || artifact->physical_bytes != graph->physical_bytes
-        || g_strcmp0 (artifact->checksum, graph->checksum) != 0)
+        || g_strcmp0 (artifact->checksum, graph->checksum) != 0
+        || (graph->old_schema_digest != NULL
+        && !manifest_schema_selections_match (artifact->schema_selections,
+        graph->schema_selections)))
       return FALSE;
   }
   return TRUE;
@@ -385,6 +409,8 @@ wyl_fact_offline_restore_manifest_preflight
           || graph->path_encoding_version != WYL_FACT_STORE_PATH_ENCODING_VERSION
           || !canonical_uuid (graph->store_uuid)
           || !canonical_sha256 (graph->checksum)
+          || (graph->old_schema_digest != NULL
+          && !canonical_sha256 (graph->old_schema_digest))
           || !canonical_sha256 (graph->schema_digest)) {
         rc = WYRELOG_E_POLICY;
         break;

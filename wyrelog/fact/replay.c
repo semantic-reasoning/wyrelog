@@ -6,6 +6,7 @@
 #include "compound-private.h"
 #include "graph-artifact-namespace-private.h"
 #include "graph-locator-private.h"
+#include "offline-backup-manifest-private.h"
 #include "replay-scheduler-private.h"
 #include "replay-store-private.h"
 #include "wyrelog/wyl-engine-private.h"
@@ -1648,6 +1649,73 @@ capture_replay_policy_graph_snapshot (wyl_policy_store_t *policy,
   return rc;
 }
 
+/* Capture the old activation and the selected restore policy in one policy
+ * read snapshot. The selected versions must cover exactly the old relation
+ * keys, so replay cannot silently omit a populated or empty relation. */
+static wyrelog_error_t
+capture_restore_selected_snapshot (wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *info,
+    const gchar *old_digest, const GPtrArray *selections,
+    WylFactReplayJobContext *job_context,
+    ReplayPolicyGraphSnapshot *snapshot)
+{
+  replay_policy_graph_snapshot_init (snapshot);
+  wyrelog_error_t rc = wyl_fact_replay_job_context_checkpoint (job_context);
+  gboolean begun = FALSE;
+  if (rc == WYRELOG_E_OK
+      && !wyl_policy_store_fact_replay_snapshot_is_current (policy)) {
+    rc = wyl_policy_store_fact_replay_snapshot_begin (policy);
+    begun = rc == WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = capture_replay_policy_graph_snapshot_locked (policy, info, snapshot);
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (snapshot->active_schema_digest, old_digest) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && selections != NULL) {
+    if (snapshot->active->len != selections->len)
+      rc = WYRELOG_E_POLICY;
+    for (guint i = 0; rc == WYRELOG_E_OK && i < selections->len; i++) {
+      const WylFactOfflineBackupSchemaSelection *selected =
+          g_ptr_array_index ((GPtrArray *) selections, i);
+      ReplayActiveRelation *active = g_ptr_array_index (snapshot->active, i);
+      if (selected == NULL || selected->schema_version == 0
+          || g_strcmp0 (selected->namespace_id, active->namespace_id) != 0
+          || g_strcmp0 (selected->relation_name, active->relation_name) != 0
+          || replay_snapshot_find_schema (snapshot, selected->namespace_id,
+          selected->relation_name, selected->schema_version) == NULL) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+    }
+    g_autofree gchar *selected_digest = NULL;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_fact_graph_selected_schema_digest_in_replay_snapshot
+            (policy, info->tenant_id, info->graph_id, selections,
+              &selected_digest);
+    if (rc == WYRELOG_E_OK) {
+      for (guint i = 0; i < selections->len; i++) {
+        const WylFactOfflineBackupSchemaSelection *selected =
+            g_ptr_array_index ((GPtrArray *) selections, i);
+        ReplayActiveRelation *active = g_ptr_array_index (snapshot->active, i);
+        active->schema_version = selected->schema_version;
+      }
+      g_free (snapshot->active_schema_digest);
+      snapshot->active_schema_digest = g_steal_pointer (&selected_digest);
+    }
+  }
+  if (begun) {
+    wyrelog_error_t end_rc = wyl_policy_store_fact_replay_snapshot_end (policy);
+    if (rc == WYRELOG_E_OK)
+      rc = end_rc;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_job_context_checkpoint (job_context);
+  if (rc != WYRELOG_E_OK)
+    replay_policy_graph_snapshot_clear (snapshot);
+  return rc;
+}
+
 static gboolean
 canonical_sha256_text (const gchar *text)
 {
@@ -1717,6 +1785,19 @@ wyl_fact_replay_validate_replay_store_for_restore
     const gchar *expected_schema_digest,
     WylFactReplayJobContext *job_context, gchar **out_schema_digest)
 {
+  return wyl_fact_replay_validate_replay_store_for_restore_selected (policy,
+             inout_store, graph_info, expected_schema_digest,
+             expected_schema_digest, NULL, job_context, out_schema_digest);
+}
+
+wyrelog_error_t
+wyl_fact_replay_validate_replay_store_for_restore_selected
+  (wyl_policy_store_t *policy, WylFactReplayStore **inout_store,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    const gchar *old_schema_digest, const gchar *expected_schema_digest,
+    const GPtrArray *schema_selections,
+    WylFactReplayJobContext *job_context, gchar **out_schema_digest)
+{
   if (out_schema_digest != NULL)
     *out_schema_digest = NULL;
   WylFactReplayStore *store = inout_store == NULL ? NULL : *inout_store;
@@ -1727,12 +1808,13 @@ wyl_fact_replay_validate_replay_store_for_restore
   ReplayPolicyGraphSnapshot snapshot = { 0 };
   if (policy == NULL || store == NULL || graph_info == NULL
       || graph_info->tenant_id == NULL || graph_info->graph_id == NULL
+      || !canonical_sha256_text (old_schema_digest)
       || !canonical_sha256_text (expected_schema_digest)
       || job_context == NULL || out_schema_digest == NULL)
     goto close_store;
 
-  rc = capture_replay_policy_graph_snapshot (policy,
-          graph_info, job_context, &snapshot);
+  rc = capture_restore_selected_snapshot (policy, graph_info,
+          old_schema_digest, schema_selections, job_context, &snapshot);
   if (rc != WYRELOG_E_OK)
     goto close_store;
 

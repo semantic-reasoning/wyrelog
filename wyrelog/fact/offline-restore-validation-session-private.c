@@ -165,7 +165,9 @@ check_policy (WylFactOfflineRestoreValidationSession *session)
         || g_strcmp0 (record->store_uuid, expected->store_uuid) != 0
         || record->format_version != expected->format_version
         || record->path_encoding_version != expected->path_encoding_version
-        || g_strcmp0 (current->active_schema_digest, expected->schema_digest) != 0)
+        || g_strcmp0 (current->active_schema_digest,
+        expected->old_schema_digest == NULL ? expected->schema_digest
+        : expected->old_schema_digest) != 0)
       rc = WYRELOG_E_POLICY;
   }
   g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);
@@ -554,9 +556,13 @@ wyl_fact_offline_restore_validation_session_run
     };
     rc = wyl_fact_replay_job_context_checkpoint (job_context);
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_offline_restore_stage_replay_validate (session->policy,
+      rc = wyl_fact_offline_restore_stage_replay_validate_selected (session->policy,
               graph->reader, expected->logical_bytes, expected->checksum,
-              &identity, &selector, expected->schema_digest, job_context, &graph->replay_digest);
+              &identity, &selector, expected->old_schema_digest == NULL
+              ? expected->schema_digest : expected->old_schema_digest,
+              expected->schema_digest, expected->old_schema_digest == NULL
+              ? NULL : expected->schema_selections,
+              job_context, &graph->replay_digest);
     if (rc == WYRELOG_E_OK && session->checkpoint != NULL)
       rc = session->checkpoint (expected->graph_id, session->checkpoint_data);
   }

@@ -173,7 +173,8 @@ tenant_commit_v5_prove_reacquire (wyl_policy_store_t *policy,
         || authority->format_version != graph->format_version
         || authority->path_encoding_version != graph->path_encoding_version
         || g_strcmp0 (entry->active_schema_digest,
-        graph->schema_digest) != 0
+        (graph->old_schema_digest == NULL ? graph->schema_digest
+        : graph->old_schema_digest)) != 0
         || authority->lifecycle_generation !=
         graph->destination_lifecycle_generation
         || authority->reconciliation_generation !=
