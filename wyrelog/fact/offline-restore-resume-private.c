@@ -7,6 +7,154 @@
 static gint step_rank (WylFactArtifactMainTransitionOp operation);
 
 wyrelog_error_t
+wyl_fact_offline_restore_tenant_replacements_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || *operation_uuid == '\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  guint64 revision = expected_revision;
+  guint steps = 0;
+  guint limit = 0;
+  for (;;) {
+    g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    g_autoptr (GBytes) canonical = NULL;
+    wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load
+          (policy, operation_uuid, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+              &record);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+    if (rc == WYRELOG_E_OK && (journal.revision != revision
+        || record->revision != revision
+        || !g_bytes_equal (canonical, record->journal_blob)))
+      rc = WYRELOG_E_BUSY;
+    if (rc == WYRELOG_E_OK
+        && (journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+        || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        || journal.graphs == NULL || journal.graphs->len == 0
+        || journal.policy_generation_published
+        || journal.lifecycle_handoff_complete))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && limit == 0)
+      limit = journal.graphs->len + 2;
+    if (rc == WYRELOG_E_OK && (journal.graphs->len + 2 != limit
+        || (steps >= limit && journal.version !=
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION)))
+      rc = WYRELOG_E_POLICY;
+    gint64 remaining = drain_timeout_us;
+    if (rc == WYRELOG_E_OK && deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0)
+        rc = WYRELOG_E_BUSY;
+    }
+    if (rc != WYRELOG_E_OK) {
+      wyl_policy_offline_restore_record_free (record);
+      return rc;
+    }
+    if (journal.version ==
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION) {
+      wyl_policy_offline_restore_record_free (record);
+      return wyl_fact_offline_restore_tenant_commit_v7_prove_selected
+               (policy, fact_root, runtime, operation_uuid, revision,
+                 remaining, out_committed);
+    }
+    g_auto (WylFactOfflineRestoreJournal) result = { 0 };
+    if (journal.version ==
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION) {
+      rc = wyl_fact_offline_restore_tenant_commit_v5_prove_complete
+            (policy, fact_root, runtime, operation_uuid, revision,
+              remaining, &result);
+      if (rc == WYRELOG_E_OK) {
+        wyl_fact_offline_restore_journal_clear (&result);
+        if (deadline > 0) {
+          remaining = deadline - g_get_monotonic_time ();
+          if (remaining <= 0)
+            rc = WYRELOG_E_BUSY;
+        }
+      }
+      if (rc == WYRELOG_E_OK) {
+        rc = wyl_fact_offline_restore_tenant_reserve_replacements_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &result);
+      }
+      if (rc == WYRELOG_E_OK && result.revision <= revision)
+        rc = WYRELOG_E_POLICY;
+    } else if (journal.version ==
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_REPLACEMENTS_VERSION) {
+      GPtrArray *phases = NULL;
+      rc = wyl_policy_store_tenant_restore_replacement_phases_load (policy,
+              record, &phases);
+      const gchar *selected_graph = NULL;
+      guint synced = 0;
+      for (guint i = 0; rc == WYRELOG_E_OK && i < phases->len; i++) {
+        const gchar *phase = g_ptr_array_index (phases, i);
+        if (g_str_equal (phase, "companion_synced"))
+          synced++;
+        else if (selected_graph == NULL && g_str_equal (phase, "reserved")) {
+          const WylFactOfflineRestoreJournalGraph *graph =
+              g_ptr_array_index (journal.graphs, i);
+          selected_graph = graph->graph_id;
+        }
+      }
+      if (rc == WYRELOG_E_OK && selected_graph != NULL) {
+        rc = wyl_fact_offline_restore_tenant_companion_sync_run
+              (policy, fact_root, runtime, operation_uuid, selected_graph,
+                revision, remaining, &result);
+        if (rc == WYRELOG_E_OK) {
+          GPtrArray *after = NULL;
+          rc = wyl_policy_store_tenant_restore_replacement_phases_load
+                (policy, record, &after);
+          guint after_synced = 0;
+          for (guint i = 0; rc == WYRELOG_E_OK && i < after->len; i++)
+            if (g_str_equal (g_ptr_array_index (after, i),
+                "companion_synced"))
+              after_synced++;
+          if (rc == WYRELOG_E_OK && (after_synced != synced + 1
+              || result.revision != revision))
+            rc = WYRELOG_E_POLICY;
+          g_clear_pointer (&after, g_ptr_array_unref);
+        }
+      } else if (rc == WYRELOG_E_OK) {
+        rc = wyl_fact_offline_restore_tenant_select_replacements_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &result);
+        if (rc == WYRELOG_E_OK && (synced != journal.graphs->len
+            || result.revision <= revision))
+          rc = WYRELOG_E_POLICY;
+      }
+      g_clear_pointer (&phases, g_ptr_array_unref);
+    } else
+      rc = WYRELOG_E_POLICY;
+    wyl_policy_offline_restore_record_free (record);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    revision = result.revision;
+    steps++;
+  }
+#endif
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_tenant_commit_v5_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
