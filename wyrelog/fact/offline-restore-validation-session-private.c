@@ -32,6 +32,7 @@ struct WylFactOfflineRestoreValidationSession
   GPtrArray *graphs;
   gboolean terminal;
   gboolean record_preflight;
+  gboolean commit_admission;
   wyrelog_error_t (*checkpoint) (const gchar *, gpointer);
   gpointer checkpoint_data;
   wyrelog_error_t (*record_checkpoint) (const gchar *, guint64, gboolean, gpointer);
@@ -121,6 +122,42 @@ staged_phase (const WylFactOfflineRestoreJournal *journal)
         || graph->copied || graph->checksum_verified || graph->identity_verified
         || graph->schema_verified || graph->replay_preflighted
         || graph->transition_state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || graph->transition_terminal || graph->resume_forbidden
+        || graph->durability_unprovable_acknowledged
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+tenant_commit_admission_phase (const WylFactOfflineRestoreJournal *journal)
+{
+  if (journal == NULL || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      || journal->graphs == NULL || journal->graphs->len == 0
+      || journal->graphs->len > WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS
+      || journal->revision != 1 + 3 * (guint64) journal->graphs->len
+      || journal->confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal->manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal->policy_generation_published
+      || journal->lifecycle_handoff_complete)
+    return FALSE;
+  g_autoptr (GBytes) encoded = NULL;
+  if (wyl_fact_offline_restore_journal_encode (journal, &encoded) != WYRELOG_E_OK)
+    return FALSE;
+  for (guint i = 0; i < journal->graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal->graphs, i);
+    if (graph == NULL || graph->old_provisioning_uuid == NULL
+        || graph->expected_main_absent || !graph->copied
+        || !graph->checksum_verified || !graph->identity_verified
+        || !graph->schema_verified || !graph->replay_preflighted
+        || graph->transition_state
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
         || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
         || graph->transition_terminal || graph->resume_forbidden
         || graph->durability_unprovable_acknowledged
@@ -329,6 +366,7 @@ session_new
     WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
     const gchar *operation_uuid, guint64 expected_revision,
     gint64 drain_timeout_us, gboolean record_preflight,
+    gboolean commit_admission,
     WylFactOfflineRestoreValidationSession **out_session)
 {
   if (out_session != NULL)
@@ -342,12 +380,14 @@ session_new
 #ifdef G_OS_WIN32
   (void) drain_timeout_us;
   (void) record_preflight;
+  (void) commit_admission;
   return WYRELOG_E_POLICY;
 #else
   WylFactOfflineRestoreValidationSession *session = g_new0 (WylFactOfflineRestoreValidationSession, 1);
   session->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   session->policy = policy;
   session->record_preflight = record_preflight;
+  session->commit_admission = commit_admission;
   session->runtime = wyl_fact_graph_runtime_manager_ref (runtime_manager);
   session->manifest = g_bytes_ref (canonical_manifest);
   session->graphs = g_ptr_array_new_with_free_func ((GDestroyNotify) validation_graph_free);
@@ -363,7 +403,10 @@ session_new
       && session->journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
       || session->journal.confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
       || session->journal.manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
-      || !wyl_fact_offline_restore_validation_progress_phase (&session->journal)
+      || !(commit_admission
+          ? tenant_commit_admission_phase (&session->journal)
+          : wyl_fact_offline_restore_validation_progress_phase
+        (&session->journal))
       : !staged_phase (&session->journal)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
@@ -429,7 +472,8 @@ wyl_fact_offline_restore_validation_session_new
     gint64 drain_timeout_us, WylFactOfflineRestoreValidationSession **out_session)
 {
   return session_new (policy, fact_root, runtime_manager, canonical_manifest,
-             operation_uuid, expected_revision, drain_timeout_us, FALSE, out_session);
+             operation_uuid, expected_revision, drain_timeout_us, FALSE, FALSE,
+             out_session);
 }
 
 wyrelog_error_t
@@ -440,7 +484,21 @@ wyl_fact_offline_restore_validation_session_new_for_preflight
     gint64 drain_timeout_us, WylFactOfflineRestoreValidationSession **out_session)
 {
   return session_new (policy, fact_root, runtime_manager, canonical_manifest,
-             operation_uuid, expected_revision, drain_timeout_us, TRUE, out_session);
+             operation_uuid, expected_revision, drain_timeout_us, TRUE, FALSE,
+             out_session);
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_validation_session_new_for_commit_admission
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreValidationSession **out_session)
+{
+  return session_new (policy, fact_root, runtime_manager, canonical_manifest,
+             operation_uuid, expected_revision, drain_timeout_us, TRUE, TRUE,
+             out_session);
 }
 
 #ifndef G_OS_WIN32
@@ -507,7 +565,9 @@ validate_current (WylFactOfflineRestoreValidationSession *session,
       .graphs = admission_graphs,
     };
     memcpy (admission.manifest_sha256, session->journal.manifest_sha256, sizeof admission.manifest_sha256);
-    WylFactOfflineRestoreValidationMode mode = session->record_preflight
+    WylFactOfflineRestoreValidationMode mode = session->commit_admission
+        ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_TENANT_COMMIT_ADMISSION
+        : session->record_preflight
         ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS
         : WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED;
     if (wyl_fact_offline_restore_validate (mode,
@@ -690,6 +750,8 @@ wyl_fact_offline_restore_validation_session_with_publication_authority
           &validation);
   if (rc == WYRELOG_E_OK)
     rc = validate_current (session, job_context, &validation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_job_context_checkpoint (job_context);
   if (rc != WYRELOG_E_OK)
     goto fail;
 

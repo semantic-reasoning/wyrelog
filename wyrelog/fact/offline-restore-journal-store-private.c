@@ -281,6 +281,55 @@ wyl_fact_offline_restore_journal_store_cas (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_fact_offline_restore_journal_store_decide_tenant_commit
+  (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *expected,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_result != NULL)
+    *out_result = WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (out_committed != NULL)
+    memset (out_committed, 0, sizeof *out_committed);
+  if (store == NULL || expected == NULL || out_result == NULL
+      || out_committed == NULL || expected->scope !=
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || expected->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      || expected->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || expected->revision == 0 || expected->revision >= G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+  g_autoptr (GBytes) expected_bytes = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (expected,
+          &expected_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (expected_bytes, &desired);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decide (&desired,
+            WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  WylPolicyOfflineRestoreRecord expected_record = { 0 }, desired_record = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = record_from_journal (expected, &expected_record);
+  if (rc == WYRELOG_E_OK)
+    rc = record_from_journal (&desired, &desired_record);
+  WylPolicyOfflineRestoreRecord *committed = NULL;
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyOfflineRestoreStoreResult result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = wyl_policy_store_offline_restore_tenant_decide_guarded (store,
+            &expected_record, &desired_record, &result, &committed);
+    if (rc == WYRELOG_E_OK) {
+      *out_result = map_result (result);
+      if (committed != NULL)
+        rc = decode_record (committed, out_committed);
+    }
+  }
+  wyl_policy_offline_restore_record_free (committed);
+  record_clear (&expected_record);
+  record_clear (&desired_record);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_journal_store_release (wyl_policy_store_t *store,
     guint64 expected_revision, const gchar *operation_uuid,
     WylFactOfflineRestoreStoreResult *out_result)

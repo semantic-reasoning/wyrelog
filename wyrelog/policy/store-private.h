@@ -3497,6 +3497,15 @@ wyrelog_error_t wyl_policy_store_offline_restore_cas
     const WylPolicyOfflineRestoreRecord *desired,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
+/* Fenced tenant COMMIT admission. The exact expected record and its legal
+ * COMMIT successor are rechecked with tenant and old provisioning authority
+ * in the same writer transaction. */
+wyrelog_error_t wyl_policy_store_offline_restore_tenant_decide_guarded
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected,
+    const WylPolicyOfflineRestoreRecord *desired,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
 wyrelog_error_t wyl_policy_store_offline_restore_release
   (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *expected,
     WylPolicyOfflineRestoreStoreResult *out_result);
