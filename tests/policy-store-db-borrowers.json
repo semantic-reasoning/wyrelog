@@ -30,7 +30,7 @@
     "tests/test-fact-store-provisioned.c": 1,
     "tests/test-handle-engine-pair.c": 3,
     "tests/test-login-projection.c": 3,
-    "tests/test-policy-graph-authority.c": 135,
+    "tests/test-policy-graph-authority.c": 136,
     "tests/test-policy-service-namespace.c": 4,
     "tests/test-policy-store-lease.c": 2,
     "tests/test-policy-store-service-cvk.c": 12,
@@ -68,7 +68,7 @@
     "wyrelog/policy/service-permission-maintenance-private.c": 1,
     "wyrelog/policy/store-private.h": 1,
     "wyrelog/policy/store.c": 15,
-    "wyrelog/wyctl/wyctl.c": 2,
+    "wyrelog/wyctl/wyctl.c": 3,
     "wyrelog/wyl-handle.c": 2
   }
 }

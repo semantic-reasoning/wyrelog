@@ -23,6 +23,7 @@ COMMAND_PATHS = {
     ("tenant", "create"): 2,
     ("tenant", "seal"): 2,
     ("tenant", "unseal"): 2,
+    ("tenant", "assign-owner"): 2,
     ("graph", "create"): 2,
     ("graph", "list"): 2,
     ("graph", "seal"): 2,
@@ -201,9 +202,9 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
     invocations = runbook_invocations(runbook)
     if not invocations:
         return [f"{runbook}: found no wyctl commands in command blocks"]
-    if len(invocations) != 68:
+    if len(invocations) != 69:
         errors.append(
-            f"{runbook}: expected 68 reviewed wyctl invocations, found "
+            f"{runbook}: expected 69 reviewed wyctl invocations, found "
             f"{len(invocations)}")
     if sum(arguments == ["status"] for _, arguments in invocations) != 2:
         errors.append(

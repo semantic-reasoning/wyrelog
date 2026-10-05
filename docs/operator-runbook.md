@@ -2118,8 +2118,35 @@ own a tenant, is never guessed at. The migration names each one in a warning
 and fails, and the store keeps its previous shape:
 
 ```
-tenant owner migration: no owner can be resolved for tenant 'acme'
+tenant owner migration: no owner can be resolved for tenant 'acme'; name one
+with `wyctl tenant assign-owner`
 ```
+
+Name an owner for each such tenant with the daemon stopped, then start the
+daemon again:
+
+```sh
+wyctl tenant assign-owner   --store /var/lib/wyrelog/system/policy.sqlite   --keyprovider file:/var/lib/wyrelog/system/policy.key   --assign acme=alice --assign beta=bob
+```
+
+`--store` and `--keyprovider` fall back to the `default-policy-store` and
+`default-keyprovider` GSettings keys, as for the other offline commands. With a
+KeyProvider the store is taken maintenance-exclusive, so the command refuses
+to run while a daemon holds it. Each `--assign` names a tenant once and a
+valid human owner; built-in tenants cannot be named. The command runs the
+migration with those owners. An assignment wins over an inferred creator for
+a tenant the migration has not yet given an owner. The command prints one
+line per assignment:
+
+- `tenant=<tenant> owner=<subject> assigned=yes`: the migration applied it.
+- `tenant=<tenant> owner=<current> assigned=no reason=already_owned`: the tenant
+  already had an owner, which is never changed.
+- `tenant=<tenant> assigned=no reason=unknown_tenant`: no such tenant.
+
+It exits `0` only when every assignment was applied. It exits `1` when any was
+not, when the migration still fails (another tenant remains unresolved; the
+warnings name it, and nothing was changed), or when the store could not be
+persisted. It exits `2` for an invalid request.
 
 ## Tenant Resource Quotas
 

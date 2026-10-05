@@ -2455,6 +2455,21 @@ wyrelog_error_t wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *
  * outside the reserved "wr." and "svc:" namespaces. */
 gboolean wyl_policy_tenant_owner_is_valid (const gchar * tenant_id,
     const gchar * owner_subject_id);
+/* Operator remedy for predecessor stores (#1338).  Before
+ * wyl_policy_store_create_schema, name owners for tenants the owner backfill
+ * cannot resolve from a creator grant.  An assignment applies only while
+ * that tenant is still unowned during migration, wins over the inferred
+ * creator there, and never changes a tenant that already has an owner.
+ * Built-in tenants, invalid owners and duplicate tenants are INVALID; the
+ * call replaces any earlier set.  _applied reports whether the last
+ * migration assigned a tenant from this set; it is meaningful only after
+ * wyl_policy_store_create_schema returned OK, since a failed migration
+ * rolls every assignment back. */
+wyrelog_error_t wyl_policy_store_set_tenant_owner_assignments
+  (wyl_policy_store_t * store, const gchar * const *tenant_ids,
+    const gchar * const *owner_subject_ids, gsize n_assignments);
+gboolean wyl_policy_store_tenant_owner_assignment_applied
+  (wyl_policy_store_t * store, const gchar * tenant_id);
 /* Creates a tenant owned by owner_subject_id.  An existing tenant is left
  * untouched, its owner included, and reports *out_created FALSE. */
 wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,

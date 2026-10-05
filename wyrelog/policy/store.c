@@ -236,6 +236,10 @@ struct wyl_policy_store_t
   gpointer service_handoff_unseal_gate_data;
   WylPolicyServiceHandoffMaintenanceNowFunc service_handoff_maintenance_now;
   gpointer service_handoff_maintenance_clock_data;
+  /* #1338 operator remedy: tenant_id -> owner for predecessor tenants the
+   * owner backfill cannot resolve, and the tenants it assigned from them. */
+  GHashTable *tenant_owner_assignments;
+  GHashTable *tenant_owner_assignments_applied;
 };
 
 static int
@@ -10036,6 +10040,9 @@ wyl_policy_store_try_close (wyl_policy_store_t **store_io)
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
   g_clear_pointer (&store->fact_root_path, g_free);
+  g_clear_pointer (&store->tenant_owner_assignments, g_hash_table_unref);
+  g_clear_pointer (&store->tenant_owner_assignments_applied,
+      g_hash_table_unref);
   wyl_fact_graph_resolver_clear (&store->fact_root_resolver);
   g_mutex_clear (&store->service_cvk_mutex);
   g_mutex_clear (&store->service_domain_gate_mutex);
@@ -14144,6 +14151,8 @@ static wyrelog_error_t
 backfill_tenant_owners (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
+  g_clear_pointer (&store->tenant_owner_assignments_applied,
+      g_hash_table_unref);
   static const gchar *select_sql =
       "SELECT t.tenant_id,"
       " (SELECT e.subject_id FROM role_membership_events e"
@@ -14161,12 +14170,20 @@ backfill_tenant_owners (wyl_policy_store_t *store)
   int step = SQLITE_DONE;
   while (rc == WYRELOG_E_OK && (step = sqlite3_step (select)) == SQLITE_ROW) {
     const gchar *tenant_id = (const gchar *) sqlite3_column_text (select, 0);
-    const gchar *owner = g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0
+    const gchar *assigned = store->tenant_owner_assignments != NULL
+        && tenant_id != NULL
+        ? g_hash_table_lookup (store->tenant_owner_assignments, tenant_id)
+        : NULL;
+    /* An operator assignment is explicit intent and wins over the inferred
+     * creator; it can name only a tenant that is still unowned here. */
+    const gchar *owner = assigned != NULL ? assigned
+        : g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0
         ? WYL_TENANT_SYSTEM_OWNER
         : (const gchar *) sqlite3_column_text (select, 1);
     if (!wyl_policy_tenant_owner_is_valid (tenant_id, owner)) {
       g_warning ("tenant owner migration: no owner can be resolved for "
-          "tenant '%s'", tenant_id != NULL ? tenant_id : "(null)");
+          "tenant '%s'; name one with `wyctl tenant assign-owner`",
+          tenant_id != NULL ? tenant_id : "(null)");
       unresolved++;
       continue;
     }
@@ -14176,6 +14193,13 @@ backfill_tenant_owners (wyl_policy_store_t *store)
       rc = bind_text (update, 2, tenant_id);
     if (rc == WYRELOG_E_OK && sqlite3_step (update) != SQLITE_DONE)
       rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && assigned != NULL) {
+      if (store->tenant_owner_assignments_applied == NULL)
+        store->tenant_owner_assignments_applied =
+            g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+      g_hash_table_add (store->tenant_owner_assignments_applied,
+          g_strdup (tenant_id));
+    }
   }
   if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
     rc = WYRELOG_E_IO;
@@ -14185,6 +14209,9 @@ backfill_tenant_owners (wyl_policy_store_t *store)
     sqlite3_finalize (update);
   if (rc == WYRELOG_E_OK && unresolved > 0)
     rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (&store->tenant_owner_assignments_applied,
+        g_hash_table_unref);
   return rc;
 }
 
@@ -15634,6 +15661,49 @@ wyl_policy_tenant_owner_is_valid (const gchar *tenant_id,
   }
   return !g_str_has_prefix (owner_subject_id, "wr.")
          && !g_str_has_prefix (owner_subject_id, "svc:");
+}
+
+wyrelog_error_t
+wyl_policy_store_set_tenant_owner_assignments (wyl_policy_store_t *store,
+    const gchar *const *tenant_ids, const gchar *const *owner_subject_ids,
+    gsize n_assignments)
+{
+  if (store == NULL || (n_assignments > 0
+      && (tenant_ids == NULL || owner_subject_ids == NULL)))
+    return WYRELOG_E_INVALID;
+  g_autoptr (GHashTable) assignments =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  for (gsize i = 0; i < n_assignments; i++) {
+    if (!wyl_policy_store_tenant_id_is_valid (tenant_ids[i])
+        || g_strcmp0 (tenant_ids[i], WYL_TENANT_DEFAULT) == 0
+        || !wyl_policy_tenant_owner_is_valid (tenant_ids[i],
+        owner_subject_ids[i])
+        || g_hash_table_contains (assignments, tenant_ids[i]))
+      return WYRELOG_E_INVALID;
+    g_hash_table_insert (assignments, g_strdup (tenant_ids[i]),
+        g_strdup (owner_subject_ids[i]));
+  }
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  g_clear_pointer (&store->tenant_owner_assignments, g_hash_table_unref);
+  g_clear_pointer (&store->tenant_owner_assignments_applied,
+      g_hash_table_unref);
+  if (n_assignments > 0)
+    store->tenant_owner_assignments = g_steal_pointer (&assignments);
+  return WYRELOG_E_OK;
+}
+
+gboolean
+wyl_policy_store_tenant_owner_assignment_applied (wyl_policy_store_t *store,
+    const gchar *tenant_id)
+{
+  if (store == NULL || tenant_id == NULL)
+    return FALSE;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  return store->tenant_owner_assignments_applied != NULL
+         && g_hash_table_contains (store->tenant_owner_assignments_applied,
+             tenant_id);
 }
 
 wyrelog_error_t

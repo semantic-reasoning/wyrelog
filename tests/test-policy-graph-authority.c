@@ -7748,10 +7748,74 @@ test_unresolvable_tenant_owner_fails_closed (void)
   g_assert_cmpstr (orphan, ==, "bob");
 }
 
+static void
+test_operator_owner_assignments (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+
+  /* Refused sets: built-in tenant, invalid owner, duplicate tenant. */
+  const gchar *builtin_t[] = { "__wr_default" }, *builtin_o[] = { "bob" };
+  const gchar *bad_t[] = { "orphan" }, *bad_o[] = { "svc:app" };
+  const gchar *dup_t[] = { "orphan", "orphan" }, *dup_o[] = { "bob", "eve" };
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      builtin_t, builtin_o, 1), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      bad_t, bad_o, 1), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      dup_t, dup_o, 2), ==, WYRELOG_E_INVALID);
+
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  strip_tenant_owner_schema (db);
+  insert_unowned_tenant (db, "acme");
+  insert_unowned_tenant (db, "orphan");
+  insert_unowned_tenant (db, "spare");
+  insert_role_event (db, "alice", "wr.system_admin", "acme", "grant");
+
+  /* A set that leaves `spare' unresolved fails the migration, and nothing
+   * it named counts as applied once the migration rolled back. */
+  const gchar *partial_t[] = { "orphan" }, *partial_o[] = { "bob" };
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      partial_t, partial_o, 1), ==, WYRELOG_E_OK);
+  g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*spare*assign-owner*");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_test_assert_expected_messages ();
+  g_assert_false (wyl_policy_store_tenant_owner_assignment_applied (store,
+      "orphan"));
+
+  /* An assignment is explicit intent: it wins over an inferred creator for
+   * a tenant that is still unowned. */
+  const gchar *full_t[] = { "orphan", "spare", "acme" };
+  const gchar *full_o[] = { "bob", "carol", "dave" };
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      full_t, full_o, 3), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  for (gsize i = 0; i < G_N_ELEMENTS (full_t); i++) {
+    g_autofree gchar *owner = tenant_owner_of (store, full_t[i]);
+    g_assert_cmpstr (owner, ==, full_o[i]);
+    g_assert_true (wyl_policy_store_tenant_owner_assignment_applied (store,
+        full_t[i]));
+  }
+
+  /* Once every tenant is owned, assignments change nothing. */
+  const gchar *late_t[] = { "acme" }, *late_o[] = { "mallory" };
+  g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
+      late_t, late_o, 1), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_false (wyl_policy_store_tenant_owner_assignment_applied (store,
+      "acme"));
+  g_autofree gchar *kept = tenant_owner_of (store, "acme");
+  g_assert_cmpstr (kept, ==, "dave");
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/operator-assignments",
+      test_operator_owner_assignments);
   g_test_add_func ("/policy/graph-authority/tenant-owner/default-system-owned",
       test_default_tenant_is_system_owned);
   g_test_add_func ("/policy/graph-authority/tenant-owner/create-records-owner",
