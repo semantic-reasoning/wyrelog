@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-locator-private.h"
+#include "fact/artifact-stat-change-test-private.h"
 #include "fact/graph-locator-darwin-private.h"
 #include "fact/graph-artifact-transition-names-private.h"
 #ifndef G_OS_WIN32
@@ -1189,7 +1190,13 @@ restore_reader_stat_matches (const struct stat *st,
 
 /* Explicit serialization avoids struct padding and ignores access times:
  * observing a directory may itself update atime. Keep nanosecond mutation
- * timestamps, ownership, mode, links, allocation and size in the comparison. */
+ * timestamps, ownership, mode, links and size in the comparison.
+ *
+ * Allocation (st_blocks) is deliberately left out (#1348).  A filesystem may
+ * change it with no write at all: XFS trims speculative preallocation past
+ * EOF in the background after a reopened, appended file is closed, so
+ * st_blocks drops some time later while size, mtime and ctime stay put.
+ * Every real change to an artifact moves mtime or ctime, which stay here. */
 static void
 restore_inventory_stat_digest (const struct stat *st, guint8 digest[32])
 {
@@ -1200,7 +1207,7 @@ restore_inventory_stat_digest (const struct stat *st, guint8 digest[32])
 #endif
   guint64 fields[] = {
     st->st_dev, st->st_ino, st->st_mode, st->st_uid, st->st_gid,
-    st->st_nlink, st->st_size, st->st_blocks, st->st_blksize,
+    st->st_nlink, st->st_size, st->st_blksize,
     mt.tv_sec, mt.tv_nsec, ct.tv_sec, ct.tv_nsec,
   };
   for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
@@ -1219,6 +1226,13 @@ restore_inventory_same_stat (const struct stat *a, const struct stat *b)
   restore_inventory_stat_digest (a, first);
   restore_inventory_stat_digest (b, second);
   return memcmp (first, second, sizeof first) == 0;
+}
+
+gboolean
+wyl_fact_graph_restore_inventory_same_stat_for_test (const struct stat *a,
+    const struct stat *b)
+{
+  return a != NULL && b != NULL && restore_inventory_same_stat (a, b);
 }
 
 static gboolean

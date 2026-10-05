@@ -234,6 +234,7 @@ wyrelog/events.h
 wyrelog/fact/artifact-io-session-posix-private.c
 wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c
+wyrelog/fact/artifact-stat-change-test-private.h
 wyrelog/fact/compound-private.h
 wyrelog/fact/compound.c
 wyrelog/fact/graph-artifact-durability-journal-codec-private.c

@@ -2,6 +2,11 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+/* Strict X/Open mode hides struct stat's st_mtimespec/st_ctimespec on Apple
+ * SDKs; the library under test is built with the Darwin names visible. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -16,6 +21,7 @@
 #endif
 
 #include "fact/graph-locator-private.h"
+#include "fact/artifact-stat-change-test-private.h"
 #include "fact/root-writer-lease-private.h"
 
 typedef struct
@@ -109,6 +115,65 @@ test_decoder_rejects_noncanonical_components (void)
     g_assert_null (decoded);
   }
 }
+
+#ifndef G_OS_WIN32
+/* #1348: a filesystem may change a file's allocation with no write at all.
+ * XFS trims speculative preallocation past EOF in the background after a
+ * file that was reopened and appended is closed, so st_blocks drops some
+ * time later while size, mtime and ctime stay put.  Change detection must
+ * not read that as a change, and must still see every real one. */
+#ifdef __APPLE__
+#define TEST_STAT_MTIME_NSEC(st) ((st).st_mtimespec.tv_nsec)
+#define TEST_STAT_CTIME_NSEC(st) ((st).st_ctimespec.tv_nsec)
+#else
+#define TEST_STAT_MTIME_NSEC(st) ((st).st_mtim.tv_nsec)
+#define TEST_STAT_CTIME_NSEC(st) ((st).st_ctim.tv_nsec)
+#endif
+
+static struct stat
+allocation_probe_stat (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-1348-stat-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "artifact", NULL);
+  g_assert_true (g_file_set_contents (path, "content", -1, NULL));
+  struct stat st;
+  g_assert_cmpint (g_stat (path, &st), ==, 0);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+  return st;
+}
+
+static void
+test_restore_inventory_stat_ignores_allocation (void)
+{
+  struct stat base = allocation_probe_stat ();
+  struct stat other = base;
+  g_assert_true (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+
+  other.st_blocks += 1280;
+  g_assert_true (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+
+  other = base;
+  TEST_STAT_MTIME_NSEC (other) ^= 1;
+  g_assert_false (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+  other = base;
+  TEST_STAT_CTIME_NSEC (other) ^= 1;
+  g_assert_false (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+  other = base;
+  other.st_size += 1;
+  g_assert_false (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+  other = base;
+  other.st_ino += 1;
+  g_assert_false (wyl_fact_graph_restore_inventory_same_stat_for_test (&base,
+      &other));
+}
+#endif
 
 static void
 test_owner_mode_contract (void)
@@ -2339,6 +2404,11 @@ main (int argc, char **argv)
       test_decoder_rejects_noncanonical_components);
   g_test_add_func ("/fact-graph-locator/metadata/owner-mode",
       test_owner_mode_contract);
+#ifndef G_OS_WIN32
+  g_test_add_func
+    ("/fact-graph-locator/restore-inventory/stat-ignores-allocation",
+      test_restore_inventory_stat_ignores_allocation);
+#endif
   g_test_add_func ("/fact-graph-locator/locator/round-trip",
       test_locator_round_trip);
   g_test_add_func ("/fact-graph-locator/locator/reject-tampered",

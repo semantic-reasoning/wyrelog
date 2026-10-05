@@ -55,10 +55,10 @@ EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "e7e1e58ec0738473d929d57cf56b7d2e4bfa6da1706db0f507fb0901aac8ae5f"
+    "3c62e41ffe34928e73620caed46ff44e80db89883b102dc79f658b9cc41cb54f"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "79b403dd66211c9cc0e589797e2e3bad4250803fc7af4b9ed3b33dc03360e8df"
+    "17a6d96fd8ac91138b5f5b3856fcf6a92a0ec6dfcad21ceb8419823961f7c7b4"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
     "f7da76f746898486e91f8d0c68f1388e8939d7bfd2e813dbc03a020e044e189e"
@@ -719,13 +719,13 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 32022)
+        artifact_lock_require(len(semantic_tokens) == 32100)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256
         )
         call_profile = c_named_call_profile(commentless_source)
-        artifact_lock_require(call_profile is not None and len(call_profile) == 2159)
+        artifact_lock_require(call_profile is not None and len(call_profile) == 2164)
         assert call_profile is not None
         artifact_lock_require(
             hashlib.sha256(repr(call_profile).encode("utf-8")).hexdigest()
