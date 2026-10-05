@@ -26,6 +26,8 @@ wyrelog_error_t wyl_fact_offline_backup_bundle_open
 
 GBytes *wyl_fact_offline_backup_bundle_manifest_bytes
   (WylFactOfflineBackupBundle *bundle);
+const guint8 *wyl_fact_offline_backup_bundle_manifest_sha256
+  (WylFactOfflineBackupBundle *bundle);
 
 /* Rechecks the named directory, its exact entry set, pinned file identities,
  * and the full checksums. Call before and after a restore import. Each read

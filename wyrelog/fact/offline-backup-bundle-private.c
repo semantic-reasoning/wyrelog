@@ -341,6 +341,18 @@ wyl_fact_offline_backup_bundle_manifest_bytes
 #endif
 }
 
+const guint8 *
+wyl_fact_offline_backup_bundle_manifest_sha256
+  (WylFactOfflineBackupBundle *bundle)
+{
+#ifdef G_OS_WIN32
+  (void) bundle;
+  return NULL;
+#else
+  return bundle == NULL ? NULL : bundle->digest;
+#endif
+}
+
 wyrelog_error_t
 wyl_fact_offline_backup_bundle_revalidate (WylFactOfflineBackupBundle *bundle)
 {

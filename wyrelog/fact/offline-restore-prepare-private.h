@@ -26,4 +26,21 @@ wyrelog_error_t wyl_fact_offline_restore_prepare_run
     GCancellable *cancellable,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Admit tenant COMMIT from a separately authenticated bundle. Reopens the
+ * prepared journal at the exact revision, repeats full-scope replay on the
+ * supplied real scheduler while retaining root and graph authority, then
+ * performs the fenced policy decision CAS. No resume driver runs here. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_commit_admit_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_fact_offline_restore_tenant_commit_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (gpointer user_data), gpointer user_data);
+#endif
+
 G_END_DECLS

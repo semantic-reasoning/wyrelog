@@ -63,6 +63,16 @@ wyrelog_error_t wyl_fact_offline_restore_validation_session_new_for_preflight
     gint64 drain_timeout_us,
     WylFactOfflineRestoreValidationSession **out_session);
 
+/* Retained-authority full replay for tenant COMMIT admission. Accepts only a
+ * v5 tenant journal with all stages/preflight records and old provisioning
+ * UUIDs durably bound. */
+wyrelog_error_t wyl_fact_offline_restore_validation_session_new_for_commit_admission
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime_manager, GBytes *canonical_manifest,
+    const gchar *operation_uuid, guint64 expected_revision,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreValidationSession **out_session);
+
 /* Only for new_for_preflight sessions. Replays ALL graphs before recording
  * missing per-graph preflight transitions through exact-revision CAS. Checks
  * the selected scope before each write and after the last write (quadratic

@@ -34,6 +34,11 @@ wyrelog_error_t wyl_fact_offline_restore_journal_store_cas
     const WylFactOfflineRestoreJournal *desired,
     WylFactOfflineRestoreStoreResult *out_result,
     WylFactOfflineRestoreJournal *out_committed);
+wyrelog_error_t wyl_fact_offline_restore_journal_store_decide_tenant_commit
+  (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *expected,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed);
 wyrelog_error_t wyl_fact_offline_restore_journal_store_release
   (wyl_policy_store_t *store, guint64 expected_revision,
     const gchar *operation_uuid,

@@ -226,11 +226,46 @@ wyl_fact_offline_restore_validation_progress_phase
 }
 
 static gboolean
+tenant_commit_admission_phase (const WylFactOfflineRestoreJournal *journal)
+{
+  if (journal == NULL || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      || journal->graphs == NULL || journal->graphs->len == 0
+      || journal->graphs->len > WYL_FACT_OFFLINE_RESTORE_MAX_GRAPHS)
+    return FALSE;
+  g_autoptr (GBytes) encoded = NULL;
+  if (wyl_fact_offline_restore_journal_encode (journal, &encoded) != WYRELOG_E_OK
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal->policy_generation_published || journal->lifecycle_handoff_complete
+      || journal->revision != 1 + 3 * (guint64) journal->graphs->len)
+    return FALSE;
+  for (guint i = 0; i < journal->graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal->graphs, i);
+    if (graph->old_provisioning_uuid == NULL || graph->expected_main_absent
+        || graph->transition_state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+        || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+        || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || graph->transition_terminal || graph->resume_forbidden
+        || graph->durability_unprovable_acknowledged
+        || !graph->copied || !graph->checksum_verified
+        || !graph->identity_verified || !graph->schema_verified
+        || !graph->replay_preflighted
+        || !identity_valid (&graph->staged_main_identity))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
 journal_phase_valid (WylFactOfflineRestoreValidationMode mode,
     const WylFactOfflineRestoreJournal *journal)
 {
   if (mode == WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS)
     return wyl_fact_offline_restore_validation_progress_phase (journal);
+  if (mode == WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_TENANT_COMMIT_ADMISSION)
+    return tenant_commit_admission_phase (journal);
   if (journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
       || journal->policy_generation_published
       || journal->lifecycle_handoff_complete)
@@ -434,7 +469,8 @@ wyl_fact_offline_restore_validate (WylFactOfflineRestoreValidationMode mode,
       || admission == NULL
       || (mode != WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_DRY_RUN
       && mode != WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED
-      && mode != WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS)
+      && mode != WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS
+      && mode != WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_TENANT_COMMIT_ADMISSION)
       || manifest_length == 0
       || manifest_length > WYL_FACT_OFFLINE_RESTORE_MAX_MANIFEST_BYTES
       || (mode == WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_DRY_RUN

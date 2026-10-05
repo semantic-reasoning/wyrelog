@@ -6,7 +6,22 @@
 #include "fact/offline-restore-validation-private.h"
 #include "fact/offline-restore-validation-session-private.h"
 
+#include <string.h>
+
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t (*tenant_commit_admission_checkpoint) (gpointer);
+static gpointer tenant_commit_admission_checkpoint_data;
+
+void
+wyl_fact_offline_restore_tenant_commit_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (gpointer), gpointer user_data)
+{
+  tenant_commit_admission_checkpoint = checkpoint;
+  tenant_commit_admission_checkpoint_data = user_data;
+}
+#endif
+
 typedef struct
 {
   WylFactOfflineRestoreValidationSession *session;
@@ -26,6 +41,60 @@ prepare_job_run (WylFactReplayJobContext *context, gpointer data)
   PrepareJob *job = data;
   return wyl_fact_offline_restore_validation_session_run_and_record_preflight
            (job->session, context, &job->committed);
+}
+#endif
+
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  WylFactOfflineRestoreValidationSession *session;
+  WylFactOfflineBackupBundle *bundle;
+  WylFactOfflineRestoreJournal committed;
+} TenantCommitAdmission;
+
+static wyrelog_error_t
+tenant_commit_admit_callback (const WylFactOfflineRestoreJournal *journal,
+    WylFactRootWriterLease *lease, WylFactGraphResolver *resolver,
+    const GPtrArray *graphs, gpointer data)
+{
+  (void) lease;
+  (void) resolver;
+  (void) graphs;
+  TenantCommitAdmission *admission = data;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (tenant_commit_admission_checkpoint != NULL) {
+    wyrelog_error_t checkpoint_rc = tenant_commit_admission_checkpoint
+          (tenant_commit_admission_checkpoint_data);
+    if (checkpoint_rc != WYRELOG_E_OK)
+      return checkpoint_rc;
+  }
+#endif
+  const guint8 *trusted_digest =
+      wyl_fact_offline_backup_bundle_manifest_sha256 (admission->bundle);
+  if (trusted_digest == NULL
+      || memcmp (trusted_digest, journal->manifest_sha256, 32) != 0)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate
+        (admission->bundle);
+  WylFactOfflineRestoreStoreResult result =
+      WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_decide_tenant_commit
+          (admission->policy, journal, &result, &admission->committed);
+  if (rc == WYRELOG_E_OK
+      && result != WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED)
+    rc = result == WYL_FACT_OFFLINE_RESTORE_STORE_STALE
+        ? WYRELOG_E_BUSY : WYRELOG_E_POLICY;
+  return rc;
+}
+
+static wyrelog_error_t
+tenant_commit_admit_job (WylFactReplayJobContext *context, gpointer data)
+{
+  TenantCommitAdmission *admission = data;
+  return wyl_fact_offline_restore_validation_session_with_publication_authority
+           (admission->session, context, tenant_commit_admit_callback, admission);
 }
 #endif
 
@@ -167,6 +236,79 @@ wyl_fact_offline_restore_prepare_run
     final = (WylFactOfflineRestoreJournal) { 0 };
   }
   wyl_fact_offline_restore_journal_clear (&job.committed);
+  return rc;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_admit_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || scheduler == NULL || bundle == NULL
+      || operation_uuid == NULL || *operation_uuid == '\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    return WYRELOG_E_CANCELLED;
+#ifndef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#else
+  wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate (bundle);
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_store_load (policy,
+            operation_uuid, &journal);
+  const guint8 *trusted_digest =
+      wyl_fact_offline_backup_bundle_manifest_sha256 (bundle);
+  if (rc == WYRELOG_E_OK && (trusted_digest == NULL
+      || journal.revision != expected_revision
+      || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      || journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+      || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal.graphs == NULL || journal.graphs->len == 0
+      || memcmp (trusted_digest, journal.manifest_sha256, 32) != 0))
+    rc = journal.revision != expected_revision ? WYRELOG_E_BUSY
+        : WYRELOG_E_POLICY;
+  g_autoptr (GBytes) manifest = rc == WYRELOG_E_OK
+      ? wyl_fact_offline_backup_bundle_manifest_bytes (bundle) : NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_manifest_preflight (manifest, &journal);
+  g_autoptr (WylFactOfflineRestoreValidationSession) session = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_validation_session_new_for_commit_admission
+          (policy, fact_root, runtime, manifest, operation_uuid,
+            expected_revision, drain_timeout_us, &session);
+  TenantCommitAdmission admission = {
+    .policy = policy,
+    .session = session,
+    .bundle = bundle,
+  };
+  g_autoptr (WylFactReplayFuture) future = NULL;
+  if (rc == WYRELOG_E_OK){
+    const WylFactOfflineRestoreJournalGraph *first_graph =
+        g_ptr_array_index (journal.graphs, 0);
+    rc = wyl_fact_replay_scheduler_submit (scheduler, journal.tenant_id,
+            first_graph->graph_id, cancellable,
+            tenant_commit_admit_job, &admission, NULL, &future);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_replay_future_wait (future);
+  if (rc == WYRELOG_E_OK) {
+    *out_committed = admission.committed;
+    admission.committed = (WylFactOfflineRestoreJournal) { 0 };
+  }
+  wyl_fact_offline_restore_journal_clear (&admission.committed);
   return rc;
 #endif
 }
