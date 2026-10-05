@@ -22,6 +22,7 @@
 #endif
 #include <string.h>
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/artifact-stat-change-test-private.h"
 
 #define TOKEN_SIDE_REPLACE "00000000-0000-4000-8000-000000000001"
 #define TOKEN_SIDE_REPLACE_WAL "00000000-0000-4000-8000-000000000002"
@@ -4469,10 +4470,68 @@ test_inventory_provider (void)
 }
 #endif
 
+#ifndef G_OS_WIN32
+/* #1348: a filesystem may change a file's allocation with no write at all.
+ * XFS trims speculative preallocation past EOF in the background after a
+ * file that was reopened and appended is closed, so st_blocks drops some
+ * time later while size, mtime and ctime stay put.  Change detection must
+ * not read that as a change, and must still see every real one. */
+static struct stat
+allocation_probe_stat (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-1348-stat-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "artifact", NULL);
+  g_assert_true (g_file_set_contents (path, "content", -1, NULL));
+  struct stat st;
+  g_assert_cmpint (g_stat (path, &st), ==, 0);
+  g_assert_cmpint (g_unlink (path), ==, 0);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+  return st;
+}
+
+static void
+test_inventory_entry_hash_ignores_allocation (void)
+{
+  struct stat base = allocation_probe_stat ();
+  struct stat other = base;
+  guint64 expected = 0;
+  g_assert_true (wyl_fact_artifact_inventory_entry_hash_for_test ("main.duckdb",
+      &base, &expected));
+  guint64 actual = 0;
+
+  other.st_blocks += 1280;
+  g_assert_true (wyl_fact_artifact_inventory_entry_hash_for_test ("main.duckdb",
+      &other, &actual));
+  g_assert_cmpuint (actual, ==, expected);
+
+  other = base;
+  other.st_mtime += 1;
+  g_assert_true (wyl_fact_artifact_inventory_entry_hash_for_test ("main.duckdb",
+      &other, &actual));
+  g_assert_cmpuint (actual, !=, expected);
+  other = base;
+  other.st_ctime += 1;
+  g_assert_true (wyl_fact_artifact_inventory_entry_hash_for_test ("main.duckdb",
+      &other, &actual));
+  g_assert_cmpuint (actual, !=, expected);
+  other = base;
+  other.st_size += 1;
+  g_assert_true (wyl_fact_artifact_inventory_entry_hash_for_test ("main.duckdb",
+      &other, &actual));
+  g_assert_cmpuint (actual, !=, expected);
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+#ifndef G_OS_WIN32
+  g_test_add_func
+    ("/fact-artifact-namespace/inventory/entry-hash-ignores-allocation",
+      test_inventory_entry_hash_ignores_allocation);
+#endif
   g_test_add_func
     ("/fact-artifact-namespace/sidecar-retirement-result-contract",
       test_sidecar_retirement_result_contract);

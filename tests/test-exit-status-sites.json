@@ -43,77 +43,77 @@
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 275,
+    "line": 276,
     "api": "_exit",
     "expression": "91",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 278,
+    "line": 279,
     "api": "_exit",
     "expression": "result == WYRELOG_E_OK ? 0 : 92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 281,
+    "line": 282,
     "api": "_exit",
     "expression": "93",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 284,
+    "line": 285,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 341,
+    "line": 342,
     "api": "_exit",
     "expression": "95",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 344,
+    "line": 345,
     "api": "_exit",
     "expression": "result == WYRELOG_E_OK ? 0 : 96",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 348,
+    "line": 349,
     "api": "_exit",
     "expression": "97",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 355,
+    "line": 356,
     "api": "_exit",
     "expression": "98",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 360,
+    "line": 361,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 396,
+    "line": 397,
     "api": "_exit",
     "expression": "94",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-namespace.c",
-    "line": 399,
+    "line": 400,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"

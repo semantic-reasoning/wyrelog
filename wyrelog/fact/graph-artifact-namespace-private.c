@@ -5406,10 +5406,32 @@ inventory_hash_stat (guint64 *hash, const gchar *name, const struct stat *st)
   entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_nlink);
   entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_uid);
   entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_size);
-  entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_blocks);
+  /* #1348: mtime and ctime, not st_blocks.  A filesystem may change
+   * allocation with no write (XFS trims speculative preallocation in the
+   * background after close), which made the fingerprint report a change
+   * that never happened.  Every real change moves mtime or ctime.  Whole
+   * seconds keep this translation unit free of platform directives; the
+   * restore inventory digest compares the nanosecond fields. */
+  entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_mtime);
+  entry_hash = inventory_hash_mix (entry_hash, (guint64) st->st_ctime);
   /* XOR makes the aggregate independent of the directory stream order. */
   *hash ^= entry_hash;
   return TRUE;
+}
+
+/* Declared in fact/artifact-stat-change-test-private.h, which this
+ * translation unit does not include so its include set stays frozen. */
+gboolean wyl_fact_artifact_inventory_entry_hash_for_test (const gchar *name,
+    const struct stat *st, guint64 *out_hash);
+
+gboolean
+wyl_fact_artifact_inventory_entry_hash_for_test (const gchar *name,
+    const struct stat *st, guint64 *out_hash)
+{
+  if (out_hash == NULL)
+    return FALSE;
+  *out_hash = 0;
+  return inventory_hash_stat (out_hash, name, st);
 }
 
 static gboolean
