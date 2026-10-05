@@ -4,6 +4,150 @@
 #include "fact/offline-restore-commit-authority-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 
+static gint step_rank (WylFactArtifactMainTransitionOp operation);
+
+wyrelog_error_t
+wyl_fact_offline_restore_tenant_commit_v5_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || *operation_uuid == '\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  guint64 revision = expected_revision;
+  for (;;) {
+    g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    g_autoptr (GBytes) canonical = NULL;
+    wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load
+          (policy, operation_uuid, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+              &record);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+    if (rc == WYRELOG_E_OK && (journal.revision != revision
+        || record->revision != revision
+        || !g_bytes_equal (canonical, record->journal_blob)))
+      rc = WYRELOG_E_BUSY;
+    wyl_policy_offline_restore_record_free (record);
+    if (rc == WYRELOG_E_OK
+        && (journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_BOUND_VERSION
+        || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+        || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        || journal.graphs == NULL || journal.graphs->len == 0
+        || journal.policy_generation_published
+        || journal.lifecycle_handoff_complete))
+      rc = WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    const WylFactOfflineRestoreJournalGraph *selected = NULL;
+    gboolean terminal = TRUE;
+    for (guint i = 0; i < journal.graphs->len; i++) {
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (journal.graphs, i);
+      if (graph == NULL || graph->old_provisioning_uuid == NULL
+          || !graph->replay_preflighted || graph->expected_main_absent)
+        return WYRELOG_E_POLICY;
+      gboolean done = graph->transition_state ==
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+          && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+          && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+          && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED
+          && !graph->transition_terminal;
+      if (done)
+        continue;
+      terminal = FALSE;
+      gint rank = step_rank (graph->next_op);
+      if (rank < 0)
+        return WYRELOG_E_POLICY;
+      if (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN
+          && graph->pending_op != graph->next_op)
+        return WYRELOG_E_POLICY;
+      if (!wyl_fact_offline_restore_tenant_commit_step_eligible
+            (&journal, graph->graph_id, graph->next_op))
+        continue;
+      gboolean unknown = graph->attempt ==
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+      gboolean selected_unknown = selected != NULL && selected->attempt ==
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN;
+      if (selected == NULL || (unknown && !selected_unknown)
+          || (unknown == selected_unknown
+          && rank < step_rank (selected->next_op)))
+        selected = graph;
+    }
+    gint64 remaining = drain_timeout_us;
+    if (deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0)
+        return WYRELOG_E_BUSY;
+    }
+    if (terminal)
+      return wyl_fact_offline_restore_tenant_commit_v5_prove_complete
+               (policy, fact_root, runtime, operation_uuid, revision,
+                 remaining, out_committed);
+    if (selected == NULL)
+      return WYRELOG_E_POLICY;
+    g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+    switch (selected->next_op) {
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
+        rc = wyl_fact_offline_restore_tenant_commit_sync_staged_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN:
+        rc = wyl_fact_offline_restore_tenant_commit_retain_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
+        rc = wyl_fact_offline_restore_tenant_commit_sync_rollback_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR:
+        rc = wyl_fact_offline_restore_tenant_commit_sync_retain_dir_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH:
+        rc = wyl_fact_offline_restore_tenant_commit_publish_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
+        rc = wyl_fact_offline_restore_tenant_commit_sync_publish_dir_run
+              (policy, fact_root, runtime, operation_uuid,
+                selected->graph_id, revision, remaining, &committed);
+        break;
+      default:
+        return WYRELOG_E_POLICY;
+    }
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (committed.revision <= revision)
+      return WYRELOG_E_POLICY;
+    revision = committed.revision;
+  }
+#endif
+}
+
 static wyrelog_error_t
 copy_journal (const WylFactOfflineRestoreJournal *journal,
     WylFactOfflineRestoreJournal *out_committed)
