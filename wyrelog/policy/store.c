@@ -10282,6 +10282,11 @@ static const WylGraphAuthorityColumn graph_authority_columns[] = {
     "9223372036854775807)"
   },
   {
+    "tenants", "owner_subject_id", "TEXT", TRUE, "''", NULL,
+    "ALTER TABLE tenants ADD COLUMN owner_subject_id TEXT NOT NULL "
+    "DEFAULT ''"
+  },
+  {
     "fact_graphs", "lifecycle_state", "TEXT", TRUE,
     "'legacy_unclassified'",
     "CHECK(lifecycle_state IN "
@@ -11263,6 +11268,36 @@ static const gchar tenant_authority_insert_guard_sql[] =
     "NEW.lifecycle_generation=0 AND NEW.sealed_generation=0 AND "
     "NEW.reconciliation_generation=0) "
     "THEN RAISE(ABORT,'invalid tenant authority') END; END";
+
+/* #1338: the owner invariant, kept out of the versioned lifecycle guards
+ * so neither ladder has to carry the other's history.  It mirrors
+ * wyl_policy_tenant_owner_is_valid: the built-in tenant is owned by the
+ * system and nothing else is.  The only owner change allowed is the
+ * predecessor-store backfill from the empty migration default. */
+#define TENANT_OWNER_VALID_SQL(row)                                          \
+  "(typeof(" row ".owner_subject_id)='text' AND "                           \
+  "length(" row ".owner_subject_id) BETWEEN 1 AND 128 AND "                 \
+  row ".owner_subject_id NOT GLOB '*[^A-Za-z0-9._:-]*' AND "                \
+  row ".owner_subject_id NOT IN ('.','..') AND ("                           \
+  "(" row ".tenant_id='" WYL_TENANT_DEFAULT "' AND "                         \
+  row ".owner_subject_id='" WYL_TENANT_SYSTEM_OWNER "') OR "                 \
+  "(" row ".tenant_id<>'" WYL_TENANT_DEFAULT "' AND "                        \
+  "substr(" row ".owner_subject_id,1,3)<>'wr.' AND "                        \
+  "substr(" row ".owner_subject_id,1,4)<>'svc:')))"
+
+static const gchar tenant_owner_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_owner_insert_guard "
+    "BEFORE INSERT ON tenants BEGIN "
+    "SELECT CASE WHEN NOT " TENANT_OWNER_VALID_SQL ("NEW")
+    " THEN RAISE(ABORT,'invalid tenant owner') END; END";
+
+static const gchar tenant_owner_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_owner_update_guard "
+    "BEFORE UPDATE ON tenants "
+    "WHEN NEW.owner_subject_id IS NOT OLD.owner_subject_id BEGIN "
+    "SELECT CASE WHEN NOT (OLD.owner_subject_id='' AND "
+    TENANT_OWNER_VALID_SQL ("NEW")
+    ") THEN RAISE(ABORT,'tenant owner is immutable') END; END";
 
 static const gchar tenant_authority_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_authority_update_guard "
@@ -13863,6 +13898,8 @@ validate_graph_authority_schema (sqlite3 *db)
      tenant_authority_insert_guard_sql},
     {"trigger", "tenant_authority_update_guard",
      tenant_authority_update_guard_sql},
+    {"trigger", "tenant_owner_insert_guard", tenant_owner_insert_guard_sql},
+    {"trigger", "tenant_owner_update_guard", tenant_owner_update_guard_sql},
     {"trigger", "fact_graph_authority_insert_guard",
      graph_authority_insert_guard_sql},
     {"trigger", "fact_graph_authority_update_guard",
@@ -14097,6 +14134,60 @@ wyl_policy_store_darwin_evidence_gate (wyl_policy_store_t *store,
   store->darwin_evidence_gate_data = data;
 }
 
+/* #1338: give every tenant of a predecessor store the owner it would have
+ * been created with.  A built-in tenant belongs to the system.  Any other
+ * tenant belongs to the subject of its earliest wr.system_admin grant,
+ * which is the creator grant tenant creation writes.  A tenant with no such
+ * grant, or whose creator could not own a tenant, is never guessed at: each
+ * one is named and the whole migration fails closed. */
+static wyrelog_error_t
+backfill_tenant_owners (wyl_policy_store_t *store)
+{
+  sqlite3 *db = store->db;
+  static const gchar *select_sql =
+      "SELECT t.tenant_id,"
+      " (SELECT e.subject_id FROM role_membership_events e"
+      "  WHERE e.role_id='wr.system_admin' AND e.scope=t.tenant_id"
+      "  AND e.operation='grant' ORDER BY e.event_id LIMIT 1)"
+      " FROM tenants t WHERE t.owner_subject_id='' ORDER BY t.tenant_id;";
+  sqlite3_stmt *select = NULL;
+  sqlite3_stmt *update = NULL;
+  wyrelog_error_t rc = prepare_stmt (db, select_sql, &select);
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (db,
+            "UPDATE tenants SET owner_subject_id=? WHERE tenant_id=? "
+            "AND owner_subject_id='';", &update);
+  guint unresolved = 0;
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (select)) == SQLITE_ROW) {
+    const gchar *tenant_id = (const gchar *) sqlite3_column_text (select, 0);
+    const gchar *owner = g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0
+        ? WYL_TENANT_SYSTEM_OWNER
+        : (const gchar *) sqlite3_column_text (select, 1);
+    if (!wyl_policy_tenant_owner_is_valid (tenant_id, owner)) {
+      g_warning ("tenant owner migration: no owner can be resolved for "
+          "tenant '%s'", tenant_id != NULL ? tenant_id : "(null)");
+      unresolved++;
+      continue;
+    }
+    sqlite3_reset (update);
+    rc = bind_text (update, 1, owner);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (update, 2, tenant_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (update) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (select != NULL)
+    sqlite3_finalize (select);
+  if (update != NULL)
+    sqlite3_finalize (update);
+  if (rc == WYRELOG_E_OK && unresolved > 0)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
 static wyrelog_error_t
 migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
 {
@@ -14125,6 +14216,14 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
       && (rc = exec_sql (db,
       "UPDATE tenants SET sealed_generation=1 WHERE sealed=1")) !=
       WYRELOG_E_OK)
+    return rc;
+  /* Not only after adding the column: a store laid down from the shipped
+   * schema template carries the column but none of the guards, so any row
+   * still holding the migration default is resolved the same way. */
+  if ((rc = backfill_tenant_owners (store)) != WYRELOG_E_OK)
+    return rc;
+  if ((rc = exec_sql (db, tenant_owner_insert_guard_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_owner_update_guard_sql)) != WYRELOG_E_OK)
     return rc;
   for (gsize i = 0; i < G_N_ELEMENTS (fact_reconcile_evidence_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
@@ -14403,7 +14502,11 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "    CHECK (typeof(reconciliation_generation) = 'integer' AND "
       "      reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
       "  created_at INTEGER NOT NULL,"
-      "  updated_at INTEGER NOT NULL"
+      "  updated_at INTEGER NOT NULL,"
+      /* #1338: the tenant's owner.  The empty default exists only so the
+       * column can be added to a populated predecessor store; the owner
+       * guards refuse it on every insert and update. */
+      "  owner_subject_id TEXT NOT NULL DEFAULT ''"
       ");"
       "CREATE TABLE IF NOT EXISTS roles ("
       "  role_id TEXT PRIMARY KEY,"
@@ -15505,30 +15608,59 @@ wyrelog_error_t
 wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *store)
 {
   gboolean created = FALSE;
-  return wyl_policy_store_create_tenant (store, WYL_TENANT_DEFAULT, &created);
+  return wyl_policy_store_create_tenant (store, WYL_TENANT_DEFAULT,
+             WYL_TENANT_SYSTEM_OWNER, &created);
+}
+
+gboolean
+wyl_policy_tenant_owner_is_valid (const gchar *tenant_id,
+    const gchar *owner_subject_id)
+{
+  if (tenant_id == NULL || owner_subject_id == NULL)
+    return FALSE;
+  if (g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
+    return g_strcmp0 (owner_subject_id, WYL_TENANT_SYSTEM_OWNER) == 0;
+  gsize len = strlen (owner_subject_id);
+  if (len < 1 || len > 128)
+    return FALSE;
+  if (g_strcmp0 (owner_subject_id, ".") == 0
+      || g_strcmp0 (owner_subject_id, "..") == 0)
+    return FALSE;
+  for (const gchar *p = owner_subject_id; *p != '\0'; p++) {
+    guchar c = (guchar) *p;
+    if (g_ascii_isalnum (c) || c == '.' || c == '_' || c == ':' || c == '-')
+      continue;
+    return FALSE;
+  }
+  return !g_str_has_prefix (owner_subject_id, "wr.")
+         && !g_str_has_prefix (owner_subject_id, "svc:");
 }
 
 wyrelog_error_t
 wyl_policy_store_create_tenant (wyl_policy_store_t *store,
-    const gchar *tenant_id, gboolean *out_created)
+    const gchar *tenant_id, const gchar *owner_subject_id,
+    gboolean *out_created)
 {
   sqlite3_stmt *stmt = NULL;
 
+  if (out_created != NULL)
+    *out_created = FALSE;
   if (store == NULL || store->db == NULL || out_created == NULL ||
-      !wyl_policy_store_tenant_id_is_valid (tenant_id))
+      !wyl_policy_store_tenant_id_is_valid (tenant_id) ||
+      !wyl_policy_tenant_owner_is_valid (tenant_id, owner_subject_id))
     return WYRELOG_E_INVALID;
-  *out_created = FALSE;
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   static const gchar *sql =
       "INSERT OR IGNORE INTO tenants "
-      "(tenant_id, sealed, created_at, updated_at) "
-      "VALUES (?, 0, unixepoch(), unixepoch());";
+      "(tenant_id, owner_subject_id, sealed, created_at, updated_at) "
+      "VALUES (?, ?, 0, unixepoch(), unixepoch());";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK) {
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, owner_subject_id)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
     return rc;
   }
@@ -15688,6 +15820,8 @@ wyl_policy_store_classify_tenant_create_bundle (wyl_policy_store_t *store,
       "SELECT"
       " (SELECT count(*) FROM tenants WHERE tenant_id=:tenant),"
       " (SELECT count(*) FROM tenants WHERE tenant_id=:tenant AND sealed=0),"
+      " (SELECT count(*) FROM tenants WHERE tenant_id=:tenant"
+      "  AND owner_subject_id=:creator),"
       " (SELECT count(*) FROM role_memberships WHERE subject_id=:creator"
       "  AND role_id='wr.system_admin' AND scope=:tenant),"
       " (SELECT count(*) FROM role_membership_events"
@@ -15760,8 +15894,8 @@ wyl_policy_store_classify_tenant_create_bundle (wyl_policy_store_t *store,
 
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
-    static const gint64 absent[11] = { 0 };
-    static const gint64 present[11] = { 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1 };
+    static const gint64 absent[12] = { 0 };
+    static const gint64 present[12] = { 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1 };
     gboolean all_absent = TRUE;
     gboolean all_present = TRUE;
     for (guint i = 0; i < G_N_ELEMENTS (present); i++) {
@@ -19920,6 +20054,7 @@ wyl_policy_tenant_authority_record_free (WylPolicyTenantAuthorityRecord *record)
   if (record == NULL)
     return;
   g_free (record->tenant_id);
+  g_free (record->owner_subject_id);
   g_free (record);
 }
 
@@ -20521,15 +20656,18 @@ tenant_authority_record_from_row (sqlite3_stmt *stmt,
       || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER
       || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
       || sqlite3_column_type (stmt, 3) != SQLITE_INTEGER
-      || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER)
+      || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 5) != SQLITE_TEXT)
     return WYRELOG_E_POLICY;
   gint64 lifecycle_generation = sqlite3_column_int64 (stmt, 3);
   gint64 reconciliation_generation = sqlite3_column_int64 (stmt, 4);
   gint sealed = sqlite3_column_int (stmt, 1);
   const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 0);
   const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 2);
+  const gchar *owner = (const gchar *) sqlite3_column_text (stmt, 5);
   WylPolicyTenantLifecycleState state;
   if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !wyl_policy_tenant_owner_is_valid (tenant_id, owner)
       || lifecycle_generation < 0 || reconciliation_generation < 0
       || (sealed != 0 && sealed != 1)
       || !tenant_lifecycle_state_parse (state_name, &state)
@@ -20545,6 +20683,7 @@ tenant_authority_record_from_row (sqlite3_stmt *stmt,
   record->lifecycle_generation = (guint64) lifecycle_generation;
   record->reconciliation_generation = (guint64) reconciliation_generation;
   record->sealed_compatibility = sealed != 0;
+  record->owner_subject_id = g_strdup (owner);
   *out_record = record;
   return WYRELOG_E_OK;
 }
@@ -20633,7 +20772,7 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
 
 #define TENANT_AUTHORITY_SELECT_COLUMNS                                      \
   "tenant_id,sealed,lifecycle_state,lifecycle_generation,"                  \
-  "reconciliation_generation"
+  "reconciliation_generation,owner_subject_id"
 #define GRAPH_AUTHORITY_SELECT_COLUMNS                                       \
   "tenant_id,graph_id,sealed,lifecycle_state,store_uuid,format_version,"    \
   "path_encoding_version,lifecycle_generation,reconciliation_generation,"  \

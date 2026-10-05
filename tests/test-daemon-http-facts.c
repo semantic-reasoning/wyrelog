@@ -1280,7 +1280,8 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     return 13;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_b_created = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-b", &tenant_b_created)
+  if (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner", &tenant_b_created)
       != WYRELOG_E_OK)
     return 131;
   WylPolicyFactQuotaConfig tenant_b_quota = {

@@ -2053,7 +2053,8 @@ wyctl --daemon-url "$BASE_URL" tenant create --name acme \
 `tenant list` prints one `tenant=<tenant> sealed=<bool>` line per tenant.
 `tenant create` prints `tenant=<tenant> changed=<bool>`; creating a tenant that
 already exists succeeds with `changed=false`. Creating a tenant grants the
-caller the `wr.system_admin` role in it.
+caller the `wr.system_admin` role in it and records the caller as the tenant's
+owner.
 
 Sealing closes the whole tenant: every request that names it is refused, and
 its service credentials stop working (see "Incident revocation and
@@ -2097,6 +2098,28 @@ wyctl --daemon-url "$BASE_URL" tenant unseal --name acme \
 
 Tenants cannot be deleted (`/tenants/delete` answers `501`); seal one to
 retire it.
+
+### Tenant owners
+
+Every tenant has exactly one recorded owner. A tenant created through
+`tenant create` is owned by the subject that created it. The built-in tenant
+`__wr_default` is owned by the reserved system owner `wr.system`, never by a
+person, and bootstrapping an administrator does not change that. No subject
+may use the reserved `wr.` namespace, and a `svc:` subject cannot own a
+tenant. The store refuses any tenant without a valid owner, and an owner
+cannot be changed.
+
+Stores created before tenants recorded an owner are migrated the first time
+the upgraded daemon opens them. `__wr_default` gets
+`wr.system`. Every other tenant gets the subject of its earliest
+`wr.system_admin` grant on that tenant, which is the grant tenant creation
+writes for its creator. A tenant without such a grant, or whose creator cannot
+own a tenant, is never guessed at. The migration names each one in a warning
+and fails, and the store keeps its previous shape:
+
+```
+tenant owner migration: no owner can be resolved for tenant 'acme'
+```
 
 ## Tenant Resource Quotas
 

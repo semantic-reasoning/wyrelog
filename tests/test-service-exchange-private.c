@@ -87,11 +87,13 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b",
+      "tenant-owner", &created), ==,
       WYRELOG_E_OK);
 }
 

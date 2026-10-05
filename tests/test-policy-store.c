@@ -627,10 +627,12 @@ check_store_manages_tenant_registry (void)
   if (wyl_policy_store_tenant_is_active (store, "__wr_default", &active)
       != WYRELOG_E_OK || !active)
     return 68;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 69;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || created)
     return 70;
   if (wyl_policy_store_set_tenant_sealed (store, "tenant-a", TRUE)
@@ -642,7 +644,8 @@ check_store_manages_tenant_registry (void)
   if (wyl_policy_store_set_tenant_sealed (store, "__wr_default", TRUE)
       != WYRELOG_E_POLICY)
     return 73;
-  if (wyl_policy_store_create_tenant (store, "bad tenant", &created)
+  if (wyl_policy_store_create_tenant (store, "bad tenant",
+      "tenant-owner", &created)
       != WYRELOG_E_INVALID)
     return 74;
 
@@ -1307,7 +1310,8 @@ check_restore_selected_predecessor_migration (void)
   gboolean created = FALSE;
   if (root == NULL || wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      || wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 9620;
   const wyl_policy_fact_graph_column_t columns[] = { { "subject", "symbol" } };
@@ -1422,10 +1426,12 @@ check_store_manages_fact_graph_registry (void)
     return 401;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 402;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 403;
-  if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 404;
 
@@ -1520,7 +1526,8 @@ check_store_unseals_only_the_reversible_population (void)
     return 9701;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9702;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 9703;
 
@@ -1652,7 +1659,8 @@ check_store_unseals_only_the_reversible_population (void)
    * tenants holding one graph name, both sealed at the moment of the call, is
    * what separates them. */
   gboolean tenant_b = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-b", &tenant_b)
+  if (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner", &tenant_b)
       != WYRELOG_E_OK || !tenant_b)
     return 9725;
   for (gsize i = 0; i < 2; i++) {
@@ -1823,7 +1831,8 @@ check_store_unseal_loses_a_race_without_writing (void)
     return 9741;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9742;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 9743;
 
@@ -1996,7 +2005,8 @@ check_store_seals_fact_graph_registry (void)
     return 421;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 422;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 423;
 
@@ -2060,7 +2070,8 @@ check_store_rejects_fact_graph_registry_escapes (void)
     return 441;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 442;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 443;
 
@@ -2119,7 +2130,8 @@ check_store_rejects_fact_graph_reserved_metadata (void)
     return 461;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 462;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 463;
 
@@ -2204,7 +2216,8 @@ check_store_fact_graph_metadata_only (void)
     return 481;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 482;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 483;
 
@@ -2270,10 +2283,12 @@ check_store_pins_fact_root_identity (void)
     return 491;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 492;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 493;
-  if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 494;
 
@@ -7090,7 +7105,8 @@ check_store_provisions_fact_graph (void)
     return 961;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 962;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 963;
 
@@ -7227,7 +7243,8 @@ check_store_fact_graph_materialization_state (void)
   gboolean created = FALSE;
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      || wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 979;
 

@@ -4531,7 +4531,8 @@ check_retained_external_publication_outcomes (void)
     return 856;
 
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (store, verify.scope, &created)
+  if (wyl_policy_store_create_tenant (store, verify.scope,
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created
       || wyl_engine_session_finish_external_publication (session, store,
       generation, WYL_DURABLE_COMMIT_COMMITTED,
@@ -4832,7 +4833,8 @@ check_session_state_witness_survives_durable_restart (void)
   }
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-      "restart-witness-tenant", &created) != WYRELOG_E_OK || !created
+      "restart-witness-tenant",
+      "tenant-owner", &created) != WYRELOG_E_OK || !created
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     g_clear_object (&handle);
     rmdir_recursive (dir);
@@ -5108,6 +5110,8 @@ typedef struct
 {
   const WylAuditEvent *event;
   const gchar *audit_id;
+  /* NULL records the creator as owner, as the daemon does. */
+  const gchar *owner;
 } CommittedCrashPublication;
 
 static wyrelog_error_t
@@ -5117,7 +5121,8 @@ mutate_committed_crash_publication (wyl_policy_store_t *store, gpointer data)
   gboolean created = FALSE;
   gboolean inserted = FALSE;
   wyrelog_error_t rc = wyl_policy_store_create_tenant (store,
-          "crash-restart-tenant", &created);
+          "crash-restart-tenant", publication->owner != NULL ?
+          publication->owner : "crash-restart-actor", &created);
   if (rc != WYRELOG_E_OK || !created)
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
   rc = wyl_policy_store_grant_role_membership (store,
@@ -5261,7 +5266,8 @@ check_committed_publication_fault_stages_and_bundle_classifier (void)
       WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
   if (partial_audit_id == NULL
       || wyl_policy_store_create_tenant (partial_store,
-      "crash-restart-tenant", &created) != WYRELOG_E_OK || !created
+      "crash-restart-tenant", "crash-restart-actor", &created) !=
+      WYRELOG_E_OK || !created
       || wyl_policy_store_classify_tenant_create_bundle (partial_store,
       &partial_bundle, &partial_state) != WYRELOG_E_OK
       || partial_state != WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN)
@@ -5277,6 +5283,48 @@ check_committed_publication_fault_stages_and_bundle_classifier (void)
   if (read_rc == WYRELOG_E_OK
       || partial_state != WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN)
     return 974;
+
+  /* Every row of the bundle is present, but the tenant is owned by someone
+   * other than its creator: that is not the publication this request made,
+   * so recovery must not report it as applied. */
+  g_autoptr (WylHandle) owner_handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &owner_handle) != WYRELOG_E_OK)
+    return 975;
+  g_autoptr (WylAuditEvent) owner_event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (owner_event, "crash-restart-actor");
+  wyl_audit_event_set_action (owner_event, "tenant_create");
+  wyl_audit_event_set_resource_id (owner_event, "crash-restart-tenant");
+  wyl_audit_event_set_request_id (owner_event, "owner-mismatch-request");
+  wyl_audit_event_set_decision (owner_event, WYL_DECISION_ALLOW);
+  g_autofree gchar *owner_audit_id =
+      wyl_audit_event_dup_id_string (owner_event);
+  CommittedCrashPublication owner_publication = {
+    owner_event, owner_audit_id, "someone-else",
+  };
+  WylPolicyTenantCreateBundle owner_bundle =
+      committed_crash_durable_bundle (&owner_publication);
+  ExternalPublicationVerify owner_verify = {
+    .scope = "crash-restart-tenant",
+    .state = "active",
+  };
+  g_autoptr (WylEngineSession) owner_session =
+      wyl_engine_session_acquire (owner_handle);
+  WylCommittedPublicationStage owner_stage =
+      WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+  if (owner_audit_id == NULL || owner_session == NULL
+      || wyl_engine_session_run_committed_publication (owner_session,
+      mutate_committed_crash_publication, &owner_publication,
+      verify_external_scope_publication, &owner_verify, NULL, NULL,
+      &owner_stage) != WYRELOG_E_OK)
+    return 976;
+  g_clear_pointer (&owner_session, wyl_engine_session_release);
+  WylPolicyTenantCreateBundleState owner_state =
+      WYL_POLICY_TENANT_CREATE_BUNDLE_ALL_PRESENT;
+  if (wyl_policy_store_classify_tenant_create_bundle
+        (wyl_handle_get_policy_store (owner_handle), &owner_bundle,
+      &owner_state) != WYRELOG_E_OK
+      || owner_state != WYL_POLICY_TENANT_CREATE_BUNDLE_UNKNOWN)
+    return 977;
   return 0;
 }
 
@@ -6769,17 +6817,21 @@ check_tenant_registry_projects_effective_scope_state (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-projection-active",
+      "tenant-owner",
       &created) != WYRELOG_E_OK || !created)
     return 861;
   if (wyl_policy_store_create_tenant (store, "tenant-projection-closed",
+      "tenant-owner",
       &created) != WYRELOG_E_OK || !created
       || wyl_policy_store_set_tenant_sealed (store,
       "tenant-projection-closed", TRUE) != WYRELOG_E_OK)
     return 862;
   if (wyl_policy_store_create_tenant (store, "svc:tenant-projection",
+      "tenant-owner",
       &created) != WYRELOG_E_OK || !created)
     return 863;
   if (wyl_policy_store_create_tenant (store, "tenant-session-collision",
+      "tenant-owner",
       &created) != WYRELOG_E_OK || !created
       || wyl_policy_store_set_tenant_sealed (store,
       "tenant-session-collision", TRUE) != WYRELOG_E_OK
@@ -6890,6 +6942,7 @@ check_scope_projection_requires_compatible_engine_relation (void)
   if (wyl_init (NULL, &tenant_handle) != WYRELOG_E_OK
       || wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (tenant_handle), "nondefault-tenant",
+      "tenant-owner",
       &created) != WYRELOG_E_OK || !created
       || wyl_handle_open_engine_pair (tenant_handle, tmpdir)
       != WYRELOG_E_POLICY) {

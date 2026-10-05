@@ -3206,7 +3206,10 @@ wyl_daemon_http_configure_tenant_for_test (SoupServer *server,
           WYL_DAEMON_POLICY_WRITE_OWNER_TEST_CONFIGURE, &write);
   if (rc == WYRELOG_E_OK && create) {
     gboolean created = FALSE;
-    rc = wyl_policy_store_create_tenant (write.store, tenant, &created);
+    /* Test configuration has no requesting subject; a fixed owner keeps
+     * the #1338 invariant without widening every caller. */
+    rc = wyl_policy_store_create_tenant (write.store, tenant,
+            "test-tenant-owner", &created);
     if (rc == WYRELOG_E_OK && !created)
       rc = WYRELOG_E_POLICY;
   }
@@ -10463,7 +10466,7 @@ mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
   TenantLifecyclePublication *publication = data;
   wyrelog_error_t rc = publication->create ?
       wyl_policy_store_create_tenant (store, publication->tenant,
-          publication->changed) :
+          publication->creator_subject, publication->changed) :
       wyl_policy_store_set_tenant_sealed_full (store, publication->tenant,
           FALSE, publication->changed);
   if (rc == WYRELOG_E_OK)

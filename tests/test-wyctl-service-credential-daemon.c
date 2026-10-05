@@ -213,7 +213,7 @@ main (void)
 
   gboolean tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-      WYL_TEST_SERVICE_TENANT, &tenant_created) != WYRELOG_E_OK
+      WYL_TEST_SERVICE_TENANT, "tenant-owner", &tenant_created) != WYRELOG_E_OK
       || !tenant_created)
     return wyl_test_normalize_exit_status (2);
 

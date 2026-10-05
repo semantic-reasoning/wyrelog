@@ -286,19 +286,57 @@ assert_column (sqlite3 *db, const gchar *table, const gchar *column)
   g_assert_true (found);
 }
 
+/* A predecessor store records a tenant's creator only as its first
+ * wr.system_admin grant, which is what the #1338 owner backfill reads.  The
+ * pre-537 fixtures carry no role tables, so lay down the event table with
+ * the store's own definition; the parent role row arrives with the full
+ * schema, hence foreign keys stay off for this one insert. */
+static void
+seed_legacy_creator_grant (sqlite3 *db, const gchar *tenant_id)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "PRAGMA foreign_keys=OFF;"
+    "CREATE TABLE IF NOT EXISTS role_membership_events ("
+    "  event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  subject_id TEXT NOT NULL,"
+    "  role_id TEXT NOT NULL,"
+    "  scope TEXT NOT NULL,"
+    "  operation TEXT NOT NULL CHECK (operation IN ('grant', 'revoke')),"
+    "  created_at INTEGER NOT NULL,"
+    "  FOREIGN KEY (role_id) REFERENCES roles (role_id)"
+    ");"
+    "INSERT INTO role_membership_events "
+    "(subject_id,role_id,scope,operation,created_at) "
+    "VALUES ('tenant-owner','wr.system_admin','%s','grant',1);"
+    "PRAGMA foreign_keys=ON;", tenant_id);
+  exec_ok (db, sql);
+}
+
+static gboolean
+tenants_have_owner_column (sqlite3 *db)
+{
+  return scalar_int64 (db,
+             "SELECT count(*) FROM pragma_table_info('tenants') "
+             "WHERE name='owner_subject_id';") == 1;
+}
+
 static void
 insert_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id,
     gboolean sealed)
 {
+  gboolean owned = tenants_have_owner_column (db);
+  if (!owned)
+    seed_legacy_creator_grant (db, tenant_id);
   g_autofree gchar *sql =
       g_strdup_printf
-        ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-          "VALUES ('%s',%d,1,1);" "INSERT INTO fact_graphs "
+        ("INSERT INTO tenants (tenant_id,%ssealed,created_at,updated_at) "
+          "VALUES ('%s',%s%d,1,1);" "INSERT INTO fact_graphs "
           "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
           "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
           "('%s','%s','file:///legacy','/legacy',1,'%s',%d,1,1,NULL);",
-          tenant_id, sealed ? 1 : 0, tenant_id, graph_id, tenant_id,
-          sealed ? 1 : 0);
+          owned ? "owner_subject_id," : "", tenant_id,
+          owned ? "'tenant-owner'," : "", sealed ? 1 : 0, tenant_id,
+          graph_id, tenant_id, sealed ? 1 : 0);
   exec_ok (db, sql);
 }
 
@@ -1575,6 +1613,7 @@ test_savepoint_never_nests_into_foreign_publication_transaction (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   TransactionRaceGate gate;
   transaction_race_gate_init (&gate, store);
@@ -3388,8 +3427,10 @@ test_pre_sealed_generation_guards_migrate (void)
       "ALTER TABLE tenants DROP COLUMN sealed_generation;");
   install_pre_sealed_generation_tenant_guards (db, FALSE);
   exec_ok (db,
-      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) VALUES"
-      "('pre-guard-open',0,1,1),('pre-guard-sealed',1,1,1);");
+      "INSERT INTO tenants (tenant_id,owner_subject_id,"
+      "sealed,created_at,updated_at) VALUES"
+      "('pre-guard-open','tenant-owner',0,1,1),('pre-guard-sealed',"
+      "'tenant-owner',1,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (scalar_int64 (db,
       "SELECT count(*) FROM tenants WHERE "
@@ -3575,12 +3616,13 @@ test_tenant_state_constraints (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
-      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('tenant-a',0,1,1);");
+      "INSERT INTO tenants (tenant_id,owner_subject_id,"
+      "sealed,created_at,updated_at) "
+      "VALUES ('tenant-a','tenant-owner',0,1,1);");
   exec_rejected (db,
-      "INSERT INTO tenants (tenant_id,sealed,lifecycle_state,"
+      "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,lifecycle_state,"
       "lifecycle_generation,reconciliation_generation,created_at,updated_at) "
-      "VALUES ('tenant-direct',0,'active',1,1,1,1);");
+      "VALUES ('tenant-direct','tenant-owner',0,'active',1,1,1,1);");
   exec_rejected (db,
       "UPDATE tenants SET lifecycle_state='active',"
       "lifecycle_generation=1 WHERE tenant_id='tenant-a';");
@@ -3617,6 +3659,7 @@ test_tenant_state_constraints (void)
 
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-generic",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
@@ -3643,10 +3686,12 @@ test_graph_quota_store_api (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-a", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-a",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-b", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-b",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
 
@@ -3707,16 +3752,20 @@ test_fact_concurrent_open_quota_store_api (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-a", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-a",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-b", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-b",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-c", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-c",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-d", &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-d",
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
 
@@ -4156,6 +4205,7 @@ test_fact_concurrent_open_quota_cross_handle_reopen (void)
   g_assert_cmpint (wyl_policy_store_create_schema (setup), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (setup, "race-tenant",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_register_fact_open_owner (setup,
@@ -4252,6 +4302,7 @@ open_fact_open_fault_fixture (const gchar *path,
       WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (*out_store, "fault-tenant",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_register_fact_open_owner (*out_store,
       "fault-owner"), ==, WYRELOG_E_OK);
@@ -4538,10 +4589,12 @@ test_graph_quota_reservation_survives_reopen (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-reopen",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-zero",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
@@ -4653,6 +4706,7 @@ test_graph_quota_reservation_survives_reopen (void)
    * operation, which an identical retry resumes rather than double-counting. */
   created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-fallback",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_set_graph_quota_limit (store,
@@ -4810,6 +4864,7 @@ test_tenant_sealed_generation_overflow (void)
       "INSERT INTO tenants"
       " (tenant_id,sealed,sealed_generation,created_at,updated_at)"
       " VALUES ('tenant-max',0,9223372036854775807,1,1);");
+  seed_legacy_creator_grant (db, "tenant-max");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "tenant-max",
       TRUE), ==, WYRELOG_E_POLICY);
@@ -4830,15 +4885,20 @@ test_integer_domain_constraints (void)
 
   exec_rejected (db,
       "INSERT INTO tenants "
-      "(tenant_id,sealed,lifecycle_generation,created_at,updated_at) "
-      "VALUES ('tenant-text-generation',0,'not-an-integer',1,1);");
+      "(tenant_id,owner_subject_id,sealed,lifecycle_generation,created_at,"
+      "updated_at) "
+      "VALUES ('tenant-text-generation','tenant-owner',0,'not-an-integer',1,"
+      "1);");
   exec_rejected (db,
       "INSERT INTO tenants "
-      "(tenant_id,sealed,reconciliation_generation,created_at,updated_at) "
-      "VALUES ('tenant-overflow-generation',0,9223372036854775808,1,1);");
+      "(tenant_id,owner_subject_id,sealed,reconciliation_generation,created_at,"
+      "updated_at) "
+      "VALUES ('tenant-overflow-generation','tenant-owner',0,"
+      "9223372036854775808,1,1);");
   exec_ok (db,
-      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('tenant-canonical',0,1,1);");
+      "INSERT INTO tenants (tenant_id,owner_subject_id,"
+      "sealed,created_at,updated_at) "
+      "VALUES ('tenant-canonical','tenant-owner',0,1,1);");
 
   const gchar *invalid_graphs[] = {
     "'not-an-integer',1,0,0",
@@ -5196,7 +5256,8 @@ prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
     guint64 *out_lifecycle_generation, guint64 *out_reconciliation_generation)
 {
   g_autofree gchar *insert = g_strdup_printf ("INSERT INTO tenants "
-          "(tenant_id,sealed,created_at,updated_at) VALUES ('%s',0,1,1);",
+          "(tenant_id,owner_subject_id,sealed,created_at,updated_at) VALUES "
+          "('%s','tenant-owner',0,1,1);",
           tenant_id);
   exec_ok (db, insert);
   *out_lifecycle_generation = 0;
@@ -5334,14 +5395,17 @@ test_complete_transition_tables_and_overflow (void)
       "DROP TRIGGER tenant_authority_insert_guard;"
       "DROP TRIGGER fact_graph_authority_insert_guard;");
   exec_ok (db,
-      "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
-      "VALUES('tenant-transitions',0,1,1);"
-      "INSERT INTO tenants(tenant_id,sealed,reconciliation_generation,"
+      "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,created_at,"
+      "updated_at) "
+      "VALUES('tenant-transitions','tenant-owner',0,1,1);"
+      "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,"
+      "reconciliation_generation,"
       "created_at,updated_at) VALUES"
-      "('tenant-reconciliation-max',0,9223372036854775807,1,1);"
-      "INSERT INTO tenants(tenant_id,sealed,lifecycle_state,"
+      "('tenant-reconciliation-max','tenant-owner',0,9223372036854775807,1,1);"
+      "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,lifecycle_state,"
       "lifecycle_generation,created_at,updated_at) VALUES"
-      "('tenant-lifecycle-max',0,'active',9223372036854775807,1,1);"
+      "('tenant-lifecycle-max','tenant-owner',0,'active',9223372036854775807,1,"
+      "1);"
       "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
       "schema_version,owner_scope,sealed,lifecycle_state,store_uuid,"
       "format_version,path_encoding_version,lifecycle_generation,"
@@ -5512,8 +5576,9 @@ test_mutation_faults_roll_back (void)
 
   exec_ok (db,
       "BEGIN;"
-      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('tenant-outer-marker',0,1,1);");
+      "INSERT INTO tenants (tenant_id,owner_subject_id,"
+      "sealed,created_at,updated_at) "
+      "VALUES ('tenant-outer-marker','tenant-owner',0,1,1);");
   wyl_policy_store_graph_authority_mutation_fail_once (store,
       WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   WylPolicyAuthorityMutationResult result;
@@ -5685,8 +5750,9 @@ test_preexisting_invalid_row_fails_closed (void)
       "DROP TRIGGER tenant_authority_update_guard;"
       "PRAGMA ignore_check_constraints=ON;"
       "INSERT INTO tenants "
-      "(tenant_id,sealed,lifecycle_generation,created_at,updated_at) "
-      "VALUES ('tenant-invalid',0,'not-an-integer',1,1);"
+      "(tenant_id,owner_subject_id,sealed,lifecycle_generation,created_at,"
+      "updated_at) "
+      "VALUES ('tenant-invalid','tenant-owner',0,'not-an-integer',1,1);"
       "PRAGMA ignore_check_constraints=OFF;");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
@@ -6625,6 +6691,7 @@ test_fact_write_rate_quota_persists (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-persist",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   /* Replace the typed table with the predecessor shape before reopening.
@@ -6783,6 +6850,7 @@ test_fact_write_rate_admission_clock_remainder (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-clock",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   WylPolicyFactQuotaConfig config = {
     .has_limit = TRUE,
@@ -6852,6 +6920,7 @@ test_fact_write_rate_admission_persists_and_bounds (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-admit",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   WylPolicyFactQuotaConfig config = {
@@ -6958,6 +7027,7 @@ test_fact_logical_quota_cancelled_reopen (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "reopen-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   WylPolicyFactLogicalQuotaConfig config = {
     .has_limit = TRUE,
@@ -7115,8 +7185,10 @@ test_fact_physical_quota_ledger (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-b",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   exec_ok (wyl_policy_store_get_db (store),
       "INSERT INTO fact_graphs (tenant_id,graph_id,storage_uri,storage_path,"
@@ -7271,8 +7343,10 @@ test_fact_logical_quota_ledger (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-b",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
 
   WylPolicyFactLogicalQuotaConfig config = {
@@ -7431,10 +7505,265 @@ test_fact_logical_quota_ledger (void)
   cleanup_store_path (store_root, store_path);
 }
 
+static gchar *
+tenant_owner_of (wyl_policy_store_t *store, const gchar *tenant_id)
+{
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, tenant_id,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_nonnull (record->owner_subject_id);
+  gchar *owner = g_strdup (record->owner_subject_id);
+  wyl_policy_tenant_authority_record_free (record);
+  return owner;
+}
+
+static void
+test_default_tenant_is_system_owned (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  assert_column (wyl_policy_store_get_db (store), "tenants",
+      "owner_subject_id");
+
+  g_autofree gchar *owner = tenant_owner_of (store, "__wr_default");
+  g_assert_cmpstr (owner, ==, "wr.system");
+
+  /* Bootstrapping an admin does not take ownership of a built-in tenant. */
+  gboolean applied = FALSE;
+  g_autofree gchar *existing = NULL;
+  g_assert_cmpint (wyl_policy_store_apply_bootstrap_admin (store, "alice",
+      FALSE, &applied, &existing), ==, WYRELOG_E_OK);
+  g_assert_true (applied);
+  g_autofree gchar *after = tenant_owner_of (store, "__wr_default");
+  g_assert_cmpstr (after, ==, "wr.system");
+}
+
+static void
+test_create_tenant_records_owner (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme", "alice",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_true (created);
+  g_autofree gchar *owner = tenant_owner_of (store, "acme");
+  g_assert_cmpstr (owner, ==, "alice");
+
+  /* Creating an existing tenant is a no-op and never rewrites its owner. */
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme", "bob",
+      &created), ==, WYRELOG_E_OK);
+  g_assert_false (created);
+  g_autofree gchar *kept = tenant_owner_of (store, "acme");
+  g_assert_cmpstr (kept, ==, "alice");
+
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_list_tenant_authorities (store, &records),
+      ==, WYRELOG_E_OK);
+  guint owned = 0;
+  for (guint i = 0; i < records->len; i++) {
+    const WylPolicyTenantAuthorityRecord *record = records->pdata[i];
+    if (g_str_equal (record->tenant_id, "acme")) {
+      g_assert_cmpstr (record->owner_subject_id, ==, "alice");
+      owned++;
+    } else if (g_str_equal (record->tenant_id, "__wr_default")) {
+      g_assert_cmpstr (record->owner_subject_id, ==, "wr.system");
+      owned++;
+    }
+  }
+  g_assert_cmpuint (owned, ==, 2);
+}
+
+static void
+test_create_tenant_refuses_invalid_owner (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_autofree gchar *too_long = g_strnfill (129, 'a');
+  const gchar *invalid[] = {
+    "", ".", "..", "a b", "alice/bob", "wr.system", "wr.alice", "svc:app",
+    too_long,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    gboolean created = TRUE;
+    g_test_message ("owner '%s'", invalid[i]);
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme",
+        invalid[i], &created), ==, WYRELOG_E_INVALID);
+    g_assert_false (created);
+  }
+  gboolean created = TRUE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme", NULL,
+      &created), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM tenants WHERE tenant_id='acme';"), ==, 0);
+  /* The default tenant already exists, and no caller may name it owned by
+   * a person. */
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "__wr_default",
+      "alice", &created), ==, WYRELOG_E_INVALID);
+}
+
+static void
+test_tenant_owner_guards (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  const gchar *rejected_inserts[] = {
+    "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+    "VALUES ('no-owner',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('empty-owner','',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('system-owner','wr.system',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('reserved-owner','wr.alice',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('service-owner','svc:app',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('spaced-owner','a b',0,1,1);",
+    "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+    "updated_at) VALUES ('dot-owner','..',0,1,1);",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (rejected_inserts); i++)
+    exec_rejected (db, rejected_inserts[i]);
+  exec_ok (db,
+      "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
+      "updated_at) VALUES ('owned','alice',0,1,1);");
+  exec_rejected (db,
+      "UPDATE tenants SET owner_subject_id='bob' WHERE tenant_id='owned';");
+  exec_rejected (db,
+      "UPDATE tenants SET owner_subject_id='' WHERE tenant_id='owned';");
+  exec_rejected (db,
+      "UPDATE tenants SET owner_subject_id='alice' "
+      "WHERE tenant_id='__wr_default';");
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM tenants WHERE "
+      "(tenant_id='owned' AND owner_subject_id='alice') OR "
+      "(tenant_id='__wr_default' AND owner_subject_id='wr.system');"), ==, 2);
+}
+
+/* Reproduce a store written before tenants recorded an owner: the column
+ * and its guards did not exist. */
+static void
+strip_tenant_owner_schema (sqlite3 *db)
+{
+  exec_ok (db,
+      "DROP TRIGGER tenant_owner_insert_guard;"
+      "DROP TRIGGER tenant_owner_update_guard;"
+      "ALTER TABLE tenants DROP COLUMN owner_subject_id;");
+}
+
+static void
+insert_unowned_tenant (sqlite3 *db, const gchar *tenant_id)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+    "VALUES ('%s',0,1,1);", tenant_id);
+  exec_ok (db, sql);
+}
+
+static void
+insert_role_event (sqlite3 *db, const gchar *subject, const gchar *role,
+    const gchar *scope, const gchar *operation)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "INSERT INTO role_membership_events "
+    "(subject_id,role_id,scope,operation,created_at) "
+    "VALUES ('%s','%s','%s','%s',1);", subject, role, scope, operation);
+  exec_ok (db, sql);
+}
+
+static void
+test_pre_owner_tenants_migrate_from_creator_grant (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  strip_tenant_owner_schema (db);
+  insert_unowned_tenant (db, "acme");
+  insert_unowned_tenant (db, "revoked");
+  /* The creator's grant is the first wr.system_admin grant on the tenant;
+   * later grants, other roles, and other scopes do not move ownership. */
+  insert_role_event (db, "alice", "wr.system_admin", "acme", "grant");
+  insert_role_event (db, "bob", "wr.system_admin", "acme", "grant");
+  insert_role_event (db, "carol", "wr.analyst", "revoked", "grant");
+  insert_role_event (db, "dave", "wr.system_admin", "revoked", "grant");
+  insert_role_event (db, "dave", "wr.system_admin", "revoked", "revoke");
+  insert_role_event (db, "erin", "wr.system_admin", "elsewhere", "grant");
+
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_autofree gchar *acme = tenant_owner_of (store, "acme");
+  g_autofree gchar *revoked = tenant_owner_of (store, "revoked");
+  g_autofree gchar *builtin = tenant_owner_of (store, "__wr_default");
+  g_assert_cmpstr (acme, ==, "alice");
+  g_assert_cmpstr (revoked, ==, "dave");
+  g_assert_cmpstr (builtin, ==, "wr.system");
+
+  /* The migrated store carries the same guards as a fresh one, and a
+   * second open is a no-op. */
+  exec_rejected (db,
+      "UPDATE tenants SET owner_subject_id='bob' WHERE tenant_id='acme';");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_autofree gchar *again = tenant_owner_of (store, "acme");
+  g_assert_cmpstr (again, ==, "alice");
+}
+
+static void
+test_unresolvable_tenant_owner_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  strip_tenant_owner_schema (db);
+  insert_unowned_tenant (db, "acme");
+  insert_unowned_tenant (db, "orphan");
+  insert_unowned_tenant (db, "service-made");
+  insert_role_event (db, "alice", "wr.system_admin", "acme", "grant");
+  /* A creator that cannot own a tenant is as unresolvable as none. */
+  insert_role_event (db, "svc:app", "wr.system_admin", "service-made",
+      "grant");
+
+  g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*orphan*");
+  g_test_expect_message (NULL, G_LOG_LEVEL_WARNING, "*service-made*");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_test_assert_expected_messages ();
+  /* Nothing was assigned: the store still has the predecessor shape. */
+  g_assert_cmpint (scalar_int64 (db,
+      "SELECT count(*) FROM pragma_table_info('tenants') "
+      "WHERE name='owner_subject_id';"), ==, 0);
+
+  /* Once every tenant has a resolvable creator, the same store migrates. */
+  insert_role_event (db, "bob", "wr.system_admin", "orphan", "grant");
+  exec_ok (db, "DELETE FROM tenants WHERE tenant_id='service-made';");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_autofree gchar *orphan = tenant_owner_of (store, "orphan");
+  g_assert_cmpstr (orphan, ==, "bob");
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/default-system-owned",
+      test_default_tenant_is_system_owned);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/create-records-owner",
+      test_create_tenant_records_owner);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/refuses-invalid",
+      test_create_tenant_refuses_invalid_owner);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/guards",
+      test_tenant_owner_guards);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/migrate-from-creator",
+      test_pre_owner_tenants_migrate_from_creator_grant);
+  g_test_add_func ("/policy/graph-authority/tenant-owner/unresolvable-fails",
+      test_unresolvable_tenant_owner_fails_closed);
   g_test_add_func ("/policy/graph-authority/recovery-mac-handle-contract",
       test_recovery_mac_handle_contract);
   g_test_add_func ("/policy/graph-authority/recovery-mac-close-race",

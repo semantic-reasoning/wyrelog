@@ -40,8 +40,9 @@ seed_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id)
 {
   g_autofree gchar *sql =
       g_strdup_printf
-        ("INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-          "VALUES ('%s',0,1,1);" "INSERT INTO fact_graphs "
+        ("INSERT INTO tenants (tenant_id,owner_subject_id,"
+          "sealed,created_at,updated_at) "
+          "VALUES ('%s','tenant-owner',0,1,1);" "INSERT INTO fact_graphs "
           "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
           "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "
           "('%s','%s','file:///legacy','/legacy',1,'%s',0,1,1,NULL);",

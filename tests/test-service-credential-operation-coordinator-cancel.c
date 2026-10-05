@@ -192,7 +192,7 @@ test_cancellation_tenant_binding (void)
   prepare_authority (handle, "svc:handoff:executor");
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-      "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
+      "tenant-b", "tenant-owner", &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_autofree gchar *operation_root =
       service_credential_operation_root_for_test (fixture.dir,

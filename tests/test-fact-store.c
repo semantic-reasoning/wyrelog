@@ -5511,7 +5511,8 @@ open_reservation_fixture_init (OpenReservationFixture *fixture,
       || wyl_policy_store_create_schema (fixture->policy) != WYRELOG_E_OK)
     return base + 1;
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (fixture->policy, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (fixture->policy, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK)
     return base + 2;
   return 0;

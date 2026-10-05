@@ -169,56 +169,56 @@
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 201,
+    "line": 202,
     "api": "_Exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 232,
+    "line": 233,
     "api": "_Exit",
     "expression": "91",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 241,
+    "line": 242,
     "api": "_Exit",
     "expression": "92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 335,
+    "line": 336,
     "api": "_Exit",
     "expression": "93",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 342,
+    "line": 343,
     "api": "_Exit",
     "expression": "rc == WYRELOG_E_IO ? 0 : 94",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 403,
+    "line": 404,
     "api": "_Exit",
     "expression": "95",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 411,
+    "line": 412,
     "api": "_Exit",
     "expression": "96",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 418,
+    "line": 419,
     "api": "_Exit",
     "expression": "97",
     "platform": "posix-normalized-wrapper"
@@ -232,35 +232,35 @@
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 1921,
+    "line": 1960,
     "api": "_Exit",
     "expression": "81",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 1932,
+    "line": 1971,
     "api": "_Exit",
     "expression": "outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :\n        (rc == WYRELOG_E_OK\n        && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82)",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3160,
+    "line": 3199,
     "api": "_Exit",
     "expression": "73",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3179,
+    "line": 3218,
     "api": "_Exit",
     "expression": "74",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3183,
+    "line": 3222,
     "api": "_Exit",
     "expression": "75",
     "platform": "posix-normalized-wrapper"
@@ -281,7 +281,7 @@
   },
   {
     "path": "tests/test-policy-store-service-cvk.c",
-    "line": 2581,
+    "line": 2583,
     "api": "_exit",
     "expression": "99",
     "platform": "posix-normalized-wrapper"

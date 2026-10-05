@@ -38,8 +38,9 @@ static void
 seed_graph (wyl_policy_store_t *store)
 {
   exec_sqlite_ok (wyl_policy_store_get_db (store),
-      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
-      "VALUES ('tenant-provision',0,1,1);"
+      "INSERT INTO tenants (tenant_id,owner_subject_id,"
+      "sealed,created_at,updated_at) "
+      "VALUES ('tenant-provision','tenant-owner',0,1,1);"
       "INSERT INTO fact_graphs "
       "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
       "owner_scope,sealed,created_at,updated_at,sealed_at) VALUES "

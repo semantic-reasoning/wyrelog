@@ -44,7 +44,8 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
   rc = wyl_policy_store_create_schema (store);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_create_tenant (store, "tenant-a", &created);
+  rc = wyl_policy_store_create_tenant (store, "tenant-a",
+          "tenant-owner", &created);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -496,7 +497,8 @@ check_schema_quota_concurrent_registration (void)
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return 32;
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (setup, "tenant-a", &created)
+  if (wyl_policy_store_create_tenant (setup, "tenant-a",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
     return 33;
   const wyl_policy_fact_graph_column_t graph_columns[] = {

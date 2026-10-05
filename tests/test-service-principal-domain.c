@@ -462,11 +462,13 @@ test_compound_tenant_seal_zero_survivors (void)
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-b",
+      "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   WylServiceAuthRegistry *registry = NULL;
   g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
@@ -956,6 +958,7 @@ test_concurrent_keyed_tenant_seal (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-concurrent",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   TenantSealThread a = {
     .handle = handle,
@@ -981,7 +984,8 @@ test_concurrent_keyed_tenant_seal (void)
       "request_id='000000000000000000000000216';"), ==, 1);
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
-      "tenant-concurrent-mismatch", &created), ==, WYRELOG_E_OK);
+      "tenant-concurrent-mismatch",
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
   TenantSealThread c = {
     .handle = handle,
     .tenant_id = "tenant-concurrent-mismatch",
@@ -1600,7 +1604,8 @@ test_tenant_seal_publication_recovery_classification (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     g_autofree gchar *tenant = g_strdup_printf ("tenant-recovery-%u", fault);
     gboolean created = FALSE;
-    g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant, &created),
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant,
+        "tenant-owner", &created),
         ==, WYRELOG_E_OK);
     g_assert_true (created);
     TenantRetirementProbe probe = {
@@ -1694,6 +1699,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   sqlite3 *db = handle_db (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-receipt",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 
@@ -1823,6 +1829,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   probe.deny = FALSE;
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-promoted",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   WylPolicyAuthorityMutationResult promoted_result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
@@ -1928,6 +1935,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-restart",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
       "tenant-restart", "operator", "000000000000000000000000214", 1,
@@ -1948,6 +1956,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
 
   store = wyl_handle_get_policy_store (handle);
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-fault",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   wyl_policy_store_service_lifecycle_fail_commit_once (store);
   g_assert_cmpint (wyl_tenant_seal_keyed_with_runtime (handle,
@@ -1976,7 +1985,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
       &runtime, &outcome), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
-      "tenant-receipt-fault", &created), ==, WYRELOG_E_OK);
+      "tenant-receipt-fault", "tenant-owner", &created), ==, WYRELOG_E_OK);
   exec_ok (handle_db (handle),
       "CREATE TRIGGER fail_tenant_seal_receipt BEFORE INSERT ON "
       "service_retirement_receipts WHEN NEW.operation='tenant_seal' "
@@ -2006,7 +2015,7 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-        "tenant-no-selector", &created), ==, WYRELOG_E_OK);
+        "tenant-no-selector", "tenant-owner", &created), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
         "tenant-no-selector", TRUE), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
@@ -2044,7 +2053,7 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-        "tenant-uncertain", &created), ==, WYRELOG_E_OK);
+        "tenant-uncertain", "tenant-owner", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
     };
@@ -2072,7 +2081,7 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-        "tenant-replay-cleanup", &created), ==, WYRELOG_E_OK);
+        "tenant-replay-cleanup", "tenant-owner", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = tenant_seal_authorize,
     };
@@ -2114,7 +2123,8 @@ test_retirement_postcommit_error_normalization (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
-        "tenant-coordination-cleanup", &created), ==, WYRELOG_E_OK);
+        "tenant-coordination-cleanup",
+        "tenant-owner", &created), ==, WYRELOG_E_OK);
     WylPolicyAuthorityMutationResult promoted =
         WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
     g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,

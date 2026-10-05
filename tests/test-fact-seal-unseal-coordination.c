@@ -50,7 +50,8 @@ seed_provisioned_graph (const gchar *path, const gchar *root)
   g_assert_cmpint (wyl_policy_store_open (path, &policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t graph_columns[] = {
     {"order_id", "symbol"}, {"amount", "int64"}, {"expedited", "bool"},

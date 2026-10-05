@@ -165,7 +165,7 @@ encrypted_abrupt_exit (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   for (guint operation = ABRUPT_CREATE; operation <= ABRUPT_RELEASE;
       operation++) {
@@ -301,7 +301,7 @@ storage_contract (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 
   g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
@@ -417,7 +417,7 @@ tenant_bound_generic_writer_denied (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
   init_journal (&initial, OP_A);
   WylFactOfflineRestoreStoreResult result = 0;
@@ -513,7 +513,7 @@ provisioned_handoff_cas (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
       "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
       "schema_version,owner_scope,created_at,updated_at) VALUES"
@@ -664,6 +664,7 @@ not_applied_retry_cas (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 
@@ -738,7 +739,7 @@ claim_matrix_and_schema_tamper (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_exec (db,
@@ -830,7 +831,7 @@ claim_matrix_and_schema_tamper (void)
       WYRELOG_E_OK);
   created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (tenant_first, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (tenant_first, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (tenant_first),
       "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
@@ -881,7 +882,7 @@ rollback_tamper_and_concurrency (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_exec (db,
@@ -941,7 +942,7 @@ rollback_tamper_and_concurrency (void)
       WYRELOG_E_OK);
   created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (concurrent, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (concurrent, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (concurrent),
       "INSERT INTO fact_graphs(tenant_id,graph_id,storage_uri,storage_path,"
@@ -993,7 +994,7 @@ encrypted_publication_and_reopen (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
@@ -1075,7 +1076,7 @@ encrypted_commit_response_lost (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (open_encrypted_store (path, key_path, &store), ==,
       WYRELOG_E_OK);
@@ -1116,7 +1117,7 @@ encrypted_rollback_failure (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (store, "tenant-a", &created), ==, WYRELOG_E_OK);
+        (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (open_encrypted_store (path, key_path, &store), ==,
       WYRELOG_E_OK);

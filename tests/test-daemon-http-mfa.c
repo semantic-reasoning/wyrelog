@@ -760,7 +760,8 @@ check_tenant_sealed_between_login_and_verify (SoupServer *server,
   static const gchar *tenant_id = "mfa-sealed-tenant";
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (store, tenant_id, &created) !=
+  if (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created) !=
       WYRELOG_E_OK)
     return 1100;
 

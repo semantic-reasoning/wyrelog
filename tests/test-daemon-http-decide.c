@@ -5775,6 +5775,17 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
     return 4626;
   g_clear_pointer (&body, g_free);
 
+  /* #1338: the creating subject is recorded as the tenant's owner. */
+  WylPolicyTenantAuthorityRecord *fresh_record = NULL;
+  if (wyl_policy_store_read_tenant_authority (store, fresh, &fresh_record)
+      != WYRELOG_E_OK)
+    return 4638;
+  gboolean owned_by_creator =
+      g_strcmp0 (fresh_record->owner_subject_id, admin) == 0;
+  wyl_policy_tenant_authority_record_free (fresh_record);
+  if (!owned_by_creator)
+    return 4639;
+
   /* The validated service bearer for <tenant>.  The tenant must already
    * exist and be active for the resolver to bind it. */
   /*
@@ -11508,7 +11519,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   gboolean legacy_created = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-legacy",
+  if (wyl_policy_store_create_tenant (store, "tenant-legacy", "tenant-owner",
       &legacy_created) != WYRELOG_E_OK || !legacy_created
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 2257;
@@ -14233,7 +14244,7 @@ prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   rc = wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-          "tenant-a", &created);
+          "tenant-a", "tenant-owner", &created);
   if (rc != WYRELOG_E_OK) {
     if (out_failure != NULL)
       *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED;
@@ -14281,7 +14292,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1923;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &tenant_created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &tenant_created)
       != WYRELOG_E_OK)
     return 1923;
   g_clear_pointer (&body, g_free);
@@ -14601,7 +14613,8 @@ prepare_service_token_subject (WylHandle *handle, const gchar *subject_id)
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
-        (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+        (wyl_handle_get_policy_store (handle), "tenant-a",
+      "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
 }
@@ -18789,6 +18802,7 @@ check_service_principal_management_contract (void)
   }
   tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (policy_store, "tenant-route",
+      "tenant-owner",
       &tenant_created) != WYRELOG_E_OK || !tenant_created
       || wyl_service_principal_create (handle, "svc:tenant-route:worker",
       "Tenant route worker", "human-principal-admin",
@@ -19151,7 +19165,8 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
     return 2110;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
   gboolean tenant_created = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &tenant_created)
+  if (wyl_policy_store_create_tenant (store, "tenant-a",
+      "tenant-owner", &tenant_created)
       != WYRELOG_E_OK || !tenant_created)
     return 2111;
   if (wyl_policy_store_set_principal_state (store, "human-principal-admin",
@@ -21106,7 +21121,7 @@ check_retirement_response_loss_restart_contract (void)
   wyl_daemon_http_suspend_service_auth_maintenance_for_test (env.http.server);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   gboolean seal_tenant_created = FALSE;
-  if (wyl_policy_store_create_tenant (store, "tenant-drop-seal",
+  if (wyl_policy_store_create_tenant (store, "tenant-drop-seal", "tenant-owner",
       &seal_tenant_created) != WYRELOG_E_OK || !seal_tenant_created
       || wyl_policy_store_grant_direct_permission (store,
       "human-principal-admin", "wr.tenant.manage", WYL_TENANT_DEFAULT)
@@ -22592,7 +22607,8 @@ check_service_management_global_principal_cross_tenant (void)
 
   gboolean created = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
-  if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
+  if (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created
       || wyl_request_id_new (principal_request_id,
       sizeof principal_request_id) != WYRELOG_E_OK
