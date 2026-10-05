@@ -129,6 +129,12 @@ wyrelog_error_t wyl_fact_offline_restore_graph_import_run
     gpointer input_data, WylFactOfflineRestoreJournal *out_committed);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+/* The staging match between a backup source, its manifest artifact and its
+ * journal graph (#1348). */
+gboolean wyl_fact_offline_restore_source_artifact_matches_for_test
+  (const WylFactOfflineBackupSourceArtifact * source,
+    const WylFactOfflineBackupArtifact * manifest,
+    const WylFactOfflineRestoreJournalGraph * journal);
 /* Construction-to-quiescence race seam; no destination capability escapes. */
 void wyl_fact_offline_restore_import_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (gpointer), gpointer user_data);
