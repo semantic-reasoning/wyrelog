@@ -3641,6 +3641,12 @@ wyrelog_error_t wyl_policy_store_tenant_restore_reacquire_v7_prove
   (wyl_policy_store_t *store,
     const WylPolicyOfflineRestoreRecord *expected_journal);
 
+/* Read-only proof of the exact published v8 tenant vector after promotion.
+ * Requires the restore claim to be absent and every replacement ACTIVE. */
+wyrelog_error_t wyl_policy_store_tenant_restore_reacquire_v8_prove
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal);
+
 /* The callback proves the complete post-publish filesystem vector under a
  * root writer lease and quiescence for every tenant graph. Its phases are in
  * journal graph order. A reserved selected graph may be linked and synced;
