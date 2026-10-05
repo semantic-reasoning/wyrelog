@@ -10575,10 +10575,61 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   fixture_clear (&fixture);
 }
 
+/* #1348: a filesystem may change a backup source's allocation with no write
+ * (XFS trims speculative preallocation in the background after close), so
+ * the live source is not held to the allocation the backup recorded.  The
+ * manifest and journal still have to agree on it, and content still has to
+ * match. */
+static void
+test_source_match_ignores_live_allocation (void)
+{
+  WylFactOfflineBackupArtifact manifest = {
+    .graph_id = (gchar *) "alpha",
+    .store_uuid = (gchar *) "01890a5d-ac96-774b-bcce-b302099a8057",
+    .format_version = 1, .path_encoding_version = 1,
+    .schema_digest = (gchar *) "digest", .logical_bytes = 4096,
+    .physical_bytes = 8192, .checksum = (gchar *) "checksum",
+  };
+  WylFactOfflineRestoreJournalGraph journal = {
+    .graph_id = (gchar *) "alpha",
+    .store_uuid = (gchar *) "01890a5d-ac96-774b-bcce-b302099a8057",
+    .format_version = 1, .path_encoding_version = 1,
+    .schema_digest = (gchar *) "digest", .logical_bytes = 4096,
+    .physical_bytes = 8192, .checksum = (gchar *) "checksum",
+  };
+  WylFactOfflineBackupSourceArtifact source = {
+    .graph_id = "alpha",
+    .store_uuid = "01890a5d-ac96-774b-bcce-b302099a8057",
+    .format_version = 1, .path_encoding_version = 1,
+    .schema_digest = "digest", .logical_bytes = 4096, .physical_bytes = 8192,
+  };
+  g_assert_true (wyl_fact_offline_restore_source_artifact_matches_for_test
+        (&source, &manifest, &journal));
+
+  /* Trimmed after capture: same content, less allocation. */
+  source.physical_bytes = 4096;
+  g_assert_true (wyl_fact_offline_restore_source_artifact_matches_for_test
+        (&source, &manifest, &journal));
+
+  /* The recorded documents disagreeing is still a mismatch. */
+  journal.physical_bytes = 4096;
+  g_assert_false (wyl_fact_offline_restore_source_artifact_matches_for_test
+        (&source, &manifest, &journal));
+  journal.physical_bytes = 8192;
+
+  /* A content-size change is still a mismatch. */
+  source.logical_bytes = 4097;
+  g_assert_false (wyl_fact_offline_restore_source_artifact_matches_for_test
+        (&source, &manifest, &journal));
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func
+    ("/fact-offline-backup-source/source-match/ignores-live-allocation",
+      test_source_match_ignores_live_allocation);
   g_test_add_func ("/fact-offline-backup-source/import/invalid",
       test_graph_import_invalid_input);
   g_test_add_func ("/fact-offline-backup-source/import/windows-fail-closed",

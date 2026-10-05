@@ -91,10 +91,27 @@ source_artifact_matches (const WylFactOfflineBackupSourceArtifact *source,
          journal->schema_selections))
          && source->logical_bytes == manifest->logical_bytes
          && source->logical_bytes == journal->logical_bytes
-         && source->physical_bytes == manifest->physical_bytes
-         && source->physical_bytes == journal->physical_bytes
+         /* #1348: the manifest and journal must agree on the allocation the
+          * backup recorded, but the live source is not held to it.  A
+          * filesystem changes allocation with no write -- XFS trims
+          * speculative preallocation in the background after close -- so
+          * the source measured now can differ from the capture while every
+          * byte of content is the same.  Content is bound by logical size,
+          * identity and the checksum verified during staging. */
+         && manifest->physical_bytes == journal->physical_bytes
          && g_strcmp0 (manifest->checksum, journal->checksum) == 0;
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+gboolean
+wyl_fact_offline_restore_source_artifact_matches_for_test
+  (const WylFactOfflineBackupSourceArtifact *source,
+    const WylFactOfflineBackupArtifact *manifest,
+    const WylFactOfflineRestoreJournalGraph *journal)
+{
+  return source_artifact_matches (source, manifest, journal);
+}
+#endif
 
 static wyrelog_error_t
 validate_complete_source_set (WylFactOfflineBackupSource *source,
