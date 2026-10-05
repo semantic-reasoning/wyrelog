@@ -4819,6 +4819,204 @@ test_tenant_commit_v5_dispatch (gconstpointer data)
   session_fixture_clear (&f);
 }
 
+static void
+test_tenant_replacements_dispatch (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "success");
+  TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
+  g_assert_cmpint (tenant_preflight_test_worker (&job), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, graphs[i], 5 + i, 0, &f.committed), ==,
+        WYRELOG_E_OK);
+    if (i + 1 < G_N_ELEMENTS (graphs))
+      wyl_fact_offline_restore_journal_clear (&f.committed);
+  }
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&f.committed,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT), ==, WYRELOG_E_OK);
+  import_restore_journal_for_test (f.fixture.policy, &f.committed);
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_v5_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 8, 0, &f.committed), ==, WYRELOG_E_OK);
+  guint64 revision = f.committed.revision;
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision - 1, 0, &f.committed), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (f.committed.graphs);
+  if (g_str_equal (mode, "companion") || g_str_equal (mode, "selection")
+      || g_str_equal (mode, "stale-active")
+      || g_str_equal (mode, "duplicate")
+      || g_str_equal (mode, "foreign")
+      || g_str_equal (mode, "missing-sibling")) {
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+    revision = f.committed.revision;
+    if (g_str_equal (mode, "foreign")
+        || g_str_equal (mode, "missing-sibling")) {
+      const WylFactOfflineRestoreJournalGraph *sibling =
+          g_ptr_array_index (f.committed.graphs, 1);
+      g_autofree gchar *basename = g_str_equal (mode, "foreign") ?
+          g_strdup_printf ("provision-%s.sqlite",
+              sibling->replacement_provisioning_uuid) :
+          g_strdup_printf ("restore-%s.duckdb.superseded",
+              session_operation);
+      g_autofree gchar *path = graph_file_path (&f.fixture, "zeta",
+              basename);
+      g_autofree gchar *parked = graph_file_path (&f.fixture, "zeta",
+              "parked-rollback");
+      if (g_str_equal (mode, "foreign"))
+        g_assert_true (g_file_set_contents (path, "foreign", -1, NULL));
+      else
+        g_assert_cmpint (g_rename (path, parked), ==, 0);
+      wyl_fact_offline_restore_journal_clear (&f.committed);
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          session_operation, revision, 0, &f.committed), !=,
+          WYRELOG_E_OK);
+      g_assert_null (f.committed.graphs);
+      if (g_str_equal (mode, "foreign"))
+        g_assert_cmpint (g_remove (path), ==, 0);
+      else
+        g_assert_cmpint (g_rename (parked, path), ==, 0);
+    }
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    if (g_str_equal (mode, "duplicate")) {
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_reserve_replacements_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          session_operation, revision - 1, 0, &f.committed), ==,
+          WYRELOG_E_BUSY);
+      g_assert_null (f.committed.graphs);
+    }
+  }
+  if (g_str_equal (mode, "selection")
+      || g_str_equal (mode, "stale-active")) {
+    for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_companion_sync_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          session_operation, graphs[i], revision, 0, &f.committed), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpuint (f.committed.revision, ==, revision);
+      wyl_fact_offline_restore_journal_clear (&f.committed);
+    }
+  }
+  if (g_str_equal (mode, "companion")
+      || g_str_equal (mode, "selection")
+      || g_str_equal (mode, "stale-active")) {
+    sqlite3_stmt *active = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+          (f.fixture.policy), "SELECT count(*) FROM "
+        "fact_graph_provisioning WHERE tenant_id='tenant-a' "
+        "AND phase='active';", -1, &active, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (active), ==, SQLITE_ROW);
+    g_assert_cmpint (sqlite3_column_int (active, 0), ==, 2);
+    sqlite3_finalize (active);
+  }
+  if (g_str_equal (mode, "stale-active")) {
+    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+    g_assert_cmpint (sqlite3_exec (db,
+        "CREATE TEMP TRIGGER hold_stale_active BEFORE DELETE ON "
+        "main.fact_graph_provisioning WHEN OLD.graph_id='zeta' AND "
+        "OLD.phase='active' BEGIN SELECT RAISE(ABORT,'stale active'); END;",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, revision, 0, &f.committed), !=,
+        WYRELOG_E_OK);
+    g_assert_null (f.committed.graphs);
+    sqlite3_stmt *counts = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (db,
+        "SELECT (SELECT count(*) FROM fact_graph_provisioning "
+        "WHERE phase='active'),(SELECT count(*) FROM "
+        "fact_graph_provisioning WHERE phase='restore_selected');",
+        -1, &counts, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (counts), ==, SQLITE_ROW);
+    g_assert_cmpint (sqlite3_column_int (counts, 0), ==, 2);
+    g_assert_cmpint (sqlite3_column_int (counts, 1), ==, 0);
+    sqlite3_finalize (counts);
+    g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER hold_stale_active;",
+        NULL, NULL, NULL), ==, SQLITE_OK);
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (!g_str_equal (mode, "normal")
+      && !g_str_equal (mode, "stale-active")
+      && !g_str_equal (mode, "duplicate")) {
+    wyl_policy_store_offline_restore_fail_once (f.fixture.policy,
+        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+          (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+        session_operation, revision, 0, &f.committed), ==, WYRELOG_E_IO);
+    g_assert_null (f.committed.graphs);
+    g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+    g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+            "policy.db", NULL);
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &f.fixture.policy),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (f.fixture.policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (f.fixture.policy, session_operation, &f.committed), ==,
+        WYRELOG_E_OK);
+    revision = f.committed.revision;
+    wyl_fact_offline_restore_journal_clear (&f.committed);
+    if (g_str_equal (mode, "selection")) {
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+          session_operation, revision - 1, 0, &f.committed), ==,
+          WYRELOG_E_BUSY);
+      g_assert_null (f.committed.graphs);
+    }
+  }
+#endif
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_SELECTED_VERSION);
+  g_assert_true (f.committed.replacement_selected_pending_cleanup);
+  g_assert_false (f.committed.policy_generation_published);
+  sqlite3_stmt *selected = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
+        (f.fixture.policy), "SELECT count(*) FROM "
+      "fact_graph_provisioning WHERE tenant_id='tenant-a' "
+      "AND phase='restore_selected';", -1, &selected, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (selected), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (selected, 0), ==, 2);
+  sqlite3_finalize (selected);
+  for (guint i = 0; i < f.committed.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (f.committed.graphs, i);
+    g_autofree gchar *rollback_name = g_strdup_printf
+          ("restore-%s.duckdb.superseded", session_operation);
+    g_autofree gchar *rollback = graph_file_path (&f.fixture,
+            graph->graph_id, rollback_name);
+    g_autofree gchar *old_name = g_strdup_printf ("provision-%s.sqlite",
+            graph->old_provisioning_uuid);
+    g_autofree gchar *old_companion = graph_file_path (&f.fixture,
+            graph->graph_id, old_name);
+    g_assert_true (g_file_test (rollback, G_FILE_TEST_IS_REGULAR));
+    g_assert_true (g_file_test (old_companion, G_FILE_TEST_IS_REGULAR));
+  }
+  revision = f.committed.revision;
+  wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_replacements_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (f.committed.revision, ==, revision);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 typedef struct
 {
@@ -9956,6 +10154,24 @@ main (int argc, char **argv)
       NULL, test_tenant_commit_resume_v5);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-v5-dispatch/full",
       "full", test_tenant_commit_v5_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/normal",
+      "normal", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/foreign-companion",
+      "foreign", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/missing-sibling",
+      "missing-sibling", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/stale-active",
+      "stale-active", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/duplicate-reservation",
+      "duplicate", test_tenant_replacements_dispatch);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/reservation-response",
+      "reservation", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/companion-response",
+      "companion", test_tenant_replacements_dispatch);
+  g_test_add_data_func ("/fact-offline-backup-source/tenant-replacements-dispatch/selection-response",
+      "selection", test_tenant_replacements_dispatch);
+#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-v5-dispatch/mixed",
       "mixed", test_tenant_commit_v5_dispatch);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-commit-v5-dispatch/restart",

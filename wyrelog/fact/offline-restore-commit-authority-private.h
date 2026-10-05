@@ -20,6 +20,14 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_commit_v5_prove_complete
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Read-only selected-vector proof with all rollback and replacement pairs
+ * present under the root lease and all-graph quiescence. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_commit_v7_prove_selected
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Callback-scoped, copied observation. It grants no publication or policy
  * authority and cannot be used as evidence for a later filesystem effect. */
 typedef struct
