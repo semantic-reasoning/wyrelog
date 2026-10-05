@@ -205,6 +205,13 @@ typedef struct
 
 typedef struct
 {
+  gchar *store_path;
+  gchar *keyprovider_path;
+  gchar **assignments;
+} WyctlTenantAssignOwnerOptions;
+
+typedef struct
+{
   gchar *tenant;
   gchar *graph;
   gchar *access_token_file;
@@ -521,6 +528,17 @@ wyctl_tenant_options_clear (WyctlTenantOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlTenantOptions,
     wyctl_tenant_options_clear);
+
+static void
+wyctl_tenant_assign_owner_options_clear (WyctlTenantAssignOwnerOptions *opts)
+{
+  g_clear_pointer (&opts->store_path, g_free);
+  g_clear_pointer (&opts->keyprovider_path, g_free);
+  g_clear_pointer (&opts->assignments, g_strfreev);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlTenantAssignOwnerOptions,
+    wyctl_tenant_assign_owner_options_clear);
 
 static void
 wyctl_fact_verify_options_clear (WyctlFactVerifyOptions *opts)
@@ -6670,6 +6688,156 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   return exit_rc;
 }
 
+/* Print one assign-owner outcome; TRUE when the migration applied it. */
+static gboolean
+tenant_assign_owner_report (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *owner)
+{
+  if (wyl_policy_store_tenant_owner_assignment_applied (store, tenant)) {
+    g_print ("tenant=%s owner=%s assigned=yes\n", tenant, owner);
+    return TRUE;
+  }
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  wyrelog_error_t rc =
+      wyl_policy_store_read_tenant_authority (store, tenant, &record);
+  if (rc == WYRELOG_E_OK)
+    g_print ("tenant=%s owner=%s assigned=no reason=already_owned\n",
+        tenant, record->owner_subject_id);
+  else
+    g_print ("tenant=%s assigned=no reason=%s\n", tenant,
+        rc == WYRELOG_E_NOT_FOUND ? "unknown_tenant" : "read_failed");
+  wyl_policy_tenant_authority_record_free (record);
+  return FALSE;
+}
+
+/* wyctl tenant assign-owner (#1338): the offline remedy for a predecessor
+ * store whose tenant-owner migration fails closed because a tenant has no
+ * creator grant to infer an owner from.  Run with the daemon stopped.  It
+ * opens the store (maintenance-exclusive when a KeyProvider is given), hands
+ * the operator's TENANT=SUBJECT assignments to the migration, and reports
+ * each one.  An assignment never changes a tenant that already has an
+ * owner; such a request, or one naming an unknown tenant, is reported and
+ * fails the command so nothing the operator asked for is silently dropped.
+ */
+static int
+run_tenant_assign_owner (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlTenantAssignOwnerOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+     "Policy store path (SQLite file)", "PATH"},
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+     "KeyProvider spec for encrypted stores", "SPEC"},
+    {"assign", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opts.assignments,
+     "Owner for an unowned tenant (repeatable)", "TENANT=SUBJECT"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new
+        ("- assign owners to tenants a store migration cannot resolve");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected tenant assign-owner argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+  g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
+          global_opts->settings, "default-policy-store");
+  g_autofree gchar *keyprovider_path =
+      wyctl_resolve_string_option (opts.keyprovider_path,
+          global_opts->settings, "default-keyprovider");
+  if (store_path == NULL || store_path[0] == '\0') {
+    g_printerr ("wyctl: tenant assign-owner requires --store\n");
+    return 2;
+  }
+  guint n_assignments = opts.assignments != NULL
+      ? g_strv_length (opts.assignments) : 0;
+  if (n_assignments == 0) {
+    g_printerr ("wyctl: tenant assign-owner requires --assign\n");
+    return 2;
+  }
+  g_autoptr (GPtrArray) tenants = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GPtrArray) owners = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < n_assignments; i++) {
+    const gchar *eq = strchr (opts.assignments[i], '=');
+    if (eq == NULL || eq == opts.assignments[i] || eq[1] == '\0') {
+      g_printerr ("wyctl: invalid --assign (expected TENANT=SUBJECT): %s\n",
+          opts.assignments[i]);
+      return 2;
+    }
+    g_ptr_array_add (tenants, g_strndup (opts.assignments[i],
+        (gsize) (eq - opts.assignments[i])));
+    g_ptr_array_add (owners, g_strdup (eq + 1));
+  }
+
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc;
+  if (keyprovider_path != NULL && keyprovider_path[0] != '\0') {
+    wyl_keyprovider_file_t *kp =
+        wyl_keyprovider_file_new_from_spec (keyprovider_path);
+    if (kp == NULL) {
+      g_printerr ("wyctl: invalid --keyprovider\n");
+      return 2;
+    }
+    wyl_policy_store_open_options_t open_opts = {
+      .path = store_path,
+      .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+      .keyprovider_state = kp,
+      .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+      .require_encrypted = TRUE,
+      .maintenance_exclusive = TRUE,
+    };
+    rc = wyl_policy_store_open_with_options (&open_opts, &store);
+  } else {
+    rc = wyl_policy_store_open (store_path, &store);
+  }
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: open store failed: %s\n", wyrelog_error_string (rc));
+    return 1;
+  }
+  int exit_rc = 0;
+  rc = wyl_policy_store_set_tenant_owner_assignments (store,
+          (const gchar * const *) tenants->pdata,
+          (const gchar * const *) owners->pdata, n_assignments);
+  if (rc == WYRELOG_E_INVALID) {
+    g_printerr ("wyctl: invalid --assign: each tenant must be named once, "
+        "must not be built in, and needs a valid human owner\n");
+    exit_rc = 2;
+  } else if (rc == WYRELOG_E_OK
+      && (rc = wyl_policy_store_create_schema (store)) != WYRELOG_E_OK) {
+    g_printerr ("wyctl: tenant owner migration failed: %s\n",
+        wyrelog_error_string (rc));
+    exit_rc = 1;
+  } else if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: tenant assign-owner failed: %s\n",
+        wyrelog_error_string (rc));
+    exit_rc = 1;
+  }
+  if (exit_rc == 0) {
+    for (guint i = 0; i < n_assignments; i++)
+      if (!tenant_assign_owner_report (store, tenants->pdata[i],
+          owners->pdata[i]))
+        exit_rc = 1;
+  }
+  /* One exit: the close is where an encrypted store publishes, so its
+   * result is part of the outcome. */
+  wyrelog_error_t close_rc = wyl_policy_store_try_close (&store);
+  if (store != NULL)
+    wyl_policy_store_close (store);
+  if (close_rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: persisting the store failed: %s\n",
+        wyrelog_error_string (close_rc));
+    if (exit_rc == 0)
+      exit_rc = 1;
+  }
+  return exit_rc;
+}
+
 static int
 run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -6685,6 +6853,8 @@ run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_tenant_command (global_opts, argc - 1, argv + 1, "seal");
   if (g_strcmp0 (argv[1], "unseal") == 0)
     return run_tenant_command (global_opts, argc - 1, argv + 1, "unseal");
+  if (g_strcmp0 (argv[1], "assign-owner") == 0)
+    return run_tenant_assign_owner (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown tenant command: %s\n", argv[1]);
   return 2;
 }

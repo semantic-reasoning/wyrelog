@@ -53,6 +53,7 @@ EXPECTED_FIELDS = {
     "WyctlTenantOptions":
         ("name", "request_id", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
+    "WyctlTenantAssignOwnerOptions": ("store_path", "keyprovider_path"),
     "WyctlGraphSealOptions":
         ("tenant", "graph", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
@@ -96,6 +97,7 @@ EXPECTED_PARSE_SITES = {
     "run_graph_list": "WyctlGraphOptions",
     "run_graph_seal": "WyctlGraphSealOptions",
     "run_tenant_command": "WyctlTenantOptions",
+    "run_tenant_assign_owner": "WyctlTenantAssignOwnerOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
     "run_fact_quota": "WyctlFactQuotaOptions",
     "run_fact_quota_operation_status": "WyctlFactQuotaOperationOptions",
@@ -126,7 +128,13 @@ EXPECTED_PARSE_SITES = {
     "main": "WyctlOptions",
 }
 
-EXPECTED_STRING_DESTINATIONS = 224
+# String-array options (G_OPTION_ARG_STRING_ARRAY) own a NULL-terminated
+# gchar ** that the holder releases with g_strfreev.
+EXPECTED_ARRAY_FIELDS = {
+    "WyctlTenantAssignOwnerOptions": ("assignments",),
+}
+
+EXPECTED_STRING_DESTINATIONS = 226
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
@@ -137,6 +145,11 @@ STRUCT_RE = re.compile(
     r"typedef struct\s*\{(?P<body>.*?)\}\s*(?P<type>Wyctl\w*Options);",
     re.DOTALL)
 STRING_FIELD_RE = re.compile(r"\bgchar\s+\*(\w+)\s*;")
+ARRAY_FIELD_RE = re.compile(r"\bgchar\s+\*\*(\w+)\s*;")
+STRING_ENTRY_RE = re.compile(r"\bG_OPTION_ARG_STRING\b(?!_)")
+ARRAY_ENTRY_RE = re.compile(r"\bG_OPTION_ARG_STRING_ARRAY\b")
+ARRAY_DESTINATION_RE = re.compile(
+    r"G_OPTION_ARG_STRING_ARRAY,\s*&opts\.(\w+)", re.DOTALL)
 STRING_DESTINATION_RE = re.compile(
     r"G_OPTION_ARG_STRING,\s*&opts\.(\w+)", re.DOTALL)
 ASSIGNMENT_RE = re.compile(
@@ -175,12 +188,21 @@ def parse_sites(text: str) -> list[tuple[str, str, str]]:
 def check_text(text: str, expected_fields=EXPECTED_FIELDS,
                expected_sites=EXPECTED_PARSE_SITES,
                expected_destinations=EXPECTED_STRING_DESTINATIONS,
-               expected_reassignments=EXPECTED_REASSIGNMENTS) -> list[str]:
+               expected_reassignments=EXPECTED_REASSIGNMENTS,
+               expected_array_fields=EXPECTED_ARRAY_FIELDS) -> list[str]:
     violations = []
     holders = {}
+    array_holders = {}
     for match in STRUCT_RE.finditer(text):
         holders[match.group("type")] = tuple(
             STRING_FIELD_RE.findall(match.group("body")))
+        arrays = tuple(ARRAY_FIELD_RE.findall(match.group("body")))
+        if arrays:
+            array_holders[match.group("type")] = arrays
+    if array_holders != expected_array_fields:
+        violations.append(
+            f"string-array holder inventory differs: expected "
+            f"{expected_array_fields}, found {array_holders}")
     if holders != expected_fields:
         violations.append(
             f"option-holder inventory differs: expected {expected_fields}, "
@@ -200,6 +222,11 @@ def check_text(text: str, expected_fields=EXPECTED_FIELDS,
             if body.count(statement) != 1:
                 violations.append(
                     f"{holder}.{field}: expected one explicit cleanup")
+        for field in expected_array_fields.get(holder, ()):
+            statement = f"g_clear_pointer (&opts->{field}, g_strfreev);"
+            if body.count(statement) != 1:
+                violations.append(
+                    f"{holder}.{field}: expected one g_strfreev cleanup")
         auto_pattern = (
             rf"G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC \({holder},\s*{clear_name}\);")
         if re.search(auto_pattern, text, re.DOTALL) is None:
@@ -230,8 +257,22 @@ def check_text(text: str, expected_fields=EXPECTED_FIELDS,
             if destination not in expected_fields[holder]:
                 violations.append(
                     f"{function}: {destination} lacks {holder} cleanup authority")
+        for destination in ARRAY_DESTINATION_RE.findall(prefix):
+            if destination not in expected_array_fields.get(holder, ()):
+                violations.append(
+                    f"{function}: {destination} lacks {holder} array cleanup "
+                    "authority")
 
-    string_entries = text.count("G_OPTION_ARG_STRING")
+    array_entries = len(ARRAY_ENTRY_RE.findall(text))
+    array_destinations = ARRAY_DESTINATION_RE.findall(text)
+    expected_arrays = sum(len(f) for f in expected_array_fields.values())
+    if array_entries != expected_arrays \
+            or len(array_destinations) != array_entries:
+        violations.append(
+            f"expected {expected_arrays} string-array entries targeting "
+            f"opts.*, found {len(array_destinations)} of {array_entries}")
+
+    string_entries = len(STRING_ENTRY_RE.findall(text))
     destinations = STRING_DESTINATION_RE.findall(text)
     if string_entries != expected_destinations:
         violations.append(
@@ -297,7 +338,7 @@ main (int argc, char **argv)
 """
     fields = {"WyctlMiniOptions": ("name",)}
     sites = {"main": "WyctlMiniOptions"}
-    if check_text(fixture, fields, sites, 1, Counter()):
+    if check_text(fixture, fields, sites, 1, Counter(), {}):
         return 1
     mutations = (
         fixture.replace("  g_clear_pointer (&opts->name, g_free);\n", ""),
@@ -306,15 +347,19 @@ main (int argc, char **argv)
         fixture.replace("G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC",
                         "G_DEFINE_BROKEN_CLEANUP_CLEAR_FUNC"),
         fixture.replace("  return 0;", "  opts.name = resolved;\n  return 0;"),
+        # A string-array entry with no declared, g_strfreev-owned field.
+        fixture.replace("    {NULL}\n",
+                        "    {\"many\", 0, 0, G_OPTION_ARG_STRING_ARRAY, "
+                        "&opts.many, \"Many\", \"X\"},\n    {NULL}\n"),
     )
     for mutation in mutations:
-        if not check_text(mutation, fields, sites, 1, Counter()):
+        if not check_text(mutation, fields, sites, 1, Counter(), {}):
             return 1
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "fixture.c"
         path.write_text(fixture, encoding="utf-8")
         if check_text(path.read_text(encoding="utf-8"), fields, sites, 1,
-                      Counter()):
+                      Counter(), {}):
             return 1
     return 0
 

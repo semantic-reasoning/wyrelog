@@ -171,6 +171,7 @@ tests/test-wyctl-publication.c
 tests/test-wyctl-service-credential-daemon.c
 tests/test-wyctl-service-credential.c
 tests/test-wyctl-service-principal.c
+tests/test-wyctl-tenant-owner.c
 tests/test-wyctl-token-file.c
 tests/windows-appverifier-probe-dll.c
 tests/windows-appverifier-probe.c

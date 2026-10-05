@@ -1159,6 +1159,32 @@ if build_client and host_machine.system() != 'windows'
     )
   endif
 
+  # Drives `wyctl tenant assign-owner' (#1338) as a subprocess against a
+  # predecessor policy store whose tenant-owner migration fails closed.
+  test_wyctl_tenant_owner = executable('test-wyctl-tenant-owner',
+    'test-wyctl-tenant-owner.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, glib_dep, sqlite_dep],
+  )
+  if meson.can_run_host_binaries()
+    test('wyctl-tenant-owner', python3,
+      args : [files('run-wyctl-with-private-tmpdir.py'),
+        test_wyctl_tenant_owner],
+      depends : [wyctl_exe, wyctl_gschemas_compiled, test_wyctl_tenant_owner],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  else
+    test('wyctl-tenant-owner', test_wyctl_tenant_owner,
+      depends : [wyctl_exe, wyctl_gschemas_compiled],
+      env : wyctl_gsettings_test_env,
+      timeout : 60,
+    )
+  endif
+
   # Drives `wyctl key status --store' and `wyctl key recover' as a subprocess
   # against an encrypted policy store, fabricating clean-NEW and interrupted
   # OLD+PENDING on-disk states in-process via the rotation crash seam.
