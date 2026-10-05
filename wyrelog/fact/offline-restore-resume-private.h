@@ -27,6 +27,15 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_replacements_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Resume a durable v7 selected vector through exact v8 publication. Each
+ * successful scoped finalize or promote result is followed by an exact
+ * journal reload. Errors leave output empty; callers reload before retry. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_selected_cleanup_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Advances one tenant COMMIT step from v5 through v8. A v6 companion phase
  * can advance without changing the journal revision. Each driver rechecks
  * its authority under the root lease and all-graph quiescence. An error
