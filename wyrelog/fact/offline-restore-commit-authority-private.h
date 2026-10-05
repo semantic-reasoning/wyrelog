@@ -8,6 +8,18 @@
 
 G_BEGIN_DECLS
 
+/* Exact v5 vector eligibility used by both dispatch and the step driver. */
+gboolean wyl_fact_offline_restore_tenant_commit_step_eligible
+  (const WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    WylFactArtifactMainTransitionOp operation);
+
+/* Read-only terminal proof under the root lease and all-graph quiescence. */
+wyrelog_error_t wyl_fact_offline_restore_tenant_commit_v5_prove_complete
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Callback-scoped, copied observation. It grants no publication or policy
  * authority and cannot be used as evidence for a later filesystem effect. */
 typedef struct
@@ -234,6 +246,8 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_promote_run
     WylFactOfflineRestoreJournal *out_committed);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+void wyl_fact_offline_restore_tenant_commit_sync_staged_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_tenant_commit_retain_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (const gchar *, gpointer), gpointer data);
 void wyl_fact_offline_restore_tenant_commit_sync_rollback_set_checkpoint_for_test
