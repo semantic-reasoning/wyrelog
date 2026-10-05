@@ -189,7 +189,8 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
 
   const wyl_policy_fact_graph_column_t graph_columns[] = {
@@ -246,7 +247,8 @@ create_compound_graph_with_schemas (wyl_policy_store_t *store,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
 
   const wyl_policy_fact_graph_column_t graph_columns[] = {
@@ -1544,7 +1546,8 @@ test_unleased_replay_rejects_metadata (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   provisioned_871_create_graph (policy, root, tenant, graph);
   g_autoptr (wyl_fact_store_t) store = NULL;
@@ -1748,6 +1751,7 @@ test_boot_converges_forget_on_sealed_provisioned_graph (void)
         WYRELOG_E_OK);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
+        "tenant-owner",
         &created), ==, WYRELOG_E_OK);
     g_assert_true (created);
     provisioned_871_create_graph (policy, root, tenant_id, target_graph);
@@ -2942,6 +2946,7 @@ test_replay_keeps_legacy_nullable_null_fail_closed (void)
         WYRELOG_E_OK);
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+        "tenant-owner",
         &created), ==, WYRELOG_E_OK);
 
     const wyl_policy_fact_graph_column_t graph_columns[] = {
@@ -4926,6 +4931,7 @@ test_replay_keeps_registered_empty_sibling_with_existing_store (void)
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
 
   const wyl_policy_fact_graph_column_t graph_columns[] = {
@@ -6087,6 +6093,7 @@ test_handle_unseal_traces_coordinator_before_publication (void)
      * deliberately rejected by the secure opener during unseal. */
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+        "tenant-owner",
         &created), ==, WYRELOG_E_OK);
     g_assert_true (created);
     provisioned_871_create_graph (policy, root, "tenant-a", "orders");

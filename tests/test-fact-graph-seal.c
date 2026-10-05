@@ -119,7 +119,8 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t graph_columns[] = {
     {"order_id", "symbol"},
@@ -156,7 +157,8 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t graph_columns[] = {
     {"order_id", "symbol"},
@@ -515,7 +517,8 @@ create_provisioned_graph_fixture (wyl_policy_store_t *policy,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
-  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id, &created),
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
+      "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t graph_columns[] = {
     {"order_id", "symbol"}, {"amount", "int64"}, {"expedited", "bool"},

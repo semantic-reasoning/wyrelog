@@ -290,6 +290,7 @@ test_fresh_policy_after_child_exit (void)
       WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (initial_policy, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t columns[] = {
     {"value", "int64"},
@@ -736,6 +737,7 @@ test_reverse_watchdog (ReverseScenario scenario)
       WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t columns[] = { { "value", "int64" } };
   const wyl_policy_fact_graph_relation_t relations[] = {
@@ -813,6 +815,7 @@ test_runtime_policy_forward (void)
       WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t columns[] = {
     {"value", "int64"},

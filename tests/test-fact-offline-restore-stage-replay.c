@@ -99,6 +99,7 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
   g_assert_cmpint (wyl_policy_store_create_schema (f->policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (f->policy, tenant,
+      "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   const wyl_policy_fact_graph_column_t graph_columns[] = {
     { "item", "symbol" }, { "amount", "int64" }, { "valid", "bool" },

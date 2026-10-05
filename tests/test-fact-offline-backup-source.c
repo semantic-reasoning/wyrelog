@@ -105,7 +105,7 @@ create_tenant (BackupFixture *fixture)
   WylPolicyAuthorityMutationResult result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   g_assert_cmpint (wyl_policy_store_create_tenant (fixture->policy,
-      "tenant-a", &created), ==, WYRELOG_E_OK);
+      "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority
         (fixture->policy, "tenant-a", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
       0, 0, &result), ==, WYRELOG_E_OK);

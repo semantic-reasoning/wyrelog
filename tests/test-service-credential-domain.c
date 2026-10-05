@@ -236,10 +236,10 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-      "tenant-a", &created), ==, WYRELOG_E_OK);
+      "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
-      "tenant-b", &created), ==, WYRELOG_E_OK);
+      "tenant-b", "tenant-owner", &created), ==, WYRELOG_E_OK);
 }
 
 static wyrelog_error_t

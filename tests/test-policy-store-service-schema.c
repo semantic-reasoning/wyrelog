@@ -216,8 +216,8 @@ assert_embedded_nul_identifiers_rejected (wyl_policy_store_t *store)
 {
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db, "SAVEPOINT nul_identifier_test;"
-      "INSERT OR IGNORE INTO tenants(tenant_id,sealed,created_at,updated_at)"
-      " VALUES('tenant-a',0,1,1);");
+      "INSERT OR IGNORE INTO tenants(tenant_id,owner_subject_id,sealed,"
+      "created_at,updated_at) VALUES('tenant-a','tenant-owner',0,1,1);");
   exec_rejected (db,
       "INSERT INTO service_principals"
       " (subject_id,display_name,state,generation,created_by,created_at_us,updated_at_us)"
@@ -298,8 +298,8 @@ static void
 insert_fixture_principal (sqlite3 *db)
 {
   exec_ok (db,
-      "INSERT OR IGNORE INTO tenants (tenant_id,sealed,created_at,updated_at)"
-      " VALUES ('tenant-a',0,1,1);"
+      "INSERT OR IGNORE INTO tenants (tenant_id,owner_subject_id,sealed,"
+      "created_at,updated_at) VALUES ('tenant-a','tenant-owner',0,1,1);"
       "INSERT INTO service_principals"
       " (subject_id,display_name,state,generation,created_by,created_at_us,updated_at_us)"
       " VALUES ('svc:tenant-a:worker','worker','active',1,'admin',1,1);");

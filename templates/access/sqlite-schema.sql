@@ -42,11 +42,16 @@ CREATE TABLE IF NOT EXISTS tenants (
         CHECK (typeof(reconciliation_generation) = 'integer' AND
             reconciliation_generation BETWEEN 0 AND 9223372036854775807),
     created_at               INTEGER NOT NULL,
-    updated_at               INTEGER NOT NULL
+    updated_at               INTEGER NOT NULL,
+    -- Every tenant has exactly one owner (#1338). Built-in tenants are owned
+    -- by the reserved system owner 'wr.system'; any other tenant by a human
+    -- subject. The store enforces this with tenant_owner_* triggers.
+    owner_subject_id         TEXT    NOT NULL DEFAULT ''
 );
 
-INSERT OR IGNORE INTO tenants (tenant_id, sealed, created_at, updated_at)
-VALUES ('__wr_default', 0, unixepoch(), unixepoch());
+INSERT OR IGNORE INTO tenants (tenant_id, owner_subject_id, sealed,
+    created_at, updated_at)
+VALUES ('__wr_default', 'wr.system', 0, unixepoch(), unixepoch());
 
 -- ---------------------------------------------------------------------------
 -- Table: roles

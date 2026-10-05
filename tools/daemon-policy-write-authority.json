@@ -1,5 +1,5 @@
 {
-  "aggregate": "d03b237013dc8a97dc08f9934b1702f3b655e17afa7829d531357011cebd4aa4",
+  "aggregate": "cf5f76aa511501addddf6e1175b54f69c0c0967ab67864e013cbd1a2685816df",
   "directives": {
     "count": 550,
     "sha256": "3e10bb70d97c0b003ccf0306ed346c1d1ae72afe63dc9b8076fd17e9b86f90a7"
@@ -15,7 +15,7 @@
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
     "mfa_enroll_confirm_handler": "6cc30363c707becfa081f40cb66c1cba37c6a29687fe1f217303d5c123fb785d",
     "mfa_enroll_subject_exists": "cc77193cff332f0bc837bb6ce33ec3c564c8e7e176986d358e27310e682d42d9",
-    "mutate_tenant_lifecycle_publication": "26dd679c7632772e4b848ff98e6f8833433f49667a8f5ee0a7bdda2564e903b6",
+    "mutate_tenant_lifecycle_publication": "e1e334691e0bbbd68c1761f2b1b273c6c425af2ecfdca861cc8d05056586792b",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
     "policy_permission_transition_handler": "bd748a383e98c431ece13ae4a2f1e41c02a1825458a72ea089000d7dd31e9a91",
@@ -49,7 +49,7 @@
     "tenant_seal_recovery_discard": "d7cbf931ef5cfbbe73a39ab0c291547183e65d9381ebe7f6894163dbbe6a9c2a",
     "tenant_seal_recovery_retain": "353d56a4544ae4deda6a0f3857ac128051c4a0357cb07e86f88ffdca955e6767",
     "tenant_unseal_handler": "e1a3c2a0c38383cb5a2fdc0b35e285ee08e65be86ea9716bac14e24ca18f3d7e",
-    "wyl_daemon_http_configure_tenant_for_test": "e58f35d09656858fac08945d50f5fb7de79690c0c7efe4d23b8100517320d24e",
+    "wyl_daemon_http_configure_tenant_for_test": "fb29004369d9ee4e8e51e0e033a08569607bb57d01f1b8e787b473c7c8d18c4f",
     "wyl_daemon_http_context_rotate_access_token_key": "54532da050b6b92a853773a8f34396a1974202290828cee8d8889108cc603eee",
     "wyl_daemon_http_fail_next_policy_write_acquire_for_test": "b5aee7156199e095c65d96a4f8afa44e432f983e4913b8aa34cf9244e7fb1ed3",
     "wyl_daemon_http_fail_next_policy_write_finalize_for_test": "f05c46ab764d425bac67044cd3ea697a2bf5578f2bb40989f0ebb6051306bc7d",

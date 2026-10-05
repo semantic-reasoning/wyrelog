@@ -176,7 +176,8 @@ run_crash_recovery (const gchar *program, const gchar *root)
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return FALSE;
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (setup, "crash-tenant", &created)
+  if (wyl_policy_store_create_tenant (setup, "crash-tenant",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created
       || wyl_policy_store_register_fact_open_owner (setup, "crash-owner")
       != WYRELOG_E_OK
@@ -240,7 +241,8 @@ run_parent (const gchar *program)
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return 1;
   gboolean created = FALSE;
-  if (wyl_policy_store_create_tenant (setup, "race-tenant", &created)
+  if (wyl_policy_store_create_tenant (setup, "race-tenant",
+      "tenant-owner", &created)
       != WYRELOG_E_OK || !created
       || wyl_policy_store_register_fact_open_owner (setup, "race-owner-a")
       != WYRELOG_E_OK

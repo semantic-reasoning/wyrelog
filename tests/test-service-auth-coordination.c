@@ -2920,8 +2920,9 @@ static void
 setup_last_used_credential (sqlite3 *db)
 {
   sqlite_exec_ok (db,
-      "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at)"
-      " VALUES('tenant-last',0,1,1);"
+      "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,created_at,"
+      "updated_at)"
+      " VALUES('tenant-last','tenant-owner',0,1,1);"
       "INSERT INTO service_principals(subject_id,display_name,state,generation,"
       "created_by,created_at_us,updated_at_us) VALUES"
       "('svc:last:used','last used','active',1,'admin',1,1);"
@@ -3638,8 +3639,9 @@ test_authority_transaction_credential_last_used_corrupt_text (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     sqlite3 *db = wyl_policy_store_get_db (store);
     sqlite_exec_ok (db,
-        "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at)"
-        " VALUES('tenant-last',0,1,1);"
+        "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,created_at,"
+        "updated_at)"
+        " VALUES('tenant-last','tenant-owner',0,1,1);"
         "INSERT INTO service_principals(subject_id,display_name,state,"
         "generation,created_by,created_at_us,updated_at_us) VALUES"
         "('svc:last:used','last used','active',1,'admin',1,1);"

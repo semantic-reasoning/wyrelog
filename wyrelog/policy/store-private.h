@@ -475,6 +475,7 @@ typedef struct
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
   gboolean sealed_compatibility;
+  gchar *owner_subject_id;
 } WylPolicyTenantAuthorityRecord;
 
 typedef struct
@@ -2448,8 +2449,17 @@ wyrelog_error_t wyl_policy_store_get_deployment_mode (wyl_policy_store_t *
 gboolean wyl_policy_store_tenant_id_is_valid (const gchar * tenant_id);
 wyrelog_error_t wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *
     store);
+/* An owner is valid for a tenant when it is WYL_TENANT_SYSTEM_OWNER and the
+ * tenant is built in, or when the tenant is not built in and the owner is a
+ * human subject identifier: 1-128 bytes of [A-Za-z0-9._:-], not "." or "..",
+ * outside the reserved "wr." and "svc:" namespaces. */
+gboolean wyl_policy_tenant_owner_is_valid (const gchar * tenant_id,
+    const gchar * owner_subject_id);
+/* Creates a tenant owned by owner_subject_id.  An existing tenant is left
+ * untouched, its owner included, and reports *out_created FALSE. */
 wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
-    const gchar * tenant_id, gboolean * out_created);
+    const gchar * tenant_id, const gchar * owner_subject_id,
+    gboolean * out_created);
 /* Compatibility/test setup mutator. Production tenant sealing must use the
  * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,

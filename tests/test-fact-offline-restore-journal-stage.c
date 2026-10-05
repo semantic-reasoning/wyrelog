@@ -107,7 +107,7 @@ create_restore_journal (Fixture *fixture, const guint8 *bytes, gsize length,
 {
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (fixture->policy,
-      "tenant-a", &created), ==, WYRELOG_E_OK);
+      "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
 
   g_autoptr (GBytes) manifest = manifest_bytes (bytes, length, two_graphs);

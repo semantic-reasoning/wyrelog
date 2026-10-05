@@ -20,3 +20,9 @@
  * comparisons. Changing the value is an ABI / wire-compat break.
  */
 #define WYL_TENANT_DEFAULT "__wr_default"
+
+/* The reserved owner of built-in tenants (#1338).  Every tenant records an
+ * owner; a built-in tenant is owned by the system, never by a person, and
+ * no subject may claim the reserved "wr." namespace.  The value is durable
+ * in the tenants table, so changing it is a store-compat break. */
+#define WYL_TENANT_SYSTEM_OWNER "wr.system"

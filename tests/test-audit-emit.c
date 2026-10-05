@@ -451,7 +451,7 @@ check_service_lifecycle_audit_reconciliation (void)
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
-      "sla-tenant", &created) != WYRELOG_E_OK)
+      "sla-tenant", "tenant-owner", &created) != WYRELOG_E_OK)
     return 703;
   wyl_service_credential_issue_result_t issued = { 0 }, rotated = { 0 };
   if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",

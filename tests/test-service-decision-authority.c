@@ -555,6 +555,7 @@ test_service_authority_sealed_tenant_denies (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-seal",
+      "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
@@ -620,6 +621,7 @@ test_service_authority_freeze_denies (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-thaw",
+      "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
@@ -681,6 +683,7 @@ test_service_authority_allow_deny_and_binding (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
@@ -875,6 +878,7 @@ test_service_authority_concurrent_context_isolation (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
+      "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
