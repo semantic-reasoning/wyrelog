@@ -331,9 +331,6 @@ jobs:
       # several minutes against a 900 s budget; the multiplier keeps a slow
       # runner from turning that into a timeout.
       - name: Test offline backup and restore with secure DuckDB
-        # Linux only for now: the first macOS run of these suites failed in
-        # two Darwin-specific places unrelated to #1348; see #1353.
-        if: ${{ runner.os == 'Linux' }}
         run: |
           meson compile -C build-secure-duckdb -j 1 \
             test-fact-offline-backup-source
