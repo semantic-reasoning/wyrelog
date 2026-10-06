@@ -9570,15 +9570,55 @@ test_graph_populated_schema_transition_roundtrip (void)
       sibling_engine_generation);
   wyl_fact_graph_runtime_status_clear (&dispatched_sibling);
   wyl_fact_graph_key_clear (&dispatched_sibling_key);
-  WylPolicyGraphRestoreReplacementRecord *companion = NULL;
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
-        (fixture.policy, fixture.root, fixture.runtime, operation,
-      revision, 0, &companion), ==, WYRELOG_E_OK);
-  wyl_policy_graph_restore_replacement_record_free (companion);
   g_auto (WylFactOfflineRestoreJournal) selected = { 0 };
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation,
       revision, 0, &selected), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selected.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
+  revision = selected.revision;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT reconciliation_generation FROM fact_graphs WHERE "
+      "tenant_id='tenant-a' AND graph_id='zeta';", -1, &stmt, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpuint ((guint64) sqlite3_column_int64 (stmt, 0), ==,
+      sibling_reconciliation_generation);
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+  WylFactGraphKey selected_sibling_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&selected_sibling_key,
+      "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus selected_sibling = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
+      &selected_sibling_key, &selected_sibling), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selected_sibling.engine_generation, ==,
+      sibling_engine_generation);
+  wyl_fact_graph_runtime_status_clear (&selected_sibling);
+  wyl_fact_graph_key_clear (&selected_sibling_key);
+  g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+      ==, WYRELOG_E_OK);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *selection_policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (selection_policy_path,
+      &fixture.policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *foreign_selection_path = graph_file_path (&fixture,
+          "alpha", "foreign-selection-artifact");
+  g_assert_true (g_file_set_contents (foreign_selection_path, "foreign", -1,
+      NULL));
+  g_auto (WylFactOfflineRestoreJournal) selected_replay = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      revision, 0, &selected_replay), !=, WYRELOG_E_OK);
+  g_assert_null (selected_replay.graphs);
+  g_assert_cmpint (g_remove (foreign_selection_path), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation,
+      revision, 0, &selected_replay), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selected_replay.revision, ==, selected.revision);
   g_auto (WylFactOfflineRestoreJournal) finalized = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
         (fixture.policy, fixture.root, fixture.runtime, operation,
@@ -10313,15 +10353,16 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   WylPolicyGraphRestoreReplacementRecord *recovered = NULL;
 #ifdef WYL_TEST_HANDLE_SEAMS
   gboolean linked_before_failure = FALSE;
+  g_auto (WylFactOfflineRestoreJournal) selection_dispatch = { 0 };
   wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
     (fail_companion_linked_once, &linked_before_failure);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      published.revision, 0, &recovered), ==, WYRELOG_E_IO);
+      published.revision, 0, &selection_dispatch), ==, WYRELOG_E_IO);
   wyl_fact_offline_restore_graph_commit_companion_set_checkpoint_for_test
     (NULL, NULL);
   g_assert_true (linked_before_failure);
-  g_assert_null (recovered);
+  g_assert_null (selection_dispatch.graphs);
   g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
   WylPolicyGraphRestoreReplacementRecord *after_link = NULL;
   g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
@@ -10478,9 +10519,34 @@ test_graph_restore_replacement_reservation (gconstpointer data)
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       published.revision, 0, &selected), !=, WYRELOG_E_OK);
   g_assert_cmpint (g_remove (foreign_path), ==, 0);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_replacement_run
+#ifdef WYL_TEST_HANDLE_SEAMS
+  wyl_policy_store_offline_restore_fail_once (fixture.policy,
+      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      published.revision, 0, &selected), ==, WYRELOG_E_IO);
+  g_assert_null (selected.graphs);
+  g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
+      ==, WYRELOG_E_OK);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_auto (WylFactOfflineRestoreJournal) selection_after_lost_response = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (fixture.policy,
+      operation_uuid, &selection_after_lost_response), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (selection_after_lost_response.revision, ==,
+      published.revision + 1);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+      selection_after_lost_response.revision, 0, &selected), ==, WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       published.revision, 0, &selected), ==, WYRELOG_E_OK);
+#endif
   g_assert_cmpuint (selected.version, ==,
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION);
   g_assert_true (selected.replacement_selected_pending_cleanup);
