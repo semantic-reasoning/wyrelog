@@ -10,6 +10,7 @@
 #endif
 #endif
 #include "test-exit-status.h"
+#include "fact-test-support.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -83,10 +84,10 @@ static gchar *
 make_root (void)
 {
   g_autoptr (GError) error = NULL;
-  gchar *root = g_dir_make_tmp ("wyl-publication-lock-matrix-XXXXXX", &error);
+  gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-publication-lock-matrix-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
-  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
   return root;
 }
 

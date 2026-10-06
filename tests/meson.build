@@ -389,9 +389,11 @@ endif
 if get_option('enable_fact_store').allowed()
   test_offline_backup_bundle = executable('test-fact-offline-backup-bundle',
     'test-fact-offline-backup-bundle.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
     include_directories : [include_directories('..'),
       include_directories('../wyrelog')],
-    dependencies : [wyrelog_handle_test_seams_dep],
+    dependencies : [wyrelog_handle_test_seams_dep] + fact_test_support_deps,
   )
   test('fact-offline-backup-bundle', test_offline_backup_bundle)
 endif

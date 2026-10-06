@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "test-exit-status.h"
+#include "fact-test-support.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -30,7 +31,8 @@ static void
 fixture_init (Fixture *fixture)
 {
   g_autoptr (GError) error = NULL;
-  fixture->root = g_dir_make_tmp ("wyrelog-bundle-XXXXXX", &error);
+  fixture->root = wyl_test_make_secure_fact_root ("wyrelog-bundle-XXXXXX",
+          &error);
   g_assert_no_error (error);
   g_assert_nonnull (fixture->root);
   g_autofree gchar *component = NULL;
