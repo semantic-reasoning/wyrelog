@@ -559,7 +559,7 @@ wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
 #endif
 
 static wyrelog_error_t
-graph_bind_prove_effect (const WylFactOfflineRestoreJournal *journal,
+graph_bind_prove_effect (GBytes *canonical_journal,
     const gchar *old_uuid, gpointer user_data)
 {
   GraphProvisioningBindEffect *context = user_data;
@@ -568,8 +568,13 @@ graph_bind_prove_effect (const WylFactOfflineRestoreJournal *journal,
     graph_bind_claim_checked_hook_for_test
       (graph_bind_claim_checked_hook_data_for_test);
 #endif
-  if (journal == NULL || journal->graphs == NULL || journal->graphs->len != 1
-      || old_uuid == NULL
+  g_auto (WylFactOfflineRestoreJournal) journal_storage = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_decode
+        (canonical_journal, &journal_storage);
+  const WylFactOfflineRestoreJournal *journal = &journal_storage;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (journal->graphs == NULL || journal->graphs->len != 1 || old_uuid == NULL
       || g_strcmp0 (journal->operation_uuid, context->operation_uuid) != 0
       || g_strcmp0 (journal->selected_graph_id, context->graph_id) != 0
       || g_strcmp0 (context->key->tenant_id, journal->tenant_id) != 0
@@ -582,7 +587,7 @@ graph_bind_prove_effect (const WylFactOfflineRestoreJournal *journal,
       && g_strcmp0 (graph->old_provisioning_uuid, old_uuid) != 0))
     return WYRELOG_E_POLICY;
   g_autoptr (GBytes) encoded = NULL;
-  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (journal,
+  rc = wyl_fact_offline_restore_journal_encode (journal,
           &encoded);
   if (rc == WYRELOG_E_OK
       && !g_bytes_equal (encoded, context->expected_journal))

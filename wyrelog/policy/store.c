@@ -41472,7 +41472,7 @@ wyl_policy_store_graph_restore_bind_provisioned_old_with_effect
         (journal.graphs, 0))->old_provisioning_uuid) != 0)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && exact)
-    rc = effect (&journal, old_uuid, effect_data);
+    rc = effect (current->journal_blob, old_uuid, effect_data);
 
   g_autoptr (GBytes) desired_blob = NULL;
   if (rc == WYRELOG_E_OK && exact && v1)
