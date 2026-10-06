@@ -350,26 +350,38 @@ if get_option('enable_fact_store').allowed() and \
     dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep,
       wirelog_dep] + fact_test_support_deps,
   )
+  # Offline restore runs only on Linux, so elsewhere much of this binary
+  # skips.  Under the exit-code protocol a run whose cases all skip, or that
+  # matches no case at all, reports Ok: GLib exits 0 for it, and main's
+  # wyl_test_normalize_exit_status would turn a 77 into a failure anyway.
+  # TAP lets meson see the per-case results and report SKIP.
   test('fact-offline-backup-source', test_offline_backup_source,
-    args : ['-x', '/fact-offline-backup-source/coordinator',
+    args : ['--tap',
+            '-x', '/fact-offline-backup-source/coordinator',
             '-x', '/fact-offline-backup-source/import',
             '-x', '/fact-offline-backup-source/tenant-provisioned-binding'],
+    protocol : 'tap',
     timeout : 900,
   )
   test('fact-offline-restore-tenant-old-binding', test_offline_backup_source,
-    args : ['-r', '/fact-offline-backup-source/tenant-provisioned-binding'],
+    args : ['--tap',
+            '-r', '/fact-offline-backup-source/tenant-provisioned-binding'],
+    protocol : 'tap',
     timeout : 90,
   )
   test('fact-offline-restore-graph-coordinator', test_offline_backup_source,
-    args : ['-r', '/fact-offline-backup-source/coordinator'],
+    args : ['--tap', '-r', '/fact-offline-backup-source/coordinator'],
+    protocol : 'tap',
     timeout : 120,
   )
   test('fact-offline-restore-graph-import', test_offline_backup_source,
-    args : ['-r', '/fact-offline-backup-source/import'],
+    args : ['--tap', '-r', '/fact-offline-backup-source/import'],
+    protocol : 'tap',
     timeout : 240,
   )
   test('fact-offline-restore-graph-rollback', test_offline_backup_source,
-    args : ['-r', '/fact-offline-backup-source/rollback'],
+    args : ['--tap', '-r', '/fact-offline-backup-source/rollback'],
+    protocol : 'tap',
     timeout : 120,
   )
 endif

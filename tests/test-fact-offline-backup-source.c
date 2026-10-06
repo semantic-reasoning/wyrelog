@@ -857,7 +857,7 @@ static void
 test_restore_dry_run_read_only (void)
 {
 #ifndef __linux__
-  return;
+  g_test_skip ("offline restore is Linux-only");
 #else
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "wyl-offline-restore-dry-run-XXXXXX");
@@ -1192,7 +1192,7 @@ static void
 test_restore_begin_authenticated (void)
 {
 #ifndef __linux__
-  return;
+  g_test_skip ("offline restore is Linux-only");
 #else
   const WylFactOfflineRestoreScope scopes[] = {
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
@@ -9203,7 +9203,7 @@ static void
 test_graph_populated_schema_transition_roundtrip (void)
 {
 #ifndef __linux__
-  return;
+  g_test_skip ("offline restore is Linux-only");
 #else
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "restore-populated-graph-XXXXXX");
@@ -10833,6 +10833,31 @@ test_source_match_ignores_live_allocation (void)
         (&source, &manifest, &journal));
 }
 
+#ifndef __linux__
+/* Offline restore runs only on Linux; elsewhere the binding entry points
+ * refuse with WYRELOG_E_POLICY.  Pin that refusal, then skip, so the suite
+ * reports SKIP off Linux instead of passing with no cases run. */
+static void
+test_tenant_provisioned_binding_fail_closed (void)
+{
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-123456789ab4";
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-provisioned-binding-XXXXXX");
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha", 1,
+      0, &committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (committed.graphs);
+  g_assert_cmpint
+    (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, 1, 0,
+      &committed), ==, WYRELOG_E_POLICY);
+  g_assert_null (committed.graphs);
+  fixture_clear (&fixture);
+  g_test_skip ("offline restore provisioned binding is Linux-only");
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -11190,6 +11215,9 @@ main (int argc, char **argv)
       "short", test_tenant_external_import);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/excess",
       "excess", test_tenant_external_import);
+#else
+  g_test_add_func ("/fact-offline-backup-source/tenant-provisioned-binding",
+      test_tenant_provisioned_binding_fail_closed);
 #endif
 #ifndef G_OS_WIN32
   const gchar *import_modes[] = {
