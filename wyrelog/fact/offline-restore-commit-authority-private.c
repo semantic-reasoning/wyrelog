@@ -4587,6 +4587,137 @@ sync_staged_capture_ready (WylFactArtifactTransitionPosix *provider,
 #endif
 
 wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || *fact_root == '\0'
+      || runtime == NULL || operation_uuid == NULL || *operation_uuid == '\0'
+      || expected_revision == 0 || expected_revision >= G_MAXINT64
+      || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  gint64 deadline = 0;
+  if (drain_timeout_us > 0) {
+    gint64 now = g_get_monotonic_time ();
+    deadline = drain_timeout_us > G_MAXINT64 - now ? G_MAXINT64 :
+        now + drain_timeout_us;
+  }
+  guint64 revision = expected_revision;
+  g_autoptr (GBytes) expected_state = NULL;
+  /* A graph-scope v2 journal has at most six file-operation transitions. */
+  for (guint step = 0; step < 7; step++) {
+    g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+    WylPolicyOfflineRestoreRecord *record = NULL;
+    g_autoptr (GBytes) canonical = NULL;
+    wyrelog_error_t rc = wyl_fact_offline_restore_journal_store_load
+          (policy, operation_uuid, &journal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+              &record);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_encode (&journal, &canonical);
+    if (rc == WYRELOG_E_OK && (journal.revision != revision
+        || record->revision != revision
+        || record->scope != WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+        || !g_bytes_equal (canonical, record->journal_blob)
+        || (expected_state != NULL
+        && !g_bytes_equal (canonical, expected_state))))
+      rc = WYRELOG_E_BUSY;
+    wyl_policy_offline_restore_record_free (record);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+        || journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        || journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        || journal.confirmation !=
+        WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+        || journal.manifest_trust !=
+        WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+        || journal.graphs == NULL || journal.graphs->len != 1
+        || journal.policy_generation_published
+        || journal.lifecycle_handoff_complete
+        || g_strcmp0 (journal.operation_uuid, operation_uuid) != 0)
+      return WYRELOG_E_POLICY;
+    WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, 0);
+    if (graph == NULL || graph->expected_main_absent || !graph->copied
+        || !graph->checksum_verified || !graph->identity_verified
+        || !graph->schema_verified || !graph->replay_preflighted
+        || graph->transition_terminal || graph->resume_forbidden
+        || graph->durability_unprovable_acknowledged)
+      return WYRELOG_E_POLICY;
+    if (graph->transition_state ==
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
+        && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE
+        && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED) {
+      *out_committed = journal;
+      memset (&journal, 0, sizeof journal);
+      return WYRELOG_E_OK;
+    }
+    if (graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN) {
+      if (graph->pending_op != graph->next_op)
+        return WYRELOG_E_POLICY;
+    } else if (graph->pending_op !=
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE)
+      return WYRELOG_E_POLICY;
+    gint64 remaining = drain_timeout_us;
+    if (deadline > 0) {
+      remaining = deadline - g_get_monotonic_time ();
+      if (remaining <= 0)
+        return WYRELOG_E_BUSY;
+    }
+    g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+    switch (graph->next_op) {
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
+        rc = wyl_fact_offline_restore_graph_commit_sync_staged_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN:
+        rc = wyl_fact_offline_restore_graph_commit_retain_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR:
+        rc = wyl_fact_offline_restore_graph_commit_sync_retained_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &committed);
+        break;
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH:
+      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
+        rc = wyl_fact_offline_restore_graph_commit_publish_run
+              (policy, fact_root, runtime, operation_uuid, revision,
+                remaining, &committed);
+        break;
+      default:
+        return WYRELOG_E_POLICY;
+    }
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (committed.revision <= revision || committed.revision >= G_MAXINT64)
+      return WYRELOG_E_POLICY;
+    g_clear_pointer (&expected_state, g_bytes_unref);
+    rc = wyl_fact_offline_restore_journal_encode (&committed,
+            &expected_state);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    revision = committed.revision;
+  }
+  return WYRELOG_E_POLICY;
+#endif
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_graph_commit_sync_staged_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,

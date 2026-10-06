@@ -250,6 +250,16 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_publish_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Resume graph-scope v2 COMMIT publication through durable post-publish.
+ * Each exact-revision step owns the root writer fence and selected graph
+ * quiescence; the dispatcher reloads canonical durable state between steps.
+ * It does not select a replacement or finalize. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Select the imported replacement in one sealed policy transaction after
  * proving the exact dual companion shape under the root lease. Leaves both
  * file pairs in place for selected-authority cleanup. */
