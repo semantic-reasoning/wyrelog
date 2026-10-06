@@ -4000,7 +4000,15 @@ test_graph_rollback_rejects (gconstpointer data)
     g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
     g_autofree gchar *parked = graph_file_path (&f.fixture, "zeta",
             "parked-companion");
+#ifdef __APPLE__
+    /* #1353: a Darwin graph is provisioned straight into facts.duckdb and
+     * never keeps the provision-*.sqlite companion, so there is nothing to
+     * park.  A foreign file at the companion's name must still be refused. */
+    (void) parked;
+    g_assert_false (g_file_test (companion, G_FILE_TEST_EXISTS));
+#else
     g_assert_cmpint (g_rename (companion, parked), ==, 0);
+#endif
     rollback_write_foreign (companion);
   } else if (g_str_equal (mode, "tenant-generation"))
     mutate_tenant_after_snapshot (&f.capture);
@@ -10192,6 +10200,19 @@ test_graph_restore_replacement_reservation (gconstpointer data)
       WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
   g_assert_null (synced);
   reserved->replacement_uuid = reserved_replacement;
+#ifndef __linux__
+  /* #1353: the companion recovery above runs only on Linux, and that is
+   * what moves the replacement to companion_synced.  Everywhere else it is
+   * still reserved here, so the first mark performs the transition; the
+   * replay that follows is the unchanged one Linux reaches directly. */
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced), ==, WYRELOG_E_OK);
+  g_assert_cmpint (policy_result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (synced->phase, ==, "companion_synced");
+  g_clear_pointer (&synced, wyl_policy_graph_restore_replacement_record_free);
+#endif
   g_assert_cmpint
     (wyl_policy_store_graph_restore_replacement_mark_companion_synced
         (fixture.policy, reserved, published_record, &policy_result,
