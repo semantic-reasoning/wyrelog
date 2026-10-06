@@ -491,6 +491,14 @@ retire_stage (GraphRollback *rollback)
       || result.state != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED
       || !result.terminal)
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  /* #1353: the same before-complete crash point recover_absent_callback
+   * offers, so a crash between retiring the stage and recording completion
+   * is reachable on this path too -- the only one Darwin takes. */
+  rc = run_checkpoint (WYL_FACT_OFFLINE_RESTORE_ROLLBACK_BEFORE_COMPLETE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
   return cas_change (rollback, ROLLBACK_COMPLETE);
 }
 
