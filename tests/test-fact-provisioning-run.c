@@ -1019,11 +1019,16 @@ test_recover_rejects_malformed_evidence_before_path (void)
       "INSERT INTO fact_graph_provisioning "
       "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
       "expected_lifecycle_generation,expected_reconciliation_generation,"
-      "phase,attempt,created_at,updated_at,darwin_operation_evidence) VALUES "
+      "phase,attempt,created_at,updated_at) VALUES "
       "('01890f47-3c4b-7cc2-b8c4-dc0c0c070548','tenant-malformed',"
       "'graph-malformed','01890f47-3c4b-7cc2-b8c4-dc0c0c070545',"
       "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070548.sqlite',1,0,"
-      "'reserved',0,1,1,zeroblob(56));");
+      "'reserved',0,1,1);");
+  /* The insert guard refuses evidence on a new row; attach it afterwards,
+   * as the reservation path does. */
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET darwin_operation_evidence="
+      "zeroblob(56) WHERE op_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c070548';");
 
   g_assert_cmpint (wyl_fact_graph_provisioning_recover (store, op_uuid, root,
       NULL), ==, WYRELOG_E_POLICY);
