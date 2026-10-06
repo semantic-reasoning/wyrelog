@@ -19,6 +19,7 @@ PY
 )
 
 TMPDIR=$(mktemp -d)
+TMPDIR=$(cd "$TMPDIR" && pwd -P)
 PID=
 
 cleanup() {
