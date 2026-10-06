@@ -9387,6 +9387,7 @@ test_graph_populated_schema_transition_roundtrip (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
       &sibling_key, &sibling_before), ==, WYRELOG_E_OK);
+  guint64 sibling_engine_generation = sibling_before.engine_generation;
 
   /* Both the old main and the operation-named stage are identity-bound. */
   g_autofree gchar *prebind_main_path = graph_file_path (&fixture, "alpha",
@@ -9539,47 +9540,36 @@ test_graph_populated_schema_transition_roundtrip (void)
   bound.revision++;
   import_restore_journal_for_test (fixture.policy, &bound);
   revision = bound.revision;
-  for (guint step = 0; step < 16; step++) {
-    g_auto (WylFactOfflineRestoreJournal) next = { 0 };
-    WylFactOfflineRestoreJournalGraph *graph =
-        g_ptr_array_index (bound.graphs, 0);
-    wyrelog_error_t rc = WYRELOG_E_INVALID;
-    switch (graph->next_op) {
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED:
-        rc = wyl_fact_offline_restore_graph_commit_sync_staged_run
-              (fixture.policy, fixture.root, fixture.runtime, operation,
-                revision, 0, &next);
-        break;
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN:
-        rc = wyl_fact_offline_restore_graph_commit_retain_run
-              (fixture.policy, fixture.root, fixture.runtime, operation,
-                revision, 0, &next);
-        break;
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE:
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR:
-        rc = wyl_fact_offline_restore_graph_commit_sync_retained_run
-              (fixture.policy, fixture.root, fixture.runtime, operation,
-                revision, 0, &next);
-        break;
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH:
-      case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR:
-        rc = wyl_fact_offline_restore_graph_commit_publish_run
-              (fixture.policy, fixture.root, fixture.runtime, operation,
-                revision, 0, &next);
-        break;
-      default:
-        g_assert_not_reached ();
-    }
-    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
-    revision = next.revision;
-    wyl_fact_offline_restore_journal_clear (&bound);
-    bound = next;
-    memset (&next, 0, sizeof next);
-    graph = g_ptr_array_index (bound.graphs, 0);
-    if (graph->transition_state ==
-        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE)
-      break;
-  }
+  g_auto (WylFactOfflineRestoreJournal) post_publish = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, revision,
+      0, &post_publish), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (post_publish.revision, >, revision);
+  revision = post_publish.revision;
+  WylFactOfflineRestoreJournalGraph *post_publish_graph =
+      g_ptr_array_index (post_publish.graphs, 0);
+  g_assert_cmpint (post_publish_graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE);
+  g_assert_cmpint (post_publish_graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+  g_assert_cmpint (post_publish_graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  WylPolicyGraphRestoreReplacementRecord *post_publish_replacement = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture.policy, operation, &post_publish_replacement), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (post_publish_replacement->phase, ==, "reserved");
+  wyl_policy_graph_restore_replacement_record_free (post_publish_replacement);
+  WylFactGraphKey dispatched_sibling_key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&dispatched_sibling_key,
+      "tenant-a", "zeta"), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus dispatched_sibling = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
+      &dispatched_sibling_key, &dispatched_sibling), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (dispatched_sibling.engine_generation, ==,
+      sibling_engine_generation);
+  wyl_fact_graph_runtime_status_clear (&dispatched_sibling);
+  wyl_fact_graph_key_clear (&dispatched_sibling_key);
   WylPolicyGraphRestoreReplacementRecord *companion = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_companion_recover
         (fixture.policy, fixture.root, fixture.runtime, operation,
@@ -9923,7 +9913,7 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   gboolean began_before_failure = FALSE;
   wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
     (fail_sync_staged_after_begin_once, &began_before_failure);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       early.revision, 0, &early_result), ==, WYRELOG_E_IO);
   wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
@@ -9944,7 +9934,7 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_cmpint (g_rename (stage_path, parked_stage), ==, 0);
   g_assert_true (g_file_set_contents (stage_path, "foreign", -1, NULL));
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
       pending.revision, 0, &early_result), !=, WYRELOG_E_OK);
   g_assert_null (early_result.graphs);
