@@ -9,6 +9,7 @@ TEMPLATE_DIR=$3
 PYTHON=$4
 
 TMPDIR=$(mktemp -d)
+TMPDIR=$(cd "$TMPDIR" && pwd -P)
 POLICY_DB="$TMPDIR/policy.sqlite"
 KEY_FILE="$TMPDIR/policy.key"
 AUDIT_DB="$TMPDIR/audit.duckdb"

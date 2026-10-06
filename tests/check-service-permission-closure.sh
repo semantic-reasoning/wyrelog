@@ -34,6 +34,7 @@ SEED=$3
 PYTHON=$4
 
 TMPDIR=$(mktemp -d)
+TMPDIR=$(cd "$TMPDIR" && pwd -P)
 chmod 700 "$TMPDIR"
 PID=
 
