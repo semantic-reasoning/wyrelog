@@ -482,7 +482,9 @@ The subject must already have an authoritative policy identity: a role
 membership created through `wyctl policy role-grant`, or a direct permission
 granted through `wyctl policy permission-grant`. A subject with neither is
 refused with `mfa_enroll_subject_not_found`, and service principals (`svc:`)
-are never enrollable. Enrollment does not grant roles or permissions; it only
+are never enrollable. A login attempt does not count: `/auth/login` accepts any
+username without authentication, so a subject that has only logged in is still
+refused. Enrollment does not grant roles or permissions; it only
 attaches a TOTP factor.
 
 ### Deactivating a User

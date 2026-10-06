@@ -37766,9 +37766,11 @@ wyl_policy_store_subject_has_human_identity (wyl_policy_store_t *store,
   if (wyl_policy_subject_has_service_prefix (subject_id))
     return WYRELOG_E_OK;
 
+  /* #1316: grants only.  principal_states is not an identity: an
+   * unauthenticated /auth/login materialises a row for any username, so
+   * counting it let anyone make a name enrollable. */
   static const gchar *sql =
-      "SELECT 1 FROM principal_states WHERE subject_id = ?1 "
-      "UNION ALL SELECT 1 FROM role_memberships WHERE subject_id = ?1 "
+      "SELECT 1 FROM role_memberships WHERE subject_id = ?1 "
       "UNION ALL SELECT 1 FROM direct_permissions WHERE subject_id = ?1 "
       "LIMIT 1;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);

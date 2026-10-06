@@ -7581,8 +7581,8 @@ check_audit_so_d_permission_taxonomy (void)
 
 /*
  * #1259: MFA enrollment accepts any human principal the store knows -- a
- * principal state, a role membership or a direct permission -- and never a
- * service principal, whatever it holds.
+ * role membership or a direct permission -- and never a service principal,
+ * whatever it holds.  #1316: a principal state alone is not enough.
  */
 static gint
 check_store_subject_has_human_identity (void)
@@ -7604,7 +7604,9 @@ check_store_subject_has_human_identity (void)
     const gchar *subject;
     gboolean expected;
   } cases[] = {
-    {"id-state", TRUE},
+    /* #1316: a principal state alone is not an identity.  An anonymous
+     * /auth/login writes one for any name, so it proves nothing. */
+    {"id-state", FALSE},
     {"id-role", TRUE},
     {"id-direct", TRUE},
     {"id-none", FALSE},

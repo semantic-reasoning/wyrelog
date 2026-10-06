@@ -2989,9 +2989,10 @@ wyrelog_error_t wyl_policy_store_role_membership_exists (wyl_policy_store_t *
     const gchar * scope, gboolean * out_exists);
 /*
  * Whether @subject_id is a human principal the store already knows: it has
- * a principal state, a role membership, or a direct permission, at any
- * scope.  A service principal (svc: prefix) never counts, whatever it holds.
- * This is the identity MFA enrollment requires.
+ * a role membership or a direct permission, at any scope.  A principal
+ * state alone does not count, because an unauthenticated login writes one
+ * for any name (#1316).  A service principal (svc: prefix) never counts,
+ * whatever it holds.  This is the identity MFA enrollment requires.
  */
 wyrelog_error_t
 wyl_policy_store_subject_has_human_identity (wyl_policy_store_t * store,
