@@ -345,8 +345,10 @@ if get_option('enable_fact_store').allowed() and \
     'fact-test-support.c',
     c_args : fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep]
-      + fact_test_support_deps,
+    # wirelog_dep: the test includes wyl-engine-private.h, whose wirelog
+    # headers are found only by accident when wirelog is system-installed.
+    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep,
+      wirelog_dep] + fact_test_support_deps,
   )
   test('fact-offline-backup-source', test_offline_backup_source,
     args : ['-x', '/fact-offline-backup-source/coordinator',
