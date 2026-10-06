@@ -9173,6 +9173,33 @@ selected_promotion_shape_for_test
 }
 
 static void
+assert_restore_journal_matches (wyl_policy_store_t *policy,
+    const gchar *operation_uuid, GBytes *expected)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (policy),
+      "SELECT journal_blob FROM fact_offline_restore_journals "
+      "WHERE operation_uuid=?1;", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_autoptr (GBytes) stored = g_bytes_new (sqlite3_column_blob (stmt, 0),
+          (gsize) sqlite3_column_bytes (stmt, 0));
+  g_assert_true (g_bytes_equal (stored, expected));
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+}
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+static void
+graph_restore_bind_competing_claim_for_test (gpointer user_data)
+{
+  sqlite3 *db = user_data;
+  g_assert_cmpint (sqlite3_exec (db, "BEGIN IMMEDIATE;", NULL, NULL, NULL),
+      ==, SQLITE_BUSY);
+}
+#endif
+
+static void
 test_graph_populated_schema_transition_roundtrip (void)
 {
 #ifndef __linux__
@@ -9320,6 +9347,9 @@ test_graph_populated_schema_transition_roundtrip (void)
       g_ptr_array_index (journal.graphs, 0))->replay_preflighted);
   g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
       WYRELOG_E_OK);
+  g_autoptr (GBytes) prepared_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &prepared_journal), ==, WYRELOG_E_OK);
   g_autofree gchar *old_uuid = NULL;
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db
@@ -9330,14 +9360,172 @@ test_graph_populated_schema_transition_roundtrip (void)
   old_uuid = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
   g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
   revision = journal.revision;
-  g_assert_cmpint (wyl_fact_offline_restore_journal_bind_provisioned_old
-        (&journal, "alpha", old_uuid), ==, WYRELOG_E_OK);
+
+  /* A graph-local handoff must be independent of sibling reconciliation
+   * changes and must leave the sibling's policy and engine generations alone. */
+  sqlite3 *policy_db = wyl_policy_store_get_db (fixture.policy);
+  gint triggers_enabled = 0;
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &triggers_enabled), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (policy_db,
+      "UPDATE fact_graphs SET reconciliation_generation="
+      "reconciliation_generation+1 WHERE tenant_id='tenant-a' "
+      "AND graph_id='zeta';", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, triggers_enabled, NULL), ==, SQLITE_OK);
+  guint64 sibling_reconciliation_generation = 0;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT reconciliation_generation FROM fact_graphs WHERE "
+      "tenant_id='tenant-a' AND graph_id='zeta';", -1, &stmt, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  sibling_reconciliation_generation = (guint64) sqlite3_column_int64 (stmt, 0);
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+  WylFactGraphKey sibling_key = { 0 };
+  WylFactGraphRuntimeStatus sibling_before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&sibling_key, "tenant-a", "zeta"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
+      &sibling_key, &sibling_before), ==, WYRELOG_E_OK);
+
+  /* Both the old main and the operation-named stage are identity-bound. */
+  g_autofree gchar *prebind_main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  g_autofree gchar *parked_main = graph_file_path (&fixture, "alpha",
+          "facts.parked.duckdb");
+  g_assert_cmpint (g_rename (prebind_main_path, parked_main), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &journal), !=, WYRELOG_E_OK);
+  g_assert_null (journal.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, prepared_journal);
+  g_assert_cmpint (g_rename (parked_main, prebind_main_path), ==, 0);
+
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "alpha",
+          "restore-018f22d0-7b6d-7a5b-8c31-123456789af1.duckdb");
+  g_autofree gchar *parked_stage = graph_file_path (&fixture, "alpha",
+          "restore-stage.parked.duckdb");
+  g_assert_cmpint (g_rename (stage_path, parked_stage), ==, 0);
+  g_assert_true (g_file_set_contents (stage_path, "substituted stage", -1,
+      NULL));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &journal), !=, WYRELOG_E_OK);
+  g_assert_null (journal.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, prepared_journal);
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  g_assert_cmpint (g_rename (parked_stage, stage_path), ==, 0);
+
+  /* A missing graph claim is rejected before any journal transition. */
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &triggers_enabled), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (policy_db,
+      "DELETE FROM fact_offline_restore_graph_claims WHERE "
+      "tenant_id='tenant-a' AND graph_id='alpha';", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, triggers_enabled, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &journal), !=, WYRELOG_E_OK);
+  g_assert_null (journal.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, prepared_journal);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &triggers_enabled), ==, SQLITE_OK);
+  g_autofree gchar *claim_sql = g_strdup_printf (
+    "INSERT INTO fact_offline_restore_graph_claims(tenant_id,graph_id,"
+    "operation_uuid) VALUES('tenant-a','alpha','%s');", operation);
+  g_assert_cmpint (sqlite3_exec (policy_db, claim_sql, NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, triggers_enabled, NULL), ==, SQLITE_OK);
+
+  assert_restore_journal_matches (fixture.policy, operation,
+      prepared_journal);
+
+  /* A stale provisioning filename cannot lend authority to a foreign row. */
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &triggers_enabled), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (policy_db,
+      "UPDATE fact_graph_provisioning SET op_uuid='018f22d0-7b6d-7a5b-8c31-"
+      "123456789af2',stage_basename='provision-"
+      "018f22d0-7b6d-7a5b-8c31-123456789af2.sqlite' WHERE "
+      "tenant_id='tenant-a' AND graph_id='alpha';", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, triggers_enabled, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &journal), !=, WYRELOG_E_OK);
+  g_assert_null (journal.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, prepared_journal);
+  g_autofree gchar *restore_provisioning_sql = g_strdup_printf (
+    "UPDATE fact_graph_provisioning SET op_uuid='%s',stage_basename="
+    "'provision-%s.sqlite' WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+    old_uuid, old_uuid);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, &triggers_enabled), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (policy_db, restore_provisioning_sql,
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_db_config (policy_db,
+      SQLITE_DBCONFIG_ENABLE_TRIGGER, triggers_enabled, NULL), ==, SQLITE_OK);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+  /* The seam runs after the claim check while the publication transaction
+   * is held. A second connection trying to claim must lose this race. */
+  g_autofree gchar *race_policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  sqlite3 *claim_racer = NULL;
+  g_assert_cmpint (sqlite3_open (race_policy_path, &claim_racer), ==,
+      SQLITE_OK);
+  wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
+    (graph_restore_bind_competing_claim_for_test, claim_racer);
+  /* Lose the first commit response, then reopen and prove exact durable v2. */
+  wyl_policy_store_offline_restore_fail_once (fixture.policy,
+      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &journal), ==, WYRELOG_E_IO);
+  g_assert_null (journal.graphs);
+  wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
+    (NULL, NULL);
+  g_assert_cmpint (sqlite3_close (claim_racer), ==, SQLITE_OK);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *reopened_policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (reopened_policy_path,
+      &fixture.policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  policy_db = wyl_policy_store_get_db (fixture.policy);
+#endif
   WylFactOfflineRestoreStoreResult result = 0;
   g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
-  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
-        (fixture.policy, revision, &journal, &result, &bound), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
+      revision, 0, &bound), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (bound.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+  g_assert_cmpuint (bound.revision, ==, revision + 1);
+  g_assert_cmpstr (((WylFactOfflineRestoreJournalGraph *)
+      g_ptr_array_index (bound.graphs, 0))->old_provisioning_uuid, ==,
+      old_uuid);
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT reconciliation_generation FROM fact_graphs WHERE "
+      "tenant_id='tenant-a' AND graph_id='zeta';", -1, &stmt, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpuint ((guint64) sqlite3_column_int64 (stmt, 0), ==,
+      sibling_reconciliation_generation);
+  g_assert_cmpint (sqlite3_finalize (stmt), ==, SQLITE_OK);
+  WylFactGraphRuntimeStatus sibling_after = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
+      &sibling_key, &sibling_after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (sibling_after.engine_generation, ==,
+      sibling_before.engine_generation);
+  wyl_fact_graph_runtime_status_clear (&sibling_before);
+  wyl_fact_graph_runtime_status_clear (&sibling_after);
+  wyl_fact_graph_key_clear (&sibling_key);
   wyl_fact_offline_restore_journal_clear (&journal);
   WylPolicyGraphRestoreReplacementRecord *replacement = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve

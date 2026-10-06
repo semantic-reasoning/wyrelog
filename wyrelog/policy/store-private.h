@@ -9,6 +9,7 @@
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-artifact-inventory-private.h"
 #include "wyrelog/fact/offline-backup-manifest-private.h"
+#include "fact/offline-restore-journal-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -3614,6 +3615,22 @@ wyrelog_error_t wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
     const WylPolicyOfflineRestoreRecord *expected_journal,
     const gchar *graph_id, const gchar *old_provisioning_uuid,
     WylPolicyTenantRestoreBindEffectFunc effect, gpointer effect_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
+
+/* Persist the graph v1->imported mode-A v2 old-provisioning binding. The
+ * callback runs inside the exact journal/claim and selected-graph authority
+ * transaction; callers must already hold root and selected-graph authority.
+ * It may only prove through retained handles and must not reenter this store,
+ * acquire authority, or mutate files. Exact v2 replays are proved without a
+ * second journal write. */
+typedef wyrelog_error_t (*WylPolicyGraphRestoreBindEffectFunc)
+  (const WylFactOfflineRestoreJournal *journal,
+    const gchar *old_provisioning_uuid, gpointer user_data);
+wyrelog_error_t wyl_policy_store_graph_restore_bind_provisioned_old_with_effect
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyGraphRestoreBindEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
 

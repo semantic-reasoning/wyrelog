@@ -65,6 +65,25 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_bind_provisioned_old_run
     const gchar *graph_id, guint64 expected_revision,
     gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
 
+/* Bind a selected graph's exact ACTIVE provisioning UUID to an authenticated,
+ * preflighted graph-scope v1 journal. Root authority and only the selected
+ * graph's quiescence are retained through the scoped policy transaction and
+ * exact READY main/stage proof. An exact durable v2 replay is re-proved after
+ * restart and does not rewrite the journal or stage. */
+wyrelog_error_t wyl_fact_offline_restore_graph_bind_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed);
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+typedef void (*WylFactOfflineRestoreGraphBindClaimCheckedHookForTest)
+  (gpointer user_data);
+void wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
+  (WylFactOfflineRestoreGraphBindClaimCheckedHookForTest hook,
+    gpointer user_data);
+#endif
+
 /* Complete the old ACTIVE provisioning vector in canonical graph order.
  * A lost CAS response is resolved from the durable journal; only unbound
  * entries are retried. A terminal policy handle returns its error and the
