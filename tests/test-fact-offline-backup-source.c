@@ -10572,21 +10572,32 @@ test_graph_restore_replacement_reservation (gconstpointer data)
       NULL), ==, SQLITE_OK);
 #endif
   if (schema_transition) {
+    /* The backup selects schema version 1 while version 2 is active.  Only
+     * the Linux block above selects and promotes the replacement, which is
+     * what restores version 1; elsewhere version 2 is still active here
+     * (#1353). */
+#ifdef __linux__
+    const guint64 expected_version = 1;
+    const gchar *present_query = "items", *absent_query = "items_v2";
+#else
+    const guint64 expected_version = 2;
+    const gchar *present_query = "items_v2", *absent_query = "items";
+#endif
     WylPolicyRelationActivationRecord *active = NULL;
     g_assert_cmpint (wyl_policy_store_read_relation_activation
           (fixture.policy, "tenant-a", "alpha", "backup", "items",
         &active), ==, WYRELOG_E_OK);
     g_assert_true (active->has_active_schema_version);
-    g_assert_cmpuint (active->active_schema_version, ==, 1);
+    g_assert_cmpuint (active->active_schema_version, ==, expected_version);
     wyl_policy_relation_activation_record_free (active);
     wyl_policy_fact_relation_query_info_t query = { 0 };
     g_assert_cmpint (wyl_policy_store_load_fact_relation_query
-          (fixture.policy, "tenant-a", "alpha", "items_v2", &query), ==,
+          (fixture.policy, "tenant-a", "alpha", absent_query, &query), ==,
         WYRELOG_E_NOT_FOUND);
     g_assert_cmpint (wyl_policy_store_load_fact_relation_query
-          (fixture.policy, "tenant-a", "alpha", "items", &query), ==,
+          (fixture.policy, "tenant-a", "alpha", present_query, &query), ==,
         WYRELOG_E_OK);
-    g_assert_cmpuint (query.schema_version, ==, 1);
+    g_assert_cmpuint (query.schema_version, ==, expected_version);
     wyl_policy_fact_relation_query_info_clear (&query);
   }
   wyl_policy_graph_restore_replacement_record_free (replayed);
