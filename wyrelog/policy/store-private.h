@@ -9,7 +9,6 @@
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-artifact-inventory-private.h"
 #include "wyrelog/fact/offline-backup-manifest-private.h"
-#include "fact/offline-restore-journal-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -3625,7 +3624,7 @@ wyrelog_error_t wyl_policy_store_tenant_restore_bind_provisioned_old_with_effect
  * acquire authority, or mutate files. Exact v2 replays are proved without a
  * second journal write. */
 typedef wyrelog_error_t (*WylPolicyGraphRestoreBindEffectFunc)
-  (const WylFactOfflineRestoreJournal *journal,
+  (GBytes *canonical_journal,
     const gchar *old_provisioning_uuid, gpointer user_data);
 wyrelog_error_t wyl_policy_store_graph_restore_bind_provisioned_old_with_effect
   (wyl_policy_store_t *store,
