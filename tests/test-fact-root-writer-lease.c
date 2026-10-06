@@ -45,8 +45,11 @@ static void
 assert_sqlite_schema_empty (const gchar *path)
 {
   sqlite3 *db = NULL;
-  g_assert_cmpint (sqlite3_open_v2 (path, &db, SQLITE_OPEN_READONLY, NULL), ==,
-      SQLITE_OK);
+  /* Apple's libsqlite3 cannot open a WAL database read-only once its -wal
+   * and -shm files are gone.  Without SQLITE_OPEN_CREATE this still never
+   * creates the database, and the query writes nothing. */
+  g_assert_cmpint (sqlite3_open_v2 (path, &db, SQLITE_OPEN_READWRITE, NULL),
+      ==, SQLITE_OK);
   sqlite3_stmt *statement = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
       "SELECT count(*) FROM sqlite_master "
