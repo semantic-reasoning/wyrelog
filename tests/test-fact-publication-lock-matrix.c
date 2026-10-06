@@ -2,6 +2,12 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+/* Apple SDKs hide the BSD O_NOFOLLOW extension under strict C modes unless
+ * this is set before system headers.  The fixture's facts.duckdb open
+ * needs it. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 #include "test-exit-status.h"
 
