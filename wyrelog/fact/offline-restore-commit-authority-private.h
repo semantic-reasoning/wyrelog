@@ -269,6 +269,15 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_select_replacement_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Resume post-publish graph replacement recovery and selection. Companion
+ * durability is reloaded before selection; ambiguous responses return an
+ * error and a fresh invocation classifies the durable journal and row. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_select_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Durable selected-authority FINALIZE: commit UNKNOWN intent before old-pair
  * cleanup, then complete the v3 journal only after exact terminal proof and
  * directory fsync. A failed response requires a fresh policy handle and
