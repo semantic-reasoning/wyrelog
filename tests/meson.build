@@ -676,8 +676,14 @@ if build_client
   )
   test_daemon_http_decide_targets += [test_daemon_http_decide_service]
 
+  # Same story as the audit variant below.  Under the policy-write sanitizer
+  # job this target measured 149s, 197s, 205s, 212s, 213s, 214s and 215s
+  # across consecutive runs as coverage grew, then hit TIMEOUT at 240s on
+  # PR #1352, whose diff does not reach the daemon.  The deadline moves to
+  # the audit variant's 600s rather than trimming coverage, and
+  # test-daemon-http-decide-private-companion-boundary.py pins it.
   test('daemon-http-decide-service', test_daemon_http_decide_service,
-    timeout : 240,
+    timeout : 600,
   )
 
   # The audit variant's 600s deadline below was 240, set against a plain
