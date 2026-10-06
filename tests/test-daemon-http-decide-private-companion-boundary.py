@@ -196,6 +196,12 @@ if audit_target_contract is None:
         "daemon HTTP audit feature state must guard target construction, "
         "target-list append, and test registration"
     )
+if re.search(
+    r"test\('daemon-http-decide-service',\s*"
+    r"test_daemon_http_decide_service,\s*timeout\s*:\s*600,\s*\)",
+    source,
+) is None:
+    fail("daemon-http-decide-service must keep its 600s sanitizer deadline")
 
 symbol_test_guard = re.search(
     r"if host_machine\.system\(\) != 'windows'\s+"
