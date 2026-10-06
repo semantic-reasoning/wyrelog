@@ -9270,6 +9270,10 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
       "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "exact-enroll-target",
       "authenticated") != WYRELOG_E_OK
+      /* #1316: enrollment needs a grant; a principal state is not one. */
+      || wyl_policy_store_grant_direct_permission (store,
+      "exact-enroll-target", "wr.graph.manage", "tenant-direct")
+      != WYRELOG_E_OK
       || grant_policy_write_authority (handle, "exact-route-admin",
       WYL_TENANT_DEFAULT) != WYRELOG_E_OK)
     return 2292;
@@ -19498,6 +19502,10 @@ policy_write_owner_fault_prepare_authority (ServiceDenialEnv *env)
       != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "owner-mfa-target",
       "authenticated") != WYRELOG_E_OK
+      /* #1316: enrollment needs a grant; a principal state is not one. */
+      || wyl_policy_store_grant_direct_permission (store,
+      "owner-mfa-target", "wr.graph.manage", "tenant-direct")
+      != WYRELOG_E_OK
       || wyl_policy_store_upsert_permission (store, "owner.policy.read",
       "owner policy read", "basic") != WYRELOG_E_OK
       || wyl_policy_store_upsert_role (store, "owner.reader", "owner reader")
@@ -20781,6 +20789,40 @@ check_mfa_enroll_start_subject_identity (void)
         || !enrolled))
       rc = 2957;
     wyl_totp_enrollment_clear (&enrollment);
+  }
+
+  /* #1316: an unauthenticated /auth/login for a name nobody granted
+   * anything must not make that name enrollable.  The login does leave a
+   * principal_states row -- assert it, or this case proves nothing. */
+  if (rc == 0) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_login (env.session, "POST", env.base_url,
+        "username=login-only-user&tenant=__wr_default", &status, &body) != 0
+        || status != 200) {
+      g_printerr ("anonymous login: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2958;
+    }
+    g_autofree gchar *state = NULL;
+    gboolean state_found = FALSE;
+    if (rc == 0 && (wyl_policy_store_get_principal_state (store,
+        "login-only-user", &state, &state_found) != WYRELOG_E_OK
+        || !state_found))
+      rc = 2959;
+  }
+  if (rc == 0) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
+        "/auth/mfa/enroll/start", guard, env.access_token,
+        "{\"subject\":\"login-only-user\"}", &status, &body) != 0
+        || status != 404
+        || strstr (body, "\"mfa_enroll_subject_not_found\"") == NULL) {
+      g_printerr ("mfa enroll start login-only-user: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2960;
+    }
   }
   service_denial_env_clear (&env);
   return rc;
