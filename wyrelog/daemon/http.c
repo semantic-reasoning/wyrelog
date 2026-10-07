@@ -14656,8 +14656,20 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
+  /* #1322: the bootstrap MFA bypass is a wr.login.skip_mfa grant at the
+   * synthetic scope "login", which is not a tenant and where no role ever
+   * confers authority.  Authorizing its revoke at that scope refused every
+   * operator, so the persisted bypass of a subject that never enrolled TOTP
+   * could not be removed.  Revoking it is authorized where the system
+   * administrator's authority lives instead.  Every other mutation at
+   * "login", granting the bypass included, is still authorized at the
+   * target scope and so stays refused. */
+  const gchar *authority_scope = scope;
+  if (!grant && g_strcmp0 (perm, "wr.login.skip_mfa") == 0
+      && g_strcmp0 (scope, "login") == 0)
+    authority_scope = WYL_TENANT_DEFAULT;
   if (!authorize_guarded_session_action (server, msg, query, ctx,
-      "wr.policy.write", scope, "policy_auth_required",
+      "wr.policy.write", authority_scope, "policy_auth_required",
       "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
   if (!tenant_scope_is_allowed (lookup_request_tenant (query), scope)) {

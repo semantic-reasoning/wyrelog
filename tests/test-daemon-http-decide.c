@@ -20828,6 +20828,99 @@ check_mfa_enroll_start_subject_identity (void)
   return rc;
 }
 
+/* #1322: the bootstrap MFA bypass is a direct wr.login.skip_mfa grant at the
+ * synthetic scope "login", where no administrator holds authority.  A
+ * system administrator must be able to revoke it through the policy route
+ * from a subject that never enrolled TOTP, and the bypass must stop working;
+ * granting it at "login" stays refused. */
+static gint
+check_skip_mfa_bypass_revoke (void)
+{
+  ServiceDenialEnv env = { 0 };
+  gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
+  wyl_policy_store_t *store = rc == 0
+      ? wyl_handle_get_policy_store (env.handle) : NULL;
+  /* The revoking operator: wr.policy.write armed at the system tenant. */
+  if (rc == 0
+      && (wyl_policy_store_grant_direct_permission (store,
+      "human-principal-admin", "wr.policy.write", WYL_TENANT_DEFAULT)
+      != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store,
+      "human-principal-admin", "wr.policy.write", WYL_TENANT_DEFAULT,
+      "armed") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT,
+      "active") != WYRELOG_E_OK))
+    rc = 2970;
+  /* What --bootstrap-admin-allow-skip-mfa leaves for a subject that never
+   * enrolls TOTP: the grant at "login", armed. */
+  if (rc == 0
+      && (wyl_policy_store_grant_direct_permission (store,
+      "bypass-subject", "wr.login.skip_mfa", "login") != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (store, "bypass-subject",
+      "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK))
+    rc = 2971;
+
+  /* The bypass works before the revoke, or the refusal below proves
+   * nothing. */
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (rc == 0
+      && (send_raw_login (env.session, "POST", env.base_url,
+      "username=bypass-subject&tenant=__wr_default&skip_mfa=true", &status,
+      &body) != 0 || status != 200)) {
+    g_printerr ("skip-mfa login before revoke: %u %s\n", status,
+        body != NULL ? body : "(null)");
+    rc = 2972;
+  }
+
+  const gchar *query = "subject=bypass-subject&perm=wr.login.skip_mfa"
+      "&scope=login&tenant=__wr_default&guard_timestamp=1"
+      "&guard_loc_class=trusted&guard_risk=0";
+  if (rc == 0) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw_service_principal_bearer (env.session, "POST",
+        env.base_url, "/policy/permissions/revoke", query, env.access_token,
+        NULL, &status, &body) != 0 || status != 200
+        || strstr (body, "\"changed\":true") == NULL) {
+      g_printerr ("skip-mfa revoke: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2973;
+    }
+  }
+  gboolean still_granted = TRUE;
+  if (rc == 0
+      && (wyl_policy_store_direct_permission_exists (store, "bypass-subject",
+      "wr.login.skip_mfa", "login", &still_granted) != WYRELOG_E_OK
+      || still_granted))
+    rc = 2974;
+  if (rc == 0) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw_login (env.session, "POST", env.base_url,
+        "username=bypass-subject&tenant=__wr_default&skip_mfa=true", &status,
+        &body) != 0 || status != 403
+        || strstr (body, "\"login_denied\"") == NULL) {
+      g_printerr ("skip-mfa login after revoke: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2975;
+    }
+  }
+  /* Granting the bypass after bootstrap stays refused. */
+  if (rc == 0) {
+    g_clear_pointer (&body, g_free);
+    if (send_raw_service_principal_bearer (env.session, "POST",
+        env.base_url, "/policy/permissions/grant", query, env.access_token,
+        NULL, &status, &body) != 0 || status != 403
+        || strstr (body, "\"policy_denied\"") == NULL) {
+      g_printerr ("skip-mfa grant: %u %s\n", status,
+          body != NULL ? body : "(null)");
+      rc = 2976;
+    }
+  }
+  service_denial_env_clear (&env);
+  return rc;
+}
+
 /* #729: the self-arm route (POST /service-management-authority/arm) lets a
  * live MFA SYSTEM admin arm the two service-management permissions at ITS OWN
  * session, with no store-seam pre-arming. Covers the happy path (self-arm ->
@@ -25187,6 +25280,11 @@ service_variant_checks (int argc, char **argv)
   gint mfa_identity_rc = check_mfa_enroll_start_subject_identity ();
   if (mfa_identity_rc != 0) {
     result = mfa_identity_rc;
+    goto cleanup;
+  }
+  gint skip_mfa_revoke_rc = check_skip_mfa_bypass_revoke ();
+  if (skip_mfa_revoke_rc != 0) {
+    result = skip_mfa_revoke_rc;
     goto cleanup;
   }
   gint self_arm_reject_rc = check_service_management_self_arm_rejections ();
