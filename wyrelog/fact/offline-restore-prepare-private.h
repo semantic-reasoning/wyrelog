@@ -38,8 +38,23 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_commit_admit_run
     GCancellable *cancellable,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Admit graph COMMIT only after independently authenticating the same bundle
+ * and replaying its selected staged graph under retained root/graph authority.
+ * The exact replacement reservation is durable before the guarded decision;
+ * errors leave decision NONE or return the exact committed successor after an
+ * ambiguous response. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_admit_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, WylFactReplayScheduler *scheduler,
+    WylFactOfflineBackupBundle *bundle, const gchar *operation_uuid,
+    guint64 expected_revision, gint64 drain_timeout_us,
+    GCancellable *cancellable,
+    WylFactOfflineRestoreJournal *out_committed);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 void wyl_fact_offline_restore_tenant_commit_set_checkpoint_for_test
+  (wyrelog_error_t (*checkpoint) (gpointer user_data), gpointer user_data);
+void wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
   (wyrelog_error_t (*checkpoint) (gpointer user_data), gpointer user_data);
 #endif
 

@@ -168,6 +168,46 @@ tenant_commit_admission_phase (const WylFactOfflineRestoreJournal *journal)
   return TRUE;
 }
 
+static gboolean
+graph_commit_admission_phase (const WylFactOfflineRestoreJournal *journal)
+{
+  if (journal == NULL || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      || journal->graphs == NULL || journal->graphs->len != 1
+      || journal->confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal->manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED)
+    return FALSE;
+  g_autoptr (GBytes) encoded = NULL;
+  if (wyl_fact_offline_restore_journal_encode (journal, &encoded) != WYRELOG_E_OK
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || journal->policy_generation_published || journal->lifecycle_handoff_complete)
+    return FALSE;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal->graphs, 0);
+  return graph != NULL && graph->old_provisioning_uuid != NULL
+         && !graph->expected_main_absent && graph->copied
+         && graph->checksum_verified && graph->identity_verified
+         && graph->schema_verified && graph->replay_preflighted
+         && graph->transition_state ==
+         WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+         && graph->next_op ==
+         WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+         && graph->attempt == WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+         && graph->pending_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+         && !graph->transition_terminal && !graph->resume_forbidden
+         && !graph->durability_unprovable_acknowledged
+         && g_strcmp0 (journal->selected_graph_id, graph->graph_id) == 0;
+}
+
+static gboolean
+commit_admission_phase (const WylFactOfflineRestoreJournal *journal)
+{
+  return journal != NULL && (journal->scope ==
+         WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      ? graph_commit_admission_phase (journal)
+      : tenant_commit_admission_phase (journal));
+}
+
 static wyrelog_error_t
 check_policy (WylFactOfflineRestoreValidationSession *session)
 {
@@ -404,7 +444,7 @@ session_new
       || session->journal.confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
       || session->journal.manifest_trust != WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
       || !(commit_admission
-          ? tenant_commit_admission_phase (&session->journal)
+          ? commit_admission_phase (&session->journal)
           : wyl_fact_offline_restore_validation_progress_phase
         (&session->journal))
       : !staged_phase (&session->journal)))
@@ -566,7 +606,9 @@ validate_current (WylFactOfflineRestoreValidationSession *session,
     };
     memcpy (admission.manifest_sha256, session->journal.manifest_sha256, sizeof admission.manifest_sha256);
     WylFactOfflineRestoreValidationMode mode = session->commit_admission
-        ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_TENANT_COMMIT_ADMISSION
+        ? session->journal.scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_GRAPH_COMMIT_ADMISSION
+        : WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_TENANT_COMMIT_ADMISSION
         : session->record_preflight
         ? WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED_PROGRESS
         : WYL_FACT_OFFLINE_RESTORE_VALIDATION_MODE_STAGED;

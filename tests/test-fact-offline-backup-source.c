@@ -9199,6 +9199,16 @@ graph_restore_bind_competing_claim_for_test (gpointer user_data)
 }
 #endif
 
+#ifdef WYL_TEST_HANDLE_SEAMS
+static wyrelog_error_t
+graph_commit_admission_fail_before_cas (gpointer data)
+{
+  gboolean *called = data;
+  *called = TRUE;
+  return WYRELOG_E_IO;
+}
+#endif
+
 static void
 test_graph_populated_schema_transition_roundtrip (void)
 {
@@ -9347,6 +9357,7 @@ test_graph_populated_schema_transition_roundtrip (void)
       g_ptr_array_index (journal.graphs, 0))->replay_preflighted);
   g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
       WYRELOG_E_OK);
+  g_clear_pointer (&scheduler, wyl_fact_replay_scheduler_unref);
   g_autoptr (GBytes) prepared_journal = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
       &prepared_journal), ==, WYRELOG_E_OK);
@@ -9500,7 +9511,6 @@ test_graph_populated_schema_transition_roundtrip (void)
       WYRELOG_E_OK);
   policy_db = wyl_policy_store_get_db (fixture.policy);
 #endif
-  WylFactOfflineRestoreStoreResult result = 0;
   g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
         (fixture.policy, fixture.root, fixture.runtime, operation, "alpha",
@@ -9528,18 +9538,70 @@ test_graph_populated_schema_transition_roundtrip (void)
   wyl_fact_graph_runtime_status_clear (&sibling_after);
   wyl_fact_graph_key_clear (&sibling_key);
   wyl_fact_offline_restore_journal_clear (&journal);
-  WylPolicyGraphRestoreReplacementRecord *replacement = NULL;
-  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
-        (fixture.policy, &bound, &result, &replacement), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
-  wyl_policy_graph_restore_replacement_record_free (replacement);
-  /* Graph replacement COMMIT is admitted through its reserved companion.
-   * The generic journal decision helper only admits absent-main graphs. */
-  bound.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
-  bound.revision++;
-  import_restore_journal_for_test (fixture.policy, &bound);
+  wyl_fact_replay_scheduler_config_defaults (&config);
+  g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
+      &scheduler), ==, WYRELOG_E_OK);
+  g_autoptr (GCancellable) cancelled = g_cancellable_new ();
+  g_cancellable_cancel (cancelled);
+  g_auto (WylFactOfflineRestoreJournal) admitted = { 0 };
+  g_autoptr (GBytes) bound_none = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&bound,
+      &bound_none), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+        (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+      operation, bound.revision, 0, cancelled, &admitted), ==,
+      WYRELOG_E_CANCELLED);
+  g_assert_null (admitted.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, bound_none);
+  WylPolicyGraphRestoreReplacementRecord *unreserved = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (fixture.policy,
+      operation, &unreserved), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (unreserved);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  gboolean proof_checkpoint_called = FALSE;
+  wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+    (graph_commit_admission_fail_before_cas, &proof_checkpoint_called);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+        (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+      operation, bound.revision, 0, NULL, &admitted), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_admit_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_true (proof_checkpoint_called);
+  g_assert_null (admitted.graphs);
+  assert_restore_journal_matches (fixture.policy, operation, bound_none);
+  WylPolicyGraphRestoreReplacementRecord *reserved = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_load (fixture.policy,
+      operation, &reserved), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (reserved->phase, ==, "reserved");
+  g_assert_cmpuint (reserved->attempt, ==, 0);
+  g_assert_cmpuint (reserved->journal_revision, ==, bound.revision);
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+#endif
+  /* Lose the response after the guarded NONE-to-COMMIT write. Admission must
+   * reload and accept only the exact canonical successor. */
+  wyl_policy_store_offline_restore_fail_once (fixture.policy,
+      WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+        (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+      operation, bound.revision, 0, NULL, &admitted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (admitted.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  g_assert_cmpuint (admitted.revision, ==, bound.revision + 1);
+  wyl_fact_offline_restore_journal_clear (&bound);
+  bound = admitted;
+  admitted = (WylFactOfflineRestoreJournal) { 0 };
   revision = bound.revision;
+  g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+  g_autofree gchar *decision_policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_assert_cmpint (wyl_policy_store_open (decision_policy_path,
+      &fixture.policy), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      WYRELOG_E_OK);
+  policy_db = wyl_policy_store_get_db (fixture.policy);
   g_auto (WylFactOfflineRestoreJournal) post_publish = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
         (fixture.policy, fixture.root, fixture.runtime, operation, revision,

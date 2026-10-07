@@ -1893,6 +1893,35 @@ successor_decide (WylFactOfflineRestoreJournal *journal, gpointer data)
            (journal, GPOINTER_TO_UINT (data));
 }
 
+static wyrelog_error_t
+successor_graph_handoff_decide (WylFactOfflineRestoreJournal *journal,
+    gpointer data)
+{
+  WylFactOfflineRestoreDecision decision = GPOINTER_TO_UINT (data);
+  if (journal->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      || journal->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || journal->graphs == NULL || journal->graphs->len != 1
+      || journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || journal->confirmation !=
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
+      || journal->manifest_trust !=
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED
+      || journal->revision >= G_MAXINT64)
+    return WYRELOG_E_POLICY;
+  WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal->graphs, 0);
+  if (graph->expected_main_absent || graph->old_provisioning_uuid == NULL
+      || !graph->copied || !graph->checksum_verified
+      || !graph->identity_verified || !graph->schema_verified
+      || !graph->replay_preflighted
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE)
+    return WYRELOG_E_POLICY;
+  journal->decision = decision;
+  journal->revision++;
+  return WYRELOG_E_OK;
+}
+
 typedef struct
 {
   const gchar *graph_id;
@@ -2095,6 +2124,12 @@ wyl_fact_offline_restore_journal_is_legal_successor
         successor_not_applied, &not_applied))
       return TRUE;
   }
+  if (current->version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      && current->scope == WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      && successor_from_candidate (current_bytes, desired,
+      successor_graph_handoff_decide,
+      GUINT_TO_POINTER (desired->decision)))
+    return TRUE;
   if (successor_from_candidate (current_bytes, desired, successor_decide,
       GUINT_TO_POINTER (desired->decision))
       || successor_from_candidate (current_bytes, desired,
