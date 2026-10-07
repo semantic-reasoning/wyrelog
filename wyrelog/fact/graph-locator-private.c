@@ -3066,6 +3066,11 @@ wyl_fact_graph_restore_selected_cleanup_execute
               directory->checkpoint_data);
     if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
       rc = WYRELOG_E_IO;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+      rc = directory->checkpoint ("restore-selected-after-companion-dir-sync",
+              directory->checkpoint_data);
+#endif
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_restore_selected_cleanup_shape_open (resolver,
               directory, lease, old_provisioning_uuid, restore_uuid,
@@ -3091,6 +3096,11 @@ wyl_fact_graph_restore_selected_cleanup_execute
   }
   if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
     rc = WYRELOG_E_IO;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-selected-after-final-dir-sync",
+            directory->checkpoint_data);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_restore_selected_cleanup_shape_open (resolver,
             directory, lease, old_provisioning_uuid, restore_uuid,

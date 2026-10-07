@@ -3863,6 +3863,14 @@ wyrelog_error_t wyl_policy_store_graph_restore_selected_promote_with_effect
     WylPolicyGraphRestoreSelectionEffectFunc terminal_shape_check,
     gpointer effect_data, WylPolicyOfflineRestoreStoreResult *out_result);
 
+/* Read-only proof of the exact published successor of a finalized graph
+ * restore. Requires the canonical v3 finalized record at revision R and
+ * returns the verified v4 record only when policy is exactly at R+2. */
+wyrelog_error_t wyl_policy_store_graph_restore_published_prove
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *finalized,
+    WylPolicyOfflineRestoreRecord **out_published);
+
 /* Complete a pending graph COMMIT RETAIN only after the callback proves the
  * exact retained filesystem shape. The effect runs under the policy writer
  * transaction and must not reenter the policy store. */
