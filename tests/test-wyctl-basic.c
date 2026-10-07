@@ -4227,6 +4227,41 @@ test_fact_mutation_times_out (void)
 }
 
 /*
+ * #1331: the fact paths stored the daemon's "error" string without the
+ * checks the other paths apply, so a misbehaving daemon could write escape
+ * sequences to the operator's terminal through wyctl.  Such a code is now
+ * dropped and wyctl prints its fixed fallback instead.
+ */
+static void
+test_fact_unsafe_error_code_not_printed (void)
+{
+  static const gchar *const bodies[] = {
+    "{\"error\":\"fact_\x1b]0;owned\x07" "denied\"}",
+    "{\"error\":\"fact\ndenied\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bodies); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fact_forget_case (403, bodies[i], NULL, FALSE, &run);
+    assert_fact_forget_exit (&run, 4);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, "wyctl: fact forget failed: "
+        "fact_forget_failed\n");
+
+    gint wait_status = 0;
+    g_autofree gchar *out = NULL;
+    g_autofree gchar *err = NULL;
+    g_autofree gchar *request = NULL;
+    run_fact_mutation_case ("put", 403, bodies[i], 0, &wait_status, &out,
+        &err, &request);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 4);
+    g_assert_nonnull (request);
+    g_assert_cmpstr (out, ==, "");
+    g_assert_cmpstr (err, ==, "wyctl: fact put failed: fact_append_failed\n");
+  }
+}
+
+/*
  * #1324: auth logout never read --timeout-ms, so it waited however long
  * the daemon took and accepted any value for the flag.  The test daemon
  * answers 200 well after the 500 ms budget: before the fix the logout
@@ -5523,6 +5558,8 @@ main (int argc, char **argv)
       test_fact_forget_audit_failed);
   g_test_add_func ("/wyctl/fact-forget-audit-failed-bare",
       test_fact_forget_audit_failed_bare);
+  g_test_add_func ("/wyctl/fact-unsafe-error-code-not-printed",
+      test_fact_unsafe_error_code_not_printed);
   g_test_add_func ("/wyctl/fact-forget-status-errors",
       test_fact_forget_status_errors);
   g_test_add_func ("/wyctl/fact-forget-times-out",
