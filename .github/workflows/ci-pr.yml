@@ -343,6 +343,31 @@ jobs:
             --timeout-multiplier 2 \
             --print-errorlogs
 
+      # These suites failed on macOS while passing on Linux, unnoticed
+      # because no job ran them there: symlinked temp roots, Apple's
+      # libsqlite3, an Apple-only provisioning case, and a compile error
+      # (#1358).  Run them in the secure build on both runtimes so a
+      # platform-specific regression shows up.
+      - name: Test fact-store platform regressions with secure DuckDB
+        run: |
+          meson compile -C build-secure-duckdb -j 1 \
+            test-fact-offline-backup-bundle \
+            test-fact-publication-lock-matrix \
+            test-fact-root-writer-lease \
+            test-fact-provisioning-run \
+            check-service-permission-closure-seed \
+            wyrelogd \
+            wyctl
+          meson test -C build-secure-duckdb --no-rebuild \
+            fact-offline-backup-bundle \
+            fact-publication-lock-matrix \
+            fact-root-writer-lease \
+            fact-provisioning-run \
+            service-permission-closure \
+            packaged-install-readiness \
+            wyrelogd-datalog-product-flow \
+            --print-errorlogs
+
       - name: Test audit DuckDB hardening with source DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 1 \
