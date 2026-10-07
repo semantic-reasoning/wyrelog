@@ -1006,6 +1006,32 @@ client_service_management_begin (WylClient *client)
   return TRUE;
 }
 
+/* An error code the client keeps: [a-z0-9_], 1 to 127 characters. */
+static gboolean
+client_error_code_is_well_formed (const gchar *code, gsize len)
+{
+  if (code == NULL || len == 0 || len > WYL_CLIENT_LAST_ERROR_CODE_MAX_LEN)
+    return FALSE;
+  for (gsize i = 0; i < len; i++)
+    if (!g_ascii_islower ((guchar) code[i])
+        && !g_ascii_isdigit ((guchar) code[i]) && code[i] != '_')
+      return FALSE;
+  return TRUE;
+}
+
+/* Drop a stored error code that echoes one of the client's own tokens. */
+static void
+client_scrub_last_error_code (WylClient *client)
+{
+  const gchar *secrets[] = {client->access_token, client->refresh_token,
+                            client->session_token};
+  for (guint i = 0; i < G_N_ELEMENTS (secrets); i++)
+    if (client->last_error_code != NULL && secrets[i] != NULL
+        && secrets[i][0] != '\0'
+        && strstr (client->last_error_code, secrets[i]) != NULL)
+      g_clear_pointer (&client->last_error_code, g_free);
+}
+
 gchar *
 wyl_client_parse_remote_error_code (const gchar *data, gsize size)
 {
@@ -1039,16 +1065,14 @@ wyl_client_parse_remote_error_code (const gchar *data, gsize size)
     return NULL;
   const gchar *start = cursor;
   while (cursor < limit && *cursor != '"') {
-    if (!g_ascii_islower ((guchar) * cursor)
-        && !g_ascii_isdigit ((guchar) * cursor)
-        && *cursor != '_')
-      return NULL;
     if ((gsize) (cursor - start) >= WYL_CLIENT_LAST_ERROR_CODE_MAX_LEN)
       return NULL;
     cursor++;
   }
   const gchar *code_end = cursor;
-  if (cursor == start || cursor >= limit || *cursor++ != '"')
+  if (cursor >= limit || *cursor++ != '"'
+      || !client_error_code_is_well_formed (start,
+      (gsize) (code_end - start)))
     return NULL;
   SKIP_JSON_WS ();
   if (cursor >= limit || *cursor++ != '}')
@@ -1074,13 +1098,7 @@ client_store_remote_response (WylClient *client, guint status,
   gsize size = 0;
   const gchar *data = g_bytes_get_data (body, &size);
   client->last_error_code = wyl_client_parse_remote_error_code (data, size);
-  const gchar *secrets[] = {client->access_token, client->refresh_token,
-                            client->session_token};
-  for (guint i = 0; i < G_N_ELEMENTS (secrets); i++)
-    if (client->last_error_code != NULL && secrets[i] != NULL
-        && secrets[i][0] != '\0'
-        && strstr (client->last_error_code, secrets[i]) != NULL)
-      g_clear_pointer (&client->last_error_code, g_free);
+  client_scrub_last_error_code (client);
 }
 
 static wyrelog_error_t
@@ -1876,6 +1894,26 @@ parse_simple_json_bool_member (const gchar *data, gsize size,
   return FALSE;
 }
 
+/*
+ * #1331: the fact paths read "error" with the lenient member scan, because
+ * a fact forget 500 carries purge fields beside it.  Hold the code to the
+ * same rules as client_store_remote_response so that wyctl never prints
+ * control characters, an unbounded string or a credential; a code that
+ * fails is dropped and the caller falls back to its own wording.
+ */
+static void
+client_store_fact_error_code (WylClient *client, const gchar *data,
+    gsize size)
+{
+  g_clear_pointer (&client->last_error_code, g_free);
+  g_autofree gchar *code = parse_simple_json_string_member (data, size,
+          "error");
+  if (code == NULL || !client_error_code_is_well_formed (code, strlen (code)))
+    return;
+  client->last_error_code = g_steal_pointer (&code);
+  client_scrub_last_error_code (client);
+}
+
 static wyrelog_error_t
 client_send_fact_message (WylClient *client, SoupMessage *message,
     GBytes **out_body)
@@ -1903,8 +1941,7 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
 
   gsize size = 0;
   const gchar *data = g_bytes_get_data (body, &size);
-  client->last_error_code = parse_simple_json_string_member (data, size,
-          "error");
+  client_store_fact_error_code (client, data, size);
   g_bytes_unref (body);
   if (status == 400)
     return WYRELOG_E_INVALID;
@@ -3420,8 +3457,7 @@ wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
     return WYRELOG_E_OK;
   }
 
-  client->last_error_code = parse_simple_json_string_member (data, size,
-          "error");
+  client_store_fact_error_code (client, data, size);
   /* The rows are gone even though no audit event was recorded; report it so
    * the caller does not retry an erasure that already happened. */
   if (status == 500 && g_strcmp0 (client->last_error_code,

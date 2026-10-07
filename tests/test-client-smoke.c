@@ -1334,6 +1334,85 @@ main (void)
       || !client_last_response_is (management_client, 404,
       "fact_batch_not_found"))
     return wyl_test_normalize_exit_status (4106);
+
+  /* #1331: the fact paths kept any "error" string the daemon sent, and
+   * wyctl printed it.  A code is now held to the strict parser's rules:
+   * [a-z0-9_], at most 127 characters, and no client credential.  The
+   * status is kept, so callers fall back to their own wording. */
+  static const gchar *const unsafe_fact_errors[] = {
+    "{\"error\":\"fact_\x1b[31mdenied\"}",
+    "{\"error\":\"fact\ndenied\"}",
+    "{\"error\":\"Fact_Denied\"}",
+    "{\"error\":\"\"}",
+  };
+  http.status = 403;
+  for (gsize i = 0; i < G_N_ELEMENTS (unsafe_fact_errors); i++) {
+    http.body = unsafe_fact_errors[i];
+    if (wyl_client_fact_graph_verify (management_client, "__wr_default",
+        "orders", 123, "public", 49, &verification) != WYRELOG_E_POLICY
+        || !client_last_response_is (management_client, 403, NULL))
+      return wyl_test_normalize_exit_status (4128);
+    if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+        "orders", "shop", "orders", 1, "b-5", "ops", "gdpr", 123, "public",
+        49, &forget) != WYRELOG_E_POLICY || forget.purged
+        || !client_last_response_is (management_client, 403, NULL))
+      return wyl_test_normalize_exit_status (4129);
+  }
+  g_autofree gchar *longest_code = g_strnfill (127, 'e');
+  g_autofree gchar *longest_body = g_strdup_printf ("{\"error\":\"%s\"}",
+          longest_code);
+  g_autofree gchar *overlong_body = g_strdup_printf ("{\"error\":\"%se\"}",
+          longest_code);
+  http.body = longest_body;
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default",
+      "orders", 123, "public", 49, &verification) != WYRELOG_E_POLICY
+      || !client_last_response_is (management_client, 403, longest_code))
+    return wyl_test_normalize_exit_status (4130);
+  http.body = overlong_body;
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default",
+      "orders", 123, "public", 49, &verification) != WYRELOG_E_POLICY
+      || !client_last_response_is (management_client, 403, NULL))
+    return wyl_test_normalize_exit_status (4131);
+  if (wyl_client_fact_forget_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-5", "ops", "gdpr", 123, "public", 49,
+      &forget) != WYRELOG_E_POLICY
+      || !client_last_response_is (management_client, 403, NULL))
+    return wyl_test_normalize_exit_status (4132);
+  /* The credential check needs tokens the character class admits. */
+  g_autoptr (WylClient) scrub_client = NULL;
+  if (wyl_client_new (local_base_url, &scrub_client) != WYRELOG_E_OK)
+    return wyl_test_normalize_exit_status (4133);
+  http.status = 0;
+  http.body = "{\"session_token\":\"scrubsession\","
+      "\"username\":\"alice\",\"tenant\":\"__wr_default\","
+      "\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"scrubaccess\"}";
+  if (wyl_client_login_skip_mfa (scrub_client, "alice") != WYRELOG_E_OK)
+    return wyl_test_normalize_exit_status (4134);
+  static const gchar *const credential_fact_errors[] = {
+    "{\"error\":\"denied_scrubaccess\"}",
+    "{\"error\":\"scrubsession\"}",
+  };
+  http.status = 403;
+  for (gsize i = 0; i < G_N_ELEMENTS (credential_fact_errors); i++) {
+    http.body = credential_fact_errors[i];
+    if (wyl_client_fact_graph_verify (scrub_client, "__wr_default",
+        "orders", 123, "public", 49, &verification) != WYRELOG_E_POLICY
+        || !client_last_response_is (scrub_client, 403, NULL))
+      return wyl_test_normalize_exit_status (4135);
+    if (wyl_client_fact_forget_batch (scrub_client, "__wr_default",
+        "orders", "shop", "orders", 1, "b-5", "ops", "gdpr", 123, "public",
+        49, &forget) != WYRELOG_E_POLICY
+        || !client_last_response_is (scrub_client, 403, NULL))
+      return wyl_test_normalize_exit_status (4136);
+  }
+  /* A sanitized code that names no credential still reaches the caller. */
+  http.body = "{\"error\":\"fact_forget_denied\"}";
+  if (wyl_client_fact_forget_batch (scrub_client, "__wr_default",
+      "orders", "shop", "orders", 1, "b-5", "ops", "gdpr", 123, "public", 49,
+      &forget) != WYRELOG_E_POLICY
+      || !client_last_response_is (scrub_client, 403, "fact_forget_denied"))
+    return wyl_test_normalize_exit_status (4137);
   http.status = 0;
 
   /* #1238: listing and sealing a tenant's graphs. */
