@@ -330,6 +330,81 @@ wyl_fact_offline_restore_journal_store_decide_tenant_commit
 }
 
 wyrelog_error_t
+wyl_fact_offline_restore_journal_store_decide_graph_commit
+  (wyl_policy_store_t *store,
+    const WylFactOfflineRestoreJournal *expected,
+    WylPolicyOfflineRestoreGraphCommitProofFunc proof, gpointer proof_data,
+    WylFactOfflineRestoreStoreResult *out_result,
+    WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_result != NULL)
+    *out_result = WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+  if (out_committed != NULL)
+    memset (out_committed, 0, sizeof *out_committed);
+  if (store == NULL || expected == NULL || proof == NULL
+      || out_result == NULL || out_committed == NULL
+      || expected->version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+      || expected->scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+      || expected->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_NONE
+      || expected->revision == 0 || expected->revision >= G_MAXINT64
+      || expected->graphs == NULL || expected->graphs->len != 1)
+    return WYRELOG_E_INVALID;
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (expected->graphs, 0);
+  if (graph == NULL || graph->old_provisioning_uuid == NULL
+      || graph->expected_main_absent || !graph->copied
+      || !graph->checksum_verified || !graph->identity_verified
+      || !graph->schema_verified || !graph->replay_preflighted
+      || graph->transition_state !=
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY
+      || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+      || graph->transition_terminal || graph->resume_forbidden
+      || graph->durability_unprovable_acknowledged
+      || g_strcmp0 (expected->selected_graph_id, graph->graph_id) != 0)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GBytes) expected_bytes = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_journal_encode (expected,
+          &expected_bytes);
+  g_auto (WylFactOfflineRestoreJournal) desired = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (expected_bytes, &desired);
+  if (rc == WYRELOG_E_OK && desired.revision >= G_MAXINT64)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    /* The general decision helper intentionally rejects replacement graphs;
+     * this scoped adapter admits them only through the guarded transaction. */
+    desired.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+    desired.revision++;
+  }
+  WylPolicyOfflineRestoreRecord expected_record = { 0 };
+  WylPolicyOfflineRestoreRecord desired_record = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = record_from_journal (expected, &expected_record);
+  if (rc == WYRELOG_E_OK)
+    rc = record_from_journal (&desired, &desired_record);
+  WylPolicyOfflineRestoreRecord *committed = NULL;
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyOfflineRestoreStoreResult result =
+        WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    rc = wyl_policy_store_offline_restore_graph_decide_guarded (store,
+            &expected_record, &desired_record, proof, proof_data, &result,
+            &committed);
+    if (rc == WYRELOG_E_OK) {
+      *out_result = map_result (result);
+      if (committed != NULL)
+        rc = decode_record (committed, out_committed);
+    }
+  }
+  wyl_policy_offline_restore_record_free (committed);
+  record_clear (&expected_record);
+  record_clear (&desired_record);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_journal_store_release (wyl_policy_store_t *store,
     guint64 expected_revision, const gchar *operation_uuid,
     WylFactOfflineRestoreStoreResult *out_result)

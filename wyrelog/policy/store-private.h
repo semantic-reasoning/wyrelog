@@ -3507,6 +3507,19 @@ wyrelog_error_t wyl_policy_store_offline_restore_tenant_decide_guarded
     const WylPolicyOfflineRestoreRecord *desired,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyOfflineRestoreRecord **out_committed);
+/* Graph COMMIT admission has already replayed the selected stage while
+ * holding publication authority. This callback runs inside the scoped writer
+ * transaction and may only revalidate held filesystem/runtime authority; it
+ * must not call policy APIs, perform filesystem mutations or retain inputs. */
+typedef wyrelog_error_t (*WylPolicyOfflineRestoreGraphCommitProofFunc)
+  (gpointer user_data);
+wyrelog_error_t wyl_policy_store_offline_restore_graph_decide_guarded
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected,
+    const WylPolicyOfflineRestoreRecord *desired,
+    WylPolicyOfflineRestoreGraphCommitProofFunc proof, gpointer proof_data,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyOfflineRestoreRecord **out_committed);
 wyrelog_error_t wyl_policy_store_offline_restore_release
   (wyl_policy_store_t *store, const WylPolicyOfflineRestoreRecord *expected,
     WylPolicyOfflineRestoreStoreResult *out_result);
