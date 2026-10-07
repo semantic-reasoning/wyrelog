@@ -382,6 +382,7 @@ EXPECTED_BUILD_STEP_NAMES = (
     "Test fact forget transaction cleanup with secure DuckDB",
     "Test opposing fact lifecycle wrappers with secure DuckDB",
     "Test offline backup and restore with secure DuckDB",
+    "Test fact-store platform regressions with secure DuckDB",
     "Test audit DuckDB hardening with source DuckDB",
     "Remove secure DuckDB compile swap",
     "Show sccache statistics",
