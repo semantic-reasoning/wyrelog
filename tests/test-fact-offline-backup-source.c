@@ -9664,41 +9664,61 @@ test_graph_populated_schema_transition_roundtrip (void)
 #endif
 }
 
-static void
-test_graph_restore_replacement_reservation (gconstpointer data)
-{
-  gboolean ambiguous_commit = g_strcmp0 (data, "commit-response") == 0;
-  gboolean schema_transition = g_strcmp0 (data, "schema-transition") == 0;
-  BackupFixture fixture = { 0 };
-  fixture_init (&fixture, "restore-replacement-XXXXXX");
-  create_tenant (&fixture);
-  create_graph (&fixture, "alpha");
+static void test_graph_restore_replacement_reservation(gconstpointer data) {
+  gboolean ambiguous_commit = g_strcmp0(data, "commit-response") == 0;
+  gboolean schema_transition = g_strcmp0(data, "schema-transition") == 0;
+  BackupFixture fixture = {0};
+  fixture_init(&fixture, "restore-replacement-XXXXXX");
+  create_tenant(&fixture);
+  create_graph(&fixture, "alpha");
+  create_graph(&fixture, "beta");
   if (schema_transition) {
     const wyl_policy_fact_relation_schema_column_t columns[] = {
-      { "id", "symbol", FALSE, TRUE },
+      {"id", "symbol", FALSE, TRUE},
     };
     const wyl_policy_fact_relation_schema_query_t queries[] = {
-      { "items_v2", "wr.datalog.query", 1000 },
+      {"items_v2", "wr.datalog.query", 1000},
     };
     const wyl_policy_fact_relation_schema_options_t schema = {
-      .tenant_id = "tenant-a", .graph_id = "alpha",
-      .namespace_id = "backup", .relation_name = "items",
-      .schema_version = 2, .relation_visible = TRUE,
-      .columns = columns, .n_columns = G_N_ELEMENTS (columns),
-      .queries = queries, .n_queries = G_N_ELEMENTS (queries),
+      .tenant_id = "tenant-a",
+      .graph_id = "alpha",
+      .namespace_id = "backup",
+      .relation_name = "items",
+      .schema_version = 2,
+      .relation_visible = TRUE,
+      .columns = columns,
+      .n_columns = G_N_ELEMENTS(columns),
+      .queries = queries,
+      .n_queries = G_N_ELEMENTS(queries),
     };
-    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema
-          (fixture.policy, &schema), ==, WYRELOG_E_OK);
-  }
-  seal_graph (&fixture, "alpha");
-  seal_tenant (&fixture);
-
-  WylFactGraphKey runtime_key = { 0 };
-  g_assert_cmpint (wyl_fact_graph_key_init (&runtime_key, "tenant-a", "alpha"),
+    g_assert_cmpint(
+      wyl_policy_store_register_fact_relation_schema(fixture.policy, &schema),
       ==, WYRELOG_E_OK);
+  }
+  seal_graph(&fixture, "alpha");
+  seal_graph(&fixture, "beta");
+  seal_tenant(&fixture);
+
+  WylFactGraphKey runtime_key = {0};
+  g_assert_cmpint(wyl_fact_graph_key_init(&runtime_key, "tenant-a", "alpha"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint(
+    wyl_fact_graph_runtime_manager_refresh(fixture.runtime, &runtime_key,
+    session_build_engine, NULL, NULL),
+    ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear(&runtime_key);
+  WylFactGraphKey sibling_key = {0};
+  g_assert_cmpint(wyl_fact_graph_key_init(&sibling_key, "tenant-a", "beta"), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (fixture.runtime,
-      &runtime_key, session_build_engine, NULL, NULL), ==, WYRELOG_E_OK);
-  wyl_fact_graph_key_clear (&runtime_key);
+      &sibling_key, session_build_engine, NULL, NULL), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus sibling_before = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (fixture.runtime,
+      &sibling_key, &sibling_before), ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear (&sibling_key);
+  WylPolicyGraphAuthorityRecord *sibling_authority_before = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (fixture.policy,
+      "tenant-a", "beta", &sibling_authority_before), ==, WYRELOG_E_OK);
 
   WylPolicyTenantAuthorityRecord *tenant = NULL;
   WylPolicyGraphAuthorityRecord *authority = NULL;
@@ -10613,18 +10633,9 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_cmpint (finalize_pending_graph->pending_op, ==,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
   g_assert_false (g_file_test (old_companion, G_FILE_TEST_EXISTS));
-  g_assert_true (g_file_test (rollback_path, G_FILE_TEST_IS_REGULAR));
-  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
-  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
-      WYRELOG_E_OK);
-  if (g_strcmp0 (data, "restart") == 0) {
-    g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
-    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
-        ==, WYRELOG_E_OK);
-  }
-  finalize_failure = "restore-selected-after-rollback-unlink";
+  g_assert_true(g_file_test(rollback_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_cmpint (link (rollback_path, old_companion), ==, 0);
+  finalize_failure = "restore-selected-after-companion-dir-sync";
   wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
     (fail_retain_once, &finalize_failure);
   g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
@@ -10633,30 +10644,81 @@ test_graph_restore_replacement_reservation (gconstpointer data)
   g_assert_null (finalize_failure);
   wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
     (NULL, NULL);
-  g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      finalize_pending.revision, 0, &finalized), ==, WYRELOG_E_OK);
+  g_assert_false (g_file_test (old_companion, G_FILE_TEST_EXISTS));
+  g_clear_pointer(&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint(wyl_policy_store_open(policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
+      WYRELOG_E_OK);
+  if (g_strcmp0(data, "restart") == 0) {
+    g_clear_pointer(&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint(wyl_fact_graph_runtime_manager_new(&fixture.runtime), ==,
+        WYRELOG_E_OK);
+  }
+  finalize_failure = "restore-selected-after-rollback-unlink";
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test(
+    fail_retain_once, &finalize_failure);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_finalize_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalize_pending.revision, 0, &finalized),
+      ==, WYRELOG_E_IO);
+  g_assert_null(finalize_failure);
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test(NULL,
+      NULL);
+  g_assert_false(g_file_test(rollback_path, G_FILE_TEST_EXISTS));
+  finalize_failure = "restore-selected-after-final-dir-sync";
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test(
+    fail_retain_once, &finalize_failure);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_finalize_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalize_pending.revision, 0, &finalized),
+      ==, WYRELOG_E_IO);
+  g_assert_null(finalize_failure);
+  wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test(NULL,
+      NULL);
+  wyl_policy_store_offline_restore_fail_once(
+    fixture.policy, WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_finalize_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalize_pending.revision, 0, &finalized),
+      ==, WYRELOG_E_IO);
+  g_clear_pointer(&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint(wyl_policy_store_open(policy_path, &fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_finalize_resume_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        &finalize_pending, 0, &finalized),
+      ==, WYRELOG_E_OK);
 #else
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_finalize_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      selected.revision, 0, &finalized), ==, WYRELOG_E_OK);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_finalize_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, selected.revision, 0, &finalized),
+      ==, WYRELOG_E_OK);
 #endif
-  g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
-      g_ptr_array_index (finalized.graphs, 0))->transition_state, ==,
-      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
-  g_assert_true (g_file_test (main_path, G_FILE_TEST_IS_REGULAR));
-  g_assert_true (g_file_test (replacement_path, G_FILE_TEST_IS_REGULAR));
-  g_assert_false (g_file_test (rollback_path, G_FILE_TEST_EXISTS));
-  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
-  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+  g_assert_cmpint(((WylFactOfflineRestoreJournalGraph *)g_ptr_array_index(
+        finalized.graphs, 0))
+      ->transition_state,
+      ==, WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED);
+  g_auto(WylFactOfflineRestoreJournal) finalized_resume = {0};
+  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_finalize_resume_run(
+        fixture.policy, fixture.root, fixture.runtime, &selected,
+        0, &finalized_resume),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint(finalized_resume.revision, ==, finalized.revision);
+  g_assert_true(g_file_test(main_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_true(g_file_test(replacement_path, G_FILE_TEST_IS_REGULAR));
+  g_assert_false(g_file_test(rollback_path, G_FILE_TEST_EXISTS));
+  g_clear_pointer(&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint(wyl_policy_store_open(policy_path, &fixture.policy), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
       WYRELOG_E_OK);
-  if (g_strcmp0 (data, "restart") == 0) {
-    g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
-    g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime),
-        ==, WYRELOG_E_OK);
+  if (g_strcmp0(data, "restart") == 0) {
+    g_clear_pointer(&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+    g_assert_cmpint(wyl_fact_graph_runtime_manager_new(&fixture.runtime), ==,
+        WYRELOG_E_OK);
   }
   WylPolicyGraphRestoreReplacementRecord *promote_row = NULL;
   WylPolicyOfflineRestoreRecord *promote_journal = NULL;
@@ -10685,135 +10747,275 @@ test_graph_restore_replacement_reservation (gconstpointer data)
     wyl_policy_graph_restore_replacement_record_free (still_selected);
   }
   sqlite3 *promotion_db = wyl_policy_store_get_db (fixture.policy);
-  g_assert_cmpint (sqlite3_exec (promotion_db,
-      "UPDATE fact_graph_provisioning SET phase='active' "
-      "WHERE phase='restore_selected';", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint(
+    sqlite3_exec(promotion_db,
+    "UPDATE fact_graph_provisioning SET phase='active' "
+    "WHERE phase='restore_selected';",
+    NULL, NULL, NULL),
+    !=, SQLITE_OK);
   gboolean reject_shape = TRUE;
   WylPolicyOfflineRestoreStoreResult promotion_result =
       WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
-  g_assert_cmpint
-    (wyl_policy_store_graph_restore_selected_promote_with_effect
-        (fixture.policy, promote_row, promote_journal,
-      selected_promotion_shape_for_test, &reject_shape,
-      &promotion_result), ==, WYRELOG_E_IO);
-  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+  g_assert_cmpint(wyl_policy_store_graph_restore_selected_promote_with_effect(
+        fixture.policy, promote_row, promote_journal,
+        selected_promotion_shape_for_test, &reject_shape,
+        &promotion_result),
+      ==, WYRELOG_E_IO);
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
       WYRELOG_E_OK);
   reject_shape = FALSE;
-  g_auto (WylFactOfflineRestoreJournal) promoted = { 0 };
-  g_assert_true (g_file_set_contents (foreign_path, "foreign", -1, NULL));
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (g_remove (foreign_path), ==, 0);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      finalized.revision + 1, 0, &promoted), ==, WYRELOG_E_POLICY);
+  g_auto(WylFactOfflineRestoreJournal) promoted = {0};
+  g_assert_true(g_file_set_contents(foreign_path, "foreign", -1, NULL));
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalized.revision, 0, &promoted),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint(g_remove(foreign_path), ==, 0);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalized.revision + 1, 0, &promoted),
+      ==, WYRELOG_E_POLICY);
   if (schema_transition) {
-    sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
-    g_assert_cmpint (sqlite3_exec (db,
+    sqlite3 *db = wyl_policy_store_get_db(fixture.policy);
+    g_assert_cmpint(
+      sqlite3_exec(
+        db,
         "UPDATE fact_relation_schema_columns SET column_type='int64' "
         "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
         "AND namespace_id='backup' AND relation_name='items' "
         "AND schema_version=1 AND column_index=0;",
-        NULL, NULL, NULL), ==, SQLITE_OK);
-    g_assert_cmpint (sqlite3_changes (db), ==, 1);
-    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
-          (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-        finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
+        NULL, NULL, NULL),
+      ==, SQLITE_OK);
+    g_assert_cmpint(sqlite3_changes(db), ==, 1);
+    g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
+          fixture.policy, fixture.root, fixture.runtime,
+          operation_uuid, finalized.revision, 0, &promoted),
+        ==, WYRELOG_E_POLICY);
     WylPolicyRelationActivationRecord *active = NULL;
-    g_assert_cmpint (wyl_policy_store_read_relation_activation
-          (fixture.policy, "tenant-a", "alpha", "backup", "items",
-        &active), ==, WYRELOG_E_OK);
-    g_assert_cmpuint (active->active_schema_version, ==, 2);
-    wyl_policy_relation_activation_record_free (active);
-    g_assert_cmpint (sqlite3_exec (db,
+    g_assert_cmpint(
+      wyl_policy_store_read_relation_activation(
+        fixture.policy, "tenant-a", "alpha", "backup", "items", &active),
+      ==, WYRELOG_E_OK);
+    g_assert_cmpuint(active->active_schema_version, ==, 2);
+    wyl_policy_relation_activation_record_free(active);
+    g_assert_cmpint(
+      sqlite3_exec(
+        db,
         "UPDATE fact_relation_schema_columns SET column_type='symbol' "
         "WHERE tenant_id='tenant-a' AND graph_id='alpha' "
         "AND namespace_id='backup' AND relation_name='items' "
         "AND schema_version=1 AND column_index=0;",
-        NULL, NULL, NULL), ==, SQLITE_OK);
-    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+        NULL, NULL, NULL),
+      ==, SQLITE_OK);
+    g_assert_cmpint(sqlite3_changes(db), ==, 1);
     /* Abort the second activation update after the first has run inside
      * promotion. The surrounding policy transaction must restore v2. */
-    g_assert_cmpint (sqlite3_exec (db,
-        "CREATE TEMP TRIGGER fail_selected_activation "
-        "BEFORE UPDATE ON fact_relation_activation "
-        "WHEN OLD.lifecycle_state='activating' "
-        "AND NEW.active_schema_version=1 "
-        "BEGIN SELECT RAISE(ABORT,'activation fault'); END;",
-        NULL, NULL, NULL), ==, SQLITE_OK);
-    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
-          (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-        finalized.revision, 0, &promoted), !=, WYRELOG_E_OK);
+    g_assert_cmpint(
+      sqlite3_exec(db,
+      "CREATE TEMP TRIGGER fail_selected_activation "
+      "BEFORE UPDATE ON fact_relation_activation "
+      "WHEN OLD.lifecycle_state='activating' "
+      "AND NEW.active_schema_version=1 "
+      "BEGIN SELECT RAISE(ABORT,'activation fault'); END;",
+      NULL, NULL, NULL),
+      ==, SQLITE_OK);
+    g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
+          fixture.policy, fixture.root, fixture.runtime,
+          operation_uuid, finalized.revision, 0, &promoted),
+        !=, WYRELOG_E_OK);
     WylPolicyRelationActivationRecord *after_fault = NULL;
-    g_assert_cmpint (wyl_policy_store_read_relation_activation
-          (fixture.policy, "tenant-a", "alpha", "backup", "items",
-        &after_fault), ==, WYRELOG_E_OK);
-    g_assert_cmpint (after_fault->lifecycle_state, ==,
+    g_assert_cmpint(wyl_policy_store_read_relation_activation(
+          fixture.policy, "tenant-a", "alpha", "backup", "items",
+          &after_fault),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint(after_fault->lifecycle_state, ==,
         WYL_POLICY_RELATION_ACTIVATION_ACTIVE);
-    g_assert_cmpuint (after_fault->active_schema_version, ==, 2);
-    wyl_policy_relation_activation_record_free (after_fault);
-    g_auto (WylFactOfflineRestoreJournal) after_fault_journal = { 0 };
-    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-          (fixture.policy, operation_uuid, &after_fault_journal), ==,
-        WYRELOG_E_OK);
-    g_assert_cmpuint (after_fault_journal.revision, ==, finalized.revision);
-    g_assert_false (after_fault_journal.policy_generation_published);
-    g_assert_cmpint (sqlite3_exec (db,
-        "DROP TRIGGER fail_selected_activation;", NULL, NULL, NULL), ==,
-        SQLITE_OK);
+    g_assert_cmpuint(after_fault->active_schema_version, ==, 2);
+    wyl_policy_relation_activation_record_free(after_fault);
+    g_auto(WylFactOfflineRestoreJournal) after_fault_journal = {0};
+    g_assert_cmpint(wyl_fact_offline_restore_journal_store_load(
+          fixture.policy, operation_uuid, &after_fault_journal),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpuint(after_fault_journal.revision, ==, finalized.revision);
+    g_assert_false(after_fault_journal.policy_generation_published);
+    g_assert_cmpint(sqlite3_exec(db, "DROP TRIGGER fail_selected_activation;",
+        NULL, NULL, NULL),
+        ==, SQLITE_OK);
   }
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (ambiguous_commit)
-    wyl_policy_store_offline_restore_fail_once (fixture.policy,
-        WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+    wyl_policy_store_offline_restore_fail_once(
+      fixture.policy, WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
 #endif
+  wyl_fact_graph_runtime_status_clear (&sibling_before);
+  WylFactGraphKey sibling_before_key = {0};
+  g_assert_cmpint(
+    wyl_fact_graph_key_init(&sibling_before_key, "tenant-a", "beta"), ==,
+    WYRELOG_E_OK);
+  g_assert_cmpint(wyl_fact_graph_runtime_manager_refresh(
+        fixture.runtime, &sibling_before_key, session_build_engine, NULL, NULL),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint(wyl_fact_graph_runtime_manager_get_status(
+        fixture.runtime, &sibling_before_key, &sibling_before),
+      ==, WYRELOG_E_OK);
+  wyl_fact_graph_key_clear(&sibling_before_key);
+  wyl_policy_graph_authority_record_free(sibling_authority_before);
+  sibling_authority_before = NULL;
+  g_assert_cmpint(
+    wyl_policy_store_read_graph_authority(fixture.policy, "tenant-a", "beta",
+    &sibling_authority_before),
+    ==, WYRELOG_E_OK);
   wyrelog_error_t promote_rc =
-      wyl_fact_offline_restore_graph_commit_promote_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-          finalized.revision, 0, &promoted);
+      wyl_fact_offline_restore_graph_commit_promote_run(
+    fixture.policy, fixture.root, fixture.runtime, operation_uuid,
+    finalized.revision, 0, &promoted);
   if (ambiguous_commit)
-    g_assert_cmpint (promote_rc, ==, WYRELOG_E_IO);
+    g_assert_cmpint(promote_rc, ==, WYRELOG_E_IO);
   else {
-    g_assert_cmpint (promote_rc, ==, WYRELOG_E_OK);
-    g_assert_cmpuint (promoted.revision, ==, finalized.revision + 2);
-    g_assert_true (promoted.policy_generation_published);
-    g_assert_true (promoted.lifecycle_handoff_complete);
+    g_assert_cmpint(promote_rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint(promoted.revision, ==, finalized.revision + 2);
+    g_assert_true(promoted.policy_generation_published);
+    g_assert_true(promoted.lifecycle_handoff_complete);
   }
-  g_clear_pointer (&fixture.policy, wyl_policy_store_close);
-  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
+  g_clear_pointer(&fixture.policy, wyl_policy_store_close);
+  g_assert_cmpint(wyl_policy_store_open(policy_path, &fixture.policy), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_promote_run
-        (fixture.policy, fixture.root, fixture.runtime, operation_uuid,
-      finalized.revision, 0, &promoted), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
+        fixture.policy, fixture.root, fixture.runtime,
+        operation_uuid, finalized.revision, 0, &promoted),
+      ==, WYRELOG_E_POLICY);
+  g_auto(WylFactOfflineRestoreJournal) promotion_resume = {0};
+  g_assert_cmpint(g_remove(main_path), ==, 0);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
+        fixture.policy, fixture.root, fixture.runtime, &finalized,
+        0, &promotion_resume),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint(link(replacement_path, main_path), ==, 0);
+  g_assert_cmpint(g_remove(replacement_path), ==, 0);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
+        fixture.policy, fixture.root, fixture.runtime, &finalized,
+        0, &promotion_resume),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint(link(main_path, replacement_path), ==, 0);
+  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
+        fixture.policy, fixture.root, fixture.runtime, &finalized,
+        0, &promotion_resume),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint(promotion_resume.revision, ==, finalized.revision + 2);
+  WylPolicyGraphAuthorityRecord *promoted_authority = NULL;
+  g_assert_cmpint(
+    wyl_policy_store_read_graph_authority(fixture.policy, "tenant-a", "alpha",
+    &promoted_authority),
+    ==, WYRELOG_E_OK);
+  g_assert_cmpuint(promoted_authority->lifecycle_generation, ==,
+      authority->lifecycle_generation + 1);
+  wyl_policy_graph_authority_record_free(promoted_authority);
+  WylPolicyTenantAuthorityRecord *promoted_tenant = NULL;
+  g_assert_cmpint(
+    wyl_policy_store_read_tenant_authority(fixture.policy, "tenant-a",
+    &promoted_tenant),
+    ==, WYRELOG_E_OK);
+  g_assert_cmpuint(promoted_tenant->lifecycle_generation, ==,
+      tenant->lifecycle_generation + 2);
+  g_assert_false(promoted_tenant->sealed_compatibility);
+  wyl_policy_tenant_authority_record_free(promoted_tenant);
+  WylFactGraphKey sibling_after_key = {0};
+  g_assert_cmpint(
+    wyl_fact_graph_key_init(&sibling_after_key, "tenant-a", "beta"), ==,
+    WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus sibling_after = {0};
+  g_assert_cmpint(wyl_fact_graph_runtime_manager_get_status(
+        fixture.runtime, &sibling_after_key, &sibling_after),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint(sibling_after.engine_generation, ==,
+      sibling_before.engine_generation);
+  WylPolicyGraphAuthorityRecord *sibling_authority_after = NULL;
+  g_assert_cmpint(
+    wyl_policy_store_read_graph_authority(fixture.policy, "tenant-a", "beta",
+    &sibling_authority_after),
+    ==, WYRELOG_E_OK);
+  g_assert_cmpuint(sibling_authority_after->lifecycle_generation, ==,
+      sibling_authority_before->lifecycle_generation);
+  wyl_policy_graph_authority_record_free(sibling_authority_before);
+  wyl_policy_graph_authority_record_free(sibling_authority_after);
+  wyl_fact_graph_runtime_status_clear(&sibling_before);
+  wyl_fact_graph_runtime_status_clear(&sibling_after);
+  wyl_fact_graph_key_clear(&sibling_after_key);
+  g_autoptr(GBytes) finalized_blob = NULL;
+  g_assert_cmpint(
+    wyl_fact_offline_restore_journal_encode(&finalized, &finalized_blob), ==,
+    WYRELOG_E_OK);
+  WylPolicyOfflineRestoreRecord finalized_record = {
+    .operation_uuid = finalized.operation_uuid,
+    .tenant_id = finalized.tenant_id,
+    .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
+    .selected_graph_id = finalized.selected_graph_id,
+    .revision = finalized.revision,
+    .graph_count = 1,
+    .journal_blob = finalized_blob,
+  };
+  memcpy(finalized_record.manifest_sha256, finalized.manifest_sha256, 32);
+  WylPolicyOfflineRestoreRecord *published_proof = NULL;
+  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
+        fixture.policy, &finalized_record, &published_proof),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull(published_proof);
+  g_assert_cmpuint(published_proof->revision, ==, finalized.revision + 2);
+  g_auto(WylFactOfflineRestoreJournal) published_proof_journal = {0};
+  g_assert_cmpint(wyl_fact_offline_restore_journal_decode(
+        published_proof->journal_blob, &published_proof_journal),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint(published_proof_journal.version, ==,
+      WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION);
+  g_assert_true(published_proof_journal.policy_generation_published);
+  g_assert_true(published_proof_journal.lifecycle_handoff_complete);
+  WylPolicyOfflineRestoreRecord wrong_manifest = finalized_record;
+  wrong_manifest.manifest_sha256[0] ^= 0x01;
+  WylPolicyOfflineRestoreRecord *wrong_manifest_proof = NULL;
+  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
+        fixture.policy, &wrong_manifest, &wrong_manifest_proof),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null(wrong_manifest_proof);
+  WylPolicyOfflineRestoreRecord wrong_revision = finalized_record;
+  wrong_revision.revision++;
+  WylPolicyOfflineRestoreRecord *wrong_proof = NULL;
+  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
+        fixture.policy, &wrong_revision, &wrong_proof),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null(wrong_proof);
+  wyl_policy_offline_restore_record_free(published_proof);
   promotion_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
-  g_assert_cmpint
-    (wyl_policy_store_graph_restore_selected_promote_with_effect
-        (fixture.policy, promote_row, promote_journal,
-      selected_promotion_shape_for_test, &reject_shape,
-      &promotion_result), ==, WYRELOG_E_OK);
-  g_assert_cmpint (promotion_result, ==,
-      WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
-  wyl_policy_offline_restore_record_free (promote_journal);
-  wyl_policy_graph_restore_replacement_record_free (promote_row);
-  sqlite3 *reopened_db = wyl_policy_store_get_db (fixture.policy);
-  g_assert_cmpint (sqlite3_exec (reopened_db, "BEGIN IMMEDIATE;",
-      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint(wyl_policy_store_graph_restore_selected_promote_with_effect(
+        fixture.policy, promote_row, promote_journal,
+        selected_promotion_shape_for_test, &reject_shape,
+        &promotion_result),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint(promotion_result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
+  wyl_policy_offline_restore_record_free(promote_journal);
+  wyl_policy_graph_restore_replacement_record_free(promote_row);
+  sqlite3 *reopened_db = wyl_policy_store_get_db(fixture.policy);
+  g_assert_cmpint(
+    sqlite3_exec(reopened_db, "BEGIN IMMEDIATE;", NULL, NULL, NULL), ==,
+    SQLITE_OK);
   sqlite3_stmt *stale_claim = NULL;
-  g_assert_cmpint (sqlite3_prepare_v2 (reopened_db,
+  g_assert_cmpint(
+    sqlite3_prepare_v2(
+      reopened_db,
       "INSERT INTO fact_offline_restore_graph_claims "
       "(tenant_id,graph_id,operation_uuid) VALUES ('tenant-a','alpha',?1);",
-      -1, &stale_claim, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_bind_text (stale_claim, 1, operation_uuid,
-      -1, SQLITE_TRANSIENT), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_step (stale_claim), ==, SQLITE_DONE);
-  sqlite3_finalize (stale_claim);
-  g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+      -1, &stale_claim, NULL),
+    ==, SQLITE_OK);
+  g_assert_cmpint(
+    sqlite3_bind_text(stale_claim, 1, operation_uuid, -1, SQLITE_TRANSIENT),
+    ==, SQLITE_OK);
+  g_assert_cmpint(sqlite3_step(stale_claim), ==, SQLITE_DONE);
+  sqlite3_finalize(stale_claim);
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
       WYRELOG_E_POLICY);
-  g_assert_cmpint (sqlite3_exec (reopened_db, "ROLLBACK;", NULL, NULL,
-      NULL), ==, SQLITE_OK);
+  g_assert_cmpint(sqlite3_exec(reopened_db, "ROLLBACK;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
 #endif
   if (schema_transition) {
     /* The backup selects schema version 1 while version 2 is active.  Only
@@ -10828,11 +11030,12 @@ test_graph_restore_replacement_reservation (gconstpointer data)
     const gchar *present_query = "items_v2", *absent_query = "items";
 #endif
     WylPolicyRelationActivationRecord *active = NULL;
-    g_assert_cmpint (wyl_policy_store_read_relation_activation
-          (fixture.policy, "tenant-a", "alpha", "backup", "items",
-        &active), ==, WYRELOG_E_OK);
-    g_assert_true (active->has_active_schema_version);
-    g_assert_cmpuint (active->active_schema_version, ==, expected_version);
+    g_assert_cmpint(
+      wyl_policy_store_read_relation_activation(
+        fixture.policy, "tenant-a", "alpha", "backup", "items", &active),
+      ==, WYRELOG_E_OK);
+    g_assert_true(active->has_active_schema_version);
+    g_assert_cmpuint(active->active_schema_version, ==, expected_version);
     wyl_policy_relation_activation_record_free (active);
     wyl_policy_fact_relation_query_info_t query = { 0 };
     g_assert_cmpint (wyl_policy_store_load_fact_relation_query

@@ -36,6 +36,24 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_selected_cleanup_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Resume selected graph cleanup from the exact caller-owned v3 snapshot.
+ * Stops at FINALIZED; retries after response loss use the same anchor. */
+wyrelog_error_t wyl_fact_offline_restore_graph_selected_finalize_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *expected,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
+/* Promote a FINALIZED v3 graph or resolve its lost response only from exact
+ * v4 R+2 journal, replacement policy tuple and TERMINAL namespace proof. */
+wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Advances one tenant COMMIT step from v5 through v8. A v6 companion phase
  * can advance without changing the journal revision. Each driver rechecks
  * its authority under the root lease and all-graph quiescence. An error

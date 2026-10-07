@@ -288,6 +288,14 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalize_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
+/* Read-only FINALIZED v3 proof after a possibly lost FINALIZE response. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_finalized_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized,
+    gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
 /* Promote a durably FINALIZED selected graph after proving the exact terminal
  * namespace under the root lease and graph quiescence. The terminal proof is
  * repeated inside the fenced policy transaction. On an ambiguous commit
@@ -296,6 +304,15 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_promote_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
     guint64 expected_revision, gint64 drain_timeout_us,
+    WylFactOfflineRestoreJournal *out_committed);
+
+/* Resolve a possibly lost promotion response from an exact FINALIZED v3
+ * snapshot. Returns only the exact v4 R+2 policy and TERMINAL namespace. */
+wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime,
+    const WylFactOfflineRestoreJournal *finalized,
+    gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
 #ifdef WYL_TEST_HANDLE_SEAMS
