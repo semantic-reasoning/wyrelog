@@ -361,7 +361,11 @@ The `--bootstrap-admin-allow-skip-mfa` flag installs a **persisted**
 `wr.login.skip_mfa` direct-permission grant against the bootstrap
 subject on the `login` scope. The grant survives daemon restarts and the flag's
 presence/absence on subsequent boots, so it must be revoked
-explicitly once the operator has rotated to an IdP-issued bearer:
+explicitly once the operator has rotated to an IdP-issued bearer. The revoke is
+authorized at `__wr_default`: the token must belong to an MFA-assured system
+administrator holding an armed `wr.policy.write` there, even though the grant
+itself lives at `login`. The bypass cannot be granted again after bootstrap; a
+grant at `login` is refused with `policy_denied`.
 
 ```sh
 wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
