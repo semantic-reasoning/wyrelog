@@ -977,6 +977,35 @@ wyctl_check_proxy_environment (void)
   return FALSE;
 }
 
+/* Send MSG on SESSION and read the response, cancelling the exchange
+ * once TIMEOUT_MS have passed. */
+static GBytes *
+wyctl_send_and_read_bounded (SoupSession *session, SoupMessage *msg,
+    guint timeout_ms, GError **error)
+{
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  WyctlTimeout timeout = {
+    .cancellable = cancellable,
+    .timeout_ms = timeout_ms,
+  };
+  g_cond_init (&timeout.cond);
+  g_mutex_init (&timeout.mutex);
+  GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
+          &timeout);
+
+  GBytes *body = soup_session_send_and_read (session, msg, cancellable,
+          error);
+
+  g_mutex_lock (&timeout.mutex);
+  timeout.done = TRUE;
+  g_cond_signal (&timeout.cond);
+  g_mutex_unlock (&timeout.mutex);
+  g_thread_join (timeout_thread);
+  g_mutex_clear (&timeout.mutex);
+  g_cond_clear (&timeout.cond);
+  return body;
+}
+
 static int
 send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
     gchar **out_body)
@@ -990,27 +1019,9 @@ send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
   if (!wyctl_check_proxy_environment ())
     return 1;
   g_autoptr (SoupSession) session = soup_session_new ();
-  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
-  WyctlTimeout timeout = {
-    .cancellable = cancellable,
-    .timeout_ms = timeout_ms,
-  };
-  g_cond_init (&timeout.cond);
-  g_mutex_init (&timeout.mutex);
-  GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
-          &timeout);
-
   g_autoptr (GError) io_error = NULL;
-  g_autoptr (GBytes) body =
-      soup_session_send_and_read (session, msg, cancellable, &io_error);
-
-  g_mutex_lock (&timeout.mutex);
-  timeout.done = TRUE;
-  g_cond_signal (&timeout.cond);
-  g_mutex_unlock (&timeout.mutex);
-  g_thread_join (timeout_thread);
-  g_mutex_clear (&timeout.mutex);
-  g_cond_clear (&timeout.cond);
+  g_autoptr (GBytes) body = wyctl_send_and_read_bounded (session, msg,
+          timeout_ms, &io_error);
 
   if (body == NULL)
     return 1;
@@ -4171,13 +4182,20 @@ wyctl_mfa_json_string (const gchar *json, const gchar *name)
   return g_strndup (start, (gsize) (end - start));
 }
 
+/*
+ * POST JSON to the daemon within TIMEOUT_MS.  *OUT_UNANSWERED is set when
+ * no complete response arrived (refused, timed out or cut off), which is
+ * the case where the daemon may have acted without wyctl learning of it.
+ */
 static int
 wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
-    const gchar *access_token, const gchar *json, gchar **out_body)
+    const gchar *access_token, const gchar *json, guint timeout_ms,
+    gchar **out_body, gboolean *out_unanswered)
 {
-  if (out_body == NULL)
+  if (out_body == NULL || out_unanswered == NULL)
     return 1;
   g_clear_pointer (out_body, g_free);
+  *out_unanswered = FALSE;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   g_autofree gchar *uri = g_strdup_printf
         ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
@@ -4196,10 +4214,11 @@ wyctl_mfa_online_post (const gchar *daemon_url, const gchar *path,
     return 1;
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (GError) error = NULL;
-  g_autoptr (GBytes) response = soup_session_send_and_read (session, msg, NULL,
-          &error);
+  g_autoptr (GBytes) response = wyctl_send_and_read_bounded (session, msg,
+          timeout_ms, &error);
   if (response == NULL) {
     g_printerr ("wyctl: online MFA request failed: %s\n", error->message);
+    *out_unanswered = TRUE;
     return 1;
   }
   gsize size = 0;
@@ -4242,6 +4261,14 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
   g_autofree gchar *access_token = NULL;
   int rc = load_access_token_file (opts->access_token_file, &access_token);
   if (rc != 0)
@@ -4250,9 +4277,17 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
   append_json_string (start_json, opts->subject);
   g_string_append_c (start_json, '}');
   g_autoptr (WyctlSensitiveChar) start_body = NULL;
+  gboolean unanswered = FALSE;
   if (wyctl_mfa_online_post (daemon_url, "/auth/mfa/enroll/start",
-      access_token, start_json->str, &start_body) != 0)
+      access_token, start_json->str, timeout_ms, &start_body,
+      &unanswered) != 0) {
+    /* At most a pending challenge exists, and the daemon replaces it on
+     * this session's next start. */
+    if (unanswered)
+      g_printerr ("wyctl: no enrollment secret was received; re-running the "
+          "same command is safe\n");
     return 1;
+  }
   g_autofree gchar *challenge = wyctl_mfa_json_string (start_body,
           "challenge");
   g_autoptr (WyctlSensitiveChar) uri = wyctl_mfa_json_string (start_body,
@@ -4282,10 +4317,18 @@ wyctl_mfa_run_online_enroll (const WyctlOptions *global_opts,
   sodium_memzero (code_text, sizeof code_text);
   g_autoptr (WyctlSensitiveChar) confirm_body = NULL;
   rc = wyctl_mfa_online_post (daemon_url, "/auth/mfa/enroll/confirm",
-          access_token, confirm_json->str, &confirm_body);
+          access_token, confirm_json->str, timeout_ms, &confirm_body,
+          &unanswered);
   sodium_memzero (confirm_json->str, confirm_json->len);
-  if (rc != 0)
+  if (rc != 0) {
+    /* The daemon may have committed the factor.  The challenge is spent
+     * either way, and it refuses a second enrollment, so a re-run tells. */
+    if (unanswered)
+      g_printerr ("wyctl: the enrollment outcome is unknown; keep this "
+          "authenticator entry and re-run the same command: HTTP 409 "
+          "mfa_already_enrolled then means this entry is enrolled\n");
     return rc;
+  }
   g_print ("status=enrolled subject=%s\n", opts->subject);
   return 0;
 }

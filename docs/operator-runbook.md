@@ -445,6 +445,25 @@ uses a monotonic five-minute expiry, and consumes the challenge on every
 confirmation attempt. A mistyped code therefore requires restarting
 `wyctl mfa enroll`; this one-shot behavior prevents online guessing and replay.
 
+Both requests are bounded by `--timeout-ms` (or `default-timeout-ms`). When
+one gets no answer in time, or the connection fails, wyctl exits 1 and says
+what to do:
+
+- **No answer to the start request** (`no enrollment secret was received`).
+  At most a pending challenge was created, and nothing was written. Re-run
+  the same command; the new challenge replaces the old one for this session,
+  and an unconfirmed challenge expires on its own.
+- **No answer to the confirmation** (`the enrollment outcome is unknown`).
+  The daemon may have enrolled the factor from this run. Keep this run's
+  authenticator entry and re-run the same command, adding the new secret as
+  a second entry to get a code. If the confirmation is refused with
+  `HTTP 409` and `mfa_already_enrolled`, the first run's factor is enrolled:
+  delete the new entry and keep the first. If it prints `status=enrolled`,
+  the first run did not enroll: delete the first entry and keep the new one.
+
+A refusal the daemon did answer, such as a wrong code, changes nothing and
+carries no such line; re-run the command.
+
 For maintenance or recovery while the daemon is stopped, the offline form is
 still available:
 
@@ -659,7 +678,10 @@ The contract is:
 
 - If `wyctl mfa enroll` exits non-zero, re-run the command. No state
   changed; the bootstrap auto-revoke step is idempotent for an
-  already-revoked subject and a no-op for non-bootstrap subjects.
+  already-revoked subject and a no-op for non-bootstrap subjects. The
+  exception is an online confirmation that got no answer: wyctl then says
+  the outcome is unknown, and the re-run is decided as described under
+  "First-Install Bootstrap".
 - If `wyctl mfa reset` exits non-zero, the prior enrollment row has
   already been deleted. The subject is unenrolled. Re-run `wyctl mfa
   enroll` against the same subject to finish the recovery.
@@ -3508,10 +3530,10 @@ completed it. For policy grants, revokes and transitions, fact put and
 retract, fact forget, fact schema register, fact quota configure, graph
 create and seal, tenant create, seal and unseal, service-principal create
 and disable, and service-credential issue, rotate and revoke, wyctl adds a
-line saying that the outcome is unknown and how to find out; other commands,
-such as `auth logout`, report only the failure, so check the daemon's state
-before repeating them.
-The online `wyctl mfa enroll` requests are not bounded yet.
+line saying that the outcome is unknown and how to find out; the online
+`mfa enroll` says whether a re-run is safe (see "First-Install Bootstrap");
+other commands, such as `auth logout`, report only the failure, so check the
+daemon's state before repeating them.
 
 Example: configure the operator workstation once and let wyctl invocations
 in that same account and settings-backend environment pick up the defaults.

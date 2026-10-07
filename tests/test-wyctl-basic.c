@@ -4261,6 +4261,158 @@ test_fact_unsafe_error_code_not_printed (void)
   }
 }
 
+/* Answer the requests of one wyctl run in order, one connection each. */
+typedef struct
+{
+  PolicyMutationServer *servers;
+  guint n_servers;
+} PolicyMutationSequence;
+
+static gpointer
+policy_mutation_sequence_thread (gpointer data)
+{
+  PolicyMutationSequence *sequence = data;
+  for (guint i = 0; i < sequence->n_servers; i++)
+    (void) policy_mutation_server_thread (&sequence->servers[i]);
+  return NULL;
+}
+
+#define MFA_ENROLL_START_LOST_HINT \
+  "wyctl: no enrollment secret was received; re-running the same command " \
+  "is safe\n"
+#define MFA_ENROLL_CONFIRM_LOST_HINT \
+  "wyctl: the enrollment outcome is unknown; keep this authenticator entry " \
+  "and re-run the same command: HTTP 409 mfa_already_enrolled then means " \
+  "this entry is enrolled\n"
+
+/* Run online `wyctl mfa enroll' with --timeout-ms 500 against SERVERS,
+ * feeding INPUT on stdin, and return how long it took. */
+static gint64
+run_online_mfa_enroll (PolicyMutationServer *servers, guint n_servers,
+    const gchar *input, gint *out_exit, gchar **out_stdout,
+    gchar **out_stderr)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  for (guint i = 0; i < n_servers; i++) {
+    servers[i].listener = listener;
+    servers[i].cancel = cancel;
+  }
+  PolicyMutationSequence sequence = { servers, n_servers };
+  GThread *thread = g_thread_new ("mfa-enroll",
+          policy_mutation_sequence_thread, &sequence);
+  const gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url, "--timeout-ms", "500",
+    "mfa", "enroll", "--subject", "alice", "--access-token-file", token_path,
+    NULL,
+  };
+  g_autoptr (GError) error = NULL;
+  gint64 started = g_get_monotonic_time ();
+  g_autoptr (GSubprocess) child = g_subprocess_newv (argv,
+          G_SUBPROCESS_FLAGS_STDIN_PIPE | G_SUBPROCESS_FLAGS_STDOUT_PIPE
+          | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_communicate_utf8 (child, input, NULL,
+      out_stdout, out_stderr, &error));
+  g_assert_no_error (error);
+  gint64 elapsed_ms = (g_get_monotonic_time () - started) / 1000;
+  *out_exit = g_subprocess_get_status (child);
+  stop_test_server (thread, cancel);
+  g_unlink (token_path);
+  return elapsed_ms;
+}
+
+/*
+ * #1328: the online enrollment requests ignored --timeout-ms, so a daemon
+ * that accepted the connection and never answered held wyctl forever.  A
+ * lost start answer leaves at most a pending challenge, which the next
+ * start for the same session replaces, so wyctl says a re-run is safe.
+ */
+static void
+test_mfa_enroll_start_times_out (void)
+{
+  PolicyMutationServer servers[] = {
+    {.status = 200, .body = "{}", .delay_ms = 10000},
+  };
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint64 elapsed_ms = run_online_mfa_enroll (servers, G_N_ELEMENTS (servers),
+          NULL, &wait_status, &out, &err);
+  g_autofree gchar *request = servers[0].request;
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpint (elapsed_ms, <, 5000);
+  g_assert_nonnull (request);
+  g_assert_true (g_str_has_prefix (request, "POST /auth/mfa/enroll/start?"));
+  g_assert_cmpstr (out, ==, "");
+  g_assert_true (g_str_has_prefix (err, "wyctl: online MFA request failed: "));
+  g_assert_true (g_str_has_suffix (err, MFA_ENROLL_START_LOST_HINT));
+}
+
+/*
+ * #1328: a lost confirm answer may follow a committed enrollment.  The
+ * challenge was spent either way, and a second enrollment is refused with
+ * mfa_already_enrolled, so the operator keeps this entry and re-runs to
+ * find out.
+ */
+static void
+test_mfa_enroll_confirm_times_out (void)
+{
+  PolicyMutationServer servers[] = {
+    {.status = 200, .body = "{\"challenge\":\"c1\","
+         "\"otpauth_uri\":\"otpauth://totp/alice\","
+         "\"secret_base32\":\"JBSWY3DP\"}"},
+    {.status = 200, .body = "{\"ok\":true}", .delay_ms = 10000},
+  };
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint64 elapsed_ms = run_online_mfa_enroll (servers, G_N_ELEMENTS (servers),
+          "123456\n", &wait_status, &out, &err);
+  g_autofree gchar *start_request = servers[0].request;
+  g_autofree gchar *confirm_request = servers[1].request;
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpint (elapsed_ms, <, 5000);
+  g_assert_nonnull (start_request);
+  g_assert_nonnull (confirm_request);
+  g_assert_true (g_str_has_prefix (confirm_request,
+      "POST /auth/mfa/enroll/confirm?"));
+  g_assert_nonnull (strstr (confirm_request,
+      "{\"challenge\":\"c1\",\"code\":\"123456\"}"));
+  g_assert_cmpstr (out, ==, "otpauth_uri=otpauth://totp/alice\n"
+      "secret_base32=JBSWY3DP\n");
+  g_assert_nonnull (strstr (err, "wyctl: online MFA request failed: "));
+  g_assert_true (g_str_has_suffix (err, MFA_ENROLL_CONFIRM_LOST_HINT));
+}
+
+/* An answer, even a refusal, is not a lost outcome: no hint. */
+static void
+test_mfa_enroll_confirm_refused_has_no_hint (void)
+{
+  PolicyMutationServer servers[] = {
+    {.status = 200, .body = "{\"challenge\":\"c1\","
+         "\"otpauth_uri\":\"otpauth://totp/alice\","
+         "\"secret_base32\":\"JBSWY3DP\"}"},
+    {.status = 401, .body = "{\"error\":\"invalid_mfa_enroll_code\"}"},
+  };
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  (void) run_online_mfa_enroll (servers, G_N_ELEMENTS (servers), "123456\n",
+      &wait_status, &out, &err);
+  g_free (servers[0].request);
+  g_free (servers[1].request);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_true (g_str_has_suffix (err, "wyctl: online MFA request failed "
+      "(HTTP 401): {\"error\":\"invalid_mfa_enroll_code\"}\n"));
+  g_assert_null (strstr (err, "outcome is unknown"));
+}
+
 /*
  * #1324: auth logout never read --timeout-ms, so it waited however long
  * the daemon took and accepted any value for the flag.  The test daemon
@@ -5558,6 +5710,12 @@ main (int argc, char **argv)
       test_fact_forget_audit_failed);
   g_test_add_func ("/wyctl/fact-forget-audit-failed-bare",
       test_fact_forget_audit_failed_bare);
+  g_test_add_func ("/wyctl/mfa-enroll-start-times-out",
+      test_mfa_enroll_start_times_out);
+  g_test_add_func ("/wyctl/mfa-enroll-confirm-times-out",
+      test_mfa_enroll_confirm_times_out);
+  g_test_add_func ("/wyctl/mfa-enroll-confirm-refused-has-no-hint",
+      test_mfa_enroll_confirm_refused_has_no_hint);
   g_test_add_func ("/wyctl/fact-unsafe-error-code-not-printed",
       test_fact_unsafe_error_code_not_printed);
   g_test_add_func ("/wyctl/fact-forget-status-errors",
