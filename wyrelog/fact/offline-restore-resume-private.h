@@ -27,9 +27,11 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_replacements_run
     guint64 expected_revision, gint64 drain_timeout_us,
     WylFactOfflineRestoreJournal *out_committed);
 
-/* Resume a durable v7 selected vector through exact v8 publication. Each
- * successful scoped finalize or promote result is followed by an exact
- * journal reload. Errors leave output empty; callers reload before retry. */
+/* Resume a durable v7 selected vector through exact v8 publication and then
+ * the normal per-graph unseal/replay lifecycle. Each successful scoped
+ * finalize or promote result is followed by an exact journal reload. A
+ * handoff failure leaves the published stores in place and the graph runtime
+ * closed so a retry can finish without republishing files. */
 wyrelog_error_t wyl_fact_offline_restore_tenant_selected_cleanup_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
@@ -57,9 +59,9 @@ wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run
 /* Advances one tenant COMMIT step from v5 through v8. A v6 companion phase
  * can advance without changing the journal revision. Each driver rechecks
  * its authority under the root lease and all-graph quiescence. An error
- * leaves output empty; retry must reload durable state. v8 returns unchanged
- * after checking the terminal graph vector. Admission and unseal are separate.
- * Linux only. */
+ * leaves output empty; retry must reload durable state. At v8, prove the
+ * terminal graph vector, release restore-only leases, and hand every selected
+ * graph to the normal unseal/replay path before returning success. Linux only. */
 wyrelog_error_t wyl_fact_offline_restore_tenant_commit_resume_one
   (wyl_policy_store_t *policy, const gchar *fact_root,
     WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,

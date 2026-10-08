@@ -4853,6 +4853,9 @@ test_tenant_commit_resume_v5 (gconstpointer data)
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
   revision = f.committed.revision;
   wyl_fact_offline_restore_journal_clear (&f.committed);
+  g_clear_pointer (&f.fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
+      ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
       session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
@@ -4865,6 +4868,19 @@ test_tenant_commit_resume_v5 (gconstpointer data)
   g_assert_cmpuint (f.committed.version, ==,
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
   wyl_fact_offline_restore_journal_clear (&f.committed);
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    WylFactGraphKey key = { 0 };
+    WylFactGraphRuntimeStatus status = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graphs[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status
+          (f.fixture.runtime, &key, &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+    g_assert_cmpint (status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+    g_assert_true (status.queryable);
+    wyl_fact_graph_runtime_status_clear (&status);
+    wyl_fact_graph_key_clear (&key);
+  }
   if (schema_transition) {
     for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
       WylPolicyRelationActivationRecord *active = NULL;
@@ -10966,6 +10982,17 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
         0, &promotion_resume),
       ==, WYRELOG_E_OK);
   g_assert_cmpuint(promotion_resume.revision, ==, finalized.revision + 2);
+  WylFactGraphKey restored_key = {0};
+  g_assert_cmpint(wyl_fact_graph_key_init(&restored_key, "tenant-a", "alpha"),
+      ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeStatus restored_status = {0};
+  g_assert_cmpint(wyl_fact_graph_runtime_manager_get_status(
+        fixture.runtime, &restored_key, &restored_status), ==, WYRELOG_E_OK);
+  g_assert_cmpint(restored_status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+  g_assert_cmpint(restored_status.admission, ==, WYL_FACT_GRAPH_ADMISSION_OPEN);
+  g_assert_true(restored_status.queryable);
+  wyl_fact_graph_runtime_status_clear(&restored_status);
+  wyl_fact_graph_key_clear(&restored_key);
   WylPolicyGraphAuthorityRecord *promoted_authority = NULL;
   g_assert_cmpint(
     wyl_policy_store_read_graph_authority(fixture.policy, "tenant-a", "alpha",

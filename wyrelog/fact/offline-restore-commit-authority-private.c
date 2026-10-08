@@ -4,12 +4,151 @@
 #include <string.h>
 
 #include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/graph-seal-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 #include "fact/offline-restore-stage-private.h"
 #include "fact/root-writer-lease-private.h"
 
 static wyrelog_error_t check_runtime(WylFactGraphRuntimeManager *runtime,
     const WylFactGraphKey *key);
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const gchar *graph_id;
+  const gchar *fact_root;
+  WylFactGraphRuntimeManager *runtime;
+  WylFactRootWriterLease *root_lease;
+  gint64 drain_timeout_us;
+  gboolean found;
+  wyl_policy_fact_graph_info_t info;
+  gchar *tenant_id;
+  gchar *graph_id_copy;
+  gchar *storage_uri;
+  gchar *storage_path;
+  gchar *owner_scope;
+} RestoreUnsealContext;
+
+static wyrelog_error_t
+restore_unseal_graph_info (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
+{
+  RestoreUnsealContext *context = user_data;
+  if (info == NULL || context == NULL || info->tenant_id == NULL
+      || info->graph_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (info->graph_id, context->graph_id) != 0)
+    return WYRELOG_E_OK;
+  context->found = TRUE;
+  context->tenant_id = g_strdup (info->tenant_id);
+  context->graph_id_copy = g_strdup (info->graph_id);
+  context->storage_uri = g_strdup (info->storage_uri);
+  context->storage_path = g_strdup (info->storage_path);
+  context->owner_scope = g_strdup (info->owner_scope);
+  if (context->tenant_id == NULL || context->graph_id_copy == NULL
+      || context->storage_uri == NULL || context->storage_path == NULL
+      || context->owner_scope == NULL)
+    return WYRELOG_E_NOMEM;
+  context->info = (wyl_policy_fact_graph_info_t) {
+    .tenant_id = context->tenant_id,
+    .graph_id = context->graph_id_copy,
+    .storage_uri = context->storage_uri,
+    .storage_path = context->storage_path,
+    .schema_version = info->schema_version,
+    .owner_scope = context->owner_scope,
+    .sealed = info->sealed,
+  };
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+restore_unseal_graph (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *tenant_id,
+    const gchar *graph_id, gint64 drain_timeout_us)
+{
+  WylFactRootWriterLease *root_lease = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root,
+          &root_lease);
+  RestoreUnsealContext context = {
+    .policy = policy,
+    .graph_id = graph_id,
+    .fact_root = fact_root,
+    .runtime = runtime,
+    .root_lease = root_lease,
+    .drain_timeout_us = drain_timeout_us,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_foreach_fact_graph (policy, tenant_id,
+            restore_unseal_graph_info, &context);
+  if (rc == WYRELOG_E_OK && !context.found)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK) {
+    WylFactGraphKey key = { 0 };
+    rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
+    WylFactGraphRuntimeStatus current = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_runtime_manager_get_status (runtime, &key,
+              &current);
+    gboolean had_entry = rc == WYRELOG_E_OK;
+    /* A retry after a lost response may find the normal lifecycle handoff
+     * already published and open. Accept that ready runtime; otherwise run
+     * the regular sealed-graph unseal sequencer. */
+    if (rc == WYRELOG_E_OK && current.state == WYL_FACT_GRAPH_RUNTIME_READY
+        && current.admission == WYL_FACT_GRAPH_ADMISSION_OPEN
+        && current.queryable) {
+      wyl_fact_graph_runtime_status_clear (&current);
+      wyl_fact_graph_key_clear (&key);
+      goto done;
+    }
+    wyl_fact_graph_runtime_status_clear (&current);
+    if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+    if (rc == WYRELOG_E_OK && had_entry) {
+      WylFactGraphUnsealPreparation preparation = { 0 };
+      rc = wyl_fact_graph_runtime_unseal_prepare (runtime, &key,
+              &preparation);
+      WylFactGraphRuntimeStatus drained = { 0 };
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_fact_graph_runtime_manager_drain (runtime, &key,
+                drain_timeout_us, &drained);
+      wyl_fact_graph_runtime_status_clear (&drained);
+      /* The restored file supersedes any engine retained by the closed
+       * runtime. Evict it before the normal unseal sequencer so an ACTIVE
+       * policy row is eligible for exact recovery and replay. Even if drain
+       * reports a timeout, make the entry unavailable before releasing the
+       * preparation. */
+      if (preparation.entry != NULL) {
+        gboolean evicted = FALSE;
+        wyrelog_error_t evict_rc =
+            wyl_fact_graph_runtime_manager_evict_closed (runtime, &key,
+                &evicted);
+        if (evict_rc == WYRELOG_E_NOT_FOUND)
+          evict_rc = WYRELOG_E_OK;
+        if (rc == WYRELOG_E_OK)
+          rc = evict_rc;
+      }
+      wyl_fact_graph_runtime_unseal_preparation_clear (&preparation);
+    }
+    WylFactGraphUnsealOutcome outcome = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_unseal_with_root_lease (policy, fact_root,
+              root_lease, &context.info, runtime, drain_timeout_us, &outcome);
+    if (rc != WYRELOG_E_OK)
+      g_printerr ("restore unseal rc=%d result=%d published=%d state=%d replay=%d\n",
+          rc, outcome.policy_result, outcome.engine_published,
+          outcome.status.state, outcome.status.last_replay_class);
+    wyl_fact_graph_unseal_outcome_clear (&outcome);
+    wyl_fact_graph_key_clear (&key);
+  }
+done:
+  g_clear_pointer (&root_lease, wyl_fact_root_writer_lease_release);
+  g_free (context.tenant_id);
+  g_free (context.graph_id_copy);
+  g_free (context.storage_uri);
+  g_free (context.storage_path);
+  g_free (context.owner_scope);
+  return rc;
+}
 
 #ifdef __linux__
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -943,6 +1082,10 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
   wyl_fact_graph_key_clear(&key);
   wyl_fact_graph_resolver_clear(&resolver);
   g_clear_pointer(&lease, wyl_fact_root_writer_lease_release);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            finalized->tenant_id, finalized->selected_graph_id,
+            drain_timeout_us);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_offline_restore_journal_clear(out_committed);
   }
@@ -3804,6 +3947,12 @@ wyl_fact_offline_restore_tenant_commit_v8_prove_terminal
   wyl_policy_offline_restore_record_free (expected);
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < journal.graphs->len; i++) {
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (journal.graphs, i);
+    rc = restore_unseal_graph (policy, fact_root, runtime, journal.tenant_id,
+            graph->graph_id, drain_timeout_us);
+  }
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
