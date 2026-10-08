@@ -384,11 +384,17 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   g_assert_cmpint (g_subprocess_get_exit_status (process), !=, 0);
   g_auto (GStrv) stderr_lines = g_strsplit_set (stderr_text, "\r\n", -1);
   gboolean found_busy_line = FALSE;
-  for (guint i = 0; stderr_lines[i] != NULL; i++)
+  gboolean found_handle_line = FALSE;
+  for (guint i = 0; stderr_lines[i] != NULL; i++) {
     if (g_str_equal (stderr_lines[i],
         "wyrelogd: init failed: resource is busy"))
       found_busy_line = TRUE;
+    if (g_str_equal (stderr_lines[i],
+        "wyrelogd: runtime handle open failed"))
+      found_handle_line = TRUE;
+  }
   g_assert_true (found_busy_line);
+  g_assert_true (found_handle_line);
   g_assert_null (strstr (stderr_text, root));
   g_assert_null (strstr (stderr_text, sentinel));
 
@@ -406,6 +412,112 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   g_assert_cmpint (g_remove (graph), ==, 0);
   g_assert_cmpint (g_remove (audit), ==, 0);
   g_assert_cmpint (g_remove (policy), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+  remove_root (root);
+}
+
+static gboolean
+daemon_stderr_has_line (const gchar *const *argv, const gchar *tmpdir,
+    const gchar *line)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocessLauncher) launcher = g_subprocess_launcher_new
+        (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+  g_subprocess_launcher_unsetenv (launcher, "WYL_LOG_FILE");
+  /* Keep the daemon's readiness scratch stores inside the test directory.
+   * g_get_tmp_dir reads TMPDIR on POSIX and TEMP or TMP on Windows. */
+  g_subprocess_launcher_setenv (launcher, "TMPDIR", tmpdir, TRUE);
+  g_subprocess_launcher_setenv (launcher, "TEMP", tmpdir, TRUE);
+  g_subprocess_launcher_setenv (launcher, "TMP", tmpdir, TRUE);
+  g_autoptr (GSubprocess) process = g_subprocess_launcher_spawnv (launcher,
+          argv, &error);
+  g_assert_no_error (error);
+  g_autofree gchar *stdout_text = NULL;
+  g_autofree gchar *stderr_text = NULL;
+  g_assert_true (g_subprocess_communicate_utf8 (process, NULL, NULL,
+      &stdout_text, &stderr_text, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_get_if_exited (process));
+  g_assert_cmpint (g_subprocess_get_exit_status (process), !=, 0);
+  g_auto (GStrv) lines = g_strsplit_set (stderr_text, "\r\n", -1);
+  g_assert_false (g_strv_contains ((const gchar *const *) lines,
+      "wyrelogd: runtime handle open failed"));
+  return g_strv_contains ((const gchar *const *) lines, line);
+}
+
+/* #1360: an init failure names the handle that failed to open.  A missing
+ * template directory fails the readiness handle in --check mode and in the
+ * readiness phase of a production start, before any runtime handle. */
+static void
+test_daemon_readiness_failure_names_handle (void)
+{
+  g_autofree gchar *root = make_root ("wyrelog-root-daemon-ready-XXXXXX");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *base = g_dir_make_tmp ("wyrelog-daemon-ready-XXXXXX",
+          &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (base);
+  g_autofree gchar *missing = g_build_filename (base, "missing-templates",
+          NULL);
+  g_autofree gchar *scratch = g_build_filename (base, "tmp", NULL);
+  g_assert_cmpint (g_mkdir (scratch, 0700), ==, 0);
+
+  const gchar *check_argv[] = {
+    WYL_TEST_WYRELOGD_PATH, "--check", "--template-dir", missing, NULL,
+  };
+  g_assert_true (daemon_stderr_has_line (check_argv, scratch,
+      "wyrelogd: readiness handle open failed"));
+
+  /* The production case relies on a POSIX owner-only key file, and its
+   * leftover count on the POSIX lease; neither has been verified on
+   * Windows, so it runs on POSIX only. */
+#ifndef G_OS_WIN32
+  g_autofree gchar *policy = g_build_filename (base, "policy.sqlite", NULL);
+  g_autofree gchar *audit = g_build_filename (base, "audit.duckdb", NULL);
+  g_autofree gchar *key = g_build_filename (base, "policy.key", NULL);
+  g_autofree gchar *keyprovider = g_strconcat ("file:", key, NULL);
+  static const gchar key_bytes[32] = { 0 };
+  g_assert_true (g_file_set_contents (key, key_bytes, sizeof key_bytes,
+      &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (key, 0600), ==, 0);
+
+  const gchar *production_argv[] = {
+    WYL_TEST_WYRELOGD_PATH,
+    "--production",
+    "--template-dir", missing,
+    "--policy-db", policy,
+    "--policy-keyprovider", keyprovider,
+    "--audit-db", audit,
+    "--fact-root", root,
+    "--listen-port", "0",
+    NULL,
+  };
+  g_assert_true (daemon_stderr_has_line (production_argv, scratch,
+      "wyrelogd: readiness handle open failed"));
+
+  g_assert_false (g_file_test (policy, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (audit, G_FILE_TEST_EXISTS));
+
+  /* The production readiness phase leaves exactly its scratch policy
+   * store's lease sidecar behind: cleanup_readiness_store does not remove
+   * the .wyrelog-lock file (#1368).  Pin that so fixing it updates this
+   * test. */
+  g_autoptr (GDir) dir = g_dir_open (scratch, 0, &error);
+  g_assert_no_error (error);
+  guint leftovers = 0;
+  const gchar *name = NULL;
+  while ((name = g_dir_read_name (dir)) != NULL) {
+    g_assert_true (g_str_has_prefix (name, "wyrelog-readiness-policy-"));
+    g_assert_true (g_str_has_suffix (name, ".sqlite.wyrelog-lock"));
+    g_autofree gchar *leftover = g_build_filename (scratch, name, NULL);
+    g_assert_cmpint (g_remove (leftover), ==, 0);
+    leftovers++;
+  }
+  g_assert_cmpuint (leftovers, ==, 1);
+  g_assert_cmpint (g_remove (key), ==, 0);
+#endif
+  g_assert_cmpint (g_rmdir (scratch), ==, 0);
   g_assert_cmpint (g_rmdir (base), ==, 0);
   remove_root (root);
 }
@@ -490,6 +602,8 @@ main (int argc, char **argv)
 #ifdef WYL_TEST_WYRELOGD_PATH
   g_test_add_func ("/fact-root-writer-lease/daemon-collision",
       test_daemon_collision_is_path_free_and_nonmutating);
+  g_test_add_func ("/fact-root-writer-lease/daemon-readiness-failure",
+      test_daemon_readiness_failure_names_handle);
 #endif
 #endif
 #ifndef G_OS_WIN32
