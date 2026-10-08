@@ -10459,25 +10459,39 @@ check_unknown_tenant_create_outcome_isolated (void)
   return 0;
 }
 
+/*
+ * #1320: a guard-catalogue permission such as wr.policy.grant_role is decided
+ * by the request guard alone; armed/3 never reads its perm_state.  This
+ * helper used to arm it, which changed nothing a decision reads.  Both
+ * events are now refused before any write, and no state row appears.
+ */
 static gint
-arm_tenant_creator_role_grant (SoupSession *session, WylHandle *handle,
-    const gchar *base_url, const gchar *session_token, const gchar *tenant,
-    gint error_base)
+refuse_catalogue_permission_transition (SoupSession *session,
+    WylHandle *handle, const gchar *base_url, const gchar *session_token,
+    const gchar *tenant, gint error_base)
 {
-  g_autofree gchar *query = g_strdup_printf
-        ("subject=http-policy-admin&perm=wr.policy.grant_role&scope=%s"
-          "&event=grant&tenant=%s&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", tenant, WYL_TENANT_DEFAULT,
-          session_token);
-  guint status = 0;
-  g_autofree gchar *body = NULL;
-  gint rc = send_raw_policy_mutation (session, "POST", base_url,
-          "/policy/permissions/transition", query, &status, &body);
-  if (rc != 0)
-    return rc;
-  return status == 200 && strstr (body, "\"ok\":true") != NULL
-         && permission_state_exists (handle, "http-policy-admin",
-             "wr.policy.grant_role", tenant) ? 0 : error_base;
+  static const gchar *const events[] = { "grant", "revoke" };
+  for (guint i = 0; i < G_N_ELEMENTS (events); i++) {
+    g_autofree gchar *query = g_strdup_printf
+          ("subject=http-policy-admin&perm=wr.policy.grant_role&scope=%s"
+            "&event=%s&tenant=%s&session_token=%s&guard_timestamp=123"
+            "&guard_loc_class=public&guard_risk=49", tenant, events[i],
+            WYL_TENANT_DEFAULT, session_token);
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    gint rc = send_raw_policy_mutation (session, "POST", base_url,
+            "/policy/permissions/transition", query, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || strstr (body, "\"permission_not_armable\"") == NULL
+        || permission_state_exists (handle, "http-policy-admin",
+        "wr.policy.grant_role", tenant)) {
+      g_printerr ("catalogue transition %s at %s: status=%u body=%s\n",
+          events[i], tenant, status, body != NULL ? body : "<null>");
+      return error_base;
+    }
+  }
+  return 0;
 }
 
 static void
@@ -11686,7 +11700,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
       "http-policy-admin", WYL_TENANT_DEFAULT, TRUE,
       &transition_mfa_access, &transition_mfa_refresh))
     return 2679;
-  gint arm_creator_rc = arm_tenant_creator_role_grant (session, handle,
+  gint arm_creator_rc = refuse_catalogue_permission_transition (session, handle,
           base_url, transition_mfa_session, "tenant-a", 2261);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
@@ -11764,7 +11778,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2264;
   g_clear_pointer (&body, g_free);
 
-  arm_creator_rc = arm_tenant_creator_role_grant (session, handle, base_url,
+  arm_creator_rc = refuse_catalogue_permission_transition (session, handle, base_url,
           transition_mfa_session, "tenant-revoke", 2265);
   if (arm_creator_rc != 0)
     return arm_creator_rc;

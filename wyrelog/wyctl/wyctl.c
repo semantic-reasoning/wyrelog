@@ -53,7 +53,20 @@ typedef struct
   gchar *permission;
   gchar *resource;
   gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
 } WyctlPolicyOptions;
+
+/* The parsed numeric fields of the policy check / explain request guard;
+ * the location class stays in WyctlPolicyOptions.  present is FALSE when
+ * no guard option was given, and the decision then carries none. */
+typedef struct
+{
+  gboolean present;
+  gint64 timestamp;
+  gint64 risk;
+} WyctlPolicyGuard;
 
 typedef struct
 {
@@ -332,6 +345,9 @@ wyctl_policy_options_clear (WyctlPolicyOptions *opts)
   g_clear_pointer (&opts->permission, g_free);
   g_clear_pointer (&opts->resource, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlPolicyOptions,
@@ -1477,10 +1493,15 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   return 0;
 }
 
+static gboolean parse_guard_options (const gchar *timestamp_arg,
+    const gchar *loc_class, const gchar *risk_arg, gint64 *out_timestamp,
+    gint64 *out_risk);
+
 static int
 run_policy_decide_request (const WyctlOptions *global_opts,
-    const WyctlPolicyOptions *policy_opts, const gchar *access_token,
-    const gchar *command, WylClientDecision **out_result)
+    const WyctlPolicyOptions *policy_opts, const WyctlPolicyGuard *guard,
+    const gchar *access_token, const gchar *command,
+    WylClientDecision **out_result)
 {
   if (out_result == NULL)
     return 2;
@@ -1521,7 +1542,11 @@ run_policy_decide_request (const WyctlOptions *global_opts,
   wyl_client_set_timeout_ms (client, timeout_ms);
 
   g_autoptr (WylClientDecision) result = NULL;
-  wyrelog_error_t rc = wyl_client_decide_ex (client, policy_opts->user,
+  wyrelog_error_t rc = guard->present
+      ? wyl_client_decide_with_guard_context_ex (client, policy_opts->user,
+          policy_opts->permission, policy_opts->resource, guard->timestamp,
+          policy_opts->guard_loc_class, guard->risk, &result)
+      : wyl_client_decide_ex (client, policy_opts->user,
           policy_opts->permission, policy_opts->resource, &result);
   if (rc != WYRELOG_E_OK) {
     g_autofree gchar *command_name = g_strdup_printf ("policy %s", command);
@@ -1535,11 +1560,12 @@ run_policy_decide_request (const WyctlOptions *global_opts,
 
 static int
 run_policy_check (const WyctlOptions *global_opts,
-    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+    const WyctlPolicyOptions *policy_opts, const WyctlPolicyGuard *guard,
+    const gchar *access_token)
 {
   g_autoptr (WylClientDecision) result = NULL;
-  int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
-          "check", &result);
+  int rc = run_policy_decide_request (global_opts, policy_opts, guard,
+          access_token, "check", &result);
   if (rc != 0)
     return rc;
 
@@ -1555,11 +1581,12 @@ run_policy_check (const WyctlOptions *global_opts,
 
 static int
 run_policy_explain (const WyctlOptions *global_opts,
-    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+    const WyctlPolicyOptions *policy_opts, const WyctlPolicyGuard *guard,
+    const gchar *access_token)
 {
   g_autoptr (WylClientDecision) result = NULL;
-  int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
-          "explain", &result);
+  int rc = run_policy_decide_request (global_opts, policy_opts, guard,
+          access_token, "explain", &result);
   if (rc != 0)
     return rc;
 
@@ -1572,6 +1599,18 @@ run_policy_explain (const WyctlOptions *global_opts,
   g_print ("deny\n");
   const gchar *deny_reason = wyl_client_decision_get_deny_reason (result);
   const gchar *deny_origin = wyl_client_decision_get_deny_origin (result);
+  /* #1320: armed/3 arms a guard-catalogue permission from the request guard
+   * alone, so for one of those not_armed means the guard was absent or
+   * unmet, never that an operator has yet to arm it. */
+  if (wyl_perm_arm_rule_lookup (policy_opts->permission) != NULL
+      && g_strcmp0 (deny_reason, "not_armed") == 0) {
+    deny_reason = "guard_unsatisfied";
+    deny_origin = "request_guard";
+    if (!guard->present)
+      g_printerr ("wyctl: %s is decided by the request guard; pass "
+          "--guard-timestamp, --guard-loc-class and --guard-risk to evaluate "
+          "it as a route does\n", policy_opts->permission);
+  }
   if (deny_reason != NULL)
     g_print ("reason=%s\n", deny_reason);
   if (deny_origin != NULL)
@@ -1592,6 +1631,12 @@ run_policy_decision_command (const WyctlOptions *global_opts,
      "Decision resource", "RESOURCE"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
      "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING, &opts.guard_timestamp_arg,
+     "Request guard timestamp, as a route sends it", "UNIX_SECONDS"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Request guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Request guard risk score (0..100)", "RISK"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1599,6 +1644,12 @@ run_policy_decision_command (const WyctlOptions *global_opts,
   g_autoptr (GOptionContext) context = g_option_context_new (summary);
   g_option_context_add_main_entries (context, entries, NULL);
   g_option_context_set_description (context,
+      "Guard-catalogue permissions such as wr.audit.read and wr.policy.write\n"
+      "are decided by the request guard, not by an armed state.  Pass all\n"
+      "three --guard-* options to evaluate one as a route does; without them\n"
+      "the decision carries no guard and explain reports\n"
+      "reason=guard_unsatisfied.\n"
+      "\n"
       "Exit codes:\n"
       "  0: request succeeded (explain may report a valid deny).\n"
       "  1: policy check returned deny, or proxy setup failed.\n"
@@ -1629,6 +1680,20 @@ run_policy_decision_command (const WyctlOptions *global_opts,
     g_printerr ("wyctl: missing --resource\n");
     return 2;
   }
+  guint guard_given = (opts.guard_timestamp_arg != NULL)
+      + (opts.guard_loc_class != NULL) + (opts.guard_risk_arg != NULL);
+  if (guard_given != 0 && guard_given != 3) {
+    g_printerr ("wyctl: --guard-timestamp, --guard-loc-class and --guard-risk "
+        "must be given together\n");
+    return 2;
+  }
+  WyctlPolicyGuard guard = { 0 };
+  if (guard_given == 3) {
+    if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+        opts.guard_risk_arg, &guard.timestamp, &guard.risk))
+      return 2;
+    guard.present = TRUE;
+  }
   g_autofree gchar *access_token_file =
       wyctl_resolve_string_option (opts.access_token_file,
           global_opts->settings, "access-token-file");
@@ -1638,9 +1703,9 @@ run_policy_decision_command (const WyctlOptions *global_opts,
     return token_rc;
 
   if (g_strcmp0 (command, "check") == 0)
-    return run_policy_check (global_opts, &opts, access_token);
+    return run_policy_check (global_opts, &opts, &guard, access_token);
   if (g_strcmp0 (command, "explain") == 0)
-    return run_policy_explain (global_opts, &opts, access_token);
+    return run_policy_explain (global_opts, &opts, &guard, access_token);
 
   g_printerr ("wyctl: policy %s is not implemented\n", command);
   return 3;
@@ -1778,7 +1843,10 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
         "machine.  --event grant arms a granted permission.  grant and reset,\n"
         "the events that arm, require an MFA-verified session (exit 4).  A\n"
         "transition the state machine refuses, such as a second grant of an\n"
-        "armed permission, exits 3; `wyctl policy explain` shows the state.");
+        "armed permission, exits 3; `wyctl policy explain` shows the state.\n"
+        "Guard-catalogue permissions such as wr.audit.read and wr.policy.write\n"
+        "have no armed state: the request guard decides them, and a transition\n"
+        "for one exits 3 with permission_not_armable.");
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);

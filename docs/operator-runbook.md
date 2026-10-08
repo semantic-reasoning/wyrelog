@@ -320,8 +320,8 @@ Use this token only to enroll TOTP. Then repeat the normal `/auth/login` and
 `/auth/mfa/verify` flow and replace the file with the newly issued
 MFA-assured access token before guarded permission transitions.
 
-After provisioning a separate MFA-authenticated auditor at `__wr_default` and
-arming `wr.audit.read` as described under [Day-2 Operations](#day-2-operations),
+After provisioning a separate MFA-authenticated auditor at `__wr_default` as
+described under [Day-2 Operations](#day-2-operations),
 verify through `wyctl.exe` with the auditor's token (not the system operator's):
 
 ```powershell
@@ -540,8 +540,9 @@ away. Run every step with an MFA-assured administrator token.
    Exit status 3 with `invalid_policy_mutation` means the permission was not
    armed at that scope; continue. This step does not apply to the
    guard-catalogue permissions, such as `wr.audit.read` and `wr.sys.admin`:
-   their decisions ignore the armed state, so disarming them changes nothing
-   and a re-grant is effective immediately (#1320).
+   they have no armed state, the daemon refuses to arm or disarm them (exit
+   3, `permission_not_armable`), and only revoking the role that carries one
+   withdraws it.
 
 3. Revoke every role membership and every direct permission, including
    `wr.login.skip_mfa` if the subject still holds it (see "Revoking bootstrap
@@ -2405,7 +2406,14 @@ The daemon's error code is printed on stderr for every remote failure.
   (`policy explain` reports `reason=not_armed`); arm it with
   `permission-transition --event grant` from an MFA-assured session. `grant`
   and `reset` both arm and both need MFA; a transition the state machine
-  refuses exits 3:
+  refuses exits 3. Arming applies only outside the guard catalogue in
+  `wyrelog/wyl-permission-scope.c`, whose twelve permissions are
+  `wr.sys.admin`, `wr.sys.key_rotate`, `wr.sys.merkle_seal`,
+  `wr.policy.write`, `wr.policy.grant_role`, `wr.svc.freeze`,
+  `wr.svc.unfreeze`, `wr.svc.grant_role`, `wr.service.self_authorize`,
+  `wr.audit.read`, `wr.audit.explain` and `wr.stream.write_reserved`. Those
+  are decided by the holder's grants and the request guard, and a transition
+  for one exits 3 with `permission_not_armable`:
 
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-grant \
@@ -2461,8 +2469,9 @@ The daemon's error code is printed on stderr for every remote failure.
   Enroll the auditor in MFA and log in through `/auth/login` followed by
   `/auth/mfa/verify` as described in [the HTTP login flow](#http-api-summary).
   `wr.audit.read` is guarded: each query must supply an acceptable guard
-  context, and risk must be below 70. For example, an existing MFA-authenticated
-  operator can grant the role with:
+  context, and risk must be below 70. It is a guard-catalogue permission, so
+  the role grant and that guard decide it; there is no arming step. For
+  example, an existing MFA-authenticated operator can grant the role with:
 
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 policy role-grant \
@@ -2472,15 +2481,17 @@ The daemon's error code is printed on stderr for every remote failure.
     --guard-loc-class trusted --guard-risk 29
   ```
 
-  Arm `wr.audit.read` for the auditor with `wyctl policy
-  permission-transition`, using the MFA-authenticated operator token. A
-  skip-MFA token is refused with exit status 4:
+  The role takes effect at once. A `permission-transition` for
+  `wr.audit.read`, or for any other guard-catalogue permission, is refused
+  with exit status 3 and `permission_not_armable`, because no decision reads
+  an armed state for these permissions; to withdraw it, revoke `wr.auditor`.
+  To check the grant, pass the same guard to `policy explain`; without one it
+  reports `reason=guard_unsatisfied` rather than the real outcome:
 
   ```sh
-  wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
-    --subject auditor --perm wr.audit.read --scope __wr_default \
-    --event grant \
-    --access-token-file /run/wyrelog/operator.token \
+  wyctl --daemon-url http://127.0.0.1:8765 policy explain \
+    --user auditor --permission wr.audit.read --resource __wr_default \
+    --access-token-file /run/wyrelog/auditor.token \
     --guard-timestamp "$(date +%s)" \
     --guard-loc-class trusted --guard-risk 29
   ```

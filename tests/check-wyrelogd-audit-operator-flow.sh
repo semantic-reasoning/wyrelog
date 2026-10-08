@@ -213,37 +213,72 @@ if status != 200 or json.loads(body).get("decision") != 1:
     fail(f"default-scope wr.auditor did not grant wr.audit.read: "
          f"{status} {body}")
 
-status, body = request("POST", "/policy/permissions/transition", {
-    "subject": "carol", "perm": "wr.audit.read",
-    "scope": "__wr_default", "event": "grant",
-    **audit_params()},
-    open(admin_token, encoding="ascii").read().strip())
-if status != 200 or json.loads(body).get("changed") is not True:
-    fail(f"admin could not arm carol's wr.audit.read permission: "
-         f"{status} {body}")
-status, body = request("POST", "/decide", {
-    "user": "carol", "perm": "wr.audit.read",
-    "session_token": "__wr_default", "tenant": "__wr_default",
-    **audit_params()},
-    auditor_token)
-if status != 200 or json.loads(body).get("decision") != 1:
-    fail(f"wr.audit.read was not allowed after its permission transition: "
-         f"{status} {body}")
+# #1320: wr.audit.read is a guard-catalogue permission.  The role and the
+# request guard decide it; it has no armed state, so the admin can neither
+# arm nor disarm it, and the decision is the same before and after.
+for event in ("grant", "revoke"):
+    status, body = request("POST", "/policy/permissions/transition", {
+        "subject": "carol", "perm": "wr.audit.read",
+        "scope": "__wr_default", "event": event,
+        **audit_params()},
+        open(admin_token, encoding="ascii").read().strip())
+    if status != 400 or '"permission_not_armable"' not in body:
+        fail(f"{event} transition of catalogue wr.audit.read was not "
+             f"refused: {status} {body}")
+    status, body = request("POST", "/decide", {
+        "user": "carol", "perm": "wr.audit.read",
+        "session_token": "__wr_default", "tenant": "__wr_default",
+        **audit_params()},
+        auditor_token)
+    if status != 200 or json.loads(body).get("decision") != 1:
+        fail(f"wr.audit.read changed after a refused {event} transition: "
+             f"{status} {body}")
+transition = cli("policy", "permission-transition", "--subject", "carol",
+    "--perm", "wr.audit.read", "--scope", "__wr_default", "--event", "grant",
+    "--access-token-file", admin_token, *guard(), check=False)
+if transition.returncode != 3 or "permission_not_armable" not in \
+        transition.stderr:
+    fail(f"wyctl did not report the refused transition: "
+         f"{transition.returncode} {transition.stderr!r}")
+
+# policy explain evaluates a catalogue permission with the request guard,
+# as the route does.  Without one it names the missing guard, never
+# not_armed, which no operator action could fix.
+auditor_token_path = token_file("auditor.token", auditor_token)
+explain = cli("policy", "explain", "--user", "carol", "--permission",
+    "wr.audit.read", "--resource", "__wr_default", "--access-token-file",
+    auditor_token_path, *guard())
+if explain.stdout != "allow\n":
+    fail(f"guarded policy explain did not allow: {explain.stdout!r}")
+explain = cli("policy", "explain", "--user", "carol", "--permission",
+    "wr.audit.read", "--resource", "__wr_default", "--access-token-file",
+    auditor_token_path, check=False)
+if explain.returncode != 0 or explain.stdout != (
+        "deny\nreason=guard_unsatisfied\norigin=request_guard\n") \
+        or "--guard-timestamp" not in explain.stderr:
+    fail(f"unguarded policy explain of a catalogue permission: "
+         f"{explain.returncode} {explain.stdout!r} {explain.stderr!r}")
 
 status, body = request("GET", "/audit/events", audit_params(), auditor_token)
 if status != 200 or not body.startswith("["):
     fail(f"system-scope auditor could not read audit via HTTP: {status} {body}")
 
 query = cli("audit", "query", "--limit", "50", "--access-token-file",
-    token_file("auditor.token", auditor_token), *guard())
+    auditor_token_path, *guard())
 rows = json.loads(query.stdout)
 if not any(row.get("action") == "role_grant"
            and row.get("resource_id") == "__wr_default"
            for row in rows):
     fail(f"wyctl audit query omitted the role-grant event: {query.stdout}")
-if not any(row.get("action") == "permission_state.grant"
-           and row.get("resource_id") == "wr.audit.read"
-           for row in rows):
-    fail(f"wyctl audit query omitted the permission-arm event: {query.stdout}")
+if any(row.get("action", "").startswith("permission_state.")
+       for row in rows):
+    fail(f"a refused transition left an audit event: {query.stdout}")
+
+# Only the role membership withdraws the permission.
+cli("policy", "role-revoke", "--subject", "carol", "--role", "wr.auditor",
+    "--scope", "__wr_default", "--access-token-file", admin_token, *guard())
+status, body = request("GET", "/audit/events", audit_params(), auditor_token)
+if status != 403 or '"audit_denied"' not in body:
+    fail(f"auditor kept audit read after the role revoke: {status} {body}")
 
 PY
