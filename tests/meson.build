@@ -1905,7 +1905,11 @@ if host_machine.system() == 'windows'
   endif
 endif
 
-fact_root_writer_lease_c_args = fact_test_support_c_args
+fact_root_writer_lease_c_args = fact_test_support_c_args + [
+  # The handle-open step lines are WYL_LOG_ERROR records; tell the test
+  # whether the library compiled them in.
+  '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
+]
 fact_root_writer_lease_depends = []
 fact_root_writer_lease_deps = [wyrelog_dep, glib_dep, gio_dep, sqlite_dep]
 if get_option('enable_fact_store').allowed()

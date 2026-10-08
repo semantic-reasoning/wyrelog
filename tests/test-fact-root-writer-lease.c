@@ -16,6 +16,7 @@
 #include "fact-test-support.h"
 #include "fact/root-writer-lease-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #define HOLDER_ARG "--root-lease-holder"
 #define LOCK_NAME ".wyrelog-writer-lock"
@@ -216,9 +217,38 @@ test_handle_fails_before_policy_open (void)
     .policy_store_path = policy,
     .fact_root = root,
   };
+  /* #1360: a failed open names the step that failed, without a path. */
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *log_dir = g_dir_make_tmp ("wyrelog-root-lease-log-XXXXXX",
+          &error);
+  g_assert_no_error (error);
+  g_autofree gchar *log_path = g_build_filename (log_dir, "wyrelog.log",
+          NULL);
+  g_autofree gchar *saved_log = g_strdup (g_getenv ("WYL_LOG"));
+  g_autofree gchar *saved_log_file = g_strdup (g_getenv ("WYL_LOG_FILE"));
+  g_setenv ("WYL_LOG_FILE", log_path, TRUE);
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reconfigure ();
   g_autoptr (WylHandle) handle = NULL;
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_BUSY);
+  if (saved_log_file != NULL)
+    g_setenv ("WYL_LOG_FILE", saved_log_file, TRUE);
+  else
+    g_unsetenv ("WYL_LOG_FILE");
+  if (saved_log != NULL)
+    g_setenv ("WYL_LOG", saved_log, TRUE);
+  wyl_log_internal_reconfigure ();
+#if WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL
+  g_autofree gchar *log_text = NULL;
+  g_assert_true (g_file_get_contents (log_path, &log_text, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_nonnull (strstr (log_text,
+      "handle open failed at fact-root lease: resource is busy"));
+  g_assert_null (strstr (log_text, root));
+#endif
+  (void) g_remove (log_path);
+  g_assert_cmpint (g_rmdir (log_dir), ==, 0);
   g_assert_null (handle);
   g_assert_false (g_file_test (policy, G_FILE_TEST_EXISTS));
   g_assert_cmpstr (wyrelog_error_string (WYRELOG_E_BUSY), ==,
@@ -371,8 +401,12 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
     "--fact-root", root,
     NULL,
   };
-  g_autoptr (GSubprocess) process = g_subprocess_newv (argv,
-          G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
+  g_autoptr (GSubprocessLauncher) launcher = g_subprocess_launcher_new
+        (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE);
+  g_subprocess_launcher_unsetenv (launcher, "WYL_LOG_FILE");
+  g_subprocess_launcher_unsetenv (launcher, "WYL_LOG");
+  g_autoptr (GSubprocess) process = g_subprocess_launcher_spawnv (launcher,
+          argv, &error);
   g_assert_no_error (error);
   g_assert_nonnull (process);
   g_autofree gchar *stdout_text = NULL;
@@ -385,6 +419,7 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   g_auto (GStrv) stderr_lines = g_strsplit_set (stderr_text, "\r\n", -1);
   gboolean found_busy_line = FALSE;
   gboolean found_handle_line = FALSE;
+  gboolean found_step_line = FALSE;
   for (guint i = 0; stderr_lines[i] != NULL; i++) {
     if (g_str_equal (stderr_lines[i],
         "wyrelogd: init failed: resource is busy"))
@@ -392,9 +427,17 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
     if (g_str_equal (stderr_lines[i],
         "wyrelogd: runtime handle open failed"))
       found_handle_line = TRUE;
+    if (g_str_has_suffix (stderr_lines[i],
+        "handle open failed at fact-root lease: resource is busy"))
+      found_step_line = TRUE;
   }
   g_assert_true (found_busy_line);
   g_assert_true (found_handle_line);
+#if WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL
+  g_assert_true (found_step_line);
+#else
+  g_assert_false (found_step_line);
+#endif
   g_assert_null (strstr (stderr_text, root));
   g_assert_null (strstr (stderr_text, sentinel));
 
