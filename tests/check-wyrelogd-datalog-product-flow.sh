@@ -14,8 +14,8 @@ POLICY_DB="$TMPDIR/policy.sqlite"
 KEY_FILE="$TMPDIR/policy.key"
 AUDIT_DB="$TMPDIR/audit.duckdb"
 FACT_ROOT="$TMPDIR/facts"
-LOG_OUT="$TMPDIR/daemon.out"
-LOG_ERR="$TMPDIR/daemon.err"
+EVENTS="$TMPDIR/daemon.events"
+START_SEQ=0
 PID=
 PORT=
 BASE_URL=
@@ -48,12 +48,113 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 }
 
+# Millisecond stamps cost a Python start, so take them only once a daemon
+# is running; the stop note sits between one daemon and the next, where
+# #1360 suspects a race, so it uses the cheap whole-second clock.
+note() {
+  stamp=$("$PYTHON" -c 'import time; print("%.3f" % time.time())')
+  printf '%s %s\n' "$stamp" "$*" >>"$EVENTS"
+}
+
+note_fast() {
+  printf '%s %s\n' "$(date +%s)" "$*" >>"$EVENTS"
+}
+
+# Report whether the fact root, the policy store lease and the two databases
+# are locked right now.  flock and POSIX record locks are probed separately:
+# Linux takes the policy lease as an OFD lock, and SQLite and DuckDB use
+# record locks, which only a record lock can observe.
+probe_locks() {
+  "$PYTHON" - "$FACT_ROOT" "$POLICY_DB.wyrelog-lock" "$POLICY_DB" \
+    "$AUDIT_DB" <<'PY'
+import errno
+import fcntl
+import os
+import sys
+
+HELD = (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK)
+
+
+def attempt(fd, lock, unlock):
+    try:
+        lock(fd)
+    except OSError as error:
+        if error.errno in HELD:
+            return "held"
+        return "error " + errno.errorcode.get(error.errno, str(error.errno))
+    unlock(fd)
+    return "free"
+
+
+def probe(label, path, directory):
+    flags = os.O_RDONLY | os.O_DIRECTORY if directory else os.O_RDWR
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        name = errno.errorcode.get(error.errno, str(error.errno))
+        print(f"{label}: cannot open ({name})")
+        return
+    try:
+        result = ["flock " + attempt(
+            fd, lambda f: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB),
+            lambda f: fcntl.flock(f, fcntl.LOCK_UN))]
+        if not directory:
+            result.append("record " + attempt(
+                fd, lambda f: fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB),
+                lambda f: fcntl.lockf(f, fcntl.LOCK_UN)))
+        print(f"{label}: " + ", ".join(result))
+    finally:
+        os.close(fd)
+
+
+probe("fact root", sys.argv[1], True)
+probe("policy store lease", sys.argv[2], False)
+probe("policy db", sys.argv[3], False)
+probe("audit db", sys.argv[4], False)
+PY
+}
+
+# Everything that could name the holder of a lock is gone once the cleanup
+# trap removes $TMPDIR, so collect it here (#1360).
+report_start_failure() {
+  echo "daemon start $START_SEQ ($1) did not become ready: $2"
+  echo "--- daemon events ---"
+  cat "$EVENTS" || true
+  n=1
+  while [ "$n" -le "$START_SEQ" ]; do
+    echo "--- daemon start $n stdout ---"
+    cat "$TMPDIR/daemon.$n.out" || true
+    echo "--- daemon start $n stderr ---"
+    cat "$TMPDIR/daemon.$n.err" || true
+    n=$((n + 1))
+  done
+  echo "--- lock probe ---"
+  probe_locks || true
+  sleep 1
+  echo "--- lock probe after 1 s ---"
+  probe_locks || true
+  echo "--- wyrelogd processes ---"
+  ps -e -o pid,ppid,stat,lstart,args | grep '[w]yrelogd --production' || true
+  if command -v lsof >/dev/null 2>&1; then
+    echo "--- open files under the scratch directory ---"
+    lsof +D "$TMPDIR" 2>/dev/null || true
+  elif [ -r /proc/locks ]; then
+    echo "--- /proc/locks (lsof unavailable) ---"
+    ls -id "$FACT_ROOT" "$POLICY_DB"* "$AUDIT_DB" 2>/dev/null || true
+    cat /proc/locks || true
+  else
+    echo "--- lsof unavailable; lock holders not listed ---"
+  fi
+}
+
 start_daemon() {
+  label=$1
+  START_SEQ=$((START_SEQ + 1))
   PORT=$(pick_port)
   BASE_URL="http://127.0.0.1:$PORT"
-  : >"$LOG_OUT"
-  : >"$LOG_ERR"
-  "$WYRELOGD" \
+  # An inherited WYL_LOG_FILE would send the daemon's startup log lines away
+  # from the stderr captured here.
+  env -u WYL_LOG_FILE "$WYRELOGD" \
     --production \
     --template-dir "$TEMPLATE_DIR" \
     --policy-db "$POLICY_DB" \
@@ -63,28 +164,40 @@ start_daemon() {
     --listen-port "$PORT" \
     --bootstrap-admin-subject admin1 \
     --bootstrap-admin-allow-skip-mfa \
-    >"$LOG_OUT" 2>"$LOG_ERR" &
+    >"$TMPDIR/daemon.$START_SEQ.out" 2>"$TMPDIR/daemon.$START_SEQ.err" &
   PID=$!
+  note "start $START_SEQ ($label) launched"
 
   i=0
   while [ "$i" -lt 200 ]; do
     i=$((i + 1))
     if "$WYCTL" --daemon-url "$BASE_URL" --timeout-ms 500 status \
         >/dev/null 2>&1; then
+      note "start $START_SEQ ready"
       return 0
+    fi
+    if ! kill -0 "$PID" 2>/dev/null; then
+      status=0
+      wait "$PID" || status=$?
+      PID=
+      note "start $START_SEQ exited with status $status"
+      report_start_failure "$label" "exited with status $status" >&2
+      exit 1
     fi
     sleep 0.1
   done
-  echo "daemon did not become ready" >&2
-  cat "$LOG_ERR" >&2 || true
+  report_start_failure "$label" "still not answering" >&2
   exit 1
 }
 
 stop_daemon() {
   if [ -n "$PID" ]; then
     kill -TERM "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
+    status=0
+    wait "$PID" 2>/dev/null || status=$?
     PID=
+    # 127 means the PID was not a known child of this shell: status unknown.
+    note_fast "stop $START_SEQ status $status"
   fi
 }
 
@@ -477,7 +590,7 @@ BOOTSTRAP_TOKEN_FILE="$TMPDIR/bootstrap.token"
 TOKEN_FILE="$TMPDIR/admin.token"
 MFA_SECRET_FILE="$TMPDIR/admin1.secret"
 
-start_daemon
+start_daemon initial
 login_token "$BOOTSTRAP_TOKEN_FILE"
 enroll_admin_mfa "$BOOTSTRAP_TOKEN_FILE" "$MFA_SECRET_FILE"
 # The successful bootstrap enrollment atomically revokes skip-MFA. Only a new
@@ -542,7 +655,7 @@ assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status "$TOKEN_FILE" ready
 
 stop_daemon
-start_daemon
+start_daemon restart
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
 assert_query_absent "$TOKEN_FILE" orders-a order-a 42
 assert_query_row "$TOKEN_FILE" orders-b order-b 7
@@ -579,7 +692,7 @@ try:
 except OSError:
     raise SystemExit("failed to corrupt fact store") from None
 PY
-start_daemon
+start_daemon restart-after-corruption
 # The restart invalidated the previous token, and the status probe now needs
 # one, so mint it before the probe rather than after (#1031).
 login_mfa_token "$MFA_SECRET_FILE" "$TOKEN_FILE"
