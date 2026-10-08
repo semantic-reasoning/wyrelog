@@ -774,6 +774,22 @@ refresh-file replacement requires a new login rather than an automatic retry.
 On Windows, `MOVEFILE_WRITE_THROUGH` is used for replacement; the filesystem
 may provide weaker parent-directory metadata durability than POSIX `fsync`.
 
+Logout removes both files only after the daemon confirms it. When it fails,
+wyctl prints `wyctl: logout failed: <code>; local token files were retained`
+and keeps both files, which stay owner-only, so leaving them while you settle
+the session is safe. If the request ran out of time (or the daemon answered
+`5xx`), the daemon may or may not have revoked the session, and wyctl adds
+that the outcome is unknown. Run the same logout again with a larger
+`--timeout-ms`; it removes the files when it succeeds. If the retry fails
+with `logout_auth_required`, the access token was refused, which happens both
+when the first logout did revoke the session and when the access token simply
+expired, so the error alone does not say whether the session is gone. wyctl
+then names the next step: run `auth refresh` with the same two files.
+`refresh_auth_required` means the refresh token can no longer reach a
+session, since logout revokes it, and both files can be deleted. A successful
+refresh means the session is still live and the files now hold a new pair;
+run logout again.
+
 A 401 from a route that takes a bearer carries an RFC 6750 challenge, so a
 client can tell a credential it should refresh from one it never sent:
 
@@ -3547,8 +3563,9 @@ create and seal, tenant create, seal and unseal, service-principal create
 and disable, and service-credential issue, rotate and revoke, wyctl adds a
 line saying that the outcome is unknown and how to find out; the online
 `mfa enroll` says whether a re-run is safe (see "First-Install Bootstrap");
-other commands, such as `auth logout`, report only the failure, so check the
-daemon's state before repeating them.
+`auth logout` says how to settle the retained token files (see "HTTP API
+Summary" under "TOTP Multi-Factor Authentication (MFA)"); other commands
+report only the failure, so check the daemon's state before repeating them.
 
 Example: configure the operator workstation once and let wyctl invocations
 in that same account and settings-backend environment pick up the defaults.
