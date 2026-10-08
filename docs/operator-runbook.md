@@ -2413,21 +2413,25 @@ The daemon's error code is printed on stderr for every remote failure.
   `wr.svc.unfreeze`, `wr.svc.grant_role`, `wr.service.self_authorize`,
   `wr.audit.read`, `wr.audit.explain` and `wr.stream.write_reserved`. Those
   are decided by the holder's grants and the request guard, and a transition
-  for one exits 3 with `permission_not_armable`:
+  for one exits 3 with `permission_not_armable`. The example uses
+  `wr.datalog.query`, which the shipped templates declare; a permission the
+  templates do not declare fails with `invalid_policy_mutation`, so a
+  site-defined permission must be added to the templates first. The scope
+  must be an existing tenant, created as described in "Tenants":
 
   ```sh
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-grant \
-    --subject alice --perm site.policy.read --scope tenant-a \
+    --subject alice --perm wr.datalog.query --scope tenant-a \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
     --guard-loc-class trusted --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-transition \
-    --subject alice --perm site.policy.read --scope tenant-a --event grant \
+    --subject alice --perm wr.datalog.query --scope tenant-a --event grant \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
     --guard-loc-class trusted --guard-risk 10
   wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
-    --subject alice --perm site.policy.read --scope tenant-a \
+    --subject alice --perm wr.datalog.query --scope tenant-a \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp "$(date +%s)" \
     --guard-loc-class trusted --guard-risk 10

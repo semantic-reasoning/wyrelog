@@ -88,6 +88,16 @@ GUARD_OPTIONS = {
 OPTION_VALUES = {
     "--guard-loc-class": {"trusted", "semi_trusted", "public", "untrusted"},
 }
+# Option values the daemon resolves against the shipped templates: an
+# example naming an undeclared permission or role fails with
+# invalid_policy_mutation against a real daemon.
+TEMPLATE_DECLARATIONS = {
+    "--perm": re.compile(r'^permission\("([^"]+)"\)\.', re.MULTILINE),
+    "--role": re.compile(r'^role\("([^"]+)"\)\.', re.MULTILINE),
+}
+# The guard catalogue (wyrelog/wyl-permission-scope.c) is decided by the
+# request guard; the daemon refuses a transition for any of its entries.
+CATALOGUE_ENTRY = re.compile(r'^\s*\{"([^"]+)", build_[a-z_]+\},$', re.MULTILINE)
 
 
 def runbook_invocations(path: Path) -> list[tuple[int, list[str]]]:
@@ -186,8 +196,35 @@ def supported_options(wyctl: Path, path: tuple[str, ...]) -> set[str]:
     return set(HELP_OPTIONS.findall(completed.stdout))
 
 
-def check(wyctl: Path, runbook: Path) -> list[str]:
+def template_declarations(source_root: Path) -> dict[str, set[str]]:
+    templates = sorted((source_root / "templates" / "access").glob("*.dl"))
+    if not templates:
+        raise AssertionError(f"{source_root}: no templates/access/*.dl")
+    text = "\n".join(path.read_text(encoding="utf-8") for path in templates)
+    declared = {
+        option: set(pattern.findall(text))
+        for option, pattern in TEMPLATE_DECLARATIONS.items()
+    }
+    for option, names in declared.items():
+        if not names:
+            raise AssertionError(f"{source_root}: templates declare no {option}")
+    return declared
+
+
+def guard_catalogue(source_root: Path) -> set[str]:
+    source = source_root / "wyrelog" / "wyl-permission-scope.c"
+    entries = set(CATALOGUE_ENTRY.findall(source.read_text(encoding="utf-8")))
+    if len(entries) != 12:
+        raise AssertionError(
+            f"{source}: expected 12 guard catalogue entries, found "
+            f"{len(entries)}")
+    return entries
+
+
+def check(wyctl: Path, runbook: Path, source_root: Path) -> list[str]:
     errors: list[str] = []
+    declared = template_declarations(source_root)
+    catalogue = guard_catalogue(source_root)
     content = runbook.read_text(encoding="utf-8")
     for required in (
         "auth login",
@@ -238,16 +275,29 @@ def check(wyctl: Path, runbook: Path) -> list[str]:
                         f"{runbook}:{line}: {path} passes {option} "
                         f"{value!r}; wyctl accepts "
                         f"{', '.join(sorted(accepted))}")
+                names = declared.get(option)
+                if names is not None and "$" not in value \
+                        and value not in names:
+                    errors.append(
+                        f"{runbook}:{line}: {path} passes {option} "
+                        f"{value!r}, which the shipped templates do not "
+                        f"declare")
+                if path == ("policy", "permission-transition") \
+                        and option == "--perm" and value in catalogue:
+                    errors.append(
+                        f"{runbook}:{line}: {path} arms {value!r}, which "
+                        f"the guard catalogue decides by request guard")
         except AssertionError as exc:
             errors.append(f"{runbook}:{line}: {exc}")
     return errors
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("usage: test-wyctl-runbook-options.py WYCTL RUNBOOK", file=sys.stderr)
+    if len(sys.argv) != 4:
+        print("usage: test-wyctl-runbook-options.py WYCTL RUNBOOK SOURCE_ROOT",
+              file=sys.stderr)
         return 2
-    errors = check(Path(sys.argv[1]), Path(sys.argv[2]))
+    errors = check(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
     for error in errors:
         print(error, file=sys.stderr)
     if errors:

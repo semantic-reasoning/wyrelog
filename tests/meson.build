@@ -1237,6 +1237,7 @@ if build_client and host_machine.system() != 'windows'
       files('test-wyctl-runbook-options.py'),
       wyctl_exe.full_path(),
       meson.project_source_root() / 'docs' / 'operator-runbook.md',
+      meson.project_source_root(),
     ],
     depends : wyctl_exe,
     timeout : 60,
