@@ -858,6 +858,11 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
     return WYRELOG_E_INVALID;
   if (subject_id == NULL || perm_id == NULL || scope == NULL || event == NULL)
     return WYRELOG_E_INVALID;
+  /* #1320: armed/3 arms a guard-catalogue permission from the request guard
+   * alone and never reads its perm_state, so a state for one would change
+   * nothing a decision reads.  Refuse it rather than record it. */
+  if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
+    return WYRELOG_E_INVALID;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)

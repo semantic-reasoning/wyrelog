@@ -1753,6 +1753,183 @@ test_policy_check (void)
       "wyctl: policy check failed: decision_request_failed\n", 0, "1000");
 }
 
+static gchar *write_token_with_mode (const gchar * contents, mode_t mode);
+
+/* Run `wyctl policy COMMAND --permission PERM' with EXTRA arguments
+ * against a server answering BODY; return the request it recorded. */
+static gchar *
+run_policy_decision_with_args (const gchar *command, const gchar *perm,
+    const gchar *const *extra, const gchar *body, gint *out_exit,
+    gchar **out_stdout, gchar **out_stderr)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyCheckServer server = {
+    .listener = listener, .cancel = cancel, .response_body = body,
+    .response_status = 200,
+  };
+  GThread *thread = g_thread_new ("policy-guard", policy_check_server_thread,
+          &server);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  const gchar *fixed[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url, "--timeout-ms", "2000",
+    "policy", command, "--user", "alice", "--permission", perm,
+    "--resource", "__wr_default", "--access-token-file", token_path,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (fixed); i++)
+    g_ptr_array_add (argv, (gpointer) fixed[i]);
+  for (const gchar *const *arg = extra; arg != NULL && *arg != NULL; arg++)
+    g_ptr_array_add (argv, (gpointer) *arg);
+  g_ptr_array_add (argv, NULL);
+  run_child ((gchar **) argv->pdata, out_stdout, out_stderr, out_exit);
+  stop_test_server (thread, cancel);
+  g_unlink (token_path);
+  return server.request;
+}
+
+#define CATALOGUE_NOT_ARMED_BODY \
+  "{\"decision\":0,\"deny_reason\":\"not_armed\"," \
+  "\"deny_origin\":\"perm_state\"}"
+
+/*
+ * #1320: a guard-catalogue permission such as wr.audit.read is decided by
+ * the request guard and has no armed state, but policy explain sent no
+ * guard, so it always printed reason=not_armed even while the route
+ * allowed.  The guard options now reach /decide as a route sends them.
+ */
+static void
+test_policy_decision_sends_guard (void)
+{
+  static const gchar *const guard[] = {
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL,
+  };
+  static const gchar *const commands[] = { "check", "explain" };
+  for (gsize i = 0; i < G_N_ELEMENTS (commands); i++) {
+    gint wait_status = 0;
+    g_autofree gchar *out = NULL;
+    g_autofree gchar *err = NULL;
+    g_autofree gchar *request = run_policy_decision_with_args (commands[i],
+            "wr.audit.read", guard, "{\"decision\":1,\"deny_reason\":null,"
+            "\"deny_origin\":null}", &wait_status, &out, &err);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+    g_assert_cmpstr (out, ==, "allow\n");
+    g_assert_cmpstr (err, ==, "");
+    g_assert_nonnull (request);
+    g_assert_nonnull (strstr (request, "guard_timestamp=123"));
+    g_assert_nonnull (strstr (request, "guard_loc_class=trusted"));
+    g_assert_nonnull (strstr (request, "guard_risk=29"));
+  }
+}
+
+/* Without the guard options no guard is sent, as before. */
+static void
+test_policy_decision_without_guard_sends_none (void)
+{
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = run_policy_decision_with_args ("check",
+          "wr.datalog.query", NULL, "{\"decision\":1,\"deny_reason\":null,"
+          "\"deny_origin\":null}", &wait_status, &out, &err);
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_nonnull (request);
+  g_assert_null (strstr (request, "guard_"));
+}
+
+/*
+ * #1320: for a catalogue permission a not_armed answer can only mean the
+ * guard was absent or unmet, since armed/3 arms these from the guard
+ * alone.  explain names that cause, and says how to supply a guard when
+ * none was given.
+ */
+static void
+test_policy_explain_catalogue_names_guard (void)
+{
+  static const gchar *const guard[] = {
+    "--guard-timestamp", "123", "--guard-loc-class", "public",
+    "--guard-risk", "99", NULL,
+  };
+  const gchar *const *cases[] = { NULL, guard };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gint wait_status = 0;
+    g_autofree gchar *out = NULL;
+    g_autofree gchar *err = NULL;
+    g_autofree gchar *request = run_policy_decision_with_args ("explain",
+            "wr.audit.read", cases[i], CATALOGUE_NOT_ARMED_BODY, &wait_status,
+            &out, &err);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+    g_assert_nonnull (request);
+    g_assert_cmpstr (out, ==, "deny\nreason=guard_unsatisfied\n"
+        "origin=request_guard\n");
+    if (cases[i] == NULL)
+      g_assert_cmpstr (err, ==, "wyctl: wr.audit.read is decided by the "
+          "request guard; pass --guard-timestamp, --guard-loc-class and "
+          "--guard-risk to evaluate it as a route does\n");
+    else
+      g_assert_cmpstr (err, ==, "");
+  }
+
+  /* A permission outside the catalogue keeps the daemon's words. */
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = run_policy_decision_with_args ("explain",
+          "wr.datalog.query", NULL, CATALOGUE_NOT_ARMED_BODY, &wait_status,
+          &out, &err);
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_cmpstr (out, ==, "deny\nreason=not_armed\norigin=perm_state\n");
+  g_assert_cmpstr (err, ==, "");
+}
+
+/* A partial or invalid guard is refused before any request. */
+static void
+test_policy_decision_guard_requires_all_three (void)
+{
+  static const gchar *const partial[] = {
+    "--guard-timestamp", "123", NULL,
+  };
+  static const gchar *const bad_risk[] = {
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "101", NULL,
+  };
+  static const struct
+  {
+    const gchar *const *args;
+    const gchar *err;
+  } cases[] = {
+    {partial, "wyctl: --guard-timestamp, --guard-loc-class and --guard-risk "
+     "must be given together\n"},
+    {bad_risk, "wyctl: invalid --guard-risk\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+    g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+    const gchar *fixed[] = {
+      WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1", "policy",
+      "explain", "--user", "alice", "--permission", "wr.audit.read",
+      "--resource", "__wr_default", "--access-token-file", token_path,
+    };
+    for (gsize j = 0; j < G_N_ELEMENTS (fixed); j++)
+      g_ptr_array_add (argv, (gpointer) fixed[j]);
+    for (const gchar *const *arg = cases[i].args; *arg != NULL; arg++)
+      g_ptr_array_add (argv, (gpointer) *arg);
+    g_ptr_array_add (argv, NULL);
+    gint wait_status = 0;
+    g_autofree gchar *out = NULL;
+    g_autofree gchar *err = NULL;
+    run_child ((gchar **) argv->pdata, &out, &err, &wait_status);
+    g_unlink (token_path);
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+    g_assert_cmpstr (out, ==, "");
+    g_assert_cmpstr (err, ==, cases[i].err);
+  }
+}
+
 static void
 test_policy_check_connection_failure (void)
 {
@@ -5655,6 +5832,14 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/policy-help", test_policy_help);
   g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
   g_test_add_func ("/wyctl/policy-check", test_policy_check);
+  g_test_add_func ("/wyctl/policy-decision-sends-guard",
+      test_policy_decision_sends_guard);
+  g_test_add_func ("/wyctl/policy-decision-without-guard-sends-none",
+      test_policy_decision_without_guard_sends_none);
+  g_test_add_func ("/wyctl/policy-explain-catalogue-names-guard",
+      test_policy_explain_catalogue_names_guard);
+  g_test_add_func ("/wyctl/policy-decision-guard-requires-all-three",
+      test_policy_decision_guard_requires_all_three);
   g_test_add_func ("/wyctl/policy-check-connection-failure",
       test_policy_check_connection_failure);
   g_test_add_func ("/wyctl/policy-permission-help",

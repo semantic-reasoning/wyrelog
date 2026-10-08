@@ -6288,7 +6288,18 @@ check_handle_permission_state_transition_reloads_snapshot (void)
       "active") != WYRELOG_E_OK)
     return 807;
 
+  /* #1320: a guard-catalogue permission has no armed state that any
+   * decision reads, so the handle refuses to move one before writing. */
   gint64 event_id = -1;
+  gboolean catalogue_state = TRUE;
+  if (wyl_handle_apply_permission_state_transition (handle,
+      "perm-transition-user", "wr.audit.read", "perm-transition-scope",
+      "grant", NULL, &event_id) != WYRELOG_E_INVALID || event_id != -1
+      || wyl_policy_store_permission_state_exists (store,
+      "perm-transition-user", "wr.audit.read", "perm-transition-scope",
+      &catalogue_state) != WYRELOG_E_OK || catalogue_state)
+    return 870;
+
   if (wyl_handle_apply_permission_state_transition (handle,
       "perm-transition-user", "site.perm.transition",
       "perm-transition-scope", "grant", NULL, &event_id) != WYRELOG_E_OK)

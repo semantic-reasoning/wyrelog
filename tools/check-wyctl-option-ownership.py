@@ -14,7 +14,8 @@ EXPECTED_FIELDS = {
         ("subject", "tenant", "token_output", "refresh_token_output",
          "access_token_file", "refresh_token_file"),
     "WyctlPolicyOptions":
-        ("user", "permission", "resource", "access_token_file"),
+        ("user", "permission", "resource", "access_token_file",
+         "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlAuditOptions":
         ("filter", "limit_arg", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
@@ -134,7 +135,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 226
+EXPECTED_STRING_DESTINATIONS = 229
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

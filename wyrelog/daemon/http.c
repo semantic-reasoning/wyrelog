@@ -14782,6 +14782,14 @@ policy_permission_transition_handler (SoupServer *server,
     set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
     return;
   }
+  /* #1320: a guard-catalogue permission (wr.audit.read, wr.policy.write and
+   * the rest of wyl-permission-scope.c) is decided by its holder's grants and
+   * the request guard; armed/3 never reads its state.  Arming or disarming
+   * one would report a change that does not exist, so refuse both. */
+  if (wyl_perm_arm_rule_lookup (perm) != NULL) {
+    set_json_error (msg, 400, "permission_not_armable");
+    return;
+  }
 
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
