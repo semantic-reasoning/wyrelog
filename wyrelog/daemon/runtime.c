@@ -858,6 +858,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
     if (readiness_rc != WYRELOG_E_OK) {
       if (wyl_daemon_early_signal_received ())
         return 0;
+      g_printerr ("wyrelogd: readiness handle open failed\n");
       g_printerr ("wyrelogd: init failed: %s\n",
           wyrelog_error_string (readiness_rc));
       return 1;
@@ -875,6 +876,10 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
       open_readiness_handle (opts, &handle) : open_runtime_handle (opts,
           &handle);
   if (rc != WYRELOG_E_OK) {
+    if (opts->check_only)
+      g_printerr ("wyrelogd: readiness handle open failed\n");
+    else
+      g_printerr ("wyrelogd: runtime handle open failed\n");
     g_printerr ("wyrelogd: init failed: %s\n", wyrelog_error_string (rc));
     return 1;
   }
