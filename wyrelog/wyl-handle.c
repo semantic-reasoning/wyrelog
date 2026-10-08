@@ -1679,6 +1679,18 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
   return wyl_handle_open_with_options (&opts, out_handle);
 }
 
+/* Name the open step that failed (#1360): every caller reports only the
+ * error code, which does not say which step returned it.  The step text
+ * is a constant and never carries a path. */
+static wyrelog_error_t
+handle_open_fail (WylHandle *self, const gchar *step, wyrelog_error_t rc)
+{
+  WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "handle open failed at %s: %s", step,
+      wyrelog_error_string (rc));
+  g_object_unref (self);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     WylHandle **out_handle)
@@ -1710,18 +1722,14 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   wyrelog_error_t scheduler_rc = wyl_fact_replay_scheduler_new
         (&self->fact_replay_scheduler_config, self->fact_resource_recorder,
           &self->fact_replay_scheduler);
-  if (scheduler_rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return scheduler_rc;
-  }
+  if (scheduler_rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "replay scheduler", scheduler_rc);
   self->fact_root = g_strdup (opts->fact_root);
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     wyrelog_error_t lease_rc = wyl_fact_root_writer_lease_acquire
           (self->fact_root, &self->fact_root_writer_lease);
-    if (lease_rc != WYRELOG_E_OK) {
-      g_object_unref (self);
-      return lease_rc;
-    }
+    if (lease_rc != WYRELOG_E_OK)
+      return handle_open_fail (self, "fact-root lease", lease_rc);
     if (opts->fact_root_lease_acquired_checkpoint != NULL)
       opts->fact_root_lease_acquired_checkpoint
         (opts->fact_root_lease_acquired_checkpoint_data);
@@ -1759,18 +1767,14 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
 
   wyrelog_error_t rc = wyl_policy_store_open_with_options (&store_open_opts,
           &self->policy_store);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "policy store", rc);
 #ifdef WYL_HAS_FACT_STORE
   if (self->fact_root != NULL && self->fact_root[0] != '\0') {
     rc = wyl_policy_store_bind_fact_root_authorized (self->policy_store,
             self->fact_root, self->fact_root_writer_lease);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (self);
-      return rc;
-    }
+    if (rc != WYRELOG_E_OK)
+      return handle_open_fail (self, "fact-root bind", rc);
   }
 #endif
   g_mutex_lock (&self->policy_store_lifecycle_mutex);
@@ -1778,49 +1782,36 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       || self->policy_store_generation == G_MAXUINT64) {
     self->policy_store_generation_exhausted = TRUE;
     g_mutex_unlock (&self->policy_store_lifecycle_mutex);
-    g_object_unref (self);
-    return WYRELOG_E_INTERNAL;
+    return handle_open_fail (self, "policy generation", WYRELOG_E_INTERNAL);
   }
   self->policy_store_generation++;
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
   rc = wyl_policy_store_create_schema (self->policy_store);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "policy schema", rc);
   if (opts->template_dir != NULL) {
     rc = wyl_handle_open_engine_pair (self, opts->template_dir);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (self);
-      return rc;
-    }
+    if (rc != WYRELOG_E_OK)
+      return handle_open_fail (self, "engine pair", rc);
   }
 #ifdef WYL_HAS_FACT_STORE
   rc = wyl_handle_replay_fact_graphs (self, NULL);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "fact replay", rc);
 #endif
 #ifdef WYL_HAS_AUDIT
   /* Open the runtime audit sink and replay durable Policy DB audit rows into
    * it. Public wyl_init() passes NULL and therefore keeps the sink in-memory;
    * private daemon/test callers may pass a file path through opts. */
   rc = wyl_audit_conn_open (opts->audit_store_path, &self->audit_conn);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "audit open", rc);
   rc = wyl_audit_conn_create_schema (self->audit_conn);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "audit schema", rc);
   rc = wyl_handle_load_policy_store_audit_events (self);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (self);
-    return rc;
-  }
+  if (rc != WYRELOG_E_OK)
+    return handle_open_fail (self, "audit replay", rc);
 #endif
 
   if (opts->production_mode) {
