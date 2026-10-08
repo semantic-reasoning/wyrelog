@@ -4590,6 +4590,15 @@ test_mfa_enroll_confirm_refused_has_no_hint (void)
   g_assert_null (strstr (err, "outcome is unknown"));
 }
 
+#define LOGOUT_UNKNOWN_HINT \
+  "wyctl: the logout outcome is unknown; re-run the same command with a " \
+  "larger --timeout-ms\n"
+#define LOGOUT_REFUSED_HINT \
+  "wyctl: the access token was refused; run auth refresh with the same " \
+  "files: refresh_auth_required means no session is left and both files " \
+  "can be deleted, a successful refresh means it is live, so log out " \
+  "again\n"
+
 /*
  * #1324: auth logout never read --timeout-ms, so it waited however long
  * the daemon took and accepted any value for the flag.  The test daemon
@@ -4628,12 +4637,83 @@ test_auth_logout_times_out (void)
   g_assert_cmpstr (out, ==, "");
   g_assert_cmpstr (err, ==,
       "wyctl: logout failed: logout_failed; local token files were "
-      "retained\n");
+      "retained\n" LOGOUT_UNKNOWN_HINT);
   g_assert_nonnull (request);
   g_assert_true (g_file_test (access_path, G_FILE_TEST_EXISTS));
   g_assert_true (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
   g_unlink (access_path);
   g_unlink (refresh_path);
+}
+
+/*
+ * #1333: a logout the daemon refused tells the operator how to settle the
+ * retained files.  A 401 logout_auth_required follows a timed-out logout
+ * that did revoke the session, but also an access token that merely
+ * expired, so the hint routes through auth refresh, whose answer decides:
+ * refresh_auth_required means no session is left to log out.  An answer
+ * that settles the request otherwise (here a sealed tenant) gets neither
+ * hint.
+ */
+static void
+run_auth_logout_refused_case (guint status, const gchar *body,
+    const gchar *expected_err)
+{
+  g_autofree gchar *access_path = write_token_with_mode ("access-1", 0600);
+  g_autofree gchar *refresh_path = write_token_with_mode ("refresh-1", 0600);
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = status, .body = body,
+  };
+  GThread *thread = g_thread_new ("logout", policy_mutation_server_thread,
+          &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url, "auth", "logout",
+    "--tenant", "__wr_default", "--token-file", access_path,
+    "--refresh-token-file", refresh_path, NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  gint wait_status = 0;
+  run_child (argv, &out, &err, &wait_status);
+  stop_test_server (thread, cancel);
+  g_autofree gchar *request = server.request;
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, expected_err);
+  g_assert_nonnull (request);
+  g_assert_true (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+  g_unlink (access_path);
+  g_unlink (refresh_path);
+}
+
+static void
+test_auth_logout_refused_token_names_refresh (void)
+{
+  run_auth_logout_refused_case (401,
+      "{\"error\":\"logout_auth_required\"}",
+      "wyctl: logout failed: logout_auth_required; local token files were "
+      "retained\n" LOGOUT_REFUSED_HINT);
+}
+
+static void
+test_auth_logout_server_error_is_unknown (void)
+{
+  run_auth_logout_refused_case (500, "{\"error\":\"logout_failed\"}",
+      "wyctl: logout failed: logout_failed; local token files were "
+      "retained\n" LOGOUT_UNKNOWN_HINT);
+}
+
+static void
+test_auth_logout_settled_refusal_has_no_hint (void)
+{
+  run_auth_logout_refused_case (409, "{\"error\":\"tenant_sealed\"}",
+      "wyctl: logout failed: tenant_sealed; local token files were "
+      "retained\n");
 }
 
 /* The flag is now validated like every other command's, before anything
@@ -5917,6 +5997,12 @@ main (int argc, char **argv)
       test_service_change_invalid_request_id);
   g_test_add_func ("/wyctl/auth-logout-times-out",
       test_auth_logout_times_out);
+  g_test_add_func ("/wyctl/auth-logout-refused-token-names-refresh",
+      test_auth_logout_refused_token_names_refresh);
+  g_test_add_func ("/wyctl/auth-logout-server-error-is-unknown",
+      test_auth_logout_server_error_is_unknown);
+  g_test_add_func ("/wyctl/auth-logout-settled-refusal-has-no-hint",
+      test_auth_logout_settled_refusal_has_no_hint);
   g_test_add_func ("/wyctl/auth-logout-rejects-invalid-timeout",
       test_auth_logout_rejects_invalid_timeout);
   g_test_add_func ("/wyctl/fact-forget-unknown-outcome",

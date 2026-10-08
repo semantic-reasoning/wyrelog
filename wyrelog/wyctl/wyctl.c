@@ -5402,10 +5402,23 @@ run_auth_logout (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   sodium_memzero (access, strlen (access));
   wyl_client_set_timeout_ms (client, timeout_ms);
-  if (wyl_client_logout (client) != WYRELOG_E_OK) {
+  wyrelog_error_t rc = wyl_client_logout (client);
+  if (rc != WYRELOG_E_OK) {
     g_autofree gchar *code = wyl_client_dup_last_error_code (client);
     g_printerr ("wyctl: logout failed: %s; local token files were retained\n",
         code != NULL ? code : "logout_failed");
+    /* #1333: a refused bearer follows both a logout that already revoked
+     * the session and an access token that merely expired; only refresh
+     * tells them apart. */
+    if (wyctl_remote_outcome_unknown (client, rc))
+      g_printerr ("wyctl: the logout outcome is unknown; re-run the same "
+          "command with a larger --timeout-ms\n");
+    else if (wyl_client_get_last_http_status (client) == 401
+        && g_strcmp0 (code, "logout_auth_required") == 0)
+      g_printerr ("wyctl: the access token was refused; run auth refresh "
+          "with the same files: refresh_auth_required means no session is "
+          "left and both files can be deleted, a successful refresh means "
+          "it is live, so log out again\n");
     return 1;
   }
   WyctlTokenFileStatus refresh_status = wyctl_token_file_remove_protected
