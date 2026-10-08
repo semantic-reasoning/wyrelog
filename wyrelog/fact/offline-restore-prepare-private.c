@@ -8,7 +8,6 @@
 #include "fact/offline-restore-validation-private.h"
 #include "fact/offline-restore-validation-session-private.h"
 
-#include <sqlite3.h>
 #include <string.h>
 
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
@@ -262,18 +261,8 @@ static wyrelog_error_t
 graph_commit_reload_durable (wyl_policy_store_t *policy,
     const gchar *operation_uuid, WylFactOfflineRestoreJournal *out_journal)
 {
-  sqlite3 *db = wyl_policy_store_get_db (policy);
-  const gchar *path = db == NULL ? NULL : sqlite3_db_filename (db, "main");
-  if (path == NULL || *path == '\0')
-    return WYRELOG_E_IO;
-  g_autoptr (wyl_policy_store_t) recovery = NULL;
-  wyrelog_error_t rc = wyl_policy_store_open (path, &recovery);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_create_schema (recovery);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_offline_restore_journal_store_load (recovery,
-            operation_uuid, out_journal);
-  return rc;
+  return wyl_fact_offline_restore_journal_store_load (policy, operation_uuid,
+             out_journal);
 }
 #endif
 
