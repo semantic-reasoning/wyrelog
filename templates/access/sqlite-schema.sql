@@ -2062,6 +2062,7 @@ CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (
     final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),
     terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),
     completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),
+    graph_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 0 AND 1024),
     CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL))
 );
 CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (

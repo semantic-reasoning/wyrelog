@@ -2182,7 +2182,7 @@ client_fact_restore_request (WylClient *client,
     for (const gchar *p = request->trusted_manifest_sha256; *p != '\0'; p++)
       if (!g_ascii_isxdigit (*p))
         return WYRELOG_E_INVALID;
-  const gchar *auth_tenant = graph_scope ? request->tenant_id : "__wr_default";
+  const gchar *auth_tenant = "__wr_default";
   g_autofree gchar *base_url = NULL, *access_token = NULL, *session_token = NULL;
   wyrelog_error_t rc = client_fact_prepare (client, auth_tenant,
           request->guard_timestamp, request->guard_loc_class, request->guard_risk,

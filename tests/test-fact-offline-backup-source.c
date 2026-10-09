@@ -2074,18 +2074,77 @@ restore_http_post_and_drop_response (const gchar *base_url,
   if (!g_output_stream_write_all (output, request, strlen (request), &written,
       NULL, &error) || written != strlen (request))
     return FALSE;
-  /* Finish the request but keep the read side open and unread while the
-   * daemon commits and writes its response. Closing afterward discards it. */
+  /* Finish the request, consume and deliberately discard the response, then
+   * close. This waits for handler completion without returning its outcome to
+   * the caller that must recover it by UUID. */
   if (!g_socket_shutdown (g_socket_connection_get_socket (connection), FALSE,
       TRUE, &error))
     return FALSE;
-  gchar debug_response[2048] = { 0 };
-  gssize debug_length = g_input_stream_read
-        (g_io_stream_get_input_stream (G_IO_STREAM (connection)), debug_response,
-          sizeof debug_response - 1, NULL, &error);
-  g_test_message ("dropped HTTP response debug (%" G_GSSIZE_FORMAT "): %s",
-      debug_length, debug_response);
+  guint8 discard[512];
+  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
+  while (g_input_stream_read (input, discard, sizeof discard, NULL, &error) > 0)
+    ;
+  if (error != NULL)
+    return FALSE;
   return g_io_stream_close (G_IO_STREAM (connection), NULL, &error);
+}
+
+static gboolean
+restore_http_send_parked_request (const gchar *base_url, const gchar *token,
+    const gchar *operation, const gchar *body,
+    GSocketConnection **out_connection)
+{
+  if (out_connection == NULL)
+    return FALSE;
+  *out_connection = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GUri) uri = g_uri_parse (base_url, G_URI_FLAGS_NONE, &error);
+  if (uri == NULL || error != NULL)
+    return FALSE;
+  const gchar *host = g_uri_get_host (uri);
+  gint port = g_uri_get_port (uri);
+  if (host == NULL || port <= 0 || port > G_MAXUINT16)
+    return FALSE;
+  g_autoptr (GSocketClient) socket_client = g_socket_client_new ();
+  g_autoptr (GSocketConnection) connection =
+      g_socket_client_connect_to_host (socket_client, host, (guint16) port,
+          NULL, &error);
+  if (connection == NULL || error != NULL)
+    return FALSE;
+  g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", token);
+  g_autofree gchar *request = g_strdup_printf (
+    "POST /facts/restore/%s?tenant=__wr_default&guard_timestamp=123&"
+    "guard_loc_class=trusted&guard_risk=29 HTTP/1.1\r\n"
+    "Host: %s:%d\r\nAuthorization: %s\r\n"
+    "Content-Type: application/json\r\nConnection: close\r\n"
+    "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+    operation, host, port, authorization, strlen (body), body);
+  GOutputStream *output = g_io_stream_get_output_stream
+        (G_IO_STREAM (connection));
+  gsize written = 0;
+  if (!g_output_stream_write_all (output, request, strlen (request), &written,
+      NULL, &error) || written != strlen (request))
+    return FALSE;
+  *out_connection = g_steal_pointer (&connection);
+  return TRUE;
+}
+
+static gboolean
+restore_http_waiting_writers (SoupServer *server, guint target,
+    gint expected_cancel_reason)
+{
+  for (guint attempt = 0; attempt < 2000; attempt++) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.waiting_writers == target
+        && (expected_cancel_reason < 0
+        || wyl_daemon_http_policy_write_last_cancel_reason_for_test (server)
+        == expected_cancel_reason))
+      return TRUE;
+    g_usleep (5000);
+  }
+  return FALSE;
 }
 
 static guint64
@@ -2710,6 +2769,91 @@ test_restore_daemon_http_lifecycle (void)
   g_assert_nonnull (strstr (response, "\"state\":\"eligible\""));
   g_assert_nonnull (strstr (response, "\"publication_eligible\":false"));
 
+  /* A disconnected request parked behind an active read must cancel at the
+   * daemon's real policy-WRITE boundary before BEGIN can mutate the journal. */
+  const gchar *cancelled_uuid = "01890c10-2e3f-7000-8000-000000000011";
+  g_autoptr (WylServiceAuthReadLease) read_lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &read_lease), ==, WYRELOG_E_OK);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body (bundle_path, digest, cancelled_uuid, 0,
+          TRUE);
+  g_autoptr (GSocketConnection) parked = NULL;
+  g_assert_true (restore_http_send_parked_request (base_url, token, "begin",
+      body, &parked));
+  g_assert_true (restore_http_waiting_writers (http.server, 1, -1));
+  g_assert_true (g_io_stream_close (G_IO_STREAM (parked), NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (restore_http_waiting_writers (http.server, 0, 1));
+  g_assert_cmpint (wyl_service_auth_read_lease_release (read_lease), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&read_lease, wyl_service_auth_read_lease_free);
+  g_clear_pointer (&parked, g_object_unref);
+  g_clear_pointer (&body, g_free);
+  body = restore_http_request_body ("", "", cancelled_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 404);
+  sqlite3_stmt *cancelled_rows = NULL;
+  sqlite3 *policy_db = wyl_policy_store_get_db
+        (wyl_handle_get_policy_store (handle));
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_tenant_claims WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_receipts WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_terminal_history WHERE operation_uuid=?1);",
+      -1, &cancelled_rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (cancelled_rows, 1, cancelled_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (cancelled_rows), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (cancelled_rows, 0), ==, 0);
+  g_assert_cmpint (sqlite3_finalize (cancelled_rows), ==, SQLITE_OK);
+
+  /* BEGIN followed by a lost ABORT response is recovered from its durable
+   * receipt using the same UUID and exact tenant scope. */
+  const gchar *aborted_uuid = "01890c10-2e3f-7000-8000-000000000012";
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body (bundle_path, digest, aborted_uuid, 0, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "begin", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  guint64 abort_revision = restore_http_revision (response);
+  g_clear_pointer (&body, g_free);
+  body = restore_http_request_body ("", "", aborted_uuid, abort_revision,
+          FALSE);
+  g_assert_true (restore_http_post_and_drop_response (base_url, token, "abort",
+      body));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body ("", "", aborted_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  if (strstr (response, "\"state\":\"aborted\"") == NULL)
+    g_test_message ("abort status response was: %s", response);
+  g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
+  g_assert_nonnull (strstr (response, aborted_uuid));
+  g_assert_nonnull (strstr (response, "\"graph_count\":2"));
+  sqlite3_stmt *aborted_rows = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_tenant_claims WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims WHERE operation_uuid=?1), "
+      "(SELECT count(*) FROM fact_offline_restore_receipts WHERE operation_uuid=?1 AND terminal_state='aborted'), "
+      "(SELECT graph_count FROM fact_offline_restore_receipts WHERE operation_uuid=?1);",
+      -1, &aborted_rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (aborted_rows, 1, aborted_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (aborted_rows), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (aborted_rows, 0), ==, 0);
+  g_assert_cmpint (sqlite3_column_int (aborted_rows, 1), ==, 1);
+  g_assert_cmpint (sqlite3_column_int (aborted_rows, 2), ==, 2);
+  g_assert_cmpint (sqlite3_finalize (aborted_rows), ==, SQLITE_OK);
+
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
   soup_server_disconnect (http.server);
@@ -2919,7 +3063,12 @@ test_restore_daemon_http_graph_lifecycle (void)
   for (guint i = 0; i < 32 && !committed; i++) {
     body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
             "", "", operation_uuid, revision, FALSE);
-    g_assert_true (restore_http_post (session, base_url, token, "resume", body,
+    g_assert_true (restore_http_post_and_drop_response (base_url, token,
+        "resume", body));
+    g_clear_pointer (&body, g_free);
+    body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+            "", "", operation_uuid, 0, FALSE);
+    g_assert_true (restore_http_post (session, base_url, token, "status", body,
         &status, &response));
     g_assert_cmpuint (status, ==, 200);
     committed = strstr (response, "\"state\":\"committed\"") != NULL;
@@ -6087,15 +6236,23 @@ test_tenant_selected_cleanup_dispatch (gconstpointer data)
   wyl_fact_offline_restore_journal_clear (&f.committed);
   g_assert_cmpint (wyl_fact_offline_restore_tenant_selected_cleanup_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
-      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (f.committed.revision, ==, revision);
+      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (f.committed.graphs);
+  WylPolicyOfflineRestoreReceipt *terminal_receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+        (f.fixture.policy, session_operation, &terminal_receipt), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (terminal_receipt->terminal_state, ==, "committed");
+  g_assert_cmpuint (terminal_receipt->final_revision, ==, revision);
+  g_assert_cmpuint (terminal_receipt->graph_count, ==, 2);
+  wyl_policy_offline_restore_receipt_free (terminal_receipt);
   wyl_fact_offline_restore_journal_clear (&f.committed);
   g_assert_cmpint (wyl_fact_offline_restore_tenant_selected_cleanup_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
-      session_operation, revision - 1, 0, &f.committed), ==, WYRELOG_E_BUSY);
+      session_operation, revision - 1, 0, &f.committed), ==,
+      WYRELOG_E_NOT_FOUND);
   g_assert_null (f.committed.graphs);
   g_clear_pointer (&f.journal_before, g_bytes_unref);
-  f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
 }
 
