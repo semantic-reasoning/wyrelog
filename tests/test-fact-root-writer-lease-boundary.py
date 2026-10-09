@@ -182,15 +182,30 @@ assert "writer-lock" not in posix
 # is the authority; the artifact is validated but never removed on release.
 windows_acquire = body(windows, "open_root_writer_lock")
 windows_release = body(windows, "wyl_fact_root_writer_lease_release")
+windows_unref = body(windows, "root_writer_lease_unref")
 assert 'L".wyrelog-writer-lock"' in windows_acquire
 assert "attributes.RootDirectory = resolver->handle" in windows_acquire
 assert "0, FILE_OPEN_IF" in windows_acquire
 assert "FILE_OPEN_REPARSE_POINT" in windows_acquire
 assert "validate_zero_length_regular" in windows_acquire
 assert "validate_parent_entry" in windows_acquire
-assert "CloseHandle" in windows_release
+assert "root_writer_lease_unref (lease)" in windows_release
+assert "g_atomic_int_dec_and_test (&lease->ref_count)" in windows_unref
+assert "CloseHandle (lease->lock_handle)" in windows_unref
+assert "wyl_fact_graph_resolver_clear (&lease->resolver)" in windows_unref
+borrowed_release = windows_unref.split(
+    "if (handle_is_valid (lease->lock_handle))", maxsplit=1
+)[0]
+assert "if (lease->borrowed_parent != NULL)" in borrowed_release
+assert "CloseHandle" not in borrowed_release
+assert "root_writer_lease_unref (parent)" in borrowed_release
+assert borrowed_release.rfind("return;") > borrowed_release.index(
+    "root_writer_lease_unref (parent)"
+)
 assert "DeleteFile" not in windows_release
 assert "set_delete_disposition" not in windows_release
+assert "DeleteFile" not in windows_unref
+assert "set_delete_disposition" not in windows_unref
 
 for public_header in (root / "wyrelog").glob("*.h"):
     assert "WylFactRootWriterLease" not in public_header.read_text(
