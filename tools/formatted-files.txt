@@ -80,6 +80,7 @@ tests/test-fact-replay-scheduler.c
 tests/test-fact-replay.c
 tests/test-fact-restore-replay-provider-parity.c
 tests/test-fact-root-writer-lease.c
+tests/test-fact-rule-pack.c
 tests/test-fact-runtime.c
 tests/test-fact-schema.c
 tests/test-fact-seal-unseal-coordination.c
@@ -332,6 +333,8 @@ wyrelog/fact/replay-store-private.h
 wyrelog/fact/replay.c
 wyrelog/fact/root-writer-lease-private.c
 wyrelog/fact/root-writer-lease-private.h
+wyrelog/fact/rule-pack-private.c
+wyrelog/fact/rule-pack-private.h
 wyrelog/fact/runtime-private.c
 wyrelog/fact/runtime-private.h
 wyrelog/fact/schema-private.h
