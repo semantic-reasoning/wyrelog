@@ -542,22 +542,19 @@ test_daemon_readiness_failure_names_handle (void)
   g_assert_false (g_file_test (policy, G_FILE_TEST_EXISTS));
   g_assert_false (g_file_test (audit, G_FILE_TEST_EXISTS));
 
-  /* The production readiness phase leaves exactly its scratch policy
-   * store's lease sidecar behind: cleanup_readiness_store does not remove
-   * the .wyrelog-lock file (#1368).  Pin that so fixing it updates this
-   * test. */
+  /* The production readiness phase removes its scratch policy store,
+   * lease sidecar included (#1368), so nothing is left behind. */
   g_autoptr (GDir) dir = g_dir_open (scratch, 0, &error);
   g_assert_no_error (error);
   guint leftovers = 0;
   const gchar *name = NULL;
   while ((name = g_dir_read_name (dir)) != NULL) {
-    g_assert_true (g_str_has_prefix (name, "wyrelog-readiness-policy-"));
-    g_assert_true (g_str_has_suffix (name, ".sqlite.wyrelog-lock"));
+    g_printerr ("readiness leftover: %s\n", name);
     g_autofree gchar *leftover = g_build_filename (scratch, name, NULL);
     g_assert_cmpint (g_remove (leftover), ==, 0);
     leftovers++;
   }
-  g_assert_cmpuint (leftovers, ==, 1);
+  g_assert_cmpuint (leftovers, ==, 0);
   g_assert_cmpint (g_remove (key), ==, 0);
 #endif
   g_assert_cmpint (g_rmdir (scratch), ==, 0);
