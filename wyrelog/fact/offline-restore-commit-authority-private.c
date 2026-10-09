@@ -1953,6 +1953,23 @@ tenant_publish_effect (GBytes *canonical_journal,
   }
   return WYRELOG_E_OK;
 }
+#else
+wyrelog_error_t
+wyl_fact_offline_restore_graph_bind_provisioned_old_run
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylFactGraphRuntimeManager *runtime, const gchar *operation_uuid,
+    const gchar *graph_id, guint64 expected_revision,
+    gint64 drain_timeout_us, WylFactOfflineRestoreJournal *out_committed)
+{
+  if (out_committed != NULL)
+    wyl_fact_offline_restore_journal_clear (out_committed);
+  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || runtime == NULL || operation_uuid == NULL || graph_id == NULL
+      || expected_revision == 0 || out_committed == NULL)
+    return WYRELOG_E_INVALID;
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+}
 #endif
 
 static wyrelog_error_t
