@@ -2816,11 +2816,23 @@ wyl_handle_fact_replay_scheduler_ref (WylHandle *self)
       ? wyl_fact_replay_scheduler_ref (self->fact_replay_scheduler) : NULL;
 }
 
-WylFactRootWriterLease *
-wyl_handle_fact_root_writer_lease_for_internal_use (WylHandle *self)
+wyrelog_error_t
+wyl_handle_fact_root_writer_lease_borrow_scope_begin
+  (WylHandle *self, gpointer scope_data)
 {
-  return self != NULL && WYL_IS_HANDLE (self)
-      ? self->fact_root_writer_lease : NULL;
+  WylFactRootWriterLeaseBorrowScope *scope = scope_data;
+  if (self == NULL || !WYL_IS_HANDLE (self) || scope == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_root_writer_lease_borrow_scope_begin
+           (self->fact_root_writer_lease, scope);
+}
+
+void
+wyl_handle_fact_root_writer_lease_borrow_scope_end
+  (gpointer scope_data)
+{
+  WylFactRootWriterLeaseBorrowScope *scope = scope_data;
+  wyl_fact_root_writer_lease_borrow_scope_end (scope);
 }
 
 typedef struct

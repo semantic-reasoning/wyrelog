@@ -14193,9 +14193,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     }
     WylFactRootWriterLeaseBorrowScope root_lease_scope = { 0 };
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_root_writer_lease_borrow_scope_begin
-            (wyl_handle_fact_root_writer_lease_for_internal_use (ctx->handle),
-              &root_lease_scope);
+      rc = wyl_handle_fact_root_writer_lease_borrow_scope_begin
+            (ctx->handle, &root_lease_scope);
     guint8 digest[32] = { 0 };
     WylFactOfflineBackupBundle *bundle = NULL;
     if (rc == WYRELOG_E_OK && !status && !aborting && !resume) {
@@ -14255,7 +14254,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
         }
         wyl_policy_offline_restore_receipt_free (receipt);
         sodium_memzero (digest, sizeof digest);
-        wyl_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
+        wyl_handle_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
         if (runtime != NULL) wyl_fact_graph_runtime_manager_unref (runtime);
         if (scheduler != NULL) wyl_fact_replay_scheduler_unref (scheduler);
         return;
@@ -14407,7 +14406,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     if (runtime != NULL) wyl_fact_graph_runtime_manager_unref (runtime);
     if (scheduler != NULL) wyl_fact_replay_scheduler_unref (scheduler);
     wyl_fact_offline_backup_bundle_free (bundle);
-    wyl_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
+    wyl_handle_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
     if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
       rc = wyl_daemon_policy_write_finish_result (&write, rc);
     if (rc != WYRELOG_E_OK) {
