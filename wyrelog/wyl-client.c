@@ -3145,6 +3145,62 @@ wyl_client_graph_list (WylClient *client, const gchar *tenant,
 }
 
 wyrelog_error_t
+wyl_client_fact_schema_status (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactSchemaStatus *out_status)
+{
+  if (out_status == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_schema_status_clear (out_status);
+  if (graph == NULL || graph[0] == '\0' || namespace_id == NULL
+      || namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token,
+          &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL :
+          session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
+          NULL, TRUE);
+  g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
+          TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+        ("%s/facts/schema/status?%s&graph=%s&namespace=%s&relation=%s",
+          base_url, guard_query, escaped_graph, escaped_namespace,
+          escaped_relation);
+  g_autoptr (SoupMessage) message = soup_message_new ("GET", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = NULL;
+  rc = client_send_fact_message (client, message, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  if (wyl_client_fact_schema_status_decode (data, size, out_status)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+  if (g_strcmp0 (out_status->tenant_id, tenant) != 0
+      || g_strcmp0 (out_status->graph_id, graph) != 0
+      || g_strcmp0 (out_status->namespace_id, namespace_id) != 0
+      || g_strcmp0 (out_status->relation_name, relation) != 0) {
+    wyl_client_fact_schema_status_clear (out_status);
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_client_graph_seal (WylClient *client, const gchar *tenant,
     const gchar *graph, gint64 guard_timestamp, const gchar *guard_loc_class,
     gint64 guard_risk)

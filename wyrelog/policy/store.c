@@ -23977,6 +23977,57 @@ wyl_policy_store_load_fact_relation_schema_columns (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_load_fact_relation_query_max_rows (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name, guint32 schema_version,
+    const gchar *query_name, guint *out_max_rows)
+{
+  if (out_max_rows != NULL)
+    *out_max_rows = 0;
+  if (store == NULL || store->db == NULL || out_max_rows == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !fact_graph_customer_name_is_valid (namespace_id)
+      || !fact_graph_customer_name_is_valid (relation_name)
+      || query_name == NULL || query_name[0] == '\0' || schema_version == 0)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT max_rows FROM fact_relation_query_allowlist "
+      "WHERE tenant_id = ? AND graph_id = ? AND namespace_id = ? "
+      "  AND relation_name = ? AND schema_version = ? AND query_name = ?;";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, schema_version) != SQLITE_OK
+      || (rc = bind_text (stmt, 6, query_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_int64 max_rows = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (max_rows < 0 || max_rows > G_MAXUINT)
+    return WYRELOG_E_IO;
+  *out_max_rows = (guint) max_rows;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_policy_store_foreach_fact_relation_schema_key (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *graph_id,
     WylPolicyFactRelationSchemaKeyCb cb, gpointer user_data)

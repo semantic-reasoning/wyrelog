@@ -1643,6 +1643,39 @@ policy store contains internal version-activation machinery, but the public
 daemon/CLI does not yet provide the staged migration workflow needed to use it
 safely.
 
+`fact schema status` reads a relation's registered schema back, so you can
+confirm what a registration left, including one whose outcome was unknown or
+that answered `schema_already_registered`. It needs the same
+`wr.schema.manage` and guard options as registration, and changes nothing:
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact schema status \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints one line for each registered version, followed by one line for each
+of that version's columns in order:
+
+```
+tenant=<tenant> graph=<graph> namespace=<ns> relation=<rel> schema_version=N relation_visible=<bool> max_rows=<N|none> columns=N
+column=<name> type=<type> nullable=<bool> visible=<bool>
+```
+
+Names are percent-encoded as in `graph list`. `max_rows` is the row limit of
+the relation's own query: the `--max-rows` given at registration, the default
+of 1000 for a visible relation registered without it, or `none` for a hidden
+relation registered without it. `--columns` registers every column as not
+nullable and visible, so a schema registered through wyctl reads back with
+`nullable=false visible=true`. The command exits `0`, `2` for a missing
+target option, `4` when the daemon denies the caller (`403 schema_denied`),
+`5` when the graph or the schema is not found (`404 graph_not_found`,
+`404 schema_not_found`), and `6` when no valid access token is presented
+(`401`). The HTTP route is `GET /facts/schema/status` with the same `tenant`,
+`graph`, `namespace` and `relation` query parameters as registration.
+
 Fact mutation is schema-registered: append, retract, and forget operate only on
 relations registered through `fact schema register`. The daemon does not support
 raw Datalog atom deletion endpoints such as `DELETE /api/facts/fact(1)` or

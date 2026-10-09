@@ -43,6 +43,7 @@ typedef struct
   gchar *last_guard_risk;
   gchar *last_namespace;
   gchar *last_graph;
+  gchar *last_relation;
   gchar *last_schema_version;
   gchar *last_content_type;
 } TestHttpServer;
@@ -107,6 +108,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_guard_risk);
   g_free (http->last_namespace);
   g_free (http->last_graph);
+  g_free (http->last_relation);
   g_free (http->last_schema_version);
   g_free (http->last_content_type);
   http->last_namespace =
@@ -114,6 +116,9 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       : NULL;
   http->last_graph =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "graph")) : NULL;
+  http->last_relation =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "relation"))
+      : NULL;
   http->last_schema_version =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "schema_version")) : NULL;
@@ -1459,6 +1464,128 @@ main (void)
   if (wyl_client_graph_list (management_client, "__wr_default", 123,
       "public", 49, &graphs) != WYRELOG_E_OK || graphs.len != 0)
     return wyl_test_normalize_exit_status (4112);
+
+  /* #1335: reading a relation's registered schema back. */
+  g_auto (WylClientFactSchemaStatus) schema = { 0 };
+  http.body = "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+      "\"namespace_id\":\"shop\",\"relation_name\":\"orders\","
+      "\"schemas\":[{\"schema_version\":1,\"relation_visible\":true,"
+      "\"max_rows\":250,\"columns\":[{\"column_name\":\"id\","
+      "\"column_type\":\"symbol\",\"nullable\":false,\"visible\":true},"
+      "{\"column_name\":\"note\",\"column_type\":\"string\","
+      "\"nullable\":true,\"visible\":false}]},"
+      "{\"schema_version\":2,\"relation_visible\":false,\"max_rows\":null,"
+      "\"columns\":[{\"column_name\":\"id\",\"column_type\":\"int64\","
+      "\"nullable\":false,\"visible\":true}]}]}";
+  if (wyl_client_fact_schema_status (management_client, "__wr_default",
+      "orders", "shop", "orders", 123, "public", 49, &schema)
+      != WYRELOG_E_OK || schema.n_versions != 2
+      || g_strcmp0 (schema.tenant_id, "__wr_default") != 0
+      || g_strcmp0 (schema.graph_id, "orders") != 0
+      || g_strcmp0 (schema.namespace_id, "shop") != 0
+      || g_strcmp0 (schema.relation_name, "orders") != 0
+      || schema.versions[0].schema_version != 1
+      || !schema.versions[0].relation_visible
+      || !schema.versions[0].has_max_rows
+      || schema.versions[0].max_rows != 250
+      || schema.versions[0].n_columns != 2
+      || g_strcmp0 (schema.versions[0].columns[0].name, "id") != 0
+      || g_strcmp0 (schema.versions[0].columns[0].type, "symbol") != 0
+      || schema.versions[0].columns[0].nullable
+      || !schema.versions[0].columns[0].visible
+      || g_strcmp0 (schema.versions[0].columns[1].name, "note") != 0
+      || !schema.versions[0].columns[1].nullable
+      || schema.versions[0].columns[1].visible
+      || schema.versions[1].schema_version != 2
+      || schema.versions[1].relation_visible
+      || schema.versions[1].has_max_rows
+      || schema.versions[1].n_columns != 1
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/facts/schema/status") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_graph, "orders") != 0
+      || g_strcmp0 (http.last_namespace, "shop") != 0
+      || g_strcmp0 (http.last_relation, "orders") != 0
+      || g_strcmp0 (http.last_guard_risk, "49") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
+    return wyl_test_normalize_exit_status (4138);
+  /* An answer for another relation, or one that breaks the shape, is
+   * refused and leaves nothing behind. */
+#define SCHEMA_HEAD "{\"tenant_id\":\"__wr_default\",\"graph_id\":" \
+  "\"orders\",\"namespace_id\":\"shop\",\"relation_name\":\"orders\","
+#define SCHEMA_COLUMN "{\"column_name\":\"id\",\"column_type\":" \
+  "\"symbol\",\"nullable\":false,\"visible\":true}"
+  static const gchar *const bad_schemas[] = {
+    "{\"tenant_id\":\"other\",\"graph_id\":\"orders\",\"namespace_id\":"
+    "\"shop\",\"relation_name\":\"orders\",\"schemas\":[{"
+    "\"schema_version\":1,\"relation_visible\":true,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"namespace_id\":\"shop\",\"relation_name\":\"other\",\"schemas\":[{"
+    "\"schema_version\":1,\"relation_visible\":true,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,\"columns\":[]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":0,"
+    "\"relation_visible\":true,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":4294967296,"
+    "\"relation_visible\":true,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":4294967296,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,\"owner\":\"x\","
+    "\"columns\":[" SCHEMA_COLUMN "]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,\"columns\":["
+    "{\"column_name\":\"id\",\"column_type\":\"symbol\","
+    "\"nullable\":false}]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,\"columns\":["
+    "{\"column_name\":\"\",\"column_type\":\"symbol\","
+    "\"nullable\":false,\"visible\":true}]}]}",
+    SCHEMA_HEAD "\"schemas\":[{\"schema_version\":1,"
+    "\"relation_visible\":true,\"max_rows\":1,"
+    "\"columns\":[" SCHEMA_COLUMN "]}]} trailing",
+  };
+#undef SCHEMA_HEAD
+#undef SCHEMA_COLUMN
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_schemas); i++) {
+    http.body = bad_schemas[i];
+    if (wyl_client_fact_schema_status (management_client, "__wr_default",
+        "orders", "shop", "orders", 123, "public", 49, &schema)
+        != WYRELOG_E_IO || schema.n_versions != 0 || schema.versions != NULL
+        || schema.tenant_id != NULL) {
+      g_printerr ("bad schema %" G_GSIZE_FORMAT " accepted\n", i);
+      return wyl_test_normalize_exit_status (4139);
+    }
+  }
+  http.status = 404;
+  http.body = "{\"error\":\"schema_not_found\"}";
+  if (wyl_client_fact_schema_status (management_client, "__wr_default",
+      "orders", "shop", "absent", 123, "public", 49, &schema) != WYRELOG_E_IO
+      || !client_last_response_is (management_client, 404, "schema_not_found")
+      || schema.n_versions != 0)
+    return wyl_test_normalize_exit_status (4140);
+  http.status = 0;
+  if (wyl_client_fact_schema_status (management_client, "__wr_default",
+      "orders", "shop", NULL, 123, "public", 49, &schema)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_schema_status (management_client, "__wr_default",
+      "orders", "", "orders", 123, "public", 49, &schema)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_schema_status (management_client, "__wr_default",
+      "orders", "shop", "orders", 123, "public", 49, NULL)
+      != WYRELOG_E_INVALID)
+    return wyl_test_normalize_exit_status (4141);
 
   http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
       "\"graph_id\":\"orders\",\"sealed\":true}";
@@ -3456,6 +3583,7 @@ main (void)
   g_clear_pointer (&http.last_guard_risk, g_free);
   g_clear_pointer (&http.last_namespace, g_free);
   g_clear_pointer (&http.last_graph, g_free);
+  g_clear_pointer (&http.last_relation, g_free);
   g_clear_pointer (&http.last_schema_version, g_free);
   g_clear_pointer (&http.last_content_type, g_free);
   g_clear_pointer (&http.loop, g_main_loop_unref);

@@ -1032,6 +1032,105 @@ tsv_check_schema_absent (WylHandle *handle)
 }
 
 static void
+schema_status_expect (SoupSession *session, const gchar *base_url,
+    const gchar *method, const gchar *query, const gchar *token,
+    guint expected_status, const gchar *expected_body)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_assert_cmpint (send_raw (session, method, base_url, "/facts/schema/status",
+      query, token, NULL, &status, &body), ==, 0);
+  if (status != expected_status || g_strcmp0 (body, expected_body) != 0)
+    g_printerr ("schema status response %u: %s\n", status, body);
+  g_assert_cmpuint (status, ==, expected_status);
+  g_assert_cmpstr (body, ==, expected_body);
+}
+
+/*
+ * #1335: the registered schema reads back, so an operator can confirm what a
+ * timed-out or refused registration left behind.  It reports every version
+ * with its columns in order, and the row limit of the relation's own query:
+ * max_rows when one was given, the default for a visible relation, or null
+ * for a hidden relation registered without one.  It is guarded like the
+ * registration it reads back.
+ */
+static void
+check_schema_status (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *deny_token)
+{
+  const gchar *hidden_query = "tenant=__wr_default&graph=tsv&namespace=shop&"
+      "relation=hidden&schema_version=3&relation_visible=false&" FACT_GUARD;
+  const gchar *hidden_schema = "h\tint64\tfalse\tfalse\n";
+  tsv_post (session, base_url, token, "/facts/schema/register", hidden_query,
+      hidden_schema, strlen (hidden_schema), 200, "\"ok\":true");
+  const gchar *limited_query = "tenant=__wr_default&graph=tsv&namespace=shop&"
+      "relation=limited&schema_version=1&max_rows=25&" FACT_GUARD;
+  const gchar *limited_schema = "l\tsymbol\tfalse\ttrue\n";
+  tsv_post (session, base_url, token, "/facts/schema/register", limited_query,
+      limited_schema, strlen (limited_schema), 200, "\"ok\":true");
+
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=pair&"
+      FACT_GUARD, token, 200,
+      "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"tsv\","
+      "\"namespace_id\":\"shop\",\"relation_name\":\"pair\","
+      "\"schemas\":[{\"schema_version\":1,\"relation_visible\":true,"
+      "\"max_rows\":1000,\"columns\":["
+      "{\"column_name\":\"a\",\"column_type\":\"string\","
+      "\"nullable\":false,\"visible\":true},"
+      "{\"column_name\":\"b\",\"column_type\":\"string\","
+      "\"nullable\":false,\"visible\":true}]}]}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=nullable&"
+      FACT_GUARD, token, 200,
+      "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"tsv\","
+      "\"namespace_id\":\"shop\",\"relation_name\":\"nullable\","
+      "\"schemas\":[{\"schema_version\":1,\"relation_visible\":true,"
+      "\"max_rows\":1000,\"columns\":["
+      "{\"column_name\":\"a\",\"column_type\":\"string\","
+      "\"nullable\":true,\"visible\":true},"
+      "{\"column_name\":\"b\",\"column_type\":\"symbol\","
+      "\"nullable\":true,\"visible\":true}]}]}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=hidden&"
+      FACT_GUARD, token, 200,
+      "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"tsv\","
+      "\"namespace_id\":\"shop\",\"relation_name\":\"hidden\","
+      "\"schemas\":[{\"schema_version\":3,\"relation_visible\":false,"
+      "\"max_rows\":null,\"columns\":["
+      "{\"column_name\":\"h\",\"column_type\":\"int64\","
+      "\"nullable\":false,\"visible\":false}]}]}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=limited&"
+      FACT_GUARD, token, 200,
+      "{\"tenant_id\":\"__wr_default\",\"graph_id\":\"tsv\","
+      "\"namespace_id\":\"shop\",\"relation_name\":\"limited\","
+      "\"schemas\":[{\"schema_version\":1,\"relation_visible\":true,"
+      "\"max_rows\":25,\"columns\":["
+      "{\"column_name\":\"l\",\"column_type\":\"symbol\","
+      "\"nullable\":false,\"visible\":true}]}]}");
+
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=absent&"
+      FACT_GUARD, token, 404, "{\"error\":\"schema_not_found\"}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=nograph&namespace=shop&relation=pair&"
+      FACT_GUARD, token, 404, "{\"error\":\"graph_not_found\"}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&" FACT_GUARD, token, 400,
+      "{\"error\":\"invalid_schema_request\"}");
+  schema_status_expect (session, base_url, "POST",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=pair&"
+      FACT_GUARD, token, 405, "{\"error\":\"method_not_allowed\"}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=pair&"
+      FACT_GUARD, NULL, 401, "{\"error\":\"schema_auth_required\"}");
+  schema_status_expect (session, base_url, "GET",
+      "tenant=__wr_default&graph=tsv&namespace=shop&relation=pair&"
+      FACT_GUARD, deny_token, 403, "{\"error\":\"schema_denied\"}");
+}
+
+static void
 check_tsv_fidelity (WylHandle *handle, SoupSession *session, const gchar *base_url,
     const gchar *token, const gchar *root)
 {
@@ -1682,6 +1781,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *body = NULL;
   gint rc = 0;
   check_tsv_fidelity (handle, session, base_url, admin_token, fact_root);
+  check_schema_status (session, base_url, admin_token, deny_token);
 
   g_autofree gchar *graphs_query = g_strdup_printf ("tenant=%s&%s",
           WYL_TENANT_DEFAULT, FACT_GUARD);

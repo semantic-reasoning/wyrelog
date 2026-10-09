@@ -480,6 +480,87 @@ schema_quota_race_worker (gpointer user_data)
   return NULL;
 }
 
+/*
+ * #1335: a schema read-back reports the row limit of the relation's own
+ * query, which the daemon registers under the relation name, either from
+ * max_rows or as the default for a visible relation.  An invisible relation
+ * registered without one has no such row.
+ */
+static gint
+check_relation_query_max_rows (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *root = NULL;
+  if (open_store_with_graph (&store, &root) != WYRELOG_E_OK)
+    return 40;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_query_t queries[] = {
+    {"orders", "wr.datalog.query", 250},
+    {"orders_by_status", "wr.fact.read", 1000},
+  };
+  wyl_policy_fact_relation_schema_options_t explicit_opts =
+      make_order_schema (columns, G_N_ELEMENTS (columns), queries,
+          G_N_ELEMENTS (queries));
+  wyl_policy_fact_relation_schema_options_t default_opts =
+      make_order_schema (columns, G_N_ELEMENTS (columns), NULL, 0);
+  default_opts.relation_name = "returns";
+  wyl_policy_fact_relation_schema_options_t hidden_opts =
+      make_order_schema (columns, G_N_ELEMENTS (columns), NULL, 0);
+  hidden_opts.relation_name = "audits";
+  hidden_opts.relation_visible = FALSE;
+  if (wyl_policy_store_register_fact_relation_schema (store, &explicit_opts)
+      != WYRELOG_E_OK
+      || wyl_policy_store_register_fact_relation_schema (store, &default_opts)
+      != WYRELOG_E_OK
+      || wyl_policy_store_register_fact_relation_schema (store, &hidden_opts)
+      != WYRELOG_E_OK) {
+    cleanup_fact_root (root);
+    return 41;
+  }
+
+  guint max_rows = 0;
+  if (wyl_policy_store_load_fact_relation_query_max_rows (store, "tenant-a",
+      "graph-main", "shop", "orders", 1, "orders", &max_rows)
+      != WYRELOG_E_OK || max_rows != 250) {
+    cleanup_fact_root (root);
+    return 42;
+  }
+  max_rows = 0;
+  if (wyl_policy_store_load_fact_relation_query_max_rows (store, "tenant-a",
+      "graph-main", "shop", "returns", 1, "returns", &max_rows)
+      != WYRELOG_E_OK || max_rows != WYL_POLICY_FACT_QUERY_DEFAULT_MAX_ROWS) {
+    cleanup_fact_root (root);
+    return 43;
+  }
+  max_rows = 7;
+  if (wyl_policy_store_load_fact_relation_query_max_rows (store, "tenant-a",
+      "graph-main", "shop", "audits", 1, "audits", &max_rows)
+      != WYRELOG_E_NOT_FOUND || max_rows != 0) {
+    cleanup_fact_root (root);
+    return 44;
+  }
+  if (wyl_policy_store_load_fact_relation_query_max_rows (store, "tenant-a",
+      "graph-main", "shop", "orders", 2, "orders", &max_rows)
+      != WYRELOG_E_NOT_FOUND) {
+    cleanup_fact_root (root);
+    return 45;
+  }
+  if (wyl_policy_store_load_fact_relation_query_max_rows (store, "tenant-a",
+      "graph-main", "shop", "orders", 0, "orders", &max_rows)
+      != WYRELOG_E_INVALID
+      || wyl_policy_store_load_fact_relation_query_max_rows (store,
+      "tenant-a", "graph-main", "shop", "orders", 1, "orders", NULL)
+      != WYRELOG_E_INVALID) {
+    cleanup_fact_root (root);
+    return 46;
+  }
+  cleanup_fact_root (root);
+  return 0;
+}
+
 static gint
 check_schema_quota_concurrent_registration (void)
 {
@@ -616,6 +697,9 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_schema_quota_concurrent_registration ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_relation_query_max_rows ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);

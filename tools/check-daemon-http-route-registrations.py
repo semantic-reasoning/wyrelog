@@ -56,6 +56,7 @@ ROUTES = (
     RouteSpec("/facts/quota/operation-status",
               "facts_quota_operation_status_handler"),
     RouteSpec("/facts/schema/register", "schema_register_handler"),
+    RouteSpec("/facts/schema/status", "schema_status_handler"),
     RouteSpec("/facts", "facts_route_handler"),
     RouteSpec("/datalog", "datalog_query_handler"),
     RouteSpec("/profile/status", "profile_status_handler"),
@@ -108,6 +109,9 @@ ISSUE_719_EXACT_PATHS = {
 PREEXISTING_EXACT_PATHS = {
     "/service-management-authority/arm",
 }
+ISSUE_1335_EXACT_PATHS = {
+    "/facts/schema/status",
+}
 ISSUE_720_EXACT_PATHS = {
     "/healthz",
     "/readyz",
@@ -143,7 +147,7 @@ ISSUE_720_EXACT_PATHS = {
 PENDING_RAW_SINGLETONS = {
     spec.path for spec in ROUTES
     if spec.path not in PREFIX_PATHS | ISSUE_719_EXACT_PATHS
-    | PREEXISTING_EXACT_PATHS | ISSUE_720_EXACT_PATHS
+    | PREEXISTING_EXACT_PATHS | ISSUE_720_EXACT_PATHS | ISSUE_1335_EXACT_PATHS
 }
 EXPECTED_BY_PATH = {spec.path: spec for spec in ROUTES}
 

@@ -2919,6 +2919,14 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
     gboolean * out_relation_visible,
     wyl_policy_fact_relation_schema_column_info_t ** out_columns,
     gsize * out_n_columns);
+/* Reads the row limit of one query registered with a relation schema
+ * version.  WYRELOG_E_NOT_FOUND when the version has no query by that name;
+ * *out_max_rows is then 0. */
+wyrelog_error_t wyl_policy_store_load_fact_relation_query_max_rows
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * namespace_id,
+    const gchar * relation_name, guint32 schema_version,
+    const gchar * query_name, guint * out_max_rows);
 typedef wyrelog_error_t (*WylPolicyFactRelationSchemaKeyCb)
   (const gchar *namespace_id, const gchar *relation_name,
     guint32 schema_version, gpointer user_data);

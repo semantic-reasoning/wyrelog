@@ -5328,8 +5328,8 @@ test_fact_verify (void)
 #define SCHEMA_REGISTER_UNKNOWN \
   "wyctl: the schema register outcome is unknown; repeating the same " \
   "command is safe, and schema_already_registered then means the relation " \
-  "already has a schema, possibly from an earlier registration, whose " \
-  "columns wyctl cannot show\n"
+  "already has a schema, possibly from an earlier registration; " \
+  "`wyctl fact schema status` shows its columns\n"
 #define QUOTA_CONFIGURE_UNKNOWN \
   "wyctl: the quota configure outcome is unknown; repeating the same " \
   "command is safe, and `wyctl fact quota status --tenant t --dimension " \
@@ -5617,6 +5617,83 @@ test_graph_list (void)
       FALSE, &denied);
   assert_fact_forget_exit (&denied, 4);
   g_assert_cmpstr (denied.err, ==, "wyctl: graph list failed: graph_denied\n");
+}
+
+/*
+ * #1335: the registered schema reads back, one line per version and one per
+ * column, so an operator can compare it with what they meant to register.
+ * Names are escaped as graph list escapes them.
+ */
+static void
+test_fact_schema_status (void)
+{
+  static const gchar *const args[] = {
+    "fact", "schema", "status", "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--relation", "r", "--access-token-file", "@TOKEN@",
+    GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+      "\"namespace_id\":\"ns\",\"relation_name\":\"r\",\"schemas\":["
+      "{\"schema_version\":1,\"relation_visible\":true,\"max_rows\":250,"
+      "\"columns\":[{\"column_name\":\"id\",\"column_type\":\"symbol\","
+      "\"nullable\":false,\"visible\":true},{\"column_name\":\"a:b\","
+      "\"column_type\":\"string\",\"nullable\":true,\"visible\":false}]},"
+      "{\"schema_version\":2,\"relation_visible\":false,\"max_rows\":null,"
+      "\"columns\":[{\"column_name\":\"id\",\"column_type\":\"int64\","
+      "\"nullable\":false,\"visible\":true}]}]}", NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==,
+      "tenant=t graph=g namespace=ns relation=r schema_version=1 "
+      "relation_visible=true max_rows=250 columns=2\n"
+      "column=id type=symbol nullable=false visible=true\n"
+      "column=a%3Ab type=string nullable=true visible=false\n"
+      "tenant=t graph=g namespace=ns relation=r schema_version=2 "
+      "relation_visible=false max_rows=none columns=1\n"
+      "column=id type=int64 nullable=false visible=true\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request, "GET /facts/schema/status?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "namespace=ns"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "relation=r"));
+
+  /* A relation without a schema is not found, and reading changes nothing,
+   * so a failure carries no outcome line. */
+  g_auto (FactForgetRun) absent = { 0 };
+  run_fake_daemon_case (404, "{\"error\":\"schema_not_found\"}", NULL,
+      args, FALSE, &absent);
+  assert_fact_forget_exit (&absent, 5);
+  g_assert_cmpstr (absent.out, ==, "");
+  g_assert_cmpstr (absent.err, ==,
+      "wyctl: fact schema status failed: schema_not_found\n");
+
+  g_auto (FactForgetRun) other = { 0 };
+  run_fake_daemon_case (200, "{\"tenant_id\":\"t\",\"graph_id\":\"g\","
+      "\"namespace_id\":\"ns\",\"relation_name\":\"other\",\"schemas\":["
+      "{\"schema_version\":1,\"relation_visible\":true,\"max_rows\":1,"
+      "\"columns\":[{\"column_name\":\"id\",\"column_type\":\"symbol\","
+      "\"nullable\":false,\"visible\":true}]}]}", NULL, args, FALSE, &other);
+  g_assert_false (WIFEXITED (other.exit_status)
+      && WEXITSTATUS (other.exit_status) == 0);
+  g_assert_cmpstr (other.out, ==, "");
+
+  g_auto (FactForgetRun) denied = { 0 };
+  run_fake_daemon_case (403, "{\"error\":\"schema_denied\"}", NULL, args,
+      FALSE, &denied);
+  assert_fact_forget_exit (&denied, 4);
+  g_assert_cmpstr (denied.err, ==,
+      "wyctl: fact schema status failed: schema_denied\n");
+
+  static const gchar *const missing[] = {
+    "fact", "schema", "status", "--tenant", "t", "--graph", "g",
+    "--namespace", "ns", "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) refused = { 0 };
+  run_fake_daemon_case (200, "{}", NULL, missing, FALSE, &refused);
+  assert_fact_forget_exit (&refused, 2);
+  g_assert_cmpstr (refused.err, ==,
+      "wyctl: missing fact schema target option\n");
+  g_assert_null (refused.request);
 }
 
 #define GRAPH_SEAL_UNKNOWN_HINT \
@@ -6146,6 +6223,7 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/fact-status-refusals", test_fact_status_refusals);
   g_test_add_func ("/wyctl/fact-verify", test_fact_verify);
   g_test_add_func ("/wyctl/graph-list", test_graph_list);
+  g_test_add_func ("/wyctl/fact-schema-status", test_fact_schema_status);
   g_test_add_func ("/wyctl/graph-seal", test_graph_seal);
   g_test_add_func ("/wyctl/graph-seal-refusals", test_graph_seal_refusals);
   g_test_add_func ("/wyctl/tenant-list-and-create",

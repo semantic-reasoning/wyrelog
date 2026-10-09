@@ -641,6 +641,258 @@ invalid:
 }
 
 void
+wyl_client_fact_schema_status_clear (WylClientFactSchemaStatus *status)
+{
+  if (status == NULL)
+    return;
+  g_clear_pointer (&status->tenant_id, g_free);
+  g_clear_pointer (&status->graph_id, g_free);
+  g_clear_pointer (&status->namespace_id, g_free);
+  g_clear_pointer (&status->relation_name, g_free);
+  for (gsize i = 0; i < status->n_versions; i++) {
+    WylClientFactSchemaVersion *version = &status->versions[i];
+    for (gsize j = 0; j < version->n_columns; j++) {
+      g_free (version->columns[j].name);
+      g_free (version->columns[j].type);
+    }
+    g_free (version->columns);
+  }
+  g_clear_pointer (&status->versions, g_free);
+  memset (status, 0, sizeof *status);
+}
+
+static gboolean
+parse_schema_column_object (JsonCursor *cursor, WylClientFactSchemaColumn *out)
+{
+  gchar *key = NULL;
+  gboolean seen_name = FALSE, seen_type = FALSE, seen_nullable = FALSE;
+  gboolean seen_visible = FALSE;
+  if (!take (cursor, '{'))
+    return FALSE;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "column_name") == 0) {
+      if (seen_name || !parse_string (cursor, &out->name)
+          || !string_is_plain_token (out->name))
+        goto invalid;
+      seen_name = TRUE;
+    } else if (g_strcmp0 (key, "column_type") == 0) {
+      if (seen_type || !parse_string (cursor, &out->type)
+          || !string_is_plain_token (out->type))
+        goto invalid;
+      seen_type = TRUE;
+    } else if (g_strcmp0 (key, "nullable") == 0) {
+      if (seen_nullable || !parse_bool (cursor, &out->nullable))
+        goto invalid;
+      seen_nullable = TRUE;
+    } else if (g_strcmp0 (key, "visible") == 0) {
+      if (seen_visible || !parse_bool (cursor, &out->visible))
+        goto invalid;
+      seen_visible = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_free (key);
+  if (!seen_name || !seen_type || !seen_nullable || !seen_visible)
+    return FALSE;
+  return TRUE;
+invalid:
+  g_free (key);
+  return FALSE;
+}
+
+static void
+schema_columns_free (GArray *columns)
+{
+  if (columns == NULL)
+    return;
+  for (guint i = 0; i < columns->len; i++) {
+    WylClientFactSchemaColumn *column =
+        &g_array_index (columns, WylClientFactSchemaColumn, i);
+    g_free (column->name);
+    g_free (column->type);
+  }
+  g_array_free (columns, TRUE);
+}
+
+static gboolean
+parse_schema_version_object (JsonCursor *cursor,
+    WylClientFactSchemaVersion *out)
+{
+  gchar *key = NULL;
+  GArray *columns = NULL;
+  gboolean seen_version = FALSE, seen_visible = FALSE, seen_max_rows = FALSE;
+  guint64 schema_version = 0, max_rows = 0;
+  if (!take (cursor, '{'))
+    return FALSE;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "schema_version") == 0) {
+      if (seen_version || !parse_uint64 (cursor, &schema_version)
+          || schema_version == 0 || schema_version > G_MAXUINT32)
+        goto invalid;
+      seen_version = TRUE;
+    } else if (g_strcmp0 (key, "relation_visible") == 0) {
+      if (seen_visible || !parse_bool (cursor, &out->relation_visible))
+        goto invalid;
+      seen_visible = TRUE;
+    } else if (g_strcmp0 (key, "max_rows") == 0) {
+      if (seen_max_rows)
+        goto invalid;
+      skip_ws (cursor);
+      if (cursor->pos + 4 <= cursor->len
+          && memcmp (cursor->data + cursor->pos, "null", 4) == 0) {
+        cursor->pos += 4;
+        out->has_max_rows = FALSE;
+      } else if (!parse_uint64 (cursor, &max_rows) || max_rows > G_MAXUINT) {
+        goto invalid;
+      } else {
+        out->has_max_rows = TRUE;
+      }
+      seen_max_rows = TRUE;
+    } else if (g_strcmp0 (key, "columns") == 0) {
+      if (columns != NULL || !take (cursor, '['))
+        goto invalid;
+      columns = g_array_new (FALSE, TRUE, sizeof (WylClientFactSchemaColumn));
+      while (TRUE) {
+        WylClientFactSchemaColumn column = { 0 };
+        if (!parse_schema_column_object (cursor, &column)) {
+          g_free (column.name);
+          g_free (column.type);
+          goto invalid;
+        }
+        g_array_append_val (columns, column);
+        if (take (cursor, ']'))
+          break;
+        if (!take (cursor, ','))
+          goto invalid;
+      }
+    } else {
+      goto invalid;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_clear_pointer (&key, g_free);
+  if (!seen_version || !seen_visible || !seen_max_rows || columns == NULL)
+    goto invalid;
+  out->schema_version = (guint32) schema_version;
+  out->max_rows = (guint) max_rows;
+  out->n_columns = columns->len;
+  out->columns = (WylClientFactSchemaColumn *)
+      g_array_free (columns, FALSE);
+  return TRUE;
+invalid:
+  g_free (key);
+  schema_columns_free (columns);
+  return FALSE;
+}
+
+static void
+schema_versions_free (GArray *versions)
+{
+  if (versions == NULL)
+    return;
+  for (guint i = 0; i < versions->len; i++) {
+    WylClientFactSchemaVersion *version =
+        &g_array_index (versions, WylClientFactSchemaVersion, i);
+    for (gsize j = 0; j < version->n_columns; j++) {
+      g_free (version->columns[j].name);
+      g_free (version->columns[j].type);
+    }
+    g_free (version->columns);
+  }
+  g_array_free (versions, TRUE);
+}
+
+/* Decodes a /facts/schema/status answer.  A relation the daemon reports has
+ * at least one version, and every version at least one column. */
+wyrelog_error_t
+wyl_client_fact_schema_status_decode (const gchar *document,
+    gsize document_len, WylClientFactSchemaStatus *out_status)
+{
+  if (out_status == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_schema_status_clear (out_status);
+  JsonCursor cursor;
+  gchar *key = NULL;
+  GArray *versions = NULL;
+  gchar **fields[] = {
+    &out_status->tenant_id, &out_status->graph_id,
+    &out_status->namespace_id, &out_status->relation_name,
+  };
+  static const gchar *const names[] = {
+    "tenant_id", "graph_id", "namespace_id", "relation_name",
+  };
+  if (!document_init (document, document_len, &cursor)
+      || !take (&cursor, '{'))
+    goto invalid;
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    gboolean matched = FALSE;
+    for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+      if (g_strcmp0 (key, names[i]) != 0)
+        continue;
+      if (*fields[i] != NULL || !parse_string (&cursor, fields[i])
+          || !string_is_plain_token (*fields[i]))
+        goto invalid;
+      matched = TRUE;
+    }
+    if (!matched && g_strcmp0 (key, "schemas") == 0) {
+      if (versions != NULL || !take (&cursor, '['))
+        goto invalid;
+      versions = g_array_new (FALSE, TRUE,
+              sizeof (WylClientFactSchemaVersion));
+      while (TRUE) {
+        WylClientFactSchemaVersion version = { 0 };
+        if (!parse_schema_version_object (&cursor, &version))
+          goto invalid;
+        g_array_append_val (versions, version);
+        if (take (&cursor, ']'))
+          break;
+        if (!take (&cursor, ','))
+          goto invalid;
+      }
+      matched = TRUE;
+    }
+    if (!matched)
+      goto invalid;
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  g_clear_pointer (&key, g_free);
+  if (!document_done (&cursor) || versions == NULL)
+    goto invalid;
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++)
+    if (*fields[i] == NULL)
+      goto invalid;
+  out_status->n_versions = versions->len;
+  out_status->versions = (WylClientFactSchemaVersion *)
+      g_array_free (versions, FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  schema_versions_free (versions);
+  wyl_client_fact_schema_status_clear (out_status);
+  return WYRELOG_E_INVALID;
+}
+
+void
 wyl_client_profile_status_clear (WylClientProfileStatus *value)
 {
   if (value == NULL)

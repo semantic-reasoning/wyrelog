@@ -13170,6 +13170,167 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
 }
 
+typedef struct
+{
+  const gchar *namespace_id;
+  const gchar *relation;
+  GArray *versions;
+} SchemaVersionScan;
+
+static wyrelog_error_t
+collect_schema_version (const gchar *namespace_id, const gchar *relation_name,
+    guint32 schema_version, gpointer user_data)
+{
+  SchemaVersionScan *scan = user_data;
+  if (g_strcmp0 (namespace_id, scan->namespace_id) == 0
+      && g_strcmp0 (relation_name, scan->relation) == 0)
+    g_array_append_val (scan->versions, schema_version);
+  return WYRELOG_E_OK;
+}
+
+static gint
+compare_schema_versions (gconstpointer a, gconstpointer b)
+{
+  guint32 left = *(const guint32 *) a;
+  guint32 right = *(const guint32 *) b;
+  return left < right ? -1 : left > right;
+}
+
+/* Appends one registered version: its columns in order and the row limit
+ * of the relation's own query, which registration names after the
+ * relation; a hidden relation registered without max_rows has none. */
+static wyrelog_error_t
+append_schema_version_json (GString *body, wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *graph, const gchar *namespace_id,
+    const gchar *relation, guint32 schema_version)
+{
+  gboolean relation_visible = FALSE;
+  wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
+  gsize n_columns = 0;
+  wyrelog_error_t rc = wyl_policy_store_load_fact_relation_schema_columns
+        (store, tenant, graph, namespace_id, relation, schema_version,
+          &relation_visible, &columns, &n_columns);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint max_rows = 0;
+  wyrelog_error_t limit_rc = wyl_policy_store_load_fact_relation_query_max_rows
+        (store, tenant, graph, namespace_id, relation, schema_version,
+          relation, &max_rows);
+  if (limit_rc != WYRELOG_E_OK && limit_rc != WYRELOG_E_NOT_FOUND) {
+    wyl_policy_fact_relation_schema_columns_free (columns, n_columns);
+    return limit_rc;
+  }
+  g_string_append_printf (body, "{\"schema_version\":%u,"
+      "\"relation_visible\":%s,\"max_rows\":", schema_version,
+      relation_visible ? "true" : "false");
+  if (limit_rc == WYRELOG_E_OK)
+    g_string_append_printf (body, "%u", max_rows);
+  else
+    g_string_append (body, "null");
+  g_string_append (body, ",\"columns\":[");
+  for (gsize i = 0; i < n_columns; i++) {
+    if (i > 0)
+      g_string_append_c (body, ',');
+    g_string_append (body, "{\"column_name\":");
+    append_json_string (body, columns[i].column_name);
+    g_string_append (body, ",\"column_type\":");
+    append_json_string (body, columns[i].column_type);
+    g_string_append_printf (body, ",\"nullable\":%s,\"visible\":%s}",
+        columns[i].nullable ? "true" : "false",
+        columns[i].visible ? "true" : "false");
+  }
+  g_string_append (body, "]}");
+  wyl_policy_fact_relation_schema_columns_free (columns, n_columns);
+  return WYRELOG_E_OK;
+}
+
+/* #1335: reads back a relation's registered schema, so an operator can
+ * confirm what a timed-out or refused registration left.  Guarded like the
+ * registration; a read, so it takes no policy write. */
+static void
+schema_status_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (!require_method (msg, "GET"))
+    return;
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  const gchar *namespace_id = lookup_required_query_string (query, "namespace");
+  const gchar *relation = lookup_required_query_string (query, "relation");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
+      !fact_http_customer_name_is_valid (graph) ||
+      !fact_http_customer_name_is_valid (namespace_id) ||
+      !fact_http_customer_name_is_valid (relation)) {
+    set_json_error (msg, 400, "invalid_schema_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+      "wr.schema.manage", tenant, "schema_auth_required",
+      "invalid_schema_auth", "schema_denied", "schema_auth_failed", NULL))
+    return;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  GraphLookupCtx lookup = { 0 };
+  wyrelog_error_t rc = lookup_fact_graph (store, tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "schema_status_failed");
+    return;
+  }
+  gboolean graph_found = lookup.found;
+  graph_lookup_clear (&lookup);
+  if (!graph_found) {
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+
+  g_autoptr (GArray) versions = g_array_new (FALSE, FALSE, sizeof (guint32));
+  SchemaVersionScan scan = {
+    .namespace_id = namespace_id,
+    .relation = relation,
+    .versions = versions,
+  };
+  rc = wyl_policy_store_foreach_fact_relation_schema_key (store, tenant, graph,
+          collect_schema_version, &scan);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "schema_status_failed");
+    return;
+  }
+  if (versions->len == 0) {
+    set_json_error (msg, 404, "schema_not_found");
+    return;
+  }
+  g_array_sort (versions, compare_schema_versions);
+
+  g_autoptr (GString) body = g_string_new ("{\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append (body, ",\"namespace_id\":");
+  append_json_string (body, namespace_id);
+  g_string_append (body, ",\"relation_name\":");
+  append_json_string (body, relation);
+  g_string_append (body, ",\"schemas\":[");
+  for (guint i = 0; i < versions->len; i++) {
+    if (i > 0)
+      g_string_append_c (body, ',');
+    rc = append_schema_version_json (body, store, tenant, graph,
+            namespace_id, relation, g_array_index (versions, guint32, i));
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "schema_status_failed");
+      return;
+    }
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
 typedef enum
 {
   FACT_HTTP_OP_APPEND = 0,
@@ -14504,6 +14665,17 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 #else
 static void
 schema_register_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+}
+
+static void
+schema_status_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   (void) server;
@@ -18526,6 +18698,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       facts_quota_operation_status_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/facts/schema/status",
+      schema_status_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,
       ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/datalog",
