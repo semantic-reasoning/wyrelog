@@ -14,6 +14,7 @@
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/graph-seal-private.h"
 #include "fact/replay-private.h"
+#include "fact/root-writer-lease-private.h"
 #include "fact/tenant-admission-private.h"
 #endif
 
@@ -279,6 +280,12 @@ void wyl_handle_fact_replay_resource_snapshot (WylHandle * self,
     WylFactReplayResourceSnapshot * out_snapshot);
 WylFactResourceRecorder *wyl_handle_fact_resource_recorder
   (WylHandle * self);
+WylFactGraphRuntimeManager *wyl_handle_fact_graph_runtime_ref
+  (WylHandle *self);
+WylFactReplayScheduler *wyl_handle_fact_replay_scheduler_ref
+  (WylHandle *self);
+WylFactRootWriterLease *wyl_handle_fact_root_writer_lease_for_internal_use
+  (WylHandle *self);
 /* Acquire this fair replay slot before acquiring a service-auth write lease. */
 wyrelog_error_t wyl_handle_fact_replay_admission_acquire (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id,

@@ -62,6 +62,9 @@ wyrelog_error_t wyl_client_fact_status_decode_with_replay_resources
     WylClientFactStatus * out_status,
     WylClientFactReplayResources * out_resources,
     gboolean * out_has_resources);
+wyrelog_error_t wyl_client_fact_restore_result_decode
+  (const gchar *document, gsize document_len,
+    WylClientFactRestoreResult *out_result);
 wyrelog_error_t wyl_client_fact_replay_resources_copy
   (const WylClientFactReplayResources * parsed,
     WylClientFactReplayResources * out_resources, gsize result_size);

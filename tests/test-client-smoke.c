@@ -940,6 +940,65 @@ check_fact_status_codec (void)
   return TRUE;
 }
 
+static gboolean
+check_fact_restore_codec (void)
+{
+  const gchar *valid =
+      "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":null,\"operation_uuid\":"
+      "\"01890c10-2e3f-7000-8000-000000000001\",\"revision\":2,"
+      "\"graph_count\":3,\"publication_eligible\":false,"
+      "\"state\":\"prepared\",\"failure_code\":null}";
+  WylClientFactRestoreResult result = { 0 };
+  if (wyl_client_fact_restore_result_decode (valid, strlen (valid), &result)
+      != WYRELOG_E_OK || result.scope != WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT
+      || result.revision != 2 || result.graph_count != 3
+      || g_strcmp0 (result.state_name, "prepared") != 0) {
+    wyl_client_fact_restore_result_clear (&result);
+    return FALSE;
+  }
+  wyl_client_fact_restore_result_clear (&result);
+  const gchar *committed =
+      "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":null,\"operation_uuid\":"
+      "\"01890c10-2e3f-7000-8000-000000000001\",\"revision\":9,"
+      "\"graph_count\":3,\"publication_eligible\":true,"
+      "\"state\":\"committed\",\"failure_code\":null}";
+  if (wyl_client_fact_restore_result_decode (committed, strlen (committed),
+      &result) != WYRELOG_E_OK
+      || result.state != WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED) {
+    wyl_client_fact_restore_result_clear (&result);
+    return FALSE;
+  }
+  wyl_client_fact_restore_result_clear (&result);
+  const gchar *invalid[] = {
+    "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+    "\"graph_id\":null,\"operation_uuid\":null,\"revision\":0,"
+    "\"graph_count\":0,\"publication_eligible\":false,"
+    "\"state\":\"prepared\",\"failure_code\":null,\"extra\":1}",
+    "{\"scope\":\"tenant\",\"scope\":\"graph\","
+    "\"tenant_id\":\"__wr_default\",\"graph_id\":null,"
+    "\"operation_uuid\":null,\"revision\":0,\"graph_count\":0,"
+    "\"publication_eligible\":false,\"state\":\"prepared\","
+    "\"failure_code\":null}",
+    "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+    "\"graph_id\":null,\"operation_uuid\":\"bad\",\"revision\":0,"
+    "\"graph_count\":0,\"publication_eligible\":false,"
+    "\"state\":\"prepared\",\"failure_code\":null}",
+    "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+    "\"graph_id\":null,\"operation_uuid\":null,\"revision\":0,"
+    "\"graph_count\":0,\"publication_eligible\":false,"
+    "\"state\":\"future_state\",\"failure_code\":null}"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    if (wyl_client_fact_restore_result_decode (invalid[i], strlen (invalid[i]),
+        &result) == WYRELOG_E_OK) {
+      wyl_client_fact_restore_result_clear (&result);
+      return FALSE;
+    }
+  return TRUE;
+}
+
 int
 main (void)
 {
@@ -947,6 +1006,8 @@ main (void)
     return wyl_test_normalize_exit_status (230);
   if (!check_fact_status_codec ())
     return wyl_test_normalize_exit_status (232);
+  if (!check_fact_restore_codec ())
+    return wyl_test_normalize_exit_status (233);
   if (!check_secret_url_preflight ())
     return wyl_test_normalize_exit_status (231);
   const gchar *version = wyrelog_client_version_string ();
@@ -1217,6 +1278,65 @@ main (void)
       || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
     return wyl_test_normalize_exit_status (289);
   wyl_client_fact_graph_verification_clear (&verification);
+  WylClientFactRestoreRequest restore_request = {
+    .scope = WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT,
+    .tenant_id = "__wr_default",
+    .bundle_path = "/trusted/backup",
+    .trusted_manifest_sha256 =
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    .guard_timestamp = 123,
+    .guard_loc_class = "public",
+    .guard_risk = 49,
+  };
+  WylClientFactRestoreResult restore_result = { 0 };
+  http.body = "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":null,\"operation_uuid\":null,\"revision\":0,"
+      "\"graph_count\":1,\"publication_eligible\":true,"
+      "\"state\":\"eligible\",\"failure_code\":null}";
+  if (wyl_client_fact_restore_dry_run (management_client, &restore_request,
+      &restore_result) != WYRELOG_E_OK
+      || restore_result.scope != WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT
+      || !restore_result.publication_eligible
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/facts/restore/dry-run") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || strstr (http.last_body, "\"bundle_path\":\"/trusted/backup\"")
+      == NULL
+      || strstr (http.last_body,
+      "\"trusted_manifest_sha256\":\"00000000000000000000000000000000")
+      == NULL)
+    return wyl_test_normalize_exit_status (2891);
+  wyl_client_fact_restore_result_clear (&restore_result);
+  restore_request.operation_uuid = "01890c10-2e3f-7000-8000-000000000001";
+  restore_request.confirmed = TRUE;
+  http.status = 500;
+  http.body = "{\"error\":\"restore_operation_failed\"}";
+  if (wyl_client_fact_restore_begin (management_client, &restore_request,
+      &restore_result) != WYRELOG_E_IO
+      || restore_result.outcome != WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN
+      || g_strcmp0 (restore_result.operation_uuid,
+      restore_request.operation_uuid) != 0
+      || g_strcmp0 (http.last_path, "/facts/restore/begin") != 0
+      || strstr (http.last_body, "\"confirmed\":\"true\"") == NULL)
+    return wyl_test_normalize_exit_status (2892);
+  wyl_client_fact_restore_result_clear (&restore_result);
+  http.status = 0;
+  restore_request.confirmed = FALSE;
+  restore_request.expected_revision = 1;
+  http.status = 409;
+  http.body = "{\"error\":\"restore_conflict\"}";
+  if (wyl_client_fact_restore_prepare (management_client, &restore_request,
+      &restore_result) != WYRELOG_E_CONFLICT
+      || restore_result.outcome != WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT)
+    return wyl_test_normalize_exit_status (2893);
+  wyl_client_fact_restore_result_clear (&restore_result);
+  http.body = "{\"error\":\"restore_in_progress\"}";
+  if (wyl_client_fact_restore_prepare (management_client, &restore_request,
+      &restore_result) != WYRELOG_E_BUSY
+      || restore_result.outcome != WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS)
+    return wyl_test_normalize_exit_status (2894);
+  wyl_client_fact_restore_result_clear (&restore_result);
+  http.status = 0;
   http.status = 404;
   http.body = "{\"error\":\"graph_not_found\"}";
   if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",

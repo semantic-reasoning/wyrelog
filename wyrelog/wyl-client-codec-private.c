@@ -7,6 +7,7 @@
 #include "wyrelog/auth/service-credential-operation-destination-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 
 #define WYL_CLIENT_CODEC_MAX_DOCUMENT (16u * 1024u)
@@ -2105,4 +2106,145 @@ wyl_client_fact_replay_resources_copy
   memcpy (out_resources, parsed, writable_size);
   out_resources->version = version;
   return WYRELOG_E_OK;
+}
+
+static WylClientFactRestoreState
+restore_state_from_wire (const gchar *name)
+{
+  if (g_strcmp0 (name, "eligible") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_ELIGIBLE;
+  if (g_strcmp0 (name, "preparing") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_PREPARING;
+  if (g_strcmp0 (name, "prepared") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_PREPARED;
+  if (g_strcmp0 (name, "committing") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING;
+  if (g_strcmp0 (name, "active") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_ACTIVE;
+  if (g_strcmp0 (name, "aborting") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_ABORTING;
+  if (g_strcmp0 (name, "aborted") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_ABORTED;
+  if (g_strcmp0 (name, "committed") == 0)
+    return WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED;
+  return WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN;
+}
+
+static gboolean
+restore_failure_code_is_valid (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0' || strlen (value) > 127)
+    return FALSE;
+  for (const guchar *p = (const guchar *) value; *p != '\0'; p++)
+    if (!g_ascii_islower (*p) && !g_ascii_isdigit (*p) && *p != '_')
+      return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_result_decode (const gchar *document,
+    gsize document_len, WylClientFactRestoreResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  *out_result = (WylClientFactRestoreResult) { 0 };
+  if (document == NULL || document_len == 0
+      || document_len > WYL_CLIENT_CODEC_MAX_DOCUMENT)
+    return WYRELOG_E_IO;
+
+  JsonCursor cursor = { document, document_len, 0 };
+  gboolean have_scope = FALSE, have_tenant = FALSE, have_graph = FALSE;
+  gboolean have_operation = FALSE, have_revision = FALSE;
+  gboolean have_graph_count = FALSE, have_eligible = FALSE;
+  gboolean have_state = FALSE, have_failure = FALSE;
+  g_autofree gchar *tenant = NULL, *graph = NULL, *operation = NULL;
+  g_autofree gchar *scope = NULL, *state = NULL, *failure = NULL;
+  guint64 revision = 0, graph_count = 0;
+  gboolean eligible = FALSE;
+  if (!take (&cursor, '{'))
+    return WYRELOG_E_IO;
+  while (TRUE) {
+    g_autofree gchar *key = NULL;
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto malformed;
+    if (g_strcmp0 (key, "scope") == 0) {
+      if (have_scope || !parse_string (&cursor, &scope))
+        goto malformed;
+      have_scope = TRUE;
+    } else if (g_strcmp0 (key, "tenant_id") == 0) {
+      if (have_tenant || !parse_string (&cursor, &tenant))
+        goto malformed;
+      have_tenant = TRUE;
+    } else if (g_strcmp0 (key, "graph_id") == 0) {
+      if (have_graph || !parse_nullable_string (&cursor, &graph))
+        goto malformed;
+      have_graph = TRUE;
+    } else if (g_strcmp0 (key, "operation_uuid") == 0) {
+      if (have_operation || !parse_nullable_string (&cursor, &operation))
+        goto malformed;
+      have_operation = TRUE;
+    } else if (g_strcmp0 (key, "revision") == 0) {
+      if (have_revision || !parse_uint64 (&cursor, &revision))
+        goto malformed;
+      have_revision = TRUE;
+    } else if (g_strcmp0 (key, "graph_count") == 0) {
+      if (have_graph_count || !parse_uint64 (&cursor, &graph_count)
+          || graph_count > WYL_CLIENT_FACT_STATUS_MAX_GRAPHS)
+        goto malformed;
+      have_graph_count = TRUE;
+    } else if (g_strcmp0 (key, "publication_eligible") == 0) {
+      if (have_eligible || !parse_bool (&cursor, &eligible))
+        goto malformed;
+      have_eligible = TRUE;
+    } else if (g_strcmp0 (key, "state") == 0) {
+      if (have_state || !parse_string (&cursor, &state))
+        goto malformed;
+      have_state = TRUE;
+    } else if (g_strcmp0 (key, "failure_code") == 0) {
+      if (have_failure || !parse_nullable_string (&cursor, &failure))
+        goto malformed;
+      have_failure = TRUE;
+    } else {
+      goto malformed;
+    }
+    skip_ws (&cursor);
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto malformed;
+  }
+  skip_ws (&cursor);
+  wyl_id_t parsed_id = WYL_ID_NIL;
+  if (cursor.pos != cursor.len || !have_scope || !have_tenant
+      || !have_graph || !have_operation || !have_revision
+      || !have_graph_count || !have_eligible || !have_state || !have_failure
+      || (g_strcmp0 (scope, "tenant") != 0
+      && g_strcmp0 (scope, "graph") != 0)
+      || tenant == NULL || tenant[0] == '\0'
+      || (g_strcmp0 (scope, "graph") == 0
+          ? graph == NULL || graph[0] == '\0' : graph != NULL)
+      || (operation != NULL && (strlen (operation) != WYL_ID_STRING_LEN
+      || wyl_id_parse (operation, &parsed_id) != WYRELOG_E_OK))
+      || revision >= G_MAXINT64
+      || restore_state_from_wire (state) == WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN
+      || (failure != NULL && !restore_failure_code_is_valid (failure)))
+    goto malformed;
+  out_result->scope = g_strcmp0 (scope, "tenant") == 0
+      ? WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT
+      : WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH;
+  out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE;
+  out_result->state = restore_state_from_wire (state);
+  out_result->tenant_id = g_steal_pointer (&tenant);
+  out_result->graph_id = g_steal_pointer (&graph);
+  out_result->operation_uuid = g_steal_pointer (&operation);
+  out_result->revision = revision;
+  out_result->graph_count = graph_count;
+  out_result->publication_eligible = eligible;
+  out_result->state_name = g_steal_pointer (&state);
+  out_result->failure_code = g_steal_pointer (&failure);
+  return WYRELOG_E_OK;
+
+malformed:
+  wyl_client_fact_restore_result_clear (out_result);
+  return WYRELOG_E_IO;
 }

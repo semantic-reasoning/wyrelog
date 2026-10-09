@@ -147,6 +147,18 @@ test_same_process_identity_and_orderly_release (void)
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_a, &duplicate),
       ==, WYRELOG_E_BUSY);
   g_assert_null (duplicate);
+  WylFactRootWriterLeaseBorrowScope borrow_scope = { 0 };
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_begin (lease_a,
+      &borrow_scope), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_a, &duplicate),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_verify (duplicate), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&duplicate, wyl_fact_root_writer_lease_release);
+  wyl_fact_root_writer_lease_borrow_scope_end (&borrow_scope);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_a, &duplicate),
+      ==, WYRELOG_E_BUSY);
+  g_assert_null (duplicate);
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_b, &lease_b), ==,
       WYRELOG_E_OK);
 

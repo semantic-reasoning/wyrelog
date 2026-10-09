@@ -72,7 +72,8 @@ OWNER_INVENTORY = {
         ("WYL_DAEMON_POLICY_WRITE_OWNER_SCHEMA_REGISTER",),
     "facts_route_handler": (
         "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_FORGET",
-        "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION"),
+        "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION",
+        "WYL_DAEMON_POLICY_WRITE_OWNER_FACT_RESTORE"),
     "direct_permission_mutation_handler":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_DIRECT_PERMISSION",),
     "policy_permission_transition_handler":
@@ -132,6 +133,7 @@ OWNER_TABLE = (
     ("MFA_CONFIRM", "mfa_confirm"),
     ("SELF_ARM", "self_arm"),
     ("FACT_QUOTA_CONFIGURE", "fact_quota_configure"),
+    ("FACT_RESTORE", "fact_restore"),
 )
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
@@ -492,7 +494,7 @@ def validate_owner_fault_matrix(root):
     invoke_values=[value for _,value in invoke[0][2]]
     required_sequences=(
         ("G_STATIC_ASSERT","(","G_N_ELEMENTS","(",
-            "policy_write_owner_fault_cases",")","==","17",")",";"),
+            "policy_write_owner_fault_cases",")","==","18",")",";"),
         ("G_STATIC_ASSERT","(","POLICY_WRITE_OWNER_FAULT_MODE_COUNT","==",
             "2",")",";"),
         ("for","(","guint","mode","=","0",";","mode","<",
@@ -800,8 +802,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 19:
-        raise GuardError("daemon WRITE owner inventory must contain 19 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 20:
+        raise GuardError("daemon WRITE owner inventory must contain 20 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():

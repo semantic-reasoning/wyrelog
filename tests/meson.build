@@ -343,12 +343,24 @@ if get_option('enable_fact_store').allowed() and \
   test_offline_backup_source = executable('test-fact-offline-backup-source',
     'test-fact-offline-backup-source.c',
     'fact-test-support.c',
-    c_args : fact_test_support_c_args,
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    c_args : fact_test_support_c_args + [
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+      '-DWYL_HAS_DAEMON_HTTP',
+      '-DWYL_TEST_DAEMON_HTTP',
+      '-DWYL_HAS_FACT_STORE',
+      '-DWYL_HAS_SECURE_DUCKDB_BRIDGE',
+    ],
     include_directories : include_directories('../wyrelog'),
     # wirelog_dep: the test includes wyl-engine-private.h, whose wirelog
     # headers are found only by accident when wirelog is system-installed.
-    dependencies : [wyrelog_handle_test_seams_dep, sqlite_dep, duckdb_dep,
-      wirelog_dep] + fact_test_support_deps,
+    dependencies : [wyrelog_handle_test_seams_dep, wyrelog_client_dep,
+      libsoup_dep, daemon_http_private_dep, service_session_private_dep,
+      sodium_dep, sqlite_dep, duckdb_dep, wirelog_dep]
+      + fact_test_support_deps,
   )
   # Offline restore runs only on Linux, so elsewhere much of this binary
   # skips.  Under the exit-code protocol a run whose cases all skip, or that

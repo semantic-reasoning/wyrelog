@@ -133,10 +133,6 @@ restore_unseal_graph (wyl_policy_store_t *policy, const gchar *fact_root,
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_graph_unseal_with_root_lease (policy, fact_root,
               root_lease, &context.info, runtime, drain_timeout_us, &outcome);
-    if (rc != WYRELOG_E_OK)
-      g_printerr ("restore unseal rc=%d result=%d published=%d state=%d replay=%d\n",
-          rc, outcome.policy_result, outcome.engine_published,
-          outcome.status.state, outcome.status.last_replay_class);
     wyl_fact_graph_unseal_outcome_clear (&outcome);
     wyl_fact_graph_key_clear (&key);
   }
@@ -943,8 +939,9 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
     wyl_fact_offline_restore_journal_clear(out_committed);
   if (policy == NULL || fact_root == NULL || *fact_root == '\0' ||
       runtime == NULL || finalized == NULL ||
-      finalized->operation_uuid == NULL || finalized->revision == 0 ||
-      out_committed == NULL)
+      finalized->operation_uuid == NULL || finalized->tenant_id == NULL ||
+      finalized->selected_graph_id == NULL || finalized->revision == 0 ||
+      finalized->revision > G_MAXINT64 - 2 || out_committed == NULL)
     return WYRELOG_E_INVALID;
 #ifndef __linux__
   (void)drain_timeout_us;
@@ -955,6 +952,46 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
       wyl_fact_offline_restore_journal_encode(finalized, &finalized_blob);
   if (rc != WYRELOG_E_OK)
     return rc;
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  wyrelog_error_t receipt_rc = wyl_policy_store_offline_restore_receipt_lookup
+        (policy, finalized->operation_uuid, &receipt);
+  if (receipt_rc != WYRELOG_E_OK)
+    return receipt_rc;
+  if (receipt != NULL) {
+    guint64 terminal_revision = receipt->final_revision;
+    gboolean matches = receipt->scope ==
+        WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+        && g_strcmp0 (receipt->tenant_id, finalized->tenant_id) == 0
+        && g_strcmp0 (receipt->selected_graph_id,
+            finalized->selected_graph_id) == 0
+        && receipt->final_revision == finalized->revision + 2
+        && receipt->graph_count == 1
+        && g_strcmp0 (receipt->terminal_state, "committed") == 0
+        && memcmp (receipt->manifest_sha256, finalized->manifest_sha256,
+            sizeof receipt->manifest_sha256) == 0;
+    wyl_policy_offline_restore_receipt_free (receipt);
+    if (!matches)
+      return WYRELOG_E_POLICY;
+    g_auto (WylFactOfflineRestoreJournal) terminal = { 0 };
+    rc = wyl_fact_offline_restore_journal_decode (finalized_blob, &terminal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_policy_published (&terminal);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_offline_restore_journal_mark_lifecycle_handoff (&terminal);
+    if (rc == WYRELOG_E_OK && terminal.revision !=
+        terminal_revision)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      *out_committed = terminal;
+      memset (&terminal, 0, sizeof terminal);
+      rc = restore_unseal_graph (policy, fact_root, runtime,
+              finalized->tenant_id, finalized->selected_graph_id,
+              drain_timeout_us);
+    }
+    if (rc != WYRELOG_E_OK)
+      wyl_fact_offline_restore_journal_clear (out_committed);
+    return rc;
+  }
   WylPolicyOfflineRestoreRecord finalized_record = {
     .operation_uuid = finalized->operation_uuid,
     .tenant_id = finalized->tenant_id,
@@ -3944,7 +3981,6 @@ wyl_fact_offline_restore_tenant_commit_v8_prove_terminal
     wyl_fact_graph_key_clear (&held[i].key);
   }
   g_free (held);
-  wyl_policy_offline_restore_record_free (expected);
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   for (guint i = 0; rc == WYRELOG_E_OK && i < journal.graphs->len; i++) {
@@ -3953,6 +3989,10 @@ wyl_fact_offline_restore_tenant_commit_v8_prove_terminal
     rc = restore_unseal_graph (policy, fact_root, runtime, journal.tenant_id,
             graph->graph_id, drain_timeout_us);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_commit_terminalize (policy,
+            expected);
+  wyl_policy_offline_restore_record_free (expected);
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
@@ -7059,6 +7099,26 @@ wyl_fact_offline_restore_graph_commit_promote_run
   wyl_fact_graph_resolver_clear (&resolver);
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   wyl_policy_graph_restore_replacement_record_free (row);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_unseal_graph (policy, fact_root, runtime,
+            out_committed->tenant_id, out_committed->selected_graph_id,
+            drain_timeout_us);
+  else {
+    WylPolicyOfflineRestoreReceipt *receipt = NULL;
+    wyrelog_error_t receipt_rc =
+        wyl_policy_store_offline_restore_receipt_lookup (policy,
+            operation_uuid, &receipt);
+    if (receipt_rc == WYRELOG_E_OK && receipt != NULL
+        && receipt->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+        && receipt->final_revision == expected_revision + 2
+        && g_strcmp0 (receipt->terminal_state, "committed") == 0)
+      (void) restore_unseal_graph (policy, fact_root, runtime,
+          journal.tenant_id, journal.selected_graph_id,
+          drain_timeout_us);
+    wyl_policy_offline_restore_receipt_free (receipt);
+  }
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_offline_restore_journal_clear (out_committed);
   return rc;
 #endif
 }

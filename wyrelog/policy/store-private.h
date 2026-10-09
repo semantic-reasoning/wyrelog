@@ -3481,6 +3481,27 @@ typedef struct
   GBytes *journal_blob;
 } WylPolicyOfflineRestoreRecord;
 
+/* Durable terminal identity for a released restore operation. */
+typedef struct
+{
+  gchar *operation_uuid;
+  gchar *tenant_id;
+  WylPolicyOfflineRestoreScope scope;
+  gchar *selected_graph_id;
+  guint8 manifest_sha256[32];
+  guint64 final_revision;
+  guint graph_count;
+  gchar *terminal_state;
+} WylPolicyOfflineRestoreReceipt;
+void wyl_policy_offline_restore_receipt_free
+  (WylPolicyOfflineRestoreReceipt *receipt);
+wyrelog_error_t wyl_policy_store_offline_restore_receipt_lookup
+  (wyl_policy_store_t *store, const gchar *operation_uuid,
+    WylPolicyOfflineRestoreReceipt **out_receipt);
+wyrelog_error_t wyl_policy_store_offline_restore_commit_terminalize
+  (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_terminal);
+
 void wyl_policy_offline_restore_record_free
   (WylPolicyOfflineRestoreRecord *record);
 wyrelog_error_t wyl_policy_store_offline_restore_create
