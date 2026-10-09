@@ -1289,6 +1289,24 @@ check_exact_facts_alias_canaries (SoupServer *server, const gchar *base_url)
   if (status != 503 || strstr (body, "\"fact_store_disabled\"") == NULL)
     return 2387;
 #endif
+  static const gchar restore_status_body[] =
+      "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"\",\"bundle_path\":\"\","
+      "\"trusted_manifest_sha256\":\"\","
+      "\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000001\","
+      "\"expected_revision\":\"1\",\"confirmed\":\"false\"}";
+  if (send_raw_path_probe (session, "POST", base_url,
+      "/facts/restore/status?tenant=__wr_default&guard_timestamp=123&"
+      "guard_loc_class=public&guard_risk=69", NULL, restore_status_body,
+      &status, &body) != 0)
+    return 2388;
+#ifdef WYL_HAS_FACT_STORE
+  if (status != 401 || strstr (body, "restore_auth_required") == NULL)
+    return 2389;
+#else
+  if (status != 503 || strstr (body, "fact_store_disabled") == NULL)
+    return 2390;
+#endif
   return 0;
 }
 
@@ -19490,6 +19508,7 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
    500, "service_authority_failed"},
   {16, "fact_quota_configure", 0, 500,
    "fact_quota_configuration_failed"},
+  {17, "fact_restore", 0, 500, "restore_operation_failed"},
 };
 
 static wyrelog_error_t
@@ -19784,6 +19803,11 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       query = g_strdup_printf ("tenant=%s&limit=1&%s",
               WYL_TENANT_DEFAULT, guard);
       break;
+    case 17:
+      path = "/facts/restore/status";
+      query = g_strdup_printf ("tenant=%s&%s", WYL_TENANT_DEFAULT, guard);
+      body = "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\",\"graph_id\":\"\",\"bundle_path\":\"\",\"trusted_manifest_sha256\":\"\",\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000001\",\"expected_revision\":\"0\",\"confirmed\":\"false\"}";
+      break;
     default:
       return 8;
   }
@@ -19825,7 +19849,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
 static gint
 check_policy_write_all_owner_faults (void)
 {
-  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 17);
+  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 18);
   G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
   for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
     for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
@@ -19891,11 +19915,14 @@ check_policy_write_all_owner_faults (void)
             (env.http.server, &snapshot)
           && policy_write_fault_snapshot_is_clean (&snapshot,
               acquire_mode ? test_case->acquire_status :
-              test_case->owner <= 2 ? 0 : 200,
+              test_case->owner <= 2 ? 0 :
+              test_case->owner == 17 ? 500 : 200,
               acquire_mode ? test_case->acquire_code :
-              test_case->owner <= 2 ? "non_http" : "success", test_case->owner,
+              test_case->owner <= 2 ? "non_http" :
+              test_case->owner == 17 ? "restore_operation_failed" : "success",
+              test_case->owner,
               test_case->name, acquire_mode ? 0 : test_case->resources,
-              acquire_mode ? 0 : 1,
+              acquire_mode ? 0 : test_case->owner == 17 ? 2 : 1,
               acquire_mode ? WYRELOG_E_OK : WYRELOG_E_INTERNAL,
               acquire_mode ? 1 : 0);
       if ((test_case->owner <= 2
@@ -19907,13 +19934,16 @@ check_policy_write_all_owner_faults (void)
           || after != before + 1 || !snapshot_ok) {
         g_printerr ("WYRELOG_TEST_DIAG owner_fault snapshot mode=%u owner=%u "
             "name=%s non_http_rc=%d terminal=%u/%u observed=%u expected=%u "
-            "snapshot_owner=%u snapshot_name=%s primary=%d/%d cleanup=%d "
+            "snapshot_owner=%u snapshot_name=%s primary=%d/%d status=%u code=%s "
+            "diag=%u valid=%d cleanup=%d "
             "hits=%u txn=%d rank=%u pins=%u/%u pre=%u/%u/%zu\n", mode,
             test_case->owner, test_case->name, non_http_rc, before, after,
             snapshot.observed_cleanup_resources,
             acquire_mode ? 0 : test_case->resources, snapshot.owner,
             snapshot.owner_name, snapshot.primary_rc,
-            snapshot.primary_rc_recorded, snapshot.cleanup_rc,
+            snapshot.primary_rc_recorded, snapshot.primary_status,
+            snapshot.primary_code,
+            snapshot.diagnostic_count, snapshot.valid, snapshot.cleanup_rc,
             snapshot.acquire_fault_hits,
             snapshot.post_finalize_transaction_active,
             snapshot.post_finalize_rank_mask,

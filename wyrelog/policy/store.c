@@ -892,6 +892,9 @@ static const gchar *const required_tables[] = {
   "fact_offline_restore_journals",
   "fact_offline_restore_tenant_claims",
   "fact_offline_restore_graph_claims",
+  "fact_offline_restore_receipts",
+  "fact_offline_restore_terminal_history",
+  "fact_offline_restore_terminal_guard",
   "fact_graph_restore_replacements",
   "fact_namespaces",
   "fact_relation_schemas",
@@ -953,6 +956,35 @@ static const gchar offline_restore_graph_claims_sql[] =
     "PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) "
     "REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) "
     "REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);";
+static const gchar offline_restore_receipts_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts ("
+    "operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,"
+    "scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),"
+    "selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK("
+    "typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),"
+    "final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),"
+    "terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),"
+    "completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),"
+    "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
+    "(scope='graph' AND selected_graph_id IS NOT NULL)));";
+static const gchar offline_restore_terminal_history_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history ("
+    "operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL,"
+    "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL,"
+    "tenant_reconciliation_generation INTEGER NOT NULL,"
+    "graph_lifecycle_generation INTEGER NOT NULL,"
+    "graph_reconciliation_generation INTEGER NOT NULL,"
+    "journal_revision INTEGER NOT NULL,companion_basename TEXT NOT NULL,"
+    "phase TEXT NOT NULL,attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,"
+    "updated_at INTEGER NOT NULL,PRIMARY KEY(operation_uuid,graph_id),"
+    "FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid) "
+    "DEFERRABLE INITIALLY DEFERRED);";
+static const gchar offline_restore_terminal_guard_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_guard ("
+    "operation_uuid TEXT PRIMARY KEY,"
+    "FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid));";
 static const gchar offline_restore_index_sql[] =
     "CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished "
     "ON fact_offline_restore_journals(tenant_id,operation_uuid);";
@@ -969,7 +1001,13 @@ static const gchar offline_restore_delete_guard_sql[] =
     "BEFORE DELETE ON fact_offline_restore_journals WHEN EXISTS(SELECT 1 FROM "
     "fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR "
     "EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE "
-    "operation_uuid=OLD.operation_uuid) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;";
+    "operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM "
+    "fact_graph_restore_replacements WHERE restore_operation_uuid=OLD.operation_uuid) "
+    "OR EXISTS(SELECT 1 FROM fact_tenant_restore_replacements WHERE "
+    "restore_operation_uuid=OLD.operation_uuid) OR NOT EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r "
+    "ON r.operation_uuid=g.operation_uuid WHERE g.operation_uuid=OLD.operation_uuid "
+    "AND r.terminal_state IN ('aborted','committed')) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;";
 static const gchar offline_restore_tenant_claim_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard "
     "BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN SELECT CASE WHEN NOT EXISTS("
@@ -992,6 +1030,14 @@ static const gchar offline_restore_graph_claim_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_update_guard "
     "BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT "
     "RAISE(ABORT,'restore graph claims are immutable'); END;";
+static const gchar offline_restore_terminal_history_no_update_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_update "
+    "BEFORE UPDATE ON fact_offline_restore_terminal_history BEGIN "
+    "SELECT RAISE(ABORT,'restore terminal history is immutable'); END;";
+static const gchar offline_restore_terminal_history_no_delete_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_delete "
+    "BEFORE DELETE ON fact_offline_restore_terminal_history BEGIN "
+    "SELECT RAISE(ABORT,'restore terminal history is permanent'); END;";
 
 /* A sealed restore reserves the replacement outside the ordinary one-row-per-
  * graph provisioning table. The old ACTIVE row remains authoritative until a
@@ -1187,7 +1233,12 @@ static const gchar restore_replacement_update_guard_sql[] =
     "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
 static const gchar restore_replacement_delete_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard "
-    "BEFORE DELETE ON fact_graph_restore_replacements BEGIN "
+    "BEFORE DELETE ON fact_graph_restore_replacements WHEN NOT EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r "
+    "ON r.operation_uuid=g.operation_uuid JOIN fact_offline_restore_terminal_history h "
+    "ON h.operation_uuid=g.operation_uuid AND h.graph_id=OLD.graph_id AND "
+    "h.replacement_uuid=OLD.replacement_uuid WHERE g.operation_uuid=OLD.restore_operation_uuid "
+    "AND r.terminal_state='committed' AND r.scope='graph') BEGIN "
     "SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;";
 /* One tenant operation reserves one replacement per graph. Its rows remain
  * separate from the graph-scope replacement authority above. */
@@ -1278,7 +1329,12 @@ static const gchar tenant_restore_replacement_update_guard_sql[] =
     "SELECT RAISE(ABORT,'tenant restore replacement is immutable'); END;";
 static const gchar tenant_restore_replacement_delete_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS fact_tenant_restore_replacement_delete_guard "
-    "BEFORE DELETE ON fact_tenant_restore_replacements BEGIN "
+    "BEFORE DELETE ON fact_tenant_restore_replacements WHEN NOT EXISTS(SELECT 1 FROM "
+    "fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r "
+    "ON r.operation_uuid=g.operation_uuid JOIN fact_offline_restore_terminal_history h "
+    "ON h.operation_uuid=g.operation_uuid AND h.graph_id=OLD.graph_id AND "
+    "h.replacement_uuid=OLD.replacement_uuid WHERE g.operation_uuid=OLD.restore_operation_uuid "
+    "AND r.terminal_state='committed' AND r.scope='tenant') BEGIN "
     "SELECT RAISE(ABORT,'tenant restore replacement is recovery owned'); END;";
 static const gchar offline_restore_schema_ddl[] =
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_journals ("
@@ -1294,9 +1350,14 @@ static const gchar offline_restore_schema_ddl[] =
     "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(tenant_id,selected_graph_id) REFERENCES fact_graphs(tenant_id,graph_id));"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims (tenant_id TEXT PRIMARY KEY,operation_uuid TEXT NOT NULL UNIQUE,FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,operation_uuid TEXT NOT NULL UNIQUE,PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)));"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL,graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,tenant_lifecycle_generation INTEGER NOT NULL,tenant_reconciliation_generation INTEGER NOT NULL,graph_lifecycle_generation INTEGER NOT NULL,graph_reconciliation_generation INTEGER NOT NULL,journal_revision INTEGER NOT NULL,companion_basename TEXT NOT NULL,phase TEXT NOT NULL,attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(operation_uuid,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid) DEFERRABLE INITIALLY DEFERRED);"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_guard (operation_uuid TEXT PRIMARY KEY,FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid));"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_update BEFORE UPDATE ON fact_offline_restore_terminal_history BEGIN SELECT RAISE(ABORT,'restore terminal history is immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_delete BEFORE DELETE ON fact_offline_restore_terminal_history BEGIN SELECT RAISE(ABORT,'restore terminal history is permanent'); END;"
     "CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished ON fact_offline_restore_journals(tenant_id,operation_uuid);"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_update_guard BEFORE UPDATE ON fact_offline_restore_journals BEGIN SELECT CASE WHEN NEW.operation_uuid!=OLD.operation_uuid OR NEW.tenant_id!=OLD.tenant_id OR NEW.scope!=OLD.scope OR NEW.selected_graph_id IS NOT OLD.selected_graph_id OR NEW.manifest_sha256!=OLD.manifest_sha256 OR NEW.graph_count!=OLD.graph_count OR NEW.created_at!=OLD.created_at OR NEW.revision!=OLD.revision+1 OR NEW.updated_at<OLD.updated_at THEN RAISE(ABORT,'invalid restore journal update') END; END;"
-    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard BEFORE DELETE ON fact_offline_restore_journals WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;"
+    "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard BEFORE DELETE ON fact_offline_restore_journals WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_graph_restore_replacements WHERE restore_operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_tenant_restore_replacements WHERE restore_operation_uuid=OLD.operation_uuid) OR NOT EXISTS(SELECT 1 FROM fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r ON r.operation_uuid=g.operation_uuid WHERE g.operation_uuid=OLD.operation_uuid AND r.terminal_state IN ('aborted','committed')) BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='tenant' AND selected_graph_id IS NULL) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid tenant restore claim') END; END;"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_graph_claim_insert_guard BEFORE INSERT ON fact_offline_restore_graph_claims BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals WHERE operation_uuid=NEW.operation_uuid AND tenant_id=NEW.tenant_id AND scope='graph' AND selected_graph_id=NEW.graph_id) OR EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE tenant_id=NEW.tenant_id) THEN RAISE(ABORT,'invalid graph restore claim') END; END;"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_update_guard BEFORE UPDATE ON fact_offline_restore_tenant_claims BEGIN SELECT RAISE(ABORT,'restore tenant claims are immutable'); END;"
@@ -11733,6 +11794,12 @@ validate_offline_restore_schema (sqlite3 *db)
       offline_restore_tenant_claims_sql },
     { "table", "fact_offline_restore_graph_claims",
       offline_restore_graph_claims_sql },
+    { "table", "fact_offline_restore_receipts",
+      offline_restore_receipts_sql },
+    { "table", "fact_offline_restore_terminal_history",
+      offline_restore_terminal_history_sql },
+    { "table", "fact_offline_restore_terminal_guard",
+      offline_restore_terminal_guard_sql },
     { "index", "idx_fact_offline_restore_journals_unfinished",
       offline_restore_index_sql },
     { "trigger", "fact_offline_restore_journal_update_guard",
@@ -11747,12 +11814,17 @@ validate_offline_restore_schema (sqlite3 *db)
       offline_restore_tenant_claim_update_guard_sql },
     { "trigger", "fact_offline_restore_graph_claim_update_guard",
       offline_restore_graph_claim_update_guard_sql },
+    { "trigger", "fact_offline_restore_terminal_history_no_update",
+      offline_restore_terminal_history_no_update_sql },
+    { "trigger", "fact_offline_restore_terminal_history_no_delete",
+      offline_restore_terminal_history_no_delete_sql },
   };
   for (guint i = 0; i < G_N_ELEMENTS (objects); i++) {
     wyrelog_error_t rc = graph_authority_object_matches (db, objects[i].type,
             objects[i].name, objects[i].sql);
-    if (rc != WYRELOG_E_OK)
+    if (rc != WYRELOG_E_OK) {
       return rc;
+    }
   }
   static const gchar *const invalid_queries[] = {
     "SELECT 1 FROM fact_offline_restore_journals WHERE "
@@ -11823,6 +11895,9 @@ migrate_offline_restore_schema (sqlite3 *db)
     "fact_offline_restore_journals",
     "fact_offline_restore_tenant_claims",
     "fact_offline_restore_graph_claims",
+    "fact_offline_restore_receipts",
+    "fact_offline_restore_terminal_history",
+    "fact_offline_restore_terminal_guard",
     "idx_fact_offline_restore_journals_unfinished",
     "fact_offline_restore_journal_update_guard",
     "fact_offline_restore_journal_delete_guard",
@@ -11830,6 +11905,8 @@ migrate_offline_restore_schema (sqlite3 *db)
     "fact_offline_restore_graph_claim_insert_guard",
     "fact_offline_restore_tenant_claim_update_guard",
     "fact_offline_restore_graph_claim_update_guard",
+    "fact_offline_restore_terminal_history_no_update",
+    "fact_offline_restore_terminal_history_no_delete",
   };
   sqlite3_stmt *shadow = NULL;
   if (sqlite3_prepare_v2 (db,
@@ -11897,10 +11974,12 @@ migrate_offline_restore_schema (sqlite3 *db)
     return WYRELOG_E_IO;
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (db,
-      "SELECT count(*) FROM sqlite_master WHERE name=?;", -1, &stmt, NULL)
+      "SELECT count(*) FROM sqlite_master WHERE name=? COLLATE NOCASE;", -1,
+      &stmt, NULL)
       != SQLITE_OK)
     return WYRELOG_E_IO;
   guint present = 0;
+  gboolean invalid_missing_object = FALSE;
   for (guint i = 0; i < G_N_ELEMENTS (names); i++) {
     sqlite3_reset (stmt);
     sqlite3_clear_bindings (stmt);
@@ -11913,13 +11992,29 @@ migrate_offline_restore_schema (sqlite3 *db)
       sqlite3_finalize (stmt);
       return WYRELOG_E_IO;
     }
-    present += sqlite3_column_int (stmt, 0) != 0;
+    if (sqlite3_column_int (stmt, 0) != 0)
+      present++;
+    else if (g_strcmp0 (names[i], "fact_offline_restore_receipts") != 0
+        && g_strcmp0 (names[i], "fact_offline_restore_terminal_history") != 0
+        && g_strcmp0 (names[i], "fact_offline_restore_terminal_guard") != 0
+        && g_strcmp0 (names[i], "fact_offline_restore_terminal_history_no_update") != 0
+        && g_strcmp0 (names[i], "fact_offline_restore_terminal_history_no_delete") != 0)
+      invalid_missing_object = TRUE;
   }
   sqlite3_finalize (stmt);
-  if (present != 0 && present != G_N_ELEMENTS (names))
+  /* Receipts and committed terminal history are additive schema objects.
+   * Any partially missing core journal/claim schema remains corrupt. */
+  if (present != 0 && invalid_missing_object)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t rc = present == 0 ?
-      exec_sql (db, offline_restore_schema_ddl) : WYRELOG_E_OK;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (present != G_N_ELEMENTS (names)) {
+    /* Replace the journal-delete guard as part of this additive migration;
+     * replacement guards are migrated by their own schema passes. */
+    rc = exec_sql (db,
+            "DROP TRIGGER IF EXISTS fact_offline_restore_journal_delete_guard;");
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, offline_restore_schema_ddl);
+  }
   return rc == WYRELOG_E_OK ? validate_offline_restore_schema (db) : rc;
 }
 
@@ -39463,6 +39558,23 @@ offline_restore_create (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_NOT_FOUND)
     return offline_restore_finish_mutation (store, &fence, rc, FALSE);
 
+  sqlite3_stmt *reserved = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT 1 FROM main.fact_offline_restore_receipts WHERE operation_uuid=?;",
+          &reserved);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (reserved, 1, record->operation_uuid);
+  int reserved_step = rc == WYRELOG_E_OK ? sqlite3_step (reserved) : SQLITE_ERROR;
+  gboolean terminal_reserved = reserved_step == SQLITE_ROW;
+  sqlite3_finalize (reserved);
+  if (rc == WYRELOG_E_OK && reserved_step != SQLITE_ROW
+      && reserved_step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK || terminal_reserved) {
+    *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  }
+
   sqlite3_stmt *conflict = NULL;
   const gchar *conflict_sql =
       record->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
@@ -40280,6 +40392,45 @@ wyl_policy_store_offline_restore_release (wyl_policy_store_t *store,
     return offline_restore_finish_mutation (store, &fence, WYRELOG_E_OK,
                FALSE);
   }
+  sqlite3_stmt *receipt = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO main.fact_offline_restore_receipts(operation_uuid,tenant_id,"
+          "scope,selected_graph_id,manifest_sha256,final_revision,terminal_state,"
+          "completed_at) VALUES(?,?,?,?,?,?,'aborted',unixepoch());", &receipt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (receipt, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (receipt, 2, expected->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (receipt, 3, expected->scope ==
+            WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ? "tenant" : "graph");
+  if (rc == WYRELOG_E_OK && expected->selected_graph_id != NULL
+      && sqlite3_bind_text (receipt, 4, expected->selected_graph_id, -1,
+      SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && expected->selected_graph_id == NULL
+      && sqlite3_bind_null (receipt, 4) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (receipt, 5, expected->manifest_sha256, 32,
+      SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int64 (receipt, 6, (sqlite3_int64) expected->revision)
+      != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (receipt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (receipt);
+  if (rc != WYRELOG_E_OK)
+    return offline_restore_finish_mutation (store, &fence, rc, FALSE);
+  sqlite3_stmt *terminal_guard = NULL;
+  rc = prepare_stmt (store->db,
+          "INSERT INTO main.fact_offline_restore_terminal_guard(operation_uuid) VALUES(?);",
+          &terminal_guard);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (terminal_guard, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (terminal_guard) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (terminal_guard);
   sqlite3_stmt *claim = NULL;
   const gchar *claim_sql = expected->scope ==
       WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
@@ -40319,10 +40470,84 @@ wyl_policy_store_offline_restore_release (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
     rc = WYRELOG_E_POLICY;
   sqlite3_finalize (journal);
+  terminal_guard = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "DELETE FROM main.fact_offline_restore_terminal_guard WHERE operation_uuid=?;",
+            &terminal_guard);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (terminal_guard, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (terminal_guard) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (terminal_guard);
   rc = offline_restore_finish_mutation (store, &fence, rc,
           rc == WYRELOG_E_OK);
   if (rc == WYRELOG_E_OK)
     *out_result = WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED;
+  return rc;
+}
+
+void
+wyl_policy_offline_restore_receipt_free (WylPolicyOfflineRestoreReceipt *receipt)
+{
+  if (receipt == NULL)
+    return;
+  g_free (receipt->operation_uuid);
+  g_free (receipt->tenant_id);
+  g_free (receipt->selected_graph_id);
+  g_free (receipt->terminal_state);
+  g_free (receipt);
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_receipt_lookup (wyl_policy_store_t *store,
+    const gchar *operation_uuid,
+    WylPolicyOfflineRestoreReceipt **out_receipt)
+{
+  if (out_receipt != NULL)
+    *out_receipt = NULL;
+  if (store == NULL || operation_uuid == NULL || out_receipt == NULL)
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = policy_store_terminal_gate (store);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "SELECT tenant_id,scope,selected_graph_id,manifest_sha256,"
+            "final_revision,terminal_state,(SELECT count(*) FROM "
+            "main.fact_offline_restore_terminal_history h WHERE "
+            "h.operation_uuid=fact_offline_restore_receipts.operation_uuid) "
+            "FROM main.fact_offline_restore_receipts WHERE operation_uuid=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, operation_uuid);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const guint8 *digest = sqlite3_column_blob (stmt, 3);
+    if (sqlite3_column_bytes (stmt, 3) != 32 || digest == NULL) {
+      rc = WYRELOG_E_POLICY;
+    } else {
+      WylPolicyOfflineRestoreReceipt *receipt = g_new0
+            (WylPolicyOfflineRestoreReceipt, 1);
+      receipt->operation_uuid = g_strdup (operation_uuid);
+      receipt->tenant_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+      receipt->scope = g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+              "tenant") == 0 ? WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT
+          : WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH;
+      if (sqlite3_column_type (stmt, 2) != SQLITE_NULL)
+        receipt->selected_graph_id = g_strdup
+              ((const gchar *) sqlite3_column_text (stmt, 2));
+      memcpy (receipt->manifest_sha256, digest, 32);
+      receipt->final_revision = (guint64) sqlite3_column_int64 (stmt, 4);
+      receipt->graph_count = (guint) sqlite3_column_int (stmt, 6);
+      receipt->terminal_state = g_strdup
+            ((const gchar *) sqlite3_column_text (stmt, 5));
+      *out_receipt = receipt;
+    }
+  } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
 }
 
@@ -43787,6 +44012,205 @@ restore_promotion_final_matches (sqlite3 *db,
          matches ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+/* Called inside the selected-promotion publication transaction, after all
+ * policy and lifecycle postconditions have been proven. Preserve the
+ * replacement evidence before removing its live reservation and journal. */
+static wyrelog_error_t
+offline_restore_commit_terminalize_locked (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected)
+{
+  WylPolicyOfflineRestoreRecord *current = NULL;
+  wyrelog_error_t rc = offline_restore_load_locked (store,
+          expected->operation_uuid, &current);
+  if (rc == WYRELOG_E_OK
+      && !offline_restore_record_equal (current, expected))
+    rc = WYRELOG_E_CONFLICT;
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_offline_restore_journal_decode (current->journal_blob,
+            &journal);
+  if (rc == WYRELOG_E_OK
+      && (journal.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !journal.lifecycle_handoff_complete
+      || journal.revision != expected->revision
+      || journal.scope != (WylFactOfflineRestoreScope) expected->scope
+      || g_strcmp0 (journal.operation_uuid, expected->operation_uuid) != 0
+      || g_strcmp0 (journal.tenant_id, expected->tenant_id) != 0
+      || g_strcmp0 (journal.selected_graph_id,
+      expected->selected_graph_id) != 0
+      || journal.graphs == NULL || journal.graphs->len != expected->graph_count))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_offline_restore_record_free (current);
+
+  const gchar *replacement_table = expected->scope ==
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "main.fact_tenant_restore_replacements" :
+      "main.fact_graph_restore_replacements";
+  g_autofree gchar *verify_sql = g_strdup_printf (
+    "SELECT count(*) FROM %s r JOIN main.fact_graph_provisioning p "
+    "ON p.op_uuid=r.replacement_uuid AND p.tenant_id=r.tenant_id AND "
+    "p.graph_id=r.graph_id AND p.phase='active' JOIN main.fact_graphs g "
+    "ON g.tenant_id=r.tenant_id AND g.graph_id=r.graph_id AND "
+    "g.lifecycle_state='active' AND g.sealed=0 WHERE "
+    "r.restore_operation_uuid=? AND r.phase='verified';", replacement_table);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, verify_sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, expected->operation_uuid);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  gboolean terminal_rows_match = step == SQLITE_ROW
+      && (guint) sqlite3_column_int (stmt, 0) == expected->graph_count;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && !terminal_rows_match)
+    rc = step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+
+  const gchar *history_select = expected->scope ==
+      WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+      "INSERT INTO main.fact_offline_restore_terminal_history "
+      "SELECT restore_operation_uuid,tenant_id,'tenant',graph_id,replacement_uuid,"
+      "old_provisioning_uuid,store_uuid,tenant_lifecycle_generation,"
+      "tenant_reconciliation_generation,graph_lifecycle_generation,"
+      "graph_reconciliation_generation,journal_revision,companion_basename,"
+      "phase,0,created_at,updated_at FROM main.fact_tenant_restore_replacements "
+      "WHERE restore_operation_uuid=? AND phase='verified';" :
+      "INSERT INTO main.fact_offline_restore_terminal_history "
+      "SELECT restore_operation_uuid,tenant_id,'graph',graph_id,replacement_uuid,"
+      "old_provisioning_uuid,store_uuid,tenant_lifecycle_generation,"
+      "tenant_reconciliation_generation,graph_lifecycle_generation,"
+      "graph_reconciliation_generation,journal_revision,companion_basename,"
+      "phase,attempt,created_at,updated_at FROM main.fact_graph_restore_replacements "
+      "WHERE restore_operation_uuid=? AND phase='verified';";
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, history_select, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  if (rc == WYRELOG_E_OK
+      && (guint) sqlite3_changes (store->db) != expected->graph_count)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (stmt);
+
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "INSERT INTO main.fact_offline_restore_receipts(operation_uuid,tenant_id,"
+            "scope,selected_graph_id,manifest_sha256,final_revision,terminal_state,"
+            "completed_at) VALUES(?,?,?,?,?,?,'committed',unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, expected->tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, expected->scope ==
+            WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ? "tenant" : "graph");
+  if (rc == WYRELOG_E_OK && expected->selected_graph_id != NULL
+      && bind_text (stmt, 4, expected->selected_graph_id) != WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && expected->selected_graph_id == NULL
+      && sqlite3_bind_null (stmt, 4) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (stmt, 5, expected->manifest_sha256, 32,
+      SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6, expected->revision) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "INSERT INTO main.fact_offline_restore_terminal_guard(operation_uuid) VALUES(?);",
+            &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, expected->operation_uuid);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+
+  if (rc == WYRELOG_E_OK) {
+    g_autofree gchar *delete_sql = g_strdup_printf
+          ("DELETE FROM %s WHERE restore_operation_uuid=?;", replacement_table);
+    stmt = NULL;
+    rc = prepare_stmt (store->db, delete_sql, &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, expected->operation_uuid);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE) {
+      rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    }
+    if (rc == WYRELOG_E_OK
+        && (guint) sqlite3_changes (store->db) != expected->graph_count)
+      rc = WYRELOG_E_POLICY;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK) {
+    stmt = NULL;
+    const gchar *claim_sql = expected->scope ==
+        WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT ?
+        "DELETE FROM main.fact_offline_restore_tenant_claims WHERE operation_uuid=?;" :
+        "DELETE FROM main.fact_offline_restore_graph_claims WHERE operation_uuid=?;";
+    rc = prepare_stmt (store->db, claim_sql, &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, expected->operation_uuid);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK) {
+    stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "DELETE FROM main.fact_offline_restore_journals WHERE operation_uuid=? AND revision=?;",
+            &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, expected->operation_uuid);
+    if (rc == WYRELOG_E_OK
+        && sqlite3_bind_int64 (stmt, 2, expected->revision) != SQLITE_OK)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_CONFLICT;
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK) {
+    stmt = NULL;
+    rc = prepare_stmt (store->db,
+            "DELETE FROM main.fact_offline_restore_terminal_guard WHERE operation_uuid=?;",
+            &stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (stmt, 1, expected->operation_uuid);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    sqlite3_finalize (stmt);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_offline_restore_commit_terminalize (wyl_policy_store_t *store,
+    const WylPolicyOfflineRestoreRecord *expected_terminal)
+{
+  if (store == NULL || !offline_restore_record_valid (expected_terminal))
+    return WYRELOG_E_INVALID;
+  WylPolicyStoreCoordinatorFence fence = WYL_POLICY_STORE_COORDINATOR_FENCE_INIT;
+  wyrelog_error_t rc = wyl_policy_store_coordinator_fence_acquire (store,
+          &fence);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_publication_transaction_begin (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_coordinator_fence_clear (&fence);
+    return rc;
+  }
+  rc = offline_restore_commit_terminalize_locked (store, expected_terminal);
+  return offline_restore_finish_mutation (store, &fence, rc,
+             rc == WYRELOG_E_OK);
+}
+
 static WylPolicyGraphRestoreReplacementRecord
 tenant_promotion_graph_row (const WylFactOfflineRestoreJournal *journal,
     const WylFactOfflineRestoreJournalGraph *graph, gchar *basename)
@@ -44496,6 +44920,8 @@ wyl_policy_store_graph_restore_selected_promote_with_effect
             "graph_id=:graph;", row);
   if (matched && rc == WYRELOG_E_OK)
     rc = restore_promotion_final_matches (store->db, row, &final_record);
+  if (matched && rc == WYRELOG_E_OK)
+    rc = offline_restore_commit_terminalize_locked (store, &final_record);
   wyl_policy_graph_restore_replacement_record_free (row);
   wyl_policy_offline_restore_record_free (stored);
   gboolean changed = matched && rc == WYRELOG_E_OK;

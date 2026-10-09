@@ -163,6 +163,12 @@ encrypted_abrupt_exit (void)
   g_assert_cmpint (open_encrypted_store (store_path, key_path, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  /* Exercise the one-table upgrade path used by stores created before
+   * terminal receipts existed. */
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+      "DROP TABLE fact_offline_restore_receipts;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
@@ -189,6 +195,39 @@ encrypted_abrupt_exit (void)
   }
   g_clear_pointer (&store, wyl_policy_store_close);
   remove_test_directory (directory);
+}
+
+static void
+offline_restore_schema_migration_rejects_other_partial_shapes (void)
+{
+  for (guint malformed_receipt = 0; malformed_receipt < 2;
+      malformed_receipt++) {
+    g_autoptr (GError) error = NULL;
+    g_autofree gchar *directory = g_dir_make_tmp
+          ("wyl-restore-schema-shape-XXXXXX", &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (directory);
+    g_autofree gchar *store_path = g_build_filename (directory,
+            "policy.store", NULL);
+    g_autofree gchar *key_path = g_build_filename (directory,
+            "policy.key", NULL);
+    g_assert_true (write_policy_key (key_path));
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (open_encrypted_store (store_path, key_path, &store), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_OK);
+    const gchar *corruption = malformed_receipt
+        ? "DROP TABLE fact_offline_restore_receipts;"
+        "CREATE TABLE fact_offline_restore_receipts(operation_uuid TEXT);"
+        : "DROP TABLE fact_offline_restore_graph_claims;";
+    g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+        corruption, NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+        WYRELOG_E_POLICY);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    remove_test_directory (directory);
+  }
 }
 #endif
 
@@ -1034,6 +1073,20 @@ encrypted_publication_and_reopen (void)
   g_auto (WylFactOfflineRestoreJournal) released = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
         (store, OP_A, &released), ==, WYRELOG_E_NOT_FOUND);
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+        (store, OP_A, &receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  g_assert_cmpstr (receipt->terminal_state, ==, "aborted");
+  g_assert_cmpstr (receipt->tenant_id, ==, "tenant-a");
+  g_assert_cmpuint (receipt->final_revision, ==, 2);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  g_auto (WylFactOfflineRestoreJournal) reused_uuid = { 0 };
+  init_journal (&reused_uuid, OP_A);
+  g_auto (WylFactOfflineRestoreJournal) reused_result = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_create
+        (store, &reused_uuid, &result, &reused_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT);
   g_auto (WylFactOfflineRestoreJournal) unpublished = { 0 };
   init_journal (&unpublished, OP_B);
   g_auto (WylFactOfflineRestoreJournal) unpublished_result = { 0 };
@@ -1333,6 +1386,8 @@ main (int argc, char **argv)
       rollback_tamper_and_concurrency);
   g_test_add_func ("/fact/offline-restore-journal-store/encrypted-publication",
       encrypted_publication_and_reopen);
+  g_test_add_func ("/fact/offline-restore-journal-store/migration-partial-shape",
+      offline_restore_schema_migration_rejects_other_partial_shapes);
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact/offline-restore-journal-store/encrypted-abrupt-exit",
       encrypted_abrupt_exit);

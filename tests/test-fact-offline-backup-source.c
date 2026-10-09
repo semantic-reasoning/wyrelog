@@ -6,6 +6,8 @@
 #endif
 #include "test-exit-status.h"
 
+#include <libsoup/soup.h>
+
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -40,6 +42,11 @@
 #include "wyrelog/fact/store-open-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/wyl-engine-private.h"
+#include "wyrelog/client.h"
+#include "wyrelog/daemon/delta.h"
+#include "wyrelog/daemon/http.h"
+#include "wyrelog/wyl-common-private.h"
+#include "wyrelog/wyl-handle-private.h"
 
 typedef struct
 {
@@ -1950,6 +1957,173 @@ typedef struct
   guint publication_callbacks;
 } SessionFixture;
 
+typedef struct
+{
+  SoupServer *server;
+  GMainLoop *loop;
+} RestoreHttpServer;
+
+static gpointer
+restore_http_server_thread (gpointer data)
+{
+  RestoreHttpServer *http = data;
+  g_main_loop_run (http->loop);
+  return NULL;
+}
+
+static wyrelog_error_t
+grant_restore_http_authority (WylHandle *handle)
+{
+  static const gchar *const permissions[] = {
+    "wr.tenant.manage", "wr.graph.manage", "wr.datalog.query",
+  };
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++) {
+    wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
+            "restore-http-admin", permissions[i], WYL_TENANT_DEFAULT);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_policy_store_set_permission_state (store, "restore-http-admin",
+            permissions[i], WYL_TENANT_DEFAULT, "armed");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  wyrelog_error_t rc = wyl_policy_store_set_session_state (store,
+          WYL_TENANT_DEFAULT, "active");
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_set_session_state (store, "tenant-a", "active");
+  return rc == WYRELOG_E_OK ? wyl_handle_reload_engine_pair (handle) : rc;
+}
+
+static gboolean restore_http_post_for_tenant (SoupSession *session,
+    const gchar *base_url, const gchar *token, const gchar *operation,
+    const gchar *query_tenant, const gchar *body, guint *out_status,
+    gchar **out_body);
+
+static gboolean
+restore_http_post (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *operation, const gchar *body,
+    guint *out_status, gchar **out_body)
+{
+  return restore_http_post_for_tenant (session, base_url, token, operation,
+             "__wr_default", body, out_status, out_body);
+}
+
+static gboolean
+restore_http_post_for_tenant (SoupSession *session, const gchar *base_url,
+    const gchar *token, const gchar *operation, const gchar *query_tenant,
+    const gchar *body, guint *out_status, gchar **out_body)
+{
+  g_autofree gchar *trimmed_base_url = g_strdup (base_url);
+  while (g_str_has_suffix (trimmed_base_url, "/"))
+    trimmed_base_url[strlen (trimmed_base_url) - 1] = '\0';
+  g_autofree gchar *url = g_strdup_printf (
+    "%s/facts/restore/%s?tenant=%s&"
+    "guard_timestamp=123&guard_loc_class=trusted&guard_risk=29",
+    trimmed_base_url, operation, query_tenant);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", url);
+  if (message == NULL)
+    return FALSE;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", token);
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+      "Authorization", authorization);
+  g_autoptr (GBytes) request = g_bytes_new (body, strlen (body));
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) response = soup_session_send_and_read (session, message,
+          NULL, &error);
+  if (response == NULL)
+    return FALSE;
+  gsize length = 0;
+  const gchar *data = g_bytes_get_data (response, &length);
+  *out_status = soup_message_get_status (message);
+  *out_body = g_strndup (data, length);
+  return TRUE;
+}
+
+static gboolean
+restore_http_post_and_drop_response (const gchar *base_url,
+    const gchar *token, const gchar *operation, const gchar *body)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GUri) uri = g_uri_parse (base_url, G_URI_FLAGS_NONE, &error);
+  if (uri == NULL || error != NULL)
+    return FALSE;
+  const gchar *host = g_uri_get_host (uri);
+  gint port = g_uri_get_port (uri);
+  if (host == NULL || port <= 0 || port > G_MAXUINT16)
+    return FALSE;
+  g_autoptr (GSocketClient) socket_client = g_socket_client_new ();
+  g_autoptr (GSocketConnection) connection =
+      g_socket_client_connect_to_host (socket_client, host, (guint16) port,
+          NULL, &error);
+  if (connection == NULL || error != NULL)
+    return FALSE;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s", token);
+  g_autofree gchar *request = g_strdup_printf (
+    "POST /facts/restore/%s?tenant=__wr_default&guard_timestamp=123&"
+    "guard_loc_class=trusted&guard_risk=29 HTTP/1.1\r\n"
+    "Host: %s:%d\r\nAuthorization: %s\r\n"
+    "Content-Type: application/json\r\nConnection: close\r\n"
+    "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+    operation, host, port, authorization, strlen (body), body);
+  GOutputStream *output = g_io_stream_get_output_stream
+        (G_IO_STREAM (connection));
+  gsize written = 0;
+  if (!g_output_stream_write_all (output, request, strlen (request), &written,
+      NULL, &error) || written != strlen (request))
+    return FALSE;
+  /* Finish the request but keep the read side open and unread while the
+   * daemon commits and writes its response. Closing afterward discards it. */
+  if (!g_socket_shutdown (g_socket_connection_get_socket (connection), FALSE,
+      TRUE, &error))
+    return FALSE;
+  gchar debug_response[2048] = { 0 };
+  gssize debug_length = g_input_stream_read
+        (g_io_stream_get_input_stream (G_IO_STREAM (connection)), debug_response,
+          sizeof debug_response - 1, NULL, &error);
+  g_test_message ("dropped HTTP response debug (%" G_GSSIZE_FORMAT "): %s",
+      debug_length, debug_response);
+  return g_io_stream_close (G_IO_STREAM (connection), NULL, &error);
+}
+
+static guint64
+restore_http_revision (const gchar *body)
+{
+  const gchar *field = strstr (body, "\"revision\":");
+  g_assert_nonnull (field);
+  field += strlen ("\"revision\":");
+  return g_ascii_strtoull (field, NULL, 10);
+}
+
+static gchar *restore_http_request_body_for_scope (const gchar *scope,
+    const gchar *tenant, const gchar *graph, const gchar *bundle_path,
+    const gchar *digest, const gchar *uuid, guint64 revision,
+    gboolean confirmed);
+
+static gchar *
+restore_http_request_body (const gchar *bundle_path, const gchar *digest,
+    const gchar *uuid, guint64 revision, gboolean confirmed)
+{
+  return restore_http_request_body_for_scope ("tenant", "tenant-a", "",
+             bundle_path, digest, uuid, revision, confirmed);
+}
+
+static gchar *
+restore_http_request_body_for_scope (const gchar *scope, const gchar *tenant,
+    const gchar *graph, const gchar *bundle_path, const gchar *digest,
+    const gchar *uuid, guint64 revision, gboolean confirmed)
+{
+  return g_strdup_printf (
+    "{\"scope\":\"%s\",\"tenant_id\":\"%s\","
+    "\"graph_id\":\"%s\",\"bundle_path\":\"%s\","
+    "\"trusted_manifest_sha256\":\"%s\",\"operation_uuid\":\"%s\","
+    "\"expected_revision\":\"%" G_GUINT64_FORMAT "\","
+    "\"confirmed\":\"%s\"}", scope, tenant, graph, bundle_path, digest,
+    uuid != NULL ? uuid : "", revision, confirmed ? "true" : "false");
+}
+
 static wyrelog_error_t
 session_build_engine (const WylFactGraphKey *key, WylEngine **out_engine,
     gpointer data)
@@ -2323,15 +2497,19 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
       && (selected_graph != NULL || g_str_equal (mode, "graph-scope"));
   const gchar *journal_mode = g_str_has_prefix (mode, "coordinator/")
       ? mode + strlen ("coordinator/") : mode;
-  create_restore_journal_for_manifest_internal (&f->fixture,
-      f->capture.manifest, graph_scope ? WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
-      : WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
-      graph_scope ? selected_graph != NULL ? selected_graph : "alpha" : NULL, session_operation,
-      !(g_str_equal (mode, "main-absence-violated")
-      || g_str_equal (mode, "stage-only")
-      || g_str_equal (mode, "coordinator/expected-main-absent")
-      || g_str_equal (mode, "orphan-provision")), journal_mode);
-  if (selected_graph != NULL && !g_str_has_prefix (mode, "coordinator"))
+  if (!g_str_equal (mode, "daemon-http")) {
+    create_restore_journal_for_manifest_internal (&f->fixture,
+        f->capture.manifest, graph_scope ? WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        : WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
+        graph_scope ? selected_graph != NULL ? selected_graph : "alpha" : NULL,
+        session_operation,
+        !(g_str_equal (mode, "main-absence-violated")
+        || g_str_equal (mode, "stage-only")
+        || g_str_equal (mode, "coordinator/expected-main-absent")
+        || g_str_equal (mode, "orphan-provision")), journal_mode);
+  }
+  if (selected_graph != NULL && !g_str_has_prefix (mode, "coordinator")
+      && !g_str_equal (mode, "daemon-http"))
     session_stage_one_graph (f, g_str_equal (selected_graph, "alpha") ? 0 : 1);
   else if (g_str_equal (mode, "partial-staging"))
     session_stage_one_graph (f, 0);
@@ -2339,6 +2517,7 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
     session_stage_one_graph (f, 0);
     session_stage_one_graph (f, 1);
   }else if (!graph_scope && !g_str_equal (mode, "unstaged")
+      && !g_str_equal (mode, "daemon-http")
       && !g_str_has_prefix (mode, "coordinator")) {
     WylFactOfflineRestoreJournal staged = { 0 };
     g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
@@ -2363,7 +2542,8 @@ session_fixture_init_selected (SessionFixture *f, const gchar *mode,
     wyl_fact_offline_restore_journal_clear (&journal);
     wyl_fact_offline_restore_journal_clear (&committed);
   }
-  f->journal_before = session_journal_bytes (f);
+  if (!g_str_equal (mode, "daemon-http"))
+    f->journal_before = session_journal_bytes (f);
   f->cancel = g_cancellable_new ();
   session_assert_authority (f, FALSE);
 }
@@ -2390,6 +2570,415 @@ session_fixture_clear (SessionFixture *f)
   g_clear_pointer (&f->journal_before, g_bytes_unref);
   destination_capture_clear (&f->capture);
   fixture_clear (&f->fixture);
+}
+
+static void
+test_restore_daemon_http_lifecycle (void)
+{
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+#else
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "daemon-http");
+  for (guint i = 0; i < G_N_ELEMENTS (f.snapshots); i++)
+    g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+  const gchar *graph_ids[] = { "alpha", "zeta" };
+  g_clear_pointer (&f.fixture.runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+
+  g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+          "policy.db", NULL);
+  WylHandleOpenOptions open_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+    .fact_root = f.fixture.root,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&open_options, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (grant_restore_http_authority (handle), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeManager *daemon_runtime_manager =
+      wyl_handle_fact_graph_runtime_ref (handle);
+  g_assert_nonnull (daemon_runtime_manager);
+  for (guint i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graph_ids[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (daemon_runtime_manager, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  wyl_fact_graph_runtime_manager_unref (daemon_runtime_manager);
+
+  WylDaemonOptions daemon_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .fact_root = f.fixture.root,
+  };
+  WylDaemonRuntime daemon_runtime = { .handle = handle };
+  g_assert_cmpint (wyl_daemon_start_delta_callbacks (handle, &daemon_runtime),
+      ==, WYRELOG_E_OK);
+  RestoreHttpServer http = { 0 };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  http.server = wyl_daemon_start_http_server_with_runtime (&daemon_options,
+          handle, &daemon_runtime, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (http.server);
+  GThread *thread = g_thread_new ("restore-http-lifecycle",
+          restore_http_server_thread, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  g_assert_nonnull (uris);
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (WylClient) client = NULL;
+  g_assert_cmpint (wyl_client_new (base_url, &client), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_login_skip_mfa (client, "restore-http-admin"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state
+        (wyl_handle_get_policy_store (handle), "restore-http-admin",
+      "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_autofree gchar *token = wyl_client_dup_access_token (client);
+  g_assert_nonnull (token);
+
+  g_autoptr (GError) file_error = NULL;
+  g_autofree gchar *bundle_path = g_dir_make_tmp
+        ("wyl-restore-daemon-bundle-XXXXXX", &file_error);
+  g_assert_no_error (file_error);
+  g_assert_nonnull (bundle_path);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (f.capture.manifest,
+          &manifest_length);
+  g_autofree gchar *manifest_path = g_build_filename (bundle_path,
+          "manifest", NULL);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < f.capture.completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (f.capture.completed_graphs, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id, &component),
+        ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_path, name, NULL);
+    GBytes *artifact = g_ptr_array_index (f.capture.artifact_bytes, i);
+    gsize artifact_length = 0;
+    const gchar *artifact_data = g_bytes_get_data (artifact, &artifact_length);
+    g_assert_true (g_file_set_contents (path, artifact_data, artifact_length,
+        &file_error));
+    g_assert_no_error (file_error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  g_autofree gchar *digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
+          manifest_data, manifest_length);
+  const gchar *operation_uuid = "01890c10-2e3f-7000-8000-000000000010";
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *response = NULL;
+  g_autofree gchar *body = restore_http_request_body (bundle_path, digest,
+          "", 0, FALSE);
+  g_autofree gchar *wrong_digest = g_strdup (digest);
+  wrong_digest[0] = wrong_digest[0] == '0' ? '1' : '0';
+  g_clear_pointer (&body, g_free);
+  body = restore_http_request_body (bundle_path, wrong_digest, operation_uuid,
+          0, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "begin", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 403);
+  g_assert_nonnull (strstr (response, "restore_refused"));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body ("", "", operation_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 404);
+
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body (bundle_path, digest, "", 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "dry-run", body,
+      &status, &response));
+  if (status != 200)
+    g_test_message ("restore dry-run returned HTTP %u: %s", status, response);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"eligible\""));
+  g_assert_nonnull (strstr (response, "\"publication_eligible\":false"));
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_object (&client);
+  g_clear_object (&handle);
+  remove_tree (bundle_path);
+  session_fixture_clear (&f);
+#endif
+}
+
+static void
+test_restore_daemon_http_graph_lifecycle (void)
+{
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+#else
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "daemon-http");
+  for (guint i = 0; i < G_N_ELEMENTS (f.snapshots); i++)
+    g_clear_pointer (&f.snapshots[i], wyl_fact_graph_snapshot_unref);
+  g_clear_pointer (&f.fixture.runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_clear_pointer (&f.fixture.policy, wyl_policy_store_close);
+
+  g_autofree gchar *policy_path = g_build_filename (f.fixture.root,
+          "policy.db", NULL);
+  WylHandleOpenOptions open_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+    .fact_root = f.fixture.root,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&open_options, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (grant_restore_http_authority (handle), ==, WYRELOG_E_OK);
+  WylFactGraphRuntimeManager *runtime =
+      wyl_handle_fact_graph_runtime_ref (handle);
+  g_assert_nonnull (runtime);
+  const gchar *graph_ids[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graph_ids[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission (runtime,
+        &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  wyl_fact_graph_runtime_manager_unref (runtime);
+
+  WylDaemonOptions daemon_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .fact_root = f.fixture.root,
+  };
+  WylDaemonRuntime daemon_runtime = { .handle = handle };
+  g_assert_cmpint (wyl_daemon_start_delta_callbacks (handle, &daemon_runtime),
+      ==, WYRELOG_E_OK);
+  RestoreHttpServer http = { 0 };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  http.server = wyl_daemon_start_http_server_with_runtime (&daemon_options,
+          handle, &daemon_runtime, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (http.server);
+  GThread *thread = g_thread_new ("restore-http-graph-lifecycle",
+          restore_http_server_thread, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  g_assert_nonnull (uris);
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (WylClient) client = NULL;
+  g_assert_cmpint (wyl_client_new (base_url, &client), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_login_skip_mfa (client, "restore-http-admin"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state
+        (wyl_handle_get_policy_store (handle), "restore-http-admin",
+      "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_autofree gchar *token = wyl_client_dup_access_token (client);
+  g_assert_nonnull (token);
+
+  g_autoptr (GError) file_error = NULL;
+  g_autofree gchar *bundle_path = g_dir_make_tmp
+        ("wyl-restore-daemon-graph-XXXXXX", &file_error);
+  g_assert_no_error (file_error);
+  g_assert_nonnull (bundle_path);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (f.capture.manifest,
+          &manifest_length);
+  g_autofree gchar *manifest_path = g_build_filename (bundle_path,
+          "manifest", NULL);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < f.capture.completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (f.capture.completed_graphs, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id, &component),
+        ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_path, name, NULL);
+    GBytes *artifact = g_ptr_array_index (f.capture.artifact_bytes, i);
+    gsize artifact_length = 0;
+    const gchar *artifact_data = g_bytes_get_data (artifact, &artifact_length);
+    g_assert_true (g_file_set_contents (path, artifact_data, artifact_length,
+        &file_error));
+    g_assert_no_error (file_error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  g_autofree gchar *digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
+          manifest_data, manifest_length);
+  const gchar *operation_uuid = "01890c10-2e3f-7000-8000-000000000021";
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *response = NULL;
+  g_autofree gchar *body = restore_http_request_body_for_scope ("graph",
+          "tenant-a", "alpha", bundle_path, digest, "", 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "dry-run", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"eligible\""));
+
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (policy,
+      "restore-http-admin", "wr.graph.manage", WYL_TENANT_DEFAULT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (policy,
+      "restore-http-admin", "wr.graph.manage", "tenant-a"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (policy,
+      "restore-http-admin", "wr.graph.manage", "tenant-a", "armed"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_path, digest, "", 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "dry-run", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 403);
+  g_assert_nonnull (strstr (response, "restore_denied"));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  g_assert_cmpint (wyl_policy_store_revoke_direct_permission (policy,
+      "restore-http-admin", "wr.graph.manage", "tenant-a"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (policy,
+      "restore-http-admin", "wr.graph.manage", WYL_TENANT_DEFAULT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_permission_state (policy,
+      "restore-http-admin", "wr.graph.manage", WYL_TENANT_DEFAULT,
+      "armed"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_path, digest, operation_uuid, 0, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "begin", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  guint64 revision = restore_http_revision (response);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_path, digest, operation_uuid, revision, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "prepare", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  revision = restore_http_revision (response);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_path, digest, operation_uuid, revision - 1, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "commit", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 409);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          "", "", operation_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  if (status != 200)
+    g_test_message ("graph terminal status returned HTTP %u: %s", status,
+        response);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, revision);
+  g_assert_nonnull (strstr (response, "\"state\":\"prepared\""));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_path, digest, operation_uuid, revision, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "commit", body,
+      &status, &response));
+  if (status != 200)
+    g_test_message ("graph commit returned HTTP %u: %s", status, response);
+  g_assert_cmpuint (status, ==, 200);
+  revision = restore_http_revision (response);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  gboolean committed = FALSE;
+  for (guint i = 0; i < 32 && !committed; i++) {
+    body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+            "", "", operation_uuid, revision, FALSE);
+    g_assert_true (restore_http_post (session, base_url, token, "resume", body,
+        &status, &response));
+    g_assert_cmpuint (status, ==, 200);
+    committed = strstr (response, "\"state\":\"committed\"") != NULL;
+    if (!committed)
+      revision = restore_http_revision (response);
+    g_clear_pointer (&body, g_free);
+    if (!committed)
+      g_clear_pointer (&response, g_free);
+  }
+  g_assert_true (committed);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          "", "", operation_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  if (status != 200)
+    g_test_message ("graph committed status returned HTTP %u: %s", status,
+        response);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"committed\""));
+  g_assert_nonnull (strstr (response, "\"graph_count\":1"));
+  sqlite3_stmt *terminal_rows = NULL;
+  sqlite3 *policy_db = wyl_policy_store_get_db
+        (wyl_handle_get_policy_store (handle));
+  g_assert_cmpint (sqlite3_prepare_v2 (policy_db,
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals WHERE operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims WHERE operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_graph_restore_replacements WHERE restore_operation_uuid=?1),"
+      "(SELECT count(*) FROM fact_offline_restore_receipts WHERE operation_uuid=?1 AND terminal_state='committed'),"
+      "(SELECT count(*) FROM fact_offline_restore_terminal_history WHERE operation_uuid=?1);",
+      -1, &terminal_rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (terminal_rows, 1, operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (terminal_rows), ==, SQLITE_ROW);
+  for (gint i = 0; i < 3; i++)
+    g_assert_cmpint (sqlite3_column_int (terminal_rows, i), ==, 0);
+  g_assert_cmpint (sqlite3_column_int (terminal_rows, 3), ==, 1);
+  g_assert_cmpint (sqlite3_column_int (terminal_rows, 4), ==, 1);
+  sqlite3_finalize (terminal_rows);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-b", "alpha",
+          "", "", operation_uuid, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 404);
+  g_assert_null (strstr (response, "tenant-a"));
+  g_assert_null (strstr (response, "alpha"));
+  g_assert_null (strstr (response, "committed"));
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_object (&client);
+  g_clear_object (&handle);
+  remove_tree (bundle_path);
+  session_fixture_clear (&f);
+#endif
 }
 
 static gchar *
@@ -4853,21 +5442,29 @@ test_tenant_commit_resume_v5 (gconstpointer data)
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
   revision = f.committed.revision;
   wyl_fact_offline_restore_journal_clear (&f.committed);
-  g_clear_pointer (&f.fixture.runtime, wyl_fact_graph_runtime_manager_unref);
-  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&f.fixture.runtime),
-      ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
-        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
-      session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (f.committed.revision, ==, revision);
-  wyl_fact_offline_restore_journal_clear (&f.committed);
   g_assert_cmpint (wyl_fact_offline_restore_tenant_selected_cleanup_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
       session_operation, revision, 0, &f.committed), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (f.committed.revision, ==, revision);
   g_assert_cmpuint (f.committed.version, ==,
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION);
+  g_assert_cmpuint (f.committed.revision, ==, revision);
   wyl_fact_offline_restore_journal_clear (&f.committed);
+  WylPolicyOfflineRestoreReceipt *terminal_receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup
+        (f.fixture.policy, session_operation, &terminal_receipt), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (terminal_receipt->terminal_state, ==, "committed");
+  g_assert_cmpuint (terminal_receipt->final_revision, ==, revision);
+  g_assert_cmpuint (terminal_receipt->graph_count, ==, 2);
+  wyl_policy_offline_restore_receipt_free (terminal_receipt);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_resume_one
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_selected_cleanup_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &f.committed), ==,
+      WYRELOG_E_NOT_FOUND);
   for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
     WylFactGraphKey key = { 0 };
     WylFactGraphRuntimeStatus status = { 0 };
@@ -4893,7 +5490,6 @@ test_tenant_commit_resume_v5 (gconstpointer data)
     }
   }
   g_clear_pointer (&f.journal_before, g_bytes_unref);
-  f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
 }
 
@@ -10971,24 +11567,11 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   g_assert_cmpint(wyl_fact_offline_restore_graph_commit_promote_run(
         fixture.policy, fixture.root, fixture.runtime,
         operation_uuid, finalized.revision, 0, &promoted),
-      ==, WYRELOG_E_POLICY);
+      ==, WYRELOG_E_NOT_FOUND);
   g_auto(WylFactOfflineRestoreJournal) promotion_resume = {0};
-  g_assert_cmpint(g_remove(main_path), ==, 0);
   g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
         fixture.policy, fixture.root, fixture.runtime, &finalized,
-        0, &promotion_resume),
-      ==, WYRELOG_E_POLICY);
-  g_assert_cmpint(link(replacement_path, main_path), ==, 0);
-  g_assert_cmpint(g_remove(replacement_path), ==, 0);
-  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
-        fixture.policy, fixture.root, fixture.runtime, &finalized,
-        0, &promotion_resume),
-      ==, WYRELOG_E_POLICY);
-  g_assert_cmpint(link(main_path, replacement_path), ==, 0);
-  g_assert_cmpint(wyl_fact_offline_restore_graph_selected_promote_resume_run(
-        fixture.policy, fixture.root, fixture.runtime, &finalized,
-        0, &promotion_resume),
-      ==, WYRELOG_E_OK);
+        0, &promotion_resume), ==, WYRELOG_E_OK);
   g_assert_cmpuint(promotion_resume.revision, ==, finalized.revision + 2);
   WylFactGraphKey restored_key = {0};
   g_assert_cmpint(wyl_fact_graph_key_init(&restored_key, "tenant-a", "alpha"),
@@ -11040,56 +11623,21 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   wyl_fact_graph_runtime_status_clear(&sibling_before);
   wyl_fact_graph_runtime_status_clear(&sibling_after);
   wyl_fact_graph_key_clear(&sibling_after_key);
-  g_autoptr(GBytes) finalized_blob = NULL;
-  g_assert_cmpint(
-    wyl_fact_offline_restore_journal_encode(&finalized, &finalized_blob), ==,
-    WYRELOG_E_OK);
-  WylPolicyOfflineRestoreRecord finalized_record = {
-    .operation_uuid = finalized.operation_uuid,
-    .tenant_id = finalized.tenant_id,
-    .scope = WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH,
-    .selected_graph_id = finalized.selected_graph_id,
-    .revision = finalized.revision,
-    .graph_count = 1,
-    .journal_blob = finalized_blob,
-  };
-  memcpy(finalized_record.manifest_sha256, finalized.manifest_sha256, 32);
-  WylPolicyOfflineRestoreRecord *published_proof = NULL;
-  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
-        fixture.policy, &finalized_record, &published_proof),
-      ==, WYRELOG_E_OK);
-  g_assert_nonnull(published_proof);
-  g_assert_cmpuint(published_proof->revision, ==, finalized.revision + 2);
-  g_auto(WylFactOfflineRestoreJournal) published_proof_journal = {0};
-  g_assert_cmpint(wyl_fact_offline_restore_journal_decode(
-        published_proof->journal_blob, &published_proof_journal),
-      ==, WYRELOG_E_OK);
-  g_assert_cmpint(published_proof_journal.version, ==,
-      WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION);
-  g_assert_true(published_proof_journal.policy_generation_published);
-  g_assert_true(published_proof_journal.lifecycle_handoff_complete);
-  WylPolicyOfflineRestoreRecord wrong_manifest = finalized_record;
-  wrong_manifest.manifest_sha256[0] ^= 0x01;
-  WylPolicyOfflineRestoreRecord *wrong_manifest_proof = NULL;
-  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
-        fixture.policy, &wrong_manifest, &wrong_manifest_proof),
-      ==, WYRELOG_E_POLICY);
-  g_assert_null(wrong_manifest_proof);
-  WylPolicyOfflineRestoreRecord wrong_revision = finalized_record;
-  wrong_revision.revision++;
-  WylPolicyOfflineRestoreRecord *wrong_proof = NULL;
-  g_assert_cmpint(wyl_policy_store_graph_restore_published_prove(
-        fixture.policy, &wrong_revision, &wrong_proof),
-      ==, WYRELOG_E_POLICY);
-  g_assert_null(wrong_proof);
-  wyl_policy_offline_restore_record_free(published_proof);
+  WylPolicyOfflineRestoreReceipt *terminal_receipt = NULL;
+  g_assert_cmpint(wyl_policy_store_offline_restore_receipt_lookup(
+        fixture.policy, operation_uuid, &terminal_receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull(terminal_receipt);
+  g_assert_cmpstr(terminal_receipt->terminal_state, ==, "committed");
+  g_assert_cmpuint(terminal_receipt->final_revision, ==,
+      finalized.revision + 2);
+  g_assert_cmpuint(terminal_receipt->graph_count, ==, 1);
+  wyl_policy_offline_restore_receipt_free(terminal_receipt);
   promotion_result = WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
   g_assert_cmpint(wyl_policy_store_graph_restore_selected_promote_with_effect(
         fixture.policy, promote_row, promote_journal,
         selected_promotion_shape_for_test, &reject_shape,
         &promotion_result),
-      ==, WYRELOG_E_OK);
-  g_assert_cmpint(promotion_result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_STALE);
+      ==, WYRELOG_E_NOT_FOUND);
   wyl_policy_offline_restore_record_free(promote_journal);
   wyl_policy_graph_restore_replacement_record_free(promote_row);
   sqlite3 *reopened_db = wyl_policy_store_get_db(fixture.policy);
@@ -11107,12 +11655,12 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   g_assert_cmpint(
     sqlite3_bind_text(stale_claim, 1, operation_uuid, -1, SQLITE_TRANSIENT),
     ==, SQLITE_OK);
-  g_assert_cmpint(sqlite3_step(stale_claim), ==, SQLITE_DONE);
+  g_assert_cmpint(sqlite3_step(stale_claim), ==, SQLITE_CONSTRAINT_TRIGGER);
   sqlite3_finalize(stale_claim);
-  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
-      WYRELOG_E_POLICY);
   g_assert_cmpint(sqlite3_exec(reopened_db, "ROLLBACK;", NULL, NULL, NULL), ==,
       SQLITE_OK);
+  g_assert_cmpint(wyl_policy_store_create_schema(fixture.policy), ==,
+      WYRELOG_E_OK);
 #endif
   if (schema_transition) {
     /* The backup selects schema version 1 while version 2 is active.  Only
@@ -11816,6 +12364,13 @@ main (int argc, char **argv)
       test_restore_dry_run_read_only);
   g_test_add_func ("/fact-offline-backup-source/restore-begin-authenticated",
       test_restore_begin_authenticated);
+#ifdef WYL_HAS_DAEMON_HTTP
+  g_test_add_func ("/fact-offline-backup-source/restore-daemon-http-lifecycle",
+      test_restore_daemon_http_lifecycle);
+  g_test_add_func
+    ("/fact-offline-backup-source/restore-daemon-http-graph-lifecycle",
+      test_restore_daemon_http_graph_lifecycle);
+#endif
   g_test_add_func ("/fact-offline-backup-source/restore-staging-coordinator",
       test_tenant_restore_staging_coordinator);
   g_test_add_func

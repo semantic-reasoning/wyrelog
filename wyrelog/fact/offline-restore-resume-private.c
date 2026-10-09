@@ -469,10 +469,16 @@ wyrelog_error_t wyl_fact_offline_restore_graph_selected_promote_resume_run(
     finalized->revision, drain_timeout_us, &promoted);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (promoted.revision != finalized->revision + 2)
+  if (promoted.revision != finalized->revision + 2
+      || promoted.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_PUBLISHED_VERSION
+      || promoted.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+      || !promoted.lifecycle_handoff_complete)
     return WYRELOG_E_POLICY;
-  return wyl_fact_offline_restore_graph_commit_published_prove_terminal(
-    policy, fact_root, runtime, finalized, drain_timeout_us, out_committed);
+  /* Promotion stores a terminal receipt and removes the live journal in the
+   * same transaction. Return the journal state proven by that promotion. */
+  *out_committed = promoted;
+  memset (&promoted, 0, sizeof promoted);
+  return WYRELOG_E_OK;
 #endif
 }
 
@@ -895,9 +901,22 @@ wyl_fact_offline_restore_tenant_commit_resume_one
                (policy, fact_root, runtime, operation_uuid,
                  selected->graph_id, expected_revision, drain_timeout_us,
                  out_committed);
-    return wyl_fact_offline_restore_tenant_promote_run (policy, fact_root,
-               runtime, operation_uuid, expected_revision, drain_timeout_us,
-               out_committed);
+    g_auto (WylFactOfflineRestoreJournal) promoted = { 0 };
+    rc = wyl_fact_offline_restore_tenant_promote_run (policy, fact_root,
+            runtime, operation_uuid, expected_revision, drain_timeout_us,
+            &promoted);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (promoted.version !=
+        WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION
+        || promoted.decision != WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        || !promoted.lifecycle_handoff_complete)
+      return WYRELOG_E_POLICY;
+    /* Promotion proves the committed handoff; terminal filesystem proof runs
+     * after this stage and retains the live journal until then. */
+    *out_committed = promoted;
+    memset (&promoted, 0, sizeof promoted);
+    return WYRELOG_E_OK;
   }
   if (journal.version ==
       WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION) {

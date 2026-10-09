@@ -2800,6 +2800,29 @@ wyl_handle_fact_resource_recorder (WylHandle *self)
       ? self->fact_resource_recorder : NULL;
 }
 
+WylFactGraphRuntimeManager *
+wyl_handle_fact_graph_runtime_ref (WylHandle *self)
+{
+  return self != NULL && WYL_IS_HANDLE (self)
+         && self->fact_graph_runtime != NULL
+      ? wyl_fact_graph_runtime_manager_ref (self->fact_graph_runtime) : NULL;
+}
+
+WylFactReplayScheduler *
+wyl_handle_fact_replay_scheduler_ref (WylHandle *self)
+{
+  return self != NULL && WYL_IS_HANDLE (self)
+         && self->fact_replay_scheduler != NULL
+      ? wyl_fact_replay_scheduler_ref (self->fact_replay_scheduler) : NULL;
+}
+
+WylFactRootWriterLease *
+wyl_handle_fact_root_writer_lease_for_internal_use (WylHandle *self)
+{
+  return self != NULL && WYL_IS_HANDLE (self)
+      ? self->fact_root_writer_lease : NULL;
+}
+
 typedef struct
 {
   GMutex mutex;

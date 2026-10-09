@@ -1,15 +1,15 @@
 {
-  "aggregate": "586daeb0111dd0f1d683857592effc3f272c3bb2121aa0a302abac84c00df072",
+  "aggregate": "a9fb4131401fb4e6b933aa4c2f2b687172aa836bc86970e78be825e3e576745c",
   "directives": {
-    "count": 550,
-    "sha256": "3e10bb70d97c0b003ccf0306ed346c1d1ae72afe63dc9b8076fd17e9b86f90a7"
+    "count": 558,
+    "sha256": "24464415323c69a858c289419155fd465de5413fe7386795310750e168e02e5f"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
     "ensure_policy_permission_exists": "9a12fb60ed4158b55ac94f121d3eed9817d0c851069cf1d9aa36287952906d5f",
     "ensure_policy_role_exists": "a690de0724da0211c1f115f0921869df174a712e45ddc95e65ee0549b5ccbb6d",
     "facts_quota_handler": "9ff4f019e3007fcf028c21f19e292a2d877c2110fd66291b514c05c3807a181f",
-    "facts_route_handler": "0fbc66485c560d42b45c80152c1d752a142641f9a7e9e1806c6785087fdeb90e",
+    "facts_route_handler": "3625bef409e256a96408e25bd78b8f01a82c23013c97d5d8edcbafe7989e4837",
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
     "graph_seal_handler": "d05b56e29f9dd57178b0615664422bbfa5e095428beb1f608ed97769b88d99b5",
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
@@ -68,8 +68,8 @@
     "wyl_daemon_policy_write_record_primary": "fd545eb0aa25baaf932a661079bf4cf18a04b49204f08d86f45db4ebbfae4e30"
   },
   "owners": {
-    "count": 17,
-    "sha256": "f248824bfb39d3609949aef4dbc22450c6e96a5c325b778861f58e2e5eaea9b2"
+    "count": 18,
+    "sha256": "ade5c198456317599630f88585a06498dfa444108cf57e2a693401a13545758b"
   },
   "profile": "raw-conditional-declarations-v1",
   "rationale": "Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.",

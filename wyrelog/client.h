@@ -34,6 +34,73 @@ typedef struct _WylClientFactAppendResult WylClientFactAppendResult;
 
 typedef enum
 {
+  WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT = 1,
+  WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH,
+} WylClientFactRestoreScope;
+
+typedef enum
+{
+  WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN = 0,
+  WYL_CLIENT_FACT_RESTORE_STATE_ELIGIBLE,
+  WYL_CLIENT_FACT_RESTORE_STATE_PREPARING,
+  WYL_CLIENT_FACT_RESTORE_STATE_PREPARED,
+  WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING,
+  WYL_CLIENT_FACT_RESTORE_STATE_ACTIVE,
+  WYL_CLIENT_FACT_RESTORE_STATE_ABORTING,
+  WYL_CLIENT_FACT_RESTORE_STATE_ABORTED,
+  /* The durable commit journal reached its terminal publication state. */
+  WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED,
+} WylClientFactRestoreState;
+
+typedef enum
+{
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE = 0,
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED,
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT,
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS,
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_CANCELLED,
+  WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN,
+} WylClientFactRestoreOutcome;
+
+/* Shared input for the typed restore calls. Bundle operations require a
+ * daemon-readable owner-only bundle_path and trusted_manifest_sha256 supplied
+ * separately by the caller from an independently trusted source. The daemon
+ * checks the digest against the exact bundle manifest bytes. Mutations require
+ * operation_uuid; all but BEGIN also require expected_revision. Confirmation
+ * is required for BEGIN and COMMIT. Query guard fields are required by the
+ * daemon authorization layer. */
+typedef struct
+{
+  WylClientFactRestoreScope scope;
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *bundle_path;
+  const gchar *trusted_manifest_sha256;
+  const gchar *operation_uuid;
+  guint64 expected_revision;
+  gboolean confirmed;
+  gint64 guard_timestamp;
+  const gchar *guard_loc_class;
+  gint64 guard_risk;
+} WylClientFactRestoreRequest;
+
+typedef struct
+{
+  WylClientFactRestoreScope scope;
+  WylClientFactRestoreOutcome outcome;
+  WylClientFactRestoreState state;
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *operation_uuid;
+  guint64 revision;
+  guint64 graph_count;
+  gboolean publication_eligible;
+  gchar *state_name;
+  gchar *failure_code;
+} WylClientFactRestoreResult;
+
+typedef enum
+{
   WYL_CLIENT_FACT_STATUS_UNKNOWN = 0,
   WYL_CLIENT_FACT_STATUS_READY,
   WYL_CLIENT_FACT_STATUS_DEGRADED,
@@ -688,6 +755,32 @@ wyrelog_error_t wyl_client_fact_schema_status (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactSchemaStatus * out_status);
 void wyl_client_fact_schema_status_clear (WylClientFactSchemaStatus * status);
+void wyl_client_fact_restore_result_clear (WylClientFactRestoreResult *result);
+/* Typed offline restore operations. A transport failure during a mutation
+ * reports OUTCOME_UNKNOWN with the same operation UUID so callers can query
+ * status/resume; callers must not generate a new UUID to retry it. The result
+ * must be zero-initialized or cleared before each call. */
+wyrelog_error_t wyl_client_fact_restore_dry_run (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_begin (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_prepare (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_commit (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_resume (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_abort (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
+wyrelog_error_t wyl_client_fact_restore_status (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result);
 void wyl_client_graph_clear (WylClientGraph * value);
 void wyl_client_graph_list_clear (WylClientGraphList * value);
 /* Lists the tenant's fact graphs.  The client must carry credentials bound to

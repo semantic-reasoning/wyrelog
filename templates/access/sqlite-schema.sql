@@ -2053,6 +2053,51 @@ CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (
     FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),
     FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (
+    operation_uuid TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),
+    selected_graph_id TEXT,
+    manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),
+    final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),
+    completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),
+    CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (
+    operation_uuid TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),
+    graph_id TEXT NOT NULL,
+    replacement_uuid TEXT NOT NULL,
+    old_provisioning_uuid TEXT NOT NULL,
+    store_uuid TEXT NOT NULL,
+    tenant_lifecycle_generation INTEGER NOT NULL,
+    tenant_reconciliation_generation INTEGER NOT NULL,
+    graph_lifecycle_generation INTEGER NOT NULL,
+    graph_reconciliation_generation INTEGER NOT NULL,
+    journal_revision INTEGER NOT NULL,
+    companion_basename TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(operation_uuid,graph_id),
+    FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid)
+        DEFERRABLE INITIALLY DEFERRED
+);
+CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_guard (
+    operation_uuid TEXT PRIMARY KEY,
+    FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid)
+);
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_update
+BEFORE UPDATE ON fact_offline_restore_terminal_history BEGIN
+    SELECT RAISE(ABORT,'restore terminal history is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_delete
+BEFORE DELETE ON fact_offline_restore_terminal_history BEGIN
+    SELECT RAISE(ABORT,'restore terminal history is permanent');
+END;
 CREATE INDEX IF NOT EXISTS idx_fact_offline_restore_journals_unfinished
     ON fact_offline_restore_journals(tenant_id,operation_uuid);
 CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_update_guard
@@ -2061,7 +2106,7 @@ BEFORE UPDATE ON fact_offline_restore_journals BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS fact_offline_restore_journal_delete_guard
 BEFORE DELETE ON fact_offline_restore_journals
-WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid)
+WHEN EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_graph_restore_replacements WHERE restore_operation_uuid=OLD.operation_uuid) OR EXISTS(SELECT 1 FROM fact_tenant_restore_replacements WHERE restore_operation_uuid=OLD.operation_uuid) OR NOT EXISTS(SELECT 1 FROM fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r ON r.operation_uuid=g.operation_uuid WHERE g.operation_uuid=OLD.operation_uuid AND r.terminal_state IN ('aborted','committed'))
 BEGIN SELECT RAISE(ABORT,'restore claims remain'); END;
 CREATE TRIGGER IF NOT EXISTS fact_offline_restore_tenant_claim_insert_guard
 BEFORE INSERT ON fact_offline_restore_tenant_claims BEGIN
@@ -2080,4 +2125,4 @@ BEFORE UPDATE ON fact_offline_restore_graph_claims BEGIN SELECT RAISE(ABORT,'res
 CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements (restore_operation_uuid TEXT PRIMARY KEY,replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) AND substr(replacement_uuid,15,1)='7' AND substr(replacement_uuid,20,1) GLOB '[89ab]' AND length(replace(replacement_uuid,'-',''))=32 AND replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),store_uuid TEXT NOT NULL,tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),journal_revision INTEGER NOT NULL CHECK(journal_revision>0),companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified')) ,attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),created_at INTEGER NOT NULL CHECK(created_at>=0),updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));
 CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_insert_guard BEFORE INSERT ON fact_graph_restore_replacements BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_journals AS j JOIN fact_offline_restore_graph_claims AS c ON c.operation_uuid=j.operation_uuid WHERE j.operation_uuid=NEW.restore_operation_uuid AND j.scope='graph' AND j.tenant_id=NEW.tenant_id AND j.selected_graph_id=NEW.graph_id AND j.revision=NEW.journal_revision AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id) OR NOT EXISTS(SELECT 1 FROM tenants AS t WHERE t.tenant_id=NEW.tenant_id AND t.lifecycle_state='sealed' AND t.lifecycle_generation=NEW.tenant_lifecycle_generation AND t.reconciliation_generation=NEW.tenant_reconciliation_generation) OR NOT EXISTS(SELECT 1 FROM fact_graphs AS g WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND g.lifecycle_state='sealed' AND g.store_uuid=NEW.store_uuid AND g.lifecycle_generation=NEW.graph_lifecycle_generation AND g.reconciliation_generation=NEW.graph_reconciliation_generation) THEN RAISE(ABORT,'restore replacement authority mismatch') END; END;
 CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard BEFORE UPDATE ON fact_graph_restore_replacements BEGIN SELECT CASE WHEN NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid OR NEW.replacement_uuid IS NOT OLD.replacement_uuid OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid OR NEW.store_uuid IS NOT OLD.store_uuid OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation OR NEW.journal_revision IS NOT OLD.journal_revision OR NEW.companion_basename IS NOT OLD.companion_basename OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) OR NOT (NEW.phase=OLD.phase OR (OLD.phase='reserved' AND NEW.phase='companion_synced') OR (OLD.phase='companion_synced' AND NEW.phase='verified')) THEN RAISE(ABORT,'invalid restore replacement update') END; END;
-CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard BEFORE DELETE ON fact_graph_restore_replacements BEGIN SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;
+CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_delete_guard BEFORE DELETE ON fact_graph_restore_replacements WHEN NOT EXISTS(SELECT 1 FROM fact_offline_restore_terminal_guard g JOIN fact_offline_restore_receipts r ON r.operation_uuid=g.operation_uuid JOIN fact_offline_restore_terminal_history h ON h.operation_uuid=g.operation_uuid AND h.graph_id=OLD.graph_id AND h.replacement_uuid=OLD.replacement_uuid WHERE g.operation_uuid=OLD.restore_operation_uuid AND r.terminal_state='committed' AND r.scope='graph') BEGIN SELECT RAISE(ABORT,'restore replacement is recovery owned'); END;

@@ -1968,6 +1968,8 @@ static void client_fact_attach_auth (SoupMessage *message,
 static gchar *client_fact_guard_query (const gchar *tenant,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     const gchar *session_token);
+static gboolean client_guard_args_are_valid (gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk);
 
 static gboolean
 parse_simple_json_uint64_member (const gchar *data, gsize size,
@@ -2127,6 +2129,209 @@ wyl_client_fact_quota_configure (WylClient *client, const gchar *tenant,
 {
   return client_fact_quota_request (client, tenant, TRUE, hard_limit,
              guard_timestamp, guard_loc_class, guard_risk, out_status);
+}
+
+void
+wyl_client_fact_restore_result_clear (WylClientFactRestoreResult *result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->tenant_id, g_free);
+  g_clear_pointer (&result->graph_id, g_free);
+  g_clear_pointer (&result->operation_uuid, g_free);
+  g_clear_pointer (&result->state_name, g_free);
+  g_clear_pointer (&result->failure_code, g_free);
+  *result = (WylClientFactRestoreResult) { 0 };
+}
+
+static wyrelog_error_t
+client_fact_restore_request (WylClient *client,
+    const WylClientFactRestoreRequest *request, const gchar *operation,
+    gboolean mutation, WylClientFactRestoreResult *out_result)
+{
+  if (out_result == NULL || request == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_restore_result_clear (out_result);
+  gboolean graph_scope = request->scope == WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH;
+  if ((!graph_scope && request->scope != WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT)
+      || request->tenant_id == NULL || request->tenant_id[0] == '\0'
+      || (graph_scope ? request->graph_id == NULL || request->graph_id[0] == '\0'
+          : request->graph_id != NULL)
+      || !client_guard_args_are_valid (request->guard_timestamp,
+      request->guard_loc_class, request->guard_risk))
+    return WYRELOG_E_INVALID;
+  gboolean needs_op = g_strcmp0 (operation, "dry-run") != 0;
+  gboolean bundle_op = g_strcmp0 (operation, "status") != 0
+      && g_strcmp0 (operation, "abort") != 0
+      && g_strcmp0 (operation, "resume") != 0;
+  wyl_id_t parsed_id = WYL_ID_NIL;
+  if ((needs_op && (request->operation_uuid == NULL
+      || strlen (request->operation_uuid) != WYL_ID_STRING_LEN
+      || wyl_id_parse (request->operation_uuid, &parsed_id) != WYRELOG_E_OK))
+      || (bundle_op && (request->bundle_path == NULL
+      || request->bundle_path[0] == '\0'
+      || request->trusted_manifest_sha256 == NULL
+      || strlen (request->trusted_manifest_sha256) != 64))
+      || ((g_strcmp0 (operation, "prepare") == 0
+      || g_strcmp0 (operation, "commit") == 0
+      || g_strcmp0 (operation, "resume") == 0
+      || g_strcmp0 (operation, "abort") == 0)
+      && request->expected_revision == 0))
+    return WYRELOG_E_INVALID;
+  if (bundle_op)
+    for (const gchar *p = request->trusted_manifest_sha256; *p != '\0'; p++)
+      if (!g_ascii_isxdigit (*p))
+        return WYRELOG_E_INVALID;
+  const gchar *auth_tenant = graph_scope ? request->tenant_id : "__wr_default";
+  g_autofree gchar *base_url = NULL, *access_token = NULL, *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, auth_tenant,
+          request->guard_timestamp, request->guard_loc_class, request->guard_risk,
+          &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard = client_fact_guard_query (auth_tenant,
+          request->guard_timestamp, request->guard_loc_class, request->guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *uri = g_strdup_printf ("%s/facts/restore/%s?%s",
+          base_url, operation, guard);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  GString *json = g_string_new ("{");
+  g_string_append (json, "\"scope\":");
+  append_json_string (json, graph_scope ? "graph" : "tenant");
+  g_string_append (json, ",\"tenant_id\":"); append_json_string (json, request->tenant_id);
+  g_string_append (json, ",\"graph_id\":");
+  append_json_string (json, request->graph_id != NULL ? request->graph_id : "");
+  g_string_append (json, ",\"bundle_path\":");
+  append_json_string (json, bundle_op ? request->bundle_path : "");
+  g_string_append (json, ",\"trusted_manifest_sha256\":");
+  append_json_string (json, bundle_op ? request->trusted_manifest_sha256 : "");
+  g_string_append (json, ",\"operation_uuid\":");
+  append_json_string (json, needs_op ? request->operation_uuid : "");
+  g_string_append (json, ",\"expected_revision\":");
+  g_autofree gchar *revision_text = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          request->expected_revision);
+  append_json_string (json, revision_text);
+  g_string_append (json, ",\"confirmed\":");
+  append_json_string (json, request->confirmed ? "true" : "false");
+  g_string_append_c (json, '}');
+  gsize request_len = json->len;
+  g_autoptr (GBytes) request_body = g_bytes_new_take (g_string_free (json, FALSE),
+          request_len);
+  soup_message_set_request_body_from_bytes (message, "application/json", request_body);
+  g_autoptr (GBytes) response = NULL;
+  rc = client_send_fact_message (client, message, &response);
+  if (rc != WYRELOG_E_OK) {
+    const gchar *code = client->last_error_code;
+    if (out_result != NULL && mutation && rc == WYRELOG_E_IO) {
+      out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN;
+      out_result->operation_uuid = g_strdup (request->operation_uuid);
+      out_result->revision = request->expected_revision;
+    }
+    if (g_strcmp0 (code, "restore_conflict") == 0
+        || g_strcmp0 (code, "restore_stale_revision") == 0) {
+      out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT;
+      return WYRELOG_E_CONFLICT;
+    }
+    if (g_strcmp0 (code, "restore_in_progress") == 0) {
+      out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS;
+      return WYRELOG_E_BUSY;
+    }
+    if (g_strcmp0 (code, "restore_cancelled") == 0) {
+      out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_CANCELLED;
+      return WYRELOG_E_CANCELLED;
+    }
+    if (g_strcmp0 (code, "restore_refused") == 0) {
+      out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED;
+      return WYRELOG_E_POLICY;
+    }
+    if (g_strcmp0 (code, "restore_not_found") == 0)
+      return WYRELOG_E_NOT_FOUND;
+    return rc;
+  }
+  gsize response_len = 0;
+  const gchar *data = g_bytes_get_data (response, &response_len);
+  rc = wyl_client_fact_restore_result_decode (data, response_len, out_result);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (out_result->scope != request->scope
+      || g_strcmp0 (out_result->tenant_id, request->tenant_id) != 0
+      || g_strcmp0 (out_result->graph_id, request->graph_id) != 0
+      || (needs_op && g_strcmp0 (out_result->operation_uuid,
+      request->operation_uuid) != 0)) {
+    wyl_client_fact_restore_result_clear (out_result);
+    return WYRELOG_E_IO;
+  }
+  if (out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARING
+      || out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING
+      || out_result->state == WYL_CLIENT_FACT_RESTORE_STATE_ABORTING)
+    out_result->outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_dry_run (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "dry-run", FALSE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_begin (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "begin", TRUE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_prepare (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "prepare", TRUE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_commit (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "commit", TRUE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_resume (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "resume", TRUE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_abort (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "abort", TRUE,
+             out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_restore_status (WylClient *client,
+    const WylClientFactRestoreRequest *request,
+    WylClientFactRestoreResult *out_result)
+{
+  return client_fact_restore_request (client, request, "status", FALSE,
+             out_result);
 }
 
 void

@@ -16,6 +16,9 @@
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/graph-seal-private.h"
+#include "wyrelog/fact/offline-backup-manifest-private.h"
+#include "wyrelog/fact/offline-restore-journal-private.h"
+#include "wyrelog/fact/offline-restore-journal-store-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -231,6 +234,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
 {
   static const gchar *const perms[] = {
     "wr.graph.manage",
+    "wr.tenant.manage",
     "wr.schema.manage",
     "wr.fact.write",
     "wr.fact.read",
@@ -1377,7 +1381,169 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_autofree gchar *deny_token = wyl_client_dup_access_token (deny_client);
   if (admin_token == NULL || deny_token == NULL)
     return 13;
+  /* Restore requests are decoded strictly before authentication and never
+   * disclose a caller supplied bundle path in the refusal response. */
+  guint restore_status = 0;
+  g_autofree gchar *restore_body = NULL;
+  const gchar *restore_request =
+      "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"\",\"bundle_path\":\"/private/backup\","
+      "\"trusted_manifest_sha256\":\"00000000000000000000000000000000"
+      "00000000000000000000000000000000\",\"operation_uuid\":\"\","
+      "\"expected_revision\":\"0\",\"confirmed\":\"false\"}";
+  gint restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/dry-run", "tenant=__wr_default&" FACT_GUARD,
+          NULL, restore_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 401
+      || strstr (restore_body, "restore_auth_required") == NULL
+      || strstr (restore_body, "/private/backup") != NULL)
+    return 1301;
+  g_clear_pointer (&restore_body, g_free);
+  g_autofree gchar *scope_mismatch_query = g_strdup_printf ("tenant=tenant-b&%s",
+          FACT_GUARD);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/dry-run", scope_mismatch_query, admin_token,
+          restore_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 403
+      || strstr (restore_body, "tenant_denied") == NULL
+      || strstr (restore_body, "/private/backup") != NULL)
+    return 1302;
+  g_clear_pointer (&restore_body, g_free);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/dry-run", "tenant=__wr_default&" FACT_GUARD,
+          admin_token,
+          "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\","
+          "\"graph_id\":\"\",\"bundle_path\":\"/private/backup\","
+          "\"trusted_manifest_sha256\":\"00000000000000000000000000000000"
+          "00000000000000000000000000000000\",\"operation_uuid\":\"\","
+          "\"expected_revision\":\"0\",\"confirmed\":\"false\","
+          "\"unexpected\":\"field\"}", &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 400
+      || strstr (restore_body, "/private/backup") != NULL)
+    return 1303;
+  g_clear_pointer (&restore_body, g_free);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  /* Seed a durable terminal abort receipt to exercise HTTP status and abort
+   * retries after the original terminal response has been lost. */
+  WylFactOfflineBackupManifest restore_manifest = { 0 };
+  GBytes *restore_manifest_bytes = NULL;
+  GPtrArray *restore_targets = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_fact_offline_restore_target_graph_free);
+  WylFactOfflineRestoreTargetGraph *restore_target = g_new0
+        (WylFactOfflineRestoreTargetGraph, 1);
+  restore_target->graph_id = g_strdup ("restore-status-graph");
+  restore_target->lifecycle_generation = 1;
+  restore_target->reconciliation_generation = 1;
+  restore_target->expected_main_absent = TRUE;
+  g_ptr_array_add (restore_targets, restore_target);
+  if (wyl_fact_offline_backup_manifest_init (&restore_manifest,
+      WYL_TENANT_DEFAULT, 1) != WYRELOG_E_OK)
+    return 1304;
+  WylFactOfflineBackupArtifact restore_artifact = {
+    .graph_id = "restore-status-graph",
+    .store_uuid = "restore-status-store",
+    .format_version = 1,
+    .path_encoding_version = 1,
+    .schema_digest = "restore-status-schema",
+    .logical_bytes = 1,
+    .physical_bytes = 4096,
+    .checksum = "sha256:restore-status",
+  };
+  if (wyl_fact_offline_backup_manifest_add (&restore_manifest,
+      &restore_artifact) != WYRELOG_E_OK
+      || wyl_fact_offline_backup_manifest_encode (&restore_manifest,
+      &restore_manifest_bytes) != WYRELOG_E_OK)
+    return 1305;
+  WylFactOfflineRestoreJournal terminal_journal = { 0 };
+  const gchar *terminal_uuid = "01890c10-2e3f-7000-8000-000000000009";
+  if (wyl_fact_offline_restore_journal_init (&terminal_journal,
+      restore_manifest_bytes, terminal_uuid,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, 1, 1, restore_targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED) != WYRELOG_E_OK)
+    return 1306;
+  WylFactOfflineRestoreStoreResult terminal_result = 0;
+  WylFactOfflineRestoreJournal terminal_committed = { 0 };
+  wyrelog_error_t terminal_create_rc =
+      wyl_fact_offline_restore_journal_store_create (store, &terminal_journal,
+          &terminal_result, &terminal_committed);
+  if (terminal_create_rc != WYRELOG_E_OK) {
+    g_printerr ("terminal restore test journal setup failed: %d\n",
+        terminal_create_rc);
+    return 1307;
+  }
+  WylFactOfflineRestoreJournal rollback = { 0 };
+  GBytes *rollback_bytes = NULL;
+  if (wyl_fact_offline_restore_journal_encode (&terminal_committed,
+      &rollback_bytes) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_decode (rollback_bytes,
+      &rollback) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_decide (&rollback,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK) != WYRELOG_E_OK)
+    return 1307;
+  WylFactOfflineRestoreJournal rollback_committed = { 0 };
+  if (wyl_fact_offline_restore_journal_store_cas (store, 1, &rollback,
+      &terminal_result, &rollback_committed) != WYRELOG_E_OK
+      || wyl_fact_offline_restore_journal_store_release (store, 2,
+      terminal_uuid, &terminal_result) != WYRELOG_E_OK)
+    return 1307;
+  g_autofree gchar *terminal_status_request = g_strdup_printf (
+    "{\"scope\":\"tenant\",\"tenant_id\":\"%s\","
+    "\"graph_id\":\"\",\"bundle_path\":\"\","
+    "\"trusted_manifest_sha256\":\"\",\"operation_uuid\":\"%s\","
+    "\"expected_revision\":\"0\",\"confirmed\":\"false\"}",
+    WYL_TENANT_DEFAULT, terminal_uuid);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/status", "tenant=__wr_default&" FACT_GUARD,
+          admin_token, terminal_status_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 200
+      || strstr (restore_body, "\"state\":\"aborted\"") == NULL) {
+    g_printerr ("restore status route failed rc=%d status=%u body=%s\n",
+        restore_rc, restore_status, restore_body != NULL ? restore_body : "(null)");
+    return 1308;
+  }
+  g_clear_pointer (&restore_body, g_free);
+  g_autofree gchar *abort_retry_request = g_strdup_printf (
+    "{\"scope\":\"tenant\",\"tenant_id\":\"%s\","
+    "\"graph_id\":\"\",\"bundle_path\":\"\","
+    "\"trusted_manifest_sha256\":\"\",\"operation_uuid\":\"%s\","
+    "\"expected_revision\":\"2\",\"confirmed\":\"false\"}",
+    WYL_TENANT_DEFAULT, terminal_uuid);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/status", "tenant=__wr_default&" FACT_GUARD,
+          admin_token, terminal_status_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 200
+      || strstr (restore_body, "\"state\":\"aborted\"") == NULL)
+    return 1308;
+  g_clear_pointer (&restore_body, g_free);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/abort", "tenant=__wr_default&" FACT_GUARD,
+          admin_token, abort_retry_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 200
+      || strstr (restore_body, "\"state\":\"aborted\"") == NULL)
+    return 1308;
+  g_clear_pointer (&restore_body, g_free);
+  g_autofree gchar *wrong_scope_request = g_strdup_printf (
+    "{\"scope\":\"graph\",\"tenant_id\":\"%s\","
+    "\"graph_id\":\"restore-status-graph\",\"bundle_path\":\"\","
+    "\"trusted_manifest_sha256\":\"\",\"operation_uuid\":\"%s\","
+    "\"expected_revision\":\"0\",\"confirmed\":\"false\"}",
+    WYL_TENANT_DEFAULT, terminal_uuid);
+  restore_rc = send_raw (session, "POST", base_url,
+          "/facts/restore/status", "tenant=__wr_default&" FACT_GUARD,
+          admin_token, wrong_scope_request, &restore_status, &restore_body);
+  if (restore_rc != 0 || restore_status != 404
+      || strstr (restore_body, "aborted") != NULL)
+    return 1309;
+  wyl_fact_offline_restore_journal_clear (&terminal_committed);
+  wyl_fact_offline_restore_journal_clear (&terminal_journal);
+  wyl_fact_offline_restore_journal_clear (&rollback);
+  wyl_fact_offline_restore_journal_clear (&rollback_committed);
+  g_bytes_unref (rollback_bytes);
+  g_bytes_unref (restore_manifest_bytes);
+  g_ptr_array_unref (restore_targets);
+  wyl_fact_offline_backup_manifest_clear (&restore_manifest);
+  g_clear_pointer (&restore_body, g_free);
   gboolean tenant_b_created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-b",
       "tenant-owner", &tenant_b_created)

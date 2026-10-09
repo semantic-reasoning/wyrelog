@@ -41,6 +41,14 @@
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/store-open-private.h"
+#include "wyrelog/fact/offline-backup-bundle-private.h"
+#include "wyrelog/fact/offline-restore-dry-run-private.h"
+#include "wyrelog/fact/offline-restore-begin-private.h"
+#include "wyrelog/fact/offline-restore-prepare-private.h"
+#include "wyrelog/fact/offline-restore-rollback-private.h"
+#include "wyrelog/fact/offline-restore-resume-private.h"
+#include "wyrelog/fact/offline-restore-commit-authority-private.h"
+#include "wyrelog/fact/offline-restore-journal-store-private.h"
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "wyrelog/fact/provisioning-run-private.h"
 #endif
@@ -747,7 +755,8 @@ typedef enum
   X (OPERATION_RECOVER, operation_recover) \
   X (MFA_CONFIRM, mfa_confirm) \
   X (SELF_ARM, self_arm) \
-  X (FACT_QUOTA_CONFIGURE, fact_quota_configure)
+  X (FACT_QUOTA_CONFIGURE, fact_quota_configure) \
+  X (FACT_RESTORE, fact_restore)
 
 typedef enum
 {
@@ -14083,6 +14092,379 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   const gchar *method = soup_server_message_get_method (msg);
+
+  if (path != NULL && g_str_has_prefix (path, "/facts/restore/")) {
+    /* Restore is dispatched here because the /facts prefix handler is shared
+     * with the legacy fact mutation surface. The restore body is a closed
+     * string-only object so duplicate, missing, mistyped and unknown members
+     * all fail in the common strict decoder. */
+    static const WylDaemonHttpStrictJsonField fields[] = {
+      {"scope", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"tenant_id", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"graph_id", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"bundle_path", 4096, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"trusted_manifest_sha256", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"operation_uuid", WYL_ID_STRING_LEN, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"expected_revision", 20, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+      {"confirmed", 5, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    };
+    g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+    if (g_strcmp0 (method, "POST") != 0) {
+      set_json_error (msg, 405, "method_not_allowed");
+      return;
+    }
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 16 * 1024,
+        fields, G_N_ELEMENTS (fields), values)) {
+      set_json_error (msg, 400, "restore_invalid_request");
+      return;
+    }
+    const gchar *operation = path + strlen ("/facts/restore/");
+    gboolean dry_run = g_strcmp0 (operation, "dry-run") == 0;
+    gboolean begin = g_strcmp0 (operation, "begin") == 0;
+    gboolean prepare = g_strcmp0 (operation, "prepare") == 0;
+    gboolean commit = g_strcmp0 (operation, "commit") == 0;
+    gboolean resume = g_strcmp0 (operation, "resume") == 0;
+    gboolean aborting = g_strcmp0 (operation, "abort") == 0;
+    gboolean status = g_strcmp0 (operation, "status") == 0;
+    gboolean graph_scope = g_strcmp0 (values[0], "graph") == 0;
+    wyl_id_t operation_id = WYL_ID_NIL;
+    if ((!dry_run && !begin && !prepare && !commit && !resume && !aborting
+        && !status) || (graph_scope ? values[2][0] == '\0'
+        : g_strcmp0 (values[0], "tenant") != 0 || values[2][0] != '\0')
+        || !wyl_policy_store_tenant_id_is_valid (values[1])
+        || (!status && !aborting && !resume && (values[3][0] == '\0'
+        || strlen (values[4]) != 64))
+        || ((!dry_run) && (strlen (values[5]) != WYL_ID_STRING_LEN
+        || wyl_id_parse (values[5], &operation_id) != WYRELOG_E_OK))
+        || ((begin || commit) && g_strcmp0 (values[7], "true") != 0)
+        || (!begin && !commit && g_strcmp0 (values[7], "false") != 0)) {
+      set_json_error (msg, 400, "restore_invalid_request");
+      return;
+    }
+    guint64 expected_revision = 0;
+    if (values[6][0] != '\0') {
+      errno = 0;
+      gchar *end = NULL;
+      expected_revision = g_ascii_strtoull (values[6], &end, 10);
+      if (errno != 0 || end == values[6] || *end != '\0'
+          || expected_revision >= G_MAXINT64) {
+        set_json_error (msg, 400, "restore_invalid_request");
+        return;
+      }
+    }
+    if ((prepare || commit || resume || aborting)
+        && (values[6][0] == '\0' || expected_revision == 0)) {
+      set_json_error (msg, 400, "restore_invalid_request");
+      return;
+    }
+    /* Restore targets are sealed by definition.  Human bearer tokens cannot
+     * authenticate as that destination tenant, so both restore scopes use the
+     * active control-plane tenant for session authentication.  Graph
+     * authorization is still evaluated against the destination resource. */
+    const gchar *auth_tenant = WYL_TENANT_DEFAULT;
+    if (!query_tenant_matches (msg, query, auth_tenant))
+      return;
+    WylDaemonHttpContext *ctx = user_data;
+    g_autofree gchar *actor = NULL;
+    if (graph_scope) {
+      g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query,
+              auth_tenant);
+      if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
+          "wr.graph.manage", WYL_TENANT_DEFAULT, "restore_auth_required",
+          "restore_invalid_auth", "restore_denied", "restore_auth_failed",
+          &actor))
+        return;
+    } else if (!authorize_guarded_session_action (server, msg, query, ctx,
+        "wr.tenant.manage", WYL_TENANT_DEFAULT, "restore_auth_required",
+        "restore_invalid_auth", "restore_denied", "restore_auth_failed",
+        &actor))
+      return;
+
+    g_auto (WylDaemonPolicyWrite) write = { 0 };
+    wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+            WYL_DAEMON_POLICY_WRITE_OWNER_FACT_RESTORE, &write);
+    WylFactGraphRuntimeManager *runtime = NULL;
+    WylFactReplayScheduler *scheduler = NULL;
+    if (rc == WYRELOG_E_OK) {
+      runtime = wyl_handle_fact_graph_runtime_ref (ctx->handle);
+      scheduler = wyl_handle_fact_replay_scheduler_ref (ctx->handle);
+      if (runtime == NULL || scheduler == NULL || ctx->fact_root == NULL)
+        rc = WYRELOG_E_NOT_FOUND;
+    }
+    WylFactRootWriterLeaseBorrowScope root_lease_scope = { 0 };
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_root_writer_lease_borrow_scope_begin
+            (wyl_handle_fact_root_writer_lease_for_internal_use (ctx->handle),
+              &root_lease_scope);
+    guint8 digest[32] = { 0 };
+    WylFactOfflineBackupBundle *bundle = NULL;
+    if (rc == WYRELOG_E_OK && !status && !aborting && !resume) {
+      if (sodium_hex2bin (digest, sizeof digest, values[4], strlen (values[4]),
+          NULL, NULL, NULL) != 0)
+        rc = WYRELOG_E_INVALID;
+      else
+        rc = wyl_fact_offline_backup_bundle_open (values[3], digest, &bundle);
+    }
+    WylFactOfflineRestoreJournal journal = { 0 };
+    guint response_graph_count = 0;
+    gboolean response_publication_eligible = FALSE;
+    WylFactOfflineRestoreScope scope = graph_scope
+        ? WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH
+        : WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT;
+    if (rc == WYRELOG_E_OK && (status || aborting || prepare || commit || resume))
+      rc = wyl_fact_offline_restore_journal_store_load (write.store,
+              values[5], &journal);
+    if (rc == WYRELOG_E_NOT_FOUND && (status || aborting || resume)) {
+      WylPolicyOfflineRestoreReceipt *receipt = NULL;
+      rc = wyl_policy_store_offline_restore_receipt_lookup (write.store,
+              values[5], &receipt);
+      gboolean exact_scope = receipt != NULL
+          && receipt->scope == (graph_scope
+              ? WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+              : WYL_POLICY_OFFLINE_RESTORE_SCOPE_TENANT)
+          && g_strcmp0 (receipt->tenant_id, values[1]) == 0
+          && g_strcmp0 (receipt->selected_graph_id,
+              graph_scope ? values[2] : NULL) == 0;
+      gboolean terminal_matches_operation = receipt != NULL
+          && (g_strcmp0 (receipt->terminal_state, "committed") == 0
+              ? (status || resume)
+              : g_strcmp0 (receipt->terminal_state, "aborted") == 0
+          && (status || resume || aborting));
+      if (rc == WYRELOG_E_OK && exact_scope && terminal_matches_operation) {
+        if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+          rc = wyl_daemon_policy_write_finish_result (&write, WYRELOG_E_OK);
+        if (rc == WYRELOG_E_OK) {
+          g_autoptr (GString) response = g_string_new ("{\"scope\":");
+          append_json_string (response, graph_scope ? "graph" : "tenant");
+          g_string_append (response, ",\"tenant_id\":");
+          append_json_string (response, values[1]);
+          g_string_append (response, ",\"graph_id\":");
+          if (graph_scope) append_json_string (response, values[2]);
+          else g_string_append (response, "null");
+          g_string_append (response, ",\"operation_uuid\":");
+          append_json_string (response, values[5]);
+          g_string_append_printf (response,
+              ",\"revision\":%" G_GUINT64_FORMAT
+              ",\"graph_count\":%u,\"publication_eligible\":false,\"state\":\"%s\",\"failure_code\":null}",
+              receipt->final_revision, receipt->graph_count,
+              receipt->terminal_state);
+          attach_request_id_header (msg);
+          soup_server_message_set_status (msg, 200, NULL);
+          soup_server_message_set_response (msg, "application/json",
+              SOUP_MEMORY_COPY, response->str, response->len);
+        }
+        wyl_policy_offline_restore_receipt_free (receipt);
+        sodium_memzero (digest, sizeof digest);
+        wyl_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
+        if (runtime != NULL) wyl_fact_graph_runtime_manager_unref (runtime);
+        if (scheduler != NULL) wyl_fact_replay_scheduler_unref (scheduler);
+        return;
+      }
+      wyl_policy_offline_restore_receipt_free (receipt);
+      rc = rc == WYRELOG_E_OK ? WYRELOG_E_NOT_FOUND : rc;
+    }
+    if (rc == WYRELOG_E_OK && (status || aborting || prepare || commit || resume)
+        && (journal.scope != scope || g_strcmp0 (journal.tenant_id, values[1]) != 0
+        || g_strcmp0 (journal.selected_graph_id,
+        graph_scope ? values[2] : NULL) != 0))
+      rc = WYRELOG_E_NOT_FOUND;
+    if (rc == WYRELOG_E_OK && (prepare || commit || resume || aborting)
+        && journal.revision != expected_revision)
+      rc = WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK && (dry_run || begin)) {
+      WylFactOfflineRestoreDryRunReport report = { 0 };
+      rc = wyl_fact_offline_restore_dry_run (write.store, ctx->fact_root,
+              runtime, bundle, scope, graph_scope ? values[2] : NULL, &report);
+      if (rc == WYRELOG_E_OK) {
+        response_graph_count = report.graphs != NULL ? report.graphs->len : 0;
+        response_publication_eligible = report.publication_eligible;
+      }
+      wyl_fact_offline_restore_dry_run_report_clear (&report);
+    }
+    if (rc == WYRELOG_E_OK && begin)
+      rc = wyl_fact_offline_restore_begin_run (write.store, ctx->fact_root,
+              runtime, bundle, scope, graph_scope ? values[2] : NULL, values[5],
+              TRUE, 30 * G_USEC_PER_SEC, &journal);
+    if (journal.graphs != NULL)
+      response_graph_count = journal.graphs->len;
+    if (journal.lifecycle_handoff_complete)
+      response_publication_eligible = TRUE;
+    if (rc == WYRELOG_E_OK && prepare) {
+      wyl_fact_offline_restore_journal_clear (&journal);
+      rc = wyl_fact_offline_restore_prepare_run (write.store, ctx->fact_root,
+              runtime, scheduler, bundle, values[5], expected_revision,
+              30 * G_USEC_PER_SEC, write.cancellable, &journal);
+    }
+    if (rc == WYRELOG_E_OK && commit) {
+      wyl_fact_offline_restore_journal_clear (&journal);
+      rc = graph_scope
+          ? wyl_fact_offline_restore_graph_bind_provisioned_old_run
+            (write.store, ctx->fact_root, runtime, values[5], values[2],
+              expected_revision, 30 * G_USEC_PER_SEC, &journal)
+          : wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+            (write.store, ctx->fact_root, runtime, values[5],
+              expected_revision, 30 * G_USEC_PER_SEC, &journal);
+      if (rc == WYRELOG_E_OK) {
+        guint64 bound_revision = journal.revision;
+        wyl_fact_offline_restore_journal_clear (&journal);
+        rc = graph_scope
+            ? wyl_fact_offline_restore_graph_commit_admit_run (write.store,
+                ctx->fact_root, runtime, scheduler, bundle, values[5],
+                bound_revision, 30 * G_USEC_PER_SEC, write.cancellable,
+                &journal)
+            : wyl_fact_offline_restore_tenant_commit_admit_run (write.store,
+                ctx->fact_root, runtime, scheduler, bundle, values[5],
+                bound_revision, 30 * G_USEC_PER_SEC, write.cancellable,
+                &journal);
+      }
+    }
+    if (rc == WYRELOG_E_OK && resume) {
+      if (!graph_scope) {
+        wyl_fact_offline_restore_journal_clear (&journal);
+        rc = wyl_fact_offline_restore_tenant_commit_resume_one (write.store,
+                ctx->fact_root, runtime, values[5], expected_revision,
+                30 * G_USEC_PER_SEC, &journal);
+        if (rc == WYRELOG_E_OK && journal.version ==
+            WYL_FACT_OFFLINE_RESTORE_JOURNAL_TENANT_PUBLISHED_VERSION)
+          rc = wyl_fact_offline_restore_tenant_selected_cleanup_run
+                (write.store, ctx->fact_root, runtime, values[5],
+                  journal.revision, 30 * G_USEC_PER_SEC, &journal);
+      } else if (journal.version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION) {
+        wyl_fact_offline_restore_journal_clear (&journal);
+        rc = wyl_fact_offline_restore_graph_commit_resume_run (write.store,
+                ctx->fact_root, runtime, values[5], expected_revision,
+                30 * G_USEC_PER_SEC, &journal);
+        if (rc == WYRELOG_E_OK) {
+          guint64 selected_revision = journal.revision;
+          wyl_fact_offline_restore_journal_clear (&journal);
+          rc = wyl_fact_offline_restore_graph_commit_select_resume_run (
+            write.store, ctx->fact_root, runtime, values[5],
+            selected_revision, 30 * G_USEC_PER_SEC, &journal);
+        }
+        if (rc == WYRELOG_E_OK) {
+          WylFactOfflineRestoreJournal finalized = { 0 };
+          rc = wyl_fact_offline_restore_graph_selected_finalize_resume_run (
+            write.store, ctx->fact_root, runtime, &journal,
+            30 * G_USEC_PER_SEC, &finalized);
+          if (rc == WYRELOG_E_OK) {
+            wyl_fact_offline_restore_journal_clear (&journal);
+            rc = wyl_fact_offline_restore_graph_selected_promote_resume_run (
+              write.store, ctx->fact_root, runtime, &finalized,
+              30 * G_USEC_PER_SEC, &journal);
+          }
+          wyl_fact_offline_restore_journal_clear (&finalized);
+        }
+      } else if (journal.version == WYL_FACT_OFFLINE_RESTORE_JOURNAL_SELECTED_VERSION) {
+        WylFactOfflineRestoreJournal finalized = { 0 };
+        WylFactOfflineRestoreJournalGraph *graph = journal.graphs != NULL
+            && journal.graphs->len == 1
+            ? g_ptr_array_index (journal.graphs, 0) : NULL;
+        if (graph != NULL && graph->transition_state
+            == WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_FINALIZED)
+          rc = wyl_fact_offline_restore_graph_commit_finalized_prove_terminal (
+            write.store, ctx->fact_root, runtime, &journal,
+            30 * G_USEC_PER_SEC, &finalized);
+        else
+          rc = wyl_fact_offline_restore_graph_selected_finalize_resume_run (
+            write.store, ctx->fact_root, runtime, &journal,
+            30 * G_USEC_PER_SEC, &finalized);
+        if (rc == WYRELOG_E_OK) {
+          wyl_fact_offline_restore_journal_clear (&journal);
+          rc = wyl_fact_offline_restore_graph_selected_promote_resume_run (
+            write.store, ctx->fact_root, runtime, &finalized,
+            30 * G_USEC_PER_SEC, &journal);
+        }
+        wyl_fact_offline_restore_journal_clear (&finalized);
+      } else {
+        rc = WYRELOG_E_OK;
+      }
+    }
+    if (rc == WYRELOG_E_OK && aborting) {
+      if (journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT)
+        rc = WYRELOG_E_POLICY;
+      else {
+        wyl_fact_offline_restore_journal_clear (&journal);
+        rc = wyl_fact_offline_restore_rollback_recover_run (write.store,
+                ctx->fact_root, runtime, values[5], 30 * G_USEC_PER_SEC, &journal);
+        if (rc == WYRELOG_E_OK)
+          rc = wyl_fact_offline_restore_rollback_release_run (write.store,
+                  ctx->fact_root, runtime, values[5], journal.revision,
+                  30 * G_USEC_PER_SEC);
+      }
+    }
+    /* Some transition primitives use BUSY for both an active worker and a
+     * stale compare-and-swap. Reload once so the wire contract keeps those
+     * cases distinct even when another request won the race after our first
+     * journal read. */
+    if (rc == WYRELOG_E_BUSY && expected_revision != 0
+        && (prepare || commit || resume || aborting)) {
+      WylFactOfflineRestoreJournal latest = { 0 };
+      if (wyl_fact_offline_restore_journal_store_load (write.store, values[5],
+          &latest) == WYRELOG_E_OK && latest.revision != expected_revision)
+        rc = WYRELOG_E_CONFLICT;
+      wyl_fact_offline_restore_journal_clear (&latest);
+    }
+    if (runtime != NULL) wyl_fact_graph_runtime_manager_unref (runtime);
+    if (scheduler != NULL) wyl_fact_replay_scheduler_unref (scheduler);
+    wyl_fact_offline_backup_bundle_free (bundle);
+    wyl_fact_root_writer_lease_borrow_scope_end (&root_lease_scope);
+    if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+      rc = wyl_daemon_policy_write_finish_result (&write, rc);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, rc == WYRELOG_E_CONFLICT ? 409
+          : rc == WYRELOG_E_AUTH || rc == WYRELOG_E_POLICY ? 403
+          : rc == WYRELOG_E_NOT_FOUND ? 404
+          : rc == WYRELOG_E_CANCELLED || rc == WYRELOG_E_BUSY ? 409 : 500,
+          rc == WYRELOG_E_CONFLICT ? "restore_conflict"
+          : rc == WYRELOG_E_BUSY ? "restore_in_progress"
+          : rc == WYRELOG_E_NOT_FOUND ? "restore_not_found"
+          : rc == WYRELOG_E_CANCELLED ? "restore_cancelled"
+          : rc == WYRELOG_E_AUTH || rc == WYRELOG_E_POLICY ? "restore_refused"
+          : "restore_operation_failed");
+      wyl_fact_offline_restore_journal_clear (&journal);
+      sodium_memzero (digest, sizeof digest);
+      return;
+    }
+    gboolean all_preflighted = journal.graphs != NULL
+        && journal.graphs->len > 0;
+    for (guint i = 0; all_preflighted && i < journal.graphs->len; i++) {
+      WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (journal.graphs, i);
+      all_preflighted = graph->replay_preflighted;
+    }
+    const gchar *state_name = dry_run ? "eligible"
+        : begin ? "preparing" : aborting ? "aborted"
+        : journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+        && journal.lifecycle_handoff_complete ? "committed"
+        : journal.lifecycle_handoff_complete ? "active"
+        : journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT
+            ? "committing"
+        : journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK
+            ? "aborting"
+        : all_preflighted ? "prepared"
+        : journal.version < WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION
+            ? "preparing" : "prepared";
+    g_autoptr (GString) response = g_string_new ("{\"scope\":");
+    append_json_string (response, graph_scope ? "graph" : "tenant");
+    g_string_append (response, ",\"tenant_id\":"); append_json_string (response, values[1]);
+    g_string_append (response, ",\"graph_id\":");
+    if (graph_scope) append_json_string (response, values[2]); else g_string_append (response, "null");
+    g_string_append (response, ",\"operation_uuid\":");
+    if (dry_run) g_string_append (response, "null"); else append_json_string (response, values[5]);
+    g_string_append_printf (response, ",\"revision\":%" G_GUINT64_FORMAT
+        ",\"graph_count\":%u,\"publication_eligible\":%s,\"state\":",
+        journal.revision, response_graph_count,
+        response_publication_eligible ? "true" : "false");
+    append_json_string (response, state_name);
+    g_string_append (response, ",\"failure_code\":null}");
+    attach_request_id_header (msg);
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+        response->str, response->len);
+    wyl_fact_offline_restore_journal_clear (&journal);
+    sodium_memzero (digest, sizeof digest);
+    return;
+  }
 
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *graph = NULL;
