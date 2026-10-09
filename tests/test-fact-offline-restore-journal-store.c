@@ -196,6 +196,7 @@ encrypted_abrupt_exit (void)
   g_clear_pointer (&store, wyl_policy_store_close);
   remove_test_directory (directory);
 }
+#endif
 
 static void
 offline_restore_schema_migration_rejects_other_partial_shapes (void)
@@ -229,7 +230,6 @@ offline_restore_schema_migration_rejects_other_partial_shapes (void)
     remove_test_directory (directory);
   }
 }
-#endif
 
 static GBytes *
 manifest_bytes (const gchar *graph_id)
