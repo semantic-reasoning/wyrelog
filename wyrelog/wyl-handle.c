@@ -2827,12 +2827,12 @@ wyl_handle_fact_root_writer_lease_borrow_scope_begin
            (self->fact_root_writer_lease, scope);
 }
 
-void
+wyrelog_error_t
 wyl_handle_fact_root_writer_lease_borrow_scope_end
   (gpointer scope_data)
 {
   WylFactRootWriterLeaseBorrowScope *scope = scope_data;
-  wyl_fact_root_writer_lease_borrow_scope_end (scope);
+  return wyl_fact_root_writer_lease_borrow_scope_end (scope);
 }
 
 typedef struct

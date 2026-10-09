@@ -21,11 +21,38 @@ struct _WylFactRootWriterLease
   WylFactGraphResolver resolver;
   gchar *registry_key;
   WylFactRootWriterLease *borrowed_parent;
+  WylFactRootWriterLeaseBorrowScope *borrowed_scope;
+  gint ref_count;
 };
 
 static GMutex root_lease_registry_mutex;
 static GHashTable *root_lease_registry;
-static GPrivate borrowed_root_lease = G_PRIVATE_INIT (NULL);
+static GPrivate borrowed_root_lease_scope = G_PRIVATE_INIT (NULL);
+
+static void
+root_writer_lease_unref (WylFactRootWriterLease *lease)
+{
+  if (!g_atomic_int_dec_and_test (&lease->ref_count))
+    return;
+  if (lease->borrowed_parent != NULL) {
+    WylFactRootWriterLease *parent = lease->borrowed_parent;
+    g_atomic_int_add (&lease->borrowed_scope->active_children, -1);
+    wyl_fact_graph_resolver_clear (&lease->resolver);
+    g_free (lease->registry_key);
+    g_free (lease);
+    root_writer_lease_unref (parent);
+    return;
+  }
+  g_mutex_lock (&root_lease_registry_mutex);
+  if (root_lease_registry != NULL && lease->registry_key != NULL
+      && g_hash_table_lookup (root_lease_registry,
+      lease->registry_key) == lease)
+    g_hash_table_remove (root_lease_registry, lease->registry_key);
+  wyl_fact_graph_resolver_clear (&lease->resolver);
+  g_mutex_unlock (&root_lease_registry_mutex);
+  g_free (lease->registry_key);
+  g_free (lease);
+}
 
 static GHashTable *
 root_lease_registry_get (void)
@@ -61,6 +88,7 @@ wyl_fact_root_writer_lease_acquire (const gchar *fact_root,
     return WYRELOG_E_INVALID;
 
   WylFactRootWriterLease *lease = g_new0 (WylFactRootWriterLease, 1);
+  g_atomic_int_set (&lease->ref_count, 1);
   lease->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root,
           &lease->resolver);
@@ -68,20 +96,25 @@ wyl_fact_root_writer_lease_acquire (const gchar *fact_root,
     goto fail;
   lease->registry_key = root_identity_key (&lease->resolver);
 
-  WylFactRootWriterLease *parent = g_private_get (&borrowed_root_lease);
-  if (parent != NULL
-      && g_strcmp0 (parent->registry_key, lease->registry_key) == 0) {
+  WylFactRootWriterLeaseBorrowScope *scope =
+      g_private_get (&borrowed_root_lease_scope);
+  for (; scope != NULL; scope = scope->previous_scope) {
+    WylFactRootWriterLease *parent = scope->lease;
+    if (g_strcmp0 (parent->registry_key, lease->registry_key) != 0)
+      continue;
     rc = wyl_fact_root_writer_lease_verify (parent);
     if (rc == WYRELOG_E_OK
         && (parent->resolver.device != lease->resolver.device
         || parent->resolver.inode != lease->resolver.inode))
       rc = WYRELOG_E_POLICY;
-    if (rc == WYRELOG_E_OK) {
-      lease->borrowed_parent = parent;
-      *out_lease = lease;
-      return WYRELOG_E_OK;
-    }
-    goto fail;
+    if (rc != WYRELOG_E_OK)
+      goto fail;
+    lease->borrowed_parent = parent;
+    lease->borrowed_scope = scope;
+    g_atomic_int_inc (&parent->ref_count);
+    g_atomic_int_inc (&scope->active_children);
+    *out_lease = lease;
+    return WYRELOG_E_OK;
   }
 
   g_mutex_lock (&root_lease_registry_mutex);
@@ -119,23 +152,35 @@ wyl_fact_root_writer_lease_borrow_scope_begin
   if (rc != WYRELOG_E_OK)
     return rc;
   scope->lease = lease;
-  scope->previous = g_private_get (&borrowed_root_lease);
+  scope->previous_scope = g_private_get (&borrowed_root_lease_scope);
+  scope->owner_thread = g_thread_self ();
+  g_atomic_int_set (&scope->active_children, 0);
   scope->active = TRUE;
-  g_private_set (&borrowed_root_lease, lease);
+  g_atomic_int_inc (&lease->ref_count);
+  g_private_set (&borrowed_root_lease_scope, scope);
   return WYRELOG_E_OK;
 }
 
-void
+wyrelog_error_t
 wyl_fact_root_writer_lease_borrow_scope_end
   (WylFactRootWriterLeaseBorrowScope *scope)
 {
   if (scope == NULL || !scope->active)
-    return;
-  g_return_if_fail (g_private_get (&borrowed_root_lease) == scope->lease);
-  g_private_set (&borrowed_root_lease, scope->previous);
+    return WYRELOG_E_INVALID;
+  if (scope->owner_thread != g_thread_self ())
+    return WYRELOG_E_INVALID;
+  if (g_private_get (&borrowed_root_lease_scope) != scope)
+    return WYRELOG_E_INVALID;
+  if (g_atomic_int_get (&scope->active_children) != 0)
+    return WYRELOG_E_BUSY;
+  g_private_set (&borrowed_root_lease_scope, scope->previous_scope);
+  WylFactRootWriterLease *lease = scope->lease;
   scope->lease = NULL;
-  scope->previous = NULL;
+  scope->previous_scope = NULL;
+  scope->owner_thread = NULL;
   scope->active = FALSE;
+  root_writer_lease_unref (lease);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -182,39 +227,7 @@ wyl_fact_root_writer_lease_release (WylFactRootWriterLease *lease)
 {
   if (lease == NULL)
     return;
-  if (lease->borrowed_parent != NULL) {
-    wyl_fact_graph_resolver_clear (&lease->resolver);
-    g_free (lease->registry_key);
-    g_free (lease);
-    return;
-  }
-  g_mutex_lock (&root_lease_registry_mutex);
-  if (root_lease_registry != NULL && lease->registry_key != NULL
-      && g_hash_table_lookup (root_lease_registry,
-      lease->registry_key) == lease)
-    g_hash_table_remove (root_lease_registry, lease->registry_key);
-  /* Closing the resolver fd releases the kernel flock.  Do not issue an
-   * explicit unlock: keeping authority until the final close avoids a gap. */
-  wyl_fact_graph_resolver_clear (&lease->resolver);
-  g_mutex_unlock (&root_lease_registry_mutex);
-  g_free (lease->registry_key);
-  g_free (lease);
-}
-#else
-wyrelog_error_t
-wyl_fact_root_writer_lease_borrow_scope_begin
-  (WylFactRootWriterLease *lease, WylFactRootWriterLeaseBorrowScope *scope)
-{
-  (void) lease;
-  if (scope != NULL)
-    *scope = (WylFactRootWriterLeaseBorrowScope) { 0 };
-  return WYRELOG_E_POLICY;
-}
-
-void
-wyl_fact_root_writer_lease_borrow_scope_end
-  (WylFactRootWriterLeaseBorrowScope *scope)
-{
-  (void) scope;
+  /* The final reference closes the resolver and releases the kernel flock. */
+  root_writer_lease_unref (lease);
 }
 #endif
