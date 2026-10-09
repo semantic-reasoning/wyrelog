@@ -2246,7 +2246,12 @@ assert_policy_mutation_error (const gchar *command,
 static void
 policy_mutation_server_wait (const PolicyMutationServer *server)
 {
-  for (guint waited = 0; waited < server->delay_ms; waited += 10) {
+  /* Wait against the clock, not a count of sleeps: each g_usleep may
+   * overshoot, which on macOS doubled a 61 s delay past the 120 s budget
+   * of the long-request cases (#1327). */
+  gint64 deadline = g_get_monotonic_time () + (gint64) server->delay_ms
+      * 1000;
+  while (g_get_monotonic_time () < deadline) {
     if (g_cancellable_is_cancelled (server->cancel))
       return;
     g_usleep (10 * 1000);
