@@ -37,6 +37,8 @@ struct _WylClient
 
 #define WYL_CLIENT_LAST_ERROR_CODE_MAX_LEN 127
 #define WYL_CLIENT_ERROR_RESPONSE_SCAN_MAX_LEN 4096
+/* libsoup's default SoupSession:timeout, kept when no budget is set. */
+#define WYL_CLIENT_SOUP_IO_TIMEOUT_S 60
 
 struct _WylClientDecision
 {
@@ -270,6 +272,11 @@ wyl_client_set_timeout_ms (WylClient *client, guint timeout_ms)
 {
   g_return_if_fail (WYL_IS_CLIENT (client));
   client->timeout_ms = timeout_ms;
+  /* With a budget, the client's deadline is the only bound: libsoup's own
+   * I/O timeout would otherwise drop an answer slower than 60 s that the
+   * budget allows (#1327).  Without one, keep libsoup's default. */
+  soup_session_set_timeout (client->session,
+      timeout_ms > 0 ? 0 : WYL_CLIENT_SOUP_IO_TIMEOUT_S);
 }
 
 typedef struct

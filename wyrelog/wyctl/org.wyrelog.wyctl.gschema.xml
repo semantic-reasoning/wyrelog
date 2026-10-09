@@ -52,7 +52,7 @@
       <summary>Default request timeout in milliseconds</summary>
       <description>
         Timeout used when --timeout-ms is omitted. Must lie in the
-        same 1..60000 range the CLI enforces.
+        same 1..3600000 range the CLI enforces.
       </description>
     </key>
 
