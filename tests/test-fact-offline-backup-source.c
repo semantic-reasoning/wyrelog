@@ -9918,7 +9918,15 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
           operation_uuid);
   g_autofree gchar *stage_path = graph_file_path (&fixture, "alpha",
           stage_basename);
-  g_assert_true (g_file_set_contents (stage_path, "replacement", -1, NULL));
+  g_autofree gchar *stage_contents = NULL;
+  gsize stage_length = 0;
+  g_assert_true (g_file_get_contents (main_path, &stage_contents,
+      &stage_length, NULL));
+  g_assert_true (g_file_set_contents (stage_path, stage_contents,
+      stage_length, NULL));
+  duckdb_database staged_db;
+  g_assert_cmpint (duckdb_open (stage_path, &staged_db), ==, DuckDBSuccess);
+  duckdb_close (&staged_db);
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
   GStatBuf stage_stat = { 0 };
   g_assert_cmpint (g_stat (stage_path, &stage_stat), ==, 0);
