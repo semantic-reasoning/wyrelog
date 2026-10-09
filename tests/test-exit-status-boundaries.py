@@ -592,7 +592,7 @@ def validate_repository(root: Path) -> list[str]:
   if sites != expected_sites:
     errors.append("direct termination inventory differs from "
         + SITES_MANIFEST)
-  if returns["source_count"] != 174 or returns["main_definitions"] != 181:
+  if returns["source_count"] != 175 or returns["main_definitions"] != 182:
     errors.append("main census changed; review and update the inventory")
   if (len(sites) != 78
       or sum(site["api"] == "_exit" for site in sites) != 55

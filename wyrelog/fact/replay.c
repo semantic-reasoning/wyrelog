@@ -6,6 +6,7 @@
 #include "compound-private.h"
 #include "graph-artifact-namespace-private.h"
 #include "graph-locator-private.h"
+#include "graph-program-private.h"
 #include "offline-backup-manifest-private.h"
 #include "replay-scheduler-private.h"
 #include "replay-store-private.h"
@@ -287,31 +288,11 @@ wyl_fact_graph_status_free (gpointer data)
   g_free (status);
 }
 
-static void
-append_wirelog_identifier (GString *out, const gchar *identifier)
-{
-  if (identifier == NULL || identifier[0] == '\0') {
-    g_string_append_c (out, 'w');
-    return;
-  }
-
-  g_string_append_c (out, 'w');
-  for (const gchar * p = identifier; *p != '\0'; p++)
-    g_string_append_printf (out, "_%02x", (guchar) * p);
-}
-
 gchar *
 wyl_fact_replay_wirelog_relation_name (const gchar *namespace_id,
     const gchar *relation_name)
 {
-  if (namespace_id == NULL || relation_name == NULL)
-    return NULL;
-
-  g_autoptr (GString) out = g_string_new (NULL);
-  append_wirelog_identifier (out, namespace_id);
-  g_string_append_c (out, '_');
-  append_wirelog_identifier (out, relation_name);
-  return g_string_free (g_steal_pointer (&out), FALSE);
+  return wyl_fact_graph_program_relation_name (namespace_id, relation_name);
 }
 
 static void
@@ -747,57 +728,19 @@ list_replay_relations (wyl_policy_store_t *policy,
 static gchar *
 build_graph_program (GPtrArray *relations)
 {
-  g_autoptr (GString) program = g_string_new (NULL);
-  for (guint i = 0; relations != NULL && i < relations->len; i++) {
+  guint n_relations = relations != NULL ? relations->len : 0;
+  g_autofree wyl_fact_graph_program_relation_t *program_relations =
+      g_new0 (wyl_fact_graph_program_relation_t, n_relations);
+  for (guint i = 0; i < n_relations; i++) {
     ReplayRelation *rel = g_ptr_array_index (relations, i);
-    const gchar *relation_names[2] = { rel->wirelog_relation, NULL };
-    g_autofree gchar *observed_relation = g_strdup_printf ("%s_observed",
-            rel->wirelog_relation);
-    relation_names[1] = observed_relation;
-
-    for (guint decl_idx = 0; decl_idx < G_N_ELEMENTS (relation_names);
-        decl_idx++) {
-      g_string_append (program, ".decl ");
-      g_string_append (program, relation_names[decl_idx]);
-      g_string_append_c (program, '(');
-      for (gsize col = 0; col < rel->n_columns; col++) {
-        const gchar *column_type = rel->columns[col].column_type;
-        const gchar *wire_type = NULL;
-        if (g_strcmp0 (column_type, "symbol") == 0
-            || g_strcmp0 (column_type, "string") == 0)
-          wire_type = "symbol";
-        else if (g_strcmp0 (column_type, "int64") == 0
-            || g_strcmp0 (column_type, "bool") == 0
-            || g_strcmp0 (column_type, "compound_ref") == 0)
-          wire_type = "int64";
-        else
-          return NULL;
-        if (col > 0)
-          g_string_append (program, ", ");
-        append_wirelog_identifier (program, rel->columns[col].column_name);
-        g_string_append_printf (program, ": %s", wire_type);
-      }
-      g_string_append (program, ")\n");
-    }
-
-    g_string_append (program, observed_relation);
-    g_string_append_c (program, '(');
-    for (gsize col = 0; col < rel->n_columns; col++) {
-      if (col > 0)
-        g_string_append (program, ", ");
-      g_string_append_printf (program, "V%" G_GSIZE_FORMAT, col);
-    }
-    g_string_append (program, ") :- ");
-    g_string_append (program, rel->wirelog_relation);
-    g_string_append_c (program, '(');
-    for (gsize col = 0; col < rel->n_columns; col++) {
-      if (col > 0)
-        g_string_append (program, ", ");
-      g_string_append_printf (program, "V%" G_GSIZE_FORMAT, col);
-    }
-    g_string_append (program, ").\n");
+    program_relations[i] = (wyl_fact_graph_program_relation_t) {
+      .namespace_id = rel->namespace_id,
+      .relation_name = rel->relation_name,
+      .columns = rel->columns,
+      .n_columns = rel->n_columns,
+    };
   }
-  return g_string_free (g_steal_pointer (&program), FALSE);
+  return wyl_fact_graph_program_render (program_relations, n_relations, NULL);
 }
 
 static wyrelog_error_t
