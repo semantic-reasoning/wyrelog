@@ -1129,17 +1129,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 40;
+  const guint expected_exact = 36;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 39;
   const guint expected_exact = 35;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 38;
-  const guint expected_exact = 34;
 #elif defined(WYL_HAS_AUDIT)
+  const guint expected_total = 36;
+  const guint expected_exact = 32;
+#else
   const guint expected_total = 35;
   const guint expected_exact = 31;
-#else
-  const guint expected_total = 34;
-  const guint expected_exact = 30;
 #endif
   if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -1176,6 +1176,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/policy/roles/grant",
     "/policy/roles/revoke",
     "/audit/events",
+    "/facts/schema/status",
     /*
      * Feature-gated paths stay at the tail: check_exact_route_shape's
      * error base is 2281 + index * 13, so an entry inserted mid-list
@@ -1198,6 +1199,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     guint canonical_method_status = 405;
 #ifndef WYL_HAS_FACT_STORE
     if (g_strcmp0 (exact_paths[i], "/facts/schema/register") == 0
+        || g_strcmp0 (exact_paths[i], "/facts/schema/status") == 0
         || g_strcmp0 (exact_paths[i], "/facts/quota") == 0
         || g_strcmp0 (exact_paths[i], "/facts/quota/operation-status") == 0)
       canonical_method_status = 503;

@@ -156,6 +156,36 @@ typedef struct
 
 typedef struct
 {
+  gchar *name;
+  gchar *type;
+  gboolean nullable;
+  gboolean visible;
+} WylClientFactSchemaColumn;
+
+typedef struct
+{
+  guint32 schema_version;
+  gboolean relation_visible;
+  /* The row limit of the relation's own query; absent for a hidden relation
+   * registered without one. */
+  gboolean has_max_rows;
+  guint max_rows;
+  WylClientFactSchemaColumn *columns;
+  gsize n_columns;
+} WylClientFactSchemaVersion;
+
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *namespace_id;
+  gchar *relation_name;
+  WylClientFactSchemaVersion *versions;
+  gsize n_versions;
+} WylClientFactSchemaStatus;
+
+typedef struct
+{
   gchar *tenant_id;
   gboolean sealed;
 } WylClientTenant;
@@ -645,6 +675,19 @@ wyrelog_error_t wyl_client_fact_graph_verify (WylClient * client,
     const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactGraphVerification * out_verification);
+/* Reads back the schema registered for one relation: every version, in
+ * ascending order, with its columns in order.  The client must carry
+ * credentials bound to tenant, and the caller needs wr.schema.manage there.
+ * out_status must be zero-initialised or cleared; it is owned by the caller
+ * and must be cleared after use.  A relation with no schema answers 404
+ * schema_not_found (WYRELOG_E_IO, with the code kept as the last error); an
+ * answer naming another relation is WYRELOG_E_IO. */
+wyrelog_error_t wyl_client_fact_schema_status (WylClient * client,
+    const gchar * tenant, const gchar * graph, const gchar * namespace_id,
+    const gchar * relation, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactSchemaStatus * out_status);
+void wyl_client_fact_schema_status_clear (WylClientFactSchemaStatus * status);
 void wyl_client_graph_clear (WylClientGraph * value);
 void wyl_client_graph_list_clear (WylClientGraphList * value);
 /* Lists the tenant's fact graphs.  The client must carry credentials bound to
@@ -996,6 +1039,8 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientGraph, wyl_client_graph_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientGraphList, wyl_client_graph_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactSchemaStatus, wyl_client_fact_schema_status_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientTenant, wyl_client_tenant_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC

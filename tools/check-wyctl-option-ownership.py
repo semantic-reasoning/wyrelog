@@ -100,6 +100,7 @@ EXPECTED_PARSE_SITES = {
     "run_tenant_command": "WyctlTenantOptions",
     "run_tenant_assign_owner": "WyctlTenantAssignOwnerOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
+    "run_fact_schema_status": "WyctlFactSchemaOptions",
     "run_fact_quota": "WyctlFactQuotaOptions",
     "run_fact_quota_operation_status": "WyctlFactQuotaOperationOptions",
     "run_fact_mutation": "WyctlFactPutOptions",
@@ -135,7 +136,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 229
+EXPECTED_STRING_DESTINATIONS = 237
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

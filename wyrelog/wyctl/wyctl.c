@@ -2646,16 +2646,122 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
           "schema_register_failed");
-  /* Any registered schema refuses a repeat, and no route reads one back,
-   * so a refusal cannot confirm the columns (#1332). */
+  /* Any registered schema refuses a repeat, so a refusal cannot confirm
+   * the columns by itself (#1332); fact schema status reads them (#1335). */
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
     g_printerr ("wyctl: the schema register outcome is unknown; repeating "
         "the same command is safe, and schema_already_registered then means "
         "the relation already has a schema, possibly from an earlier "
-        "registration, whose columns wyctl cannot show\n");
+        "registration; `wyctl fact schema status` shows its columns\n");
   if (exit_rc == 0)
     g_print ("ok\n");
   return exit_rc;
+}
+
+/* #1335: prints the registered schema, one line per version and one per
+ * column, escaping names as graph list does. */
+static int
+run_fact_schema_status (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlFactSchemaOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
+     "NS"},
+    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
+     "REL"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog fact schema status");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact schema status argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+          global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
+      || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
+      opts.relation[0] == '\0') {
+    g_printerr ("wyctl: missing fact schema target option\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_auto (WylClientFactSchemaStatus) schema = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_schema_status (client, tenant, graph,
+          opts.namespace_id, opts.relation, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &schema);
+  int exit_rc = fact_remote_exit (client, "fact schema status", rc,
+          "schema_status_failed");
+  if (exit_rc != 0)
+    return exit_rc;
+  g_autofree gchar *shown_tenant = g_uri_escape_string (schema.tenant_id,
+          NULL, TRUE);
+  g_autofree gchar *shown_graph = g_uri_escape_string (schema.graph_id, NULL,
+          TRUE);
+  g_autofree gchar *shown_namespace = g_uri_escape_string
+        (schema.namespace_id, NULL, TRUE);
+  g_autofree gchar *shown_relation = g_uri_escape_string
+        (schema.relation_name, NULL, TRUE);
+  for (gsize i = 0; i < schema.n_versions; i++) {
+    const WylClientFactSchemaVersion *version = &schema.versions[i];
+    g_autofree gchar *max_rows = version->has_max_rows
+        ? g_strdup_printf ("%u", version->max_rows) : g_strdup ("none");
+    g_print ("tenant=%s graph=%s namespace=%s relation=%s schema_version=%u "
+        "relation_visible=%s max_rows=%s columns=%" G_GSIZE_FORMAT "\n",
+        shown_tenant, shown_graph, shown_namespace, shown_relation,
+        version->schema_version,
+        version->relation_visible ? "true" : "false", max_rows,
+        version->n_columns);
+    for (gsize j = 0; j < version->n_columns; j++) {
+      g_autofree gchar *name = g_uri_escape_string (version->columns[j].name,
+              NULL, TRUE);
+      g_autofree gchar *type = g_uri_escape_string (version->columns[j].type,
+              NULL, TRUE);
+      g_print ("column=%s type=%s nullable=%s visible=%s\n", name, type,
+          version->columns[j].nullable ? "true" : "false",
+          version->columns[j].visible ? "true" : "false");
+    }
+  }
+  return 0;
 }
 
 static gchar *
@@ -3267,6 +3373,8 @@ run_fact_schema (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "register") == 0)
     return run_fact_schema_register (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_fact_schema_status (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown fact schema command: %s\n", argv[1]);
   return 2;
 }

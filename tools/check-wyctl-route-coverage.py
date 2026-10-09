@@ -57,6 +57,7 @@ COVERAGE = {
     "/facts/quota": ("fact", "quota", "configure"),
     "/facts/quota/operation-status": ("fact", "quota", "operation-status"),
     "/facts/schema/register": ("fact", "schema", "register"),
+    "/facts/schema/status": ("fact", "schema", "status"),
     "/facts/{tenant}/{graph}/{relation}:append": ("fact", "put"),
     "/facts/{tenant}/{graph}/{relation}:retract": ("fact", "retract"),
     "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),

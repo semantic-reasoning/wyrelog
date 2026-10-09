@@ -1085,6 +1085,28 @@ main (void)
   assert_wyctl_stdout (fact_schema_quota_status_argv,
       "tenant=__wr_default dimension=schema_count limit=2 registered=1\n");
 
+  /* #1335: the registration reads back through the real daemon, with the
+   * default row limit of a visible relation registered without one. */
+  gchar *schema_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "schema", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (schema_status_argv,
+      "tenant=__wr_default graph=orders namespace=shop relation=orders "
+      "schema_version=1 relation_visible=true max_rows=1000 columns=2\n"
+      "column=order_id type=symbol nullable=false visible=true\n"
+      "column=amount type=int64 nullable=false visible=true\n");
+
   g_autoptr (GError) input_error = NULL;
   gchar *input_path = NULL;
   gint input_fd = g_file_open_tmp ("wyctl-facts-input-XXXXXX", &input_path,
