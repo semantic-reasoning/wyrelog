@@ -969,7 +969,8 @@ static const gchar offline_restore_receipts_sql[] =
     "(scope='graph' AND selected_graph_id IS NOT NULL)));";
 static const gchar offline_restore_terminal_history_sql[] =
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history ("
-    "operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL,"
+    "operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL "
+    "CHECK(scope IN ('tenant','graph')) ,"
     "graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,"
     "old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,"
     "tenant_lifecycle_generation INTEGER NOT NULL,"
@@ -1351,7 +1352,7 @@ static const gchar offline_restore_schema_ddl[] =
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims (tenant_id TEXT PRIMARY KEY,operation_uuid TEXT NOT NULL UNIQUE,FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,operation_uuid TEXT NOT NULL UNIQUE,PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)));"
-    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL,graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,tenant_lifecycle_generation INTEGER NOT NULL,tenant_reconciliation_generation INTEGER NOT NULL,graph_lifecycle_generation INTEGER NOT NULL,graph_reconciliation_generation INTEGER NOT NULL,journal_revision INTEGER NOT NULL,companion_basename TEXT NOT NULL,phase TEXT NOT NULL,attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(operation_uuid,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid) DEFERRABLE INITIALLY DEFERRED);"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')) ,graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,tenant_lifecycle_generation INTEGER NOT NULL,tenant_reconciliation_generation INTEGER NOT NULL,graph_lifecycle_generation INTEGER NOT NULL,graph_reconciliation_generation INTEGER NOT NULL,journal_revision INTEGER NOT NULL,companion_basename TEXT NOT NULL,phase TEXT NOT NULL,attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(operation_uuid,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid) DEFERRABLE INITIALLY DEFERRED);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_guard (operation_uuid TEXT PRIMARY KEY,FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid));"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_update BEFORE UPDATE ON fact_offline_restore_terminal_history BEGIN SELECT RAISE(ABORT,'restore terminal history is immutable'); END;"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_delete BEFORE DELETE ON fact_offline_restore_terminal_history BEGIN SELECT RAISE(ABORT,'restore terminal history is permanent'); END;"
@@ -12798,6 +12799,36 @@ migrate_tenant_restore_replacement_schema (sqlite3 *db)
   return tenant_restore_replacement_validate_rows (db);
 }
 
+/* The journal delete guard refers to both replacement tables. Migrate the
+ * replacement schemas together so neither migration has to reparse that
+ * trigger while its peer table is temporarily absent. */
+static wyrelog_error_t
+migrate_restore_replacement_schemas (sqlite3 *db)
+{
+  wyrelog_error_t rc = exec_sql (db,
+          "SAVEPOINT wyrelog_restore_replacement_schemas;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (db,
+          "DROP TRIGGER fact_offline_restore_journal_delete_guard;");
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_restore_replacement_schema (db);
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_tenant_restore_replacement_schema (db);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, offline_restore_delete_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db,
+            "RELEASE SAVEPOINT wyrelog_restore_replacement_schemas;");
+  else {
+    (void) exec_sql (db,
+        "ROLLBACK TO SAVEPOINT wyrelog_restore_replacement_schemas;");
+    (void) exec_sql (db,
+        "RELEASE SAVEPOINT wyrelog_restore_replacement_schemas;");
+  }
+  return rc;
+}
+
 static wyrelog_error_t graph_authority_migration_checkpoint
   (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
@@ -15549,38 +15580,7 @@ graph_authority_schema_ready:
     return rc;
   }
 
-  rc = exec_sql (store->db, "SAVEPOINT wyrelog_restore_replacement_schema;");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = migrate_restore_replacement_schema (store->db);
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (store->db,
-            "RELEASE SAVEPOINT wyrelog_restore_replacement_schema;");
-  else {
-    (void) exec_sql (store->db,
-        "ROLLBACK TO SAVEPOINT wyrelog_restore_replacement_schema;");
-    (void) exec_sql (store->db,
-        "RELEASE SAVEPOINT wyrelog_restore_replacement_schema;");
-    return rc;
-  }
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = exec_sql (store->db,
-          "SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = migrate_tenant_restore_replacement_schema (store->db);
-  if (rc == WYRELOG_E_OK)
-    rc = exec_sql (store->db,
-            "RELEASE SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
-  else {
-    (void) exec_sql (store->db,
-        "ROLLBACK TO SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
-    (void) exec_sql (store->db,
-        "RELEASE SAVEPOINT wyrelog_tenant_restore_replacement_schema;");
-    return rc;
-  }
+  rc = migrate_restore_replacement_schemas (store->db);
   if (rc != WYRELOG_E_OK)
     return rc;
 
