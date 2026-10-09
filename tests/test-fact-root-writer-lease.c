@@ -709,9 +709,11 @@ main (int argc, char **argv)
       return wyl_test_normalize_exit_status (2);
     return wyl_test_normalize_exit_status (holder_main (argv[2]));
   }
-  if (argc >= 2 && g_strcmp0 (argv[1], PROBE_ARG) == 0)
-    return argc == 3 ? wyl_test_normalize_exit_status (probe_main (argv[2]))
-                     : wyl_test_normalize_exit_status (2);
+  if (argc >= 2 && g_strcmp0 (argv[1], PROBE_ARG) == 0) {
+    if (argc == 3)
+      return wyl_test_normalize_exit_status (probe_main (argv[2]));
+    return wyl_test_normalize_exit_status (2);
+  }
   if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
     g_error ("fact-root writer lease test has no executable path");
   self_path = g_canonicalize_filename (argv[0], NULL);
