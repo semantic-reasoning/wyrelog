@@ -133,7 +133,32 @@ struct _WylFactRootWriterLease
   WylFactGraphResolver resolver;
   HANDLE lock_handle;
   WylFactGraphWinIdentity lock_identity;
+  WylFactRootWriterLease *borrowed_parent;
+  WylFactRootWriterLeaseBorrowScope *borrowed_scope;
+  gint ref_count;
 };
+
+static GPrivate borrowed_root_writer_scope = G_PRIVATE_INIT (NULL);
+
+static void
+root_writer_lease_unref (WylFactRootWriterLease *lease)
+{
+  if (!g_atomic_int_dec_and_test (&lease->ref_count))
+    return;
+  if (lease->borrowed_parent != NULL) {
+    if (lease->borrowed_scope != NULL)
+      g_atomic_int_add (&lease->borrowed_scope->active_children, -1);
+    WylFactRootWriterLease *parent = lease->borrowed_parent;
+    wyl_fact_graph_resolver_clear (&lease->resolver);
+    g_free (lease);
+    root_writer_lease_unref (parent);
+    return;
+  }
+  if (handle_is_valid (lease->lock_handle))
+    CloseHandle (lease->lock_handle);
+  wyl_fact_graph_resolver_clear (&lease->resolver);
+  g_free (lease);
+}
 
 static void
 trace_windows_failure (const gchar *stage, wyrelog_error_t rc,
@@ -1266,10 +1291,37 @@ wyl_fact_root_writer_lease_acquire (const gchar *fact_root,
   if (fact_root == NULL || fact_root[0] == '\0' || out_lease == NULL)
     return WYRELOG_E_INVALID;
   WylFactRootWriterLease *lease = g_new0 (WylFactRootWriterLease, 1);
+  g_atomic_int_set (&lease->ref_count, 1);
   lease->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   lease->lock_handle = INVALID_HANDLE_VALUE;
   wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root,
           &lease->resolver);
+  WylFactRootWriterLeaseBorrowScope *scope =
+      g_private_get (&borrowed_root_writer_scope);
+  for (; rc == WYRELOG_E_OK && scope != NULL;
+      scope = scope->previous_scope) {
+    WylFactRootWriterLease *parent = scope->lease;
+    if (!identity_equal (&parent->resolver.identity,
+        &lease->resolver.identity))
+      continue;
+    rc = wyl_fact_root_writer_lease_verify (parent);
+    if (rc != WYRELOG_E_OK)
+      break;
+    rc = wyl_fact_graph_resolver_revalidate (&lease->resolver);
+    if (rc == WYRELOG_E_OK
+        && !identity_equal (&parent->resolver.identity,
+        &lease->resolver.identity))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      lease->borrowed_parent = parent;
+      lease->borrowed_scope = scope;
+      g_atomic_int_inc (&parent->ref_count);
+      g_atomic_int_inc (&scope->active_children);
+      *out_lease = lease;
+      return WYRELOG_E_OK;
+    }
+    break;
+  }
   if (rc == WYRELOG_E_OK)
     rc = open_root_writer_lock (&lease->resolver, &lease->lock_handle,
             &lease->lock_identity);
@@ -1289,13 +1341,63 @@ wyl_fact_root_writer_lease_acquire (const gchar *fact_root,
 wyrelog_error_t
 wyl_fact_root_writer_lease_verify (WylFactRootWriterLease *lease)
 {
-  if (lease == NULL || !handle_is_valid (lease->resolver.handle)
-      || !handle_is_valid (lease->lock_handle))
+  if (lease == NULL || !handle_is_valid (lease->resolver.handle))
     return WYRELOG_E_INVALID;
-  wyrelog_error_t rc = verify_root_writer_lock (lease);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (lease->borrowed_parent != NULL) {
+    rc = wyl_fact_root_writer_lease_verify (lease->borrowed_parent);
+    if (rc == WYRELOG_E_OK
+        && !identity_equal (&lease->borrowed_parent->resolver.identity,
+        &lease->resolver.identity))
+      rc = WYRELOG_E_POLICY;
+  } else if (!handle_is_valid (lease->lock_handle))
+    return WYRELOG_E_INVALID;
+  else
+    rc = verify_root_writer_lock (lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_revalidate (&lease->resolver);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_root_writer_lease_borrow_scope_begin
+  (WylFactRootWriterLease *lease,
+    WylFactRootWriterLeaseBorrowScope *scope)
+{
+  if (lease == NULL || scope == NULL || scope->active)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  scope->lease = lease;
+  scope->previous_scope = g_private_get (&borrowed_root_writer_scope);
+  scope->owner_thread = g_thread_self ();
+  g_atomic_int_set (&scope->active_children, 0);
+  scope->active = TRUE;
+  g_atomic_int_inc (&lease->ref_count);
+  g_private_set (&borrowed_root_writer_scope, scope);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_root_writer_lease_borrow_scope_end
+  (WylFactRootWriterLeaseBorrowScope *scope)
+{
+  if (scope == NULL || !scope->active)
+    return WYRELOG_E_INVALID;
+  if (scope->owner_thread != g_thread_self ()
+      || g_private_get (&borrowed_root_writer_scope) != scope)
+    return WYRELOG_E_INVALID;
+  if (g_atomic_int_get (&scope->active_children) != 0)
+    return WYRELOG_E_BUSY;
+  g_private_set (&borrowed_root_writer_scope, scope->previous_scope);
+  WylFactRootWriterLease *lease = scope->lease;
+  scope->lease = NULL;
+  scope->previous_scope = NULL;
+  scope->owner_thread = NULL;
+  scope->active = FALSE;
+  root_writer_lease_unref (lease);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1317,10 +1419,7 @@ wyl_fact_root_writer_lease_release (WylFactRootWriterLease *lease)
 {
   if (lease == NULL)
     return;
-  if (handle_is_valid (lease->lock_handle))
-    CloseHandle (lease->lock_handle);
-  wyl_fact_graph_resolver_clear (&lease->resolver);
-  g_free (lease);
+  root_writer_lease_unref (lease);
 }
 
 /* The handle-and-entry half of revalidate_named_regular: the held file still

@@ -286,7 +286,7 @@ WylFactReplayScheduler *wyl_handle_fact_replay_scheduler_ref
   (WylHandle *self);
 wyrelog_error_t wyl_handle_fact_root_writer_lease_borrow_scope_begin
   (WylHandle *self, gpointer scope);
-void wyl_handle_fact_root_writer_lease_borrow_scope_end
+wyrelog_error_t wyl_handle_fact_root_writer_lease_borrow_scope_end
   (gpointer scope);
 /* Acquire this fair replay slot before acquiring a service-auth write lease. */
 wyrelog_error_t wyl_handle_fact_replay_admission_acquire (WylHandle * self,

@@ -19,6 +19,7 @@
 #include "wyrelog/wyl-log-private.h"
 
 #define HOLDER_ARG "--root-lease-holder"
+#define PROBE_ARG "--root-lease-probe"
 #define LOCK_NAME ".wyrelog-writer-lock"
 
 static gchar *self_path;
@@ -83,6 +84,29 @@ remove_root (const gchar *root)
   g_assert_no_error (error);
 }
 
+static gpointer
+end_borrow_scope_from_other_thread (gpointer data)
+{
+  return GINT_TO_POINTER (wyl_fact_root_writer_lease_borrow_scope_end (data));
+}
+
+typedef struct
+{
+  const gchar *root;
+  wyrelog_error_t result;
+} RootLeaseThreadAcquire;
+
+static gpointer
+acquire_root_from_other_thread (gpointer data)
+{
+  RootLeaseThreadAcquire *attempt = data;
+  WylFactRootWriterLease *lease = NULL;
+  attempt->result = wyl_fact_root_writer_lease_acquire (attempt->root,
+          &lease);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  return NULL;
+}
+
 static gint
 holder_main (const gchar *root)
 {
@@ -94,6 +118,14 @@ holder_main (const gchar *root)
   fflush (stdout);
   (void) getchar ();
   return 0;
+}
+
+static gint
+probe_main (const gchar *root)
+{
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (root, &lease);
+  return rc == WYRELOG_E_BUSY ? 0 : 1;
 }
 
 static GSubprocess *
@@ -133,6 +165,21 @@ stop_holder_orderly (GSubprocess *process)
 }
 
 static void
+assert_subprocess_cannot_acquire (const gchar *root)
+{
+  const gchar *argv[] = { self_path, PROBE_ARG, root, NULL };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSubprocess) process = g_subprocess_newv (argv,
+          G_SUBPROCESS_FLAGS_STDOUT_SILENCE
+          | G_SUBPROCESS_FLAGS_STDERR_SILENCE, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (process);
+  g_assert_true (g_subprocess_wait (process, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_subprocess_get_exit_status (process), ==, 0);
+}
+
+static void
 test_same_process_identity_and_orderly_release (void)
 {
   g_autofree gchar *root_a = make_root ("wyrelog-root-lease-a-XXXXXX");
@@ -148,19 +195,42 @@ test_same_process_identity_and_orderly_release (void)
       ==, WYRELOG_E_BUSY);
   g_assert_null (duplicate);
   WylFactRootWriterLeaseBorrowScope borrow_scope = { 0 };
+  WylFactRootWriterLeaseBorrowScope nested_scope = { 0 };
   g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_begin (lease_a,
       &borrow_scope), ==, WYRELOG_E_OK);
+  GThread *wrong_thread = g_thread_new ("lease-scope-wrong-thread",
+          end_borrow_scope_from_other_thread, &borrow_scope);
+  g_assert_cmpint (GPOINTER_TO_INT (g_thread_join (wrong_thread)), ==,
+      WYRELOG_E_INVALID);
+  g_assert_true (borrow_scope.active);
+  RootLeaseThreadAcquire attempt = { root_a, WYRELOG_E_OK };
+  GThread *contender = g_thread_new ("lease-scope-contender",
+          acquire_root_from_other_thread, &attempt);
+  g_thread_join (contender);
+  g_assert_cmpint (attempt.result, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_b, &lease_b), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_begin (lease_b,
+      &nested_scope), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_end
+        (&borrow_scope), ==, WYRELOG_E_INVALID);
+  g_assert_true (borrow_scope.active);
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_a, &duplicate),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_root_writer_lease_verify (duplicate), ==,
       WYRELOG_E_OK);
+  assert_subprocess_cannot_acquire (root_a);
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_end
+        (&nested_scope), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_end
+        (&borrow_scope), ==, WYRELOG_E_BUSY);
   g_clear_pointer (&duplicate, wyl_fact_root_writer_lease_release);
-  wyl_fact_root_writer_lease_borrow_scope_end (&borrow_scope);
+  assert_subprocess_cannot_acquire (root_a);
+  g_assert_cmpint (wyl_fact_root_writer_lease_borrow_scope_end
+        (&borrow_scope), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_a, &duplicate),
       ==, WYRELOG_E_BUSY);
   g_assert_null (duplicate);
-  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root_b, &lease_b), ==,
-      WYRELOG_E_OK);
 
   WylFactGraphResolver resolver_a = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphResolver resolver_b = WYL_FACT_GRAPH_RESOLVER_INIT;
@@ -639,6 +709,9 @@ main (int argc, char **argv)
       return wyl_test_normalize_exit_status (2);
     return wyl_test_normalize_exit_status (holder_main (argv[2]));
   }
+  if (argc >= 2 && g_strcmp0 (argv[1], PROBE_ARG) == 0)
+    return argc == 3 ? wyl_test_normalize_exit_status (probe_main (argv[2]))
+                     : wyl_test_normalize_exit_status (2);
   if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
     g_error ("fact-root writer lease test has no executable path");
   self_path = g_canonicalize_filename (argv[0], NULL);
@@ -646,9 +719,9 @@ main (int argc, char **argv)
       || !g_file_test (self_path, G_FILE_TEST_IS_REGULAR))
     g_error ("fact-root writer lease test executable path is invalid");
   g_test_init (&argc, &argv, NULL);
-#ifndef G_OS_WIN32
   g_test_add_func ("/fact-root-writer-lease/same-process",
       test_same_process_identity_and_orderly_release);
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact-root-writer-lease/process-recovery",
       test_cross_process_orderly_and_crash_recovery);
 #ifdef WYL_HAS_FACT_STORE

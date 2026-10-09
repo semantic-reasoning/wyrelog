@@ -10,10 +10,12 @@ G_BEGIN_DECLS;
 
 typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
-typedef struct
+typedef struct _WylFactRootWriterLeaseBorrowScope
 {
   WylFactRootWriterLease *lease;
-  WylFactRootWriterLease *previous;
+  struct _WylFactRootWriterLeaseBorrowScope *previous_scope;
+  GThread *owner_thread;
+  gint active_children;
   gboolean active;
 } WylFactRootWriterLeaseBorrowScope;
 
@@ -32,7 +34,7 @@ wyrelog_error_t wyl_fact_root_writer_lease_acquire (const gchar * fact_root,
 wyrelog_error_t wyl_fact_root_writer_lease_borrow_scope_begin
   (WylFactRootWriterLease * lease,
     WylFactRootWriterLeaseBorrowScope * scope);
-void wyl_fact_root_writer_lease_borrow_scope_end
+wyrelog_error_t wyl_fact_root_writer_lease_borrow_scope_end
   (WylFactRootWriterLeaseBorrowScope * scope);
 
 /* Revalidates the pinned root and the native lease authority. */
