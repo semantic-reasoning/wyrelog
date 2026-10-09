@@ -138,6 +138,8 @@ struct _WylFactRootWriterLease
   gint ref_count;
 };
 
+static gboolean handle_is_valid (HANDLE handle);
+
 static GPrivate borrowed_root_writer_scope = G_PRIVATE_INIT (NULL);
 
 static void
