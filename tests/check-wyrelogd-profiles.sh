@@ -52,6 +52,63 @@ fi
   $FACT_SYSTEM_ARGS \
   --check
 
+# A production daemon uses a temporary policy store for readiness checks.
+# Its lease creates a sidecar in TMPDIR, which must be removed when the
+# readiness handle is released during shutdown.
+PORT=$("$PYTHON" - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+mkdir -p "$TMPDIR/readiness"
+TMPDIR="$TMPDIR" "$WYRELOGD" --production --profile=system \
+  --template-dir "$TEMPLATE_DIR" \
+  --policy-db "$TMPDIR/readiness/policy.sqlite" \
+  --policy-keyprovider "$TMPDIR/system.key" \
+  --audit-db "$TMPDIR/readiness/audit.duckdb" \
+  $FACT_SYSTEM_ARGS --listen-port "$PORT" \
+  >"$TMPDIR/readiness.stdout" 2>"$TMPDIR/readiness.stderr" &
+READINESS_PID=$!
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  if "$PYTHON" - "$PORT" <<'PY'
+import sys
+import urllib.request
+
+try:
+    urllib.request.urlopen(
+        f"http://127.0.0.1:{sys.argv[1]}/healthz", timeout=1
+    ).read()
+except Exception:
+    sys.exit(1)
+PY
+  then
+    ready=1
+    break
+  fi
+  if ! kill -0 "$READINESS_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+kill "$READINESS_PID" 2>/dev/null || true
+wait "$READINESS_PID" 2>/dev/null || true
+if [ "$ready" -ne 1 ]; then
+  echo "production daemon did not become ready" >&2
+  cat "$TMPDIR/readiness.stderr" >&2
+  exit 1
+fi
+if find "$TMPDIR" -maxdepth 1 -name 'wyrelog-readiness-policy-*.sqlite.wyrelog-lock' \
+    -print -quit | grep -q .; then
+  echo "production readiness policy lock sidecar was left in TMPDIR" >&2
+  exit 1
+fi
+
 "$WYRELOGD" --production --profile=service \
   --template-dir "$TEMPLATE_DIR" \
   --policy-db "$TMPDIR/service/policy.sqlite" \

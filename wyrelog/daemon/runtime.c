@@ -348,11 +348,13 @@ cleanup_readiness_store (gpointer data)
 
   g_autofree gchar *clear_path = g_strdup_printf ("%s.clear", path);
   g_autofree gchar *wal_path = g_strdup_printf ("%s.wal", path);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   g_autofree gchar *sqlite_wal_path = g_strdup_printf ("%s-wal", path);
   g_autofree gchar *sqlite_shm_path = g_strdup_printf ("%s-shm", path);
   (void) g_remove (path);
   (void) g_remove (clear_path);
   (void) g_remove (wal_path);
+  (void) g_remove (lock_path);
   (void) g_remove (sqlite_wal_path);
   (void) g_remove (sqlite_shm_path);
   g_free (path);
