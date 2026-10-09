@@ -606,17 +606,13 @@ test_replacement_and_insecure_root_fail_closed (void)
 }
 #else
 static void
-test_lock_artifact_shape_is_enforced (void)
+test_unsupported_platform_fails_closed (void)
 {
-  g_autofree gchar *root = make_root ("wyrelog-root-lease-shape-XXXXXX");
-  g_autofree gchar *lock = g_build_filename (root, LOCK_NAME, NULL);
+  g_autofree gchar *root = make_root ("wyrelog-root-lease-unsupported-XXXXXX");
   g_autoptr (WylFactRootWriterLease) lease = NULL;
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
-      WYRELOG_E_OK);
-  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
-  g_assert_true (g_file_set_contents (lock, "foreign", 7, NULL));
-  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
       WYRELOG_E_POLICY);
+  g_assert_null (lease);
   remove_root (root);
 }
 #endif
@@ -636,6 +632,7 @@ main (int argc, char **argv)
       || !g_file_test (self_path, G_FILE_TEST_IS_REGULAR))
     g_error ("fact-root writer lease test executable path is invalid");
   g_test_init (&argc, &argv, NULL);
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact-root-writer-lease/same-process",
       test_same_process_identity_and_orderly_release);
   g_test_add_func ("/fact-root-writer-lease/process-recovery",
@@ -647,10 +644,8 @@ main (int argc, char **argv)
       test_handle_lifetime_owns_lease);
   g_test_add_func ("/fact-root-writer-lease/handle-init-failure",
       test_handle_init_failure_releases_lease);
-#ifndef G_OS_WIN32
   g_test_add_func ("/fact-root-writer-lease/handle-root-replacement",
       test_handle_rejects_replaced_root_before_schema);
-#endif
 #ifdef WYL_TEST_WYRELOGD_PATH
   g_test_add_func ("/fact-root-writer-lease/daemon-collision",
       test_daemon_collision_is_path_free_and_nonmutating);
@@ -658,12 +653,13 @@ main (int argc, char **argv)
       test_daemon_readiness_failure_names_handle);
 #endif
 #endif
+#endif
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact-root-writer-lease/replacement",
       test_replacement_and_insecure_root_fail_closed);
 #else
-  g_test_add_func ("/fact-root-writer-lease/artifact-shape",
-      test_lock_artifact_shape_is_enforced);
+  g_test_add_func ("/fact-root-writer-lease/unsupported-platform-fails-closed",
+      test_unsupported_platform_fails_closed);
 #endif
   gint result = g_test_run ();
   g_clear_pointer (&self_path, g_free);
