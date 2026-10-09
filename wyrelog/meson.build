@@ -163,6 +163,7 @@ if get_option('enable_fact_store').allowed()
     'fact/legacy-store-identity-private.c', 'fact/query.c',
     'fact/provisioning-private.c', 'fact/replay-store-private.c',
     'fact/graph-program-private.c',
+    'fact/rule-pack-private.c',
     'fact/replay.c', 'fact/runtime-private.c',
     'fact/tenant-admission-private.c',
     'fact/legacy-open-private.c',
