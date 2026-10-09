@@ -2247,6 +2247,13 @@ if get_option('enable_fact_store').allowed()
     test_fact_replay_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
   endif
 
+  test_fact_graph_program = executable('test-fact-graph-program',
+    'test-fact-graph-program.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep],
+  )
+  test('fact-graph-program', test_fact_graph_program)
+
   test_fact_replay = executable('test-fact-replay',
     'test-fact-replay.c',
     'fact-test-support.c',

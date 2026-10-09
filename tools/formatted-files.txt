@@ -58,6 +58,7 @@ tests/test-fact-graph-locator-darwin-evidence.c
 tests/test-fact-graph-locator-macos.c
 tests/test-fact-graph-locator-windows.c
 tests/test-fact-graph-locator.c
+tests/test-fact-graph-program.c
 tests/test-fact-graph-seal.c
 tests/test-fact-offline-backup-bundle.c
 tests/test-fact-offline-backup-manifest.c
@@ -264,6 +265,8 @@ wyrelog/fact/graph-locator-darwin-private.h
 wyrelog/fact/graph-locator-private.c
 wyrelog/fact/graph-locator-private.h
 wyrelog/fact/graph-locator-windows-private.c
+wyrelog/fact/graph-program-private.c
+wyrelog/fact/graph-program-private.h
 wyrelog/fact/graph-provisioned-pair-internal.h
 wyrelog/fact/graph-seal-private.c
 wyrelog/fact/graph-seal-private.h
