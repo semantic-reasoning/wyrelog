@@ -538,7 +538,44 @@ test_status_rejects_invalid_timeout (void)
   assert_status_invalid_timeout ("0");
   assert_status_invalid_timeout ("-1");
   assert_status_invalid_timeout ("abc");
-  assert_status_invalid_timeout ("60001");
+  assert_status_invalid_timeout ("3600001");
+}
+
+/*
+ * #1327: the limit was 60000 ms, so an operation longer than a minute could
+ * not be awaited.  It is one hour now.  Both values pass validation and
+ * reach the daemon, which refuses the connection: the failure is the probe,
+ * not the timeout.
+ */
+static void
+assert_status_accepts_timeout (const gchar *timeout_ms)
+{
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "--timeout-ms",
+    (gchar *) timeout_ms,
+    "status",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (stderr_buf);
+  g_assert_null (g_strstr_len (stderr_buf, -1, "invalid timeout"));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: "));
+}
+
+static void
+test_status_accepts_hour_timeout (void)
+{
+  assert_status_accepts_timeout ("60001");
+  assert_status_accepts_timeout ("3600000");
 }
 
 /*
@@ -4716,6 +4753,87 @@ test_auth_logout_settled_refusal_has_no_hint (void)
       "retained\n");
 }
 
+/*
+ * #1327: libsoup drops a response that sends nothing for its own 60 s I/O
+ * timeout, whatever --timeout-ms allows, so raising the limit alone would
+ * still give up at a minute.  The daemon here answers after 61 s within a
+ * 120 s budget.  Each case lasts over a minute, so it runs only in slow
+ * mode, from its own meson test; the status probe uses wyctl's session and
+ * logout the client library's.
+ */
+#define LONG_REQUEST_DELAY_MS 61000
+
+static void
+run_long_request_case (gchar **argv_tail, gint expected_exit,
+    gchar **out_stdout, gchar **out_stderr, gchar **out_request)
+{
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = 200,
+    .body = "{\"status\":\"ok\"}", .delay_ms = LONG_REQUEST_DELAY_MS,
+  };
+  GThread *thread = g_thread_new ("long-request",
+          policy_mutation_server_thread, &server);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  g_ptr_array_add (argv, "--daemon-url");
+  g_ptr_array_add (argv, daemon_url);
+  g_ptr_array_add (argv, "--timeout-ms");
+  g_ptr_array_add (argv, "120000");
+  for (gchar **arg = argv_tail; *arg != NULL; arg++)
+    g_ptr_array_add (argv, *arg);
+  g_ptr_array_add (argv, NULL);
+  gint wait_status = 0;
+  run_child ((gchar **) argv->pdata, out_stdout, out_stderr, &wait_status);
+  stop_test_server (thread, cancel);
+  *out_request = server.request;
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
+}
+
+static void
+test_status_outlasts_soup_io_timeout (void)
+{
+  if (!g_test_slow ()) {
+    g_test_skip ("waits over a minute; run with -m slow");
+    return;
+  }
+  gchar *tail[] = { "status", NULL };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = NULL;
+  run_long_request_case (tail, 0, &out, &err, &request);
+  g_assert_cmpstr (err, ==, "");
+  g_assert_nonnull (request);
+}
+
+static void
+test_auth_logout_outlasts_soup_io_timeout (void)
+{
+  if (!g_test_slow ()) {
+    g_test_skip ("waits over a minute; run with -m slow");
+    return;
+  }
+  g_autofree gchar *access_path = write_token_with_mode ("access-1", 0600);
+  g_autofree gchar *refresh_path = write_token_with_mode ("refresh-1", 0600);
+  gchar *tail[] = {
+    "auth", "logout", "--tenant", "__wr_default", "--token-file",
+    access_path, "--refresh-token-file", refresh_path, NULL,
+  };
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = NULL;
+  run_long_request_case (tail, 0, &out, &err, &request);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "");
+  g_assert_nonnull (request);
+  g_assert_false (g_file_test (access_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (refresh_path, G_FILE_TEST_EXISTS));
+}
+
 /* The flag is now validated like every other command's, before anything
  * is read or sent. */
 static void
@@ -4725,7 +4843,7 @@ test_auth_logout_rejects_invalid_timeout (void)
   g_autofree gchar *refresh_path = write_token_with_mode ("refresh-1", 0600);
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1",
-    "--timeout-ms", "60001", "auth", "logout", "--tenant", "__wr_default",
+    "--timeout-ms", "3600001", "auth", "logout", "--tenant", "__wr_default",
     "--token-file", access_path, "--refresh-token-file", refresh_path, NULL,
   };
   g_autofree gchar *out = NULL;
@@ -5901,6 +6019,12 @@ main (int argc, char **argv)
       test_status_connection_failure);
   g_test_add_func ("/wyctl/status-rejects-invalid-timeout",
       test_status_rejects_invalid_timeout);
+  g_test_add_func ("/wyctl/status-accepts-hour-timeout",
+      test_status_accepts_hour_timeout);
+  g_test_add_func ("/wyctl/long-request/status",
+      test_status_outlasts_soup_io_timeout);
+  g_test_add_func ("/wyctl/long-request/auth-logout",
+      test_auth_logout_outlasts_soup_io_timeout);
   g_test_add_func ("/wyctl/status-times-out", test_status_times_out);
   g_test_add_func ("/wyctl/status-readiness", test_status_readiness);
   g_test_add_func ("/wyctl/status-requires-daemon-url",

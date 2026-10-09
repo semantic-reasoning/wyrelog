@@ -9,7 +9,8 @@
 SoupSession *wyl_client_get_soup_session (WylClient * client);
 /* Bound every request this client sends -- connecting, sending the request
  * body and reading the response -- to |timeout_ms| from the start of that
- * request; 0 (the default) leaves requests unbounded.  A request that runs
+ * request; 0 (the default) sets no budget, leaving only libsoup's own 60 s
+ * I/O timeout, which a budget replaces.  A request that runs
  * out of time fails as a transport error (WYRELOG_E_IO) and the daemon may
  * still have applied it.  The bound is per request, not per call. */
 void wyl_client_set_timeout_ms (WylClient * client, guint timeout_ms);

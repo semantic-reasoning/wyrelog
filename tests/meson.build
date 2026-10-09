@@ -1114,6 +1114,17 @@ if build_client and host_machine.system() != 'windows'
       env : wyctl_gsettings_test_env,
       timeout : 60,
     )
+    # #1327: a request outlasting libsoup's 60 s I/O timeout.  Each case
+    # waits over a minute, so they run apart from wyctl-basic, in slow mode.
+    foreach long_request : ['status', 'auth-logout']
+      test('wyctl-long-request-' + long_request, python3,
+        args : [files('run-wyctl-with-private-tmpdir.py'), test_wyctl_basic,
+          '-m', 'slow', '-p', '/wyctl/long-request/' + long_request],
+        depends : [wyctl_exe, wyctl_gschemas_compiled, test_wyctl_basic],
+        env : wyctl_gsettings_test_env,
+        timeout : 180,
+      )
+    endforeach
   else
     # Keep Meson's normal cross-build skip behavior without an exe wrapper.
     test('wyctl-basic', test_wyctl_basic,

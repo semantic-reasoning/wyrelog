@@ -3543,7 +3543,7 @@ system-wide defaults layer.
 | `default-tenant` | `s` | `""` | Tenant id used when `--tenant` is omitted (same empty-is-unset convention). |
 | `default-graph` | `s` | `""` | Graph id used when `--graph` is omitted. |
 | `access-token-file` | `s` | `""` | Filesystem path to the bearer token file used when `--access-token-file` is omitted. Path only. |
-| `default-timeout-ms` | `u` | `2000` | Request timeout in milliseconds used when `--timeout-ms` is omitted. Re-validated by wyctl's CLI parser (`1..60000`). |
+| `default-timeout-ms` | `u` | `2000` | Request timeout in milliseconds used when `--timeout-ms` is omitted. Re-validated by wyctl's CLI parser (`1..3600000`). |
 | `default-guard-loc-class` | `s` | `""` | Location class used when `--guard-loc-class` is omitted. |
 | `default-guard-risk` | `i` | `-1` | Risk score (0..100) used when `--guard-risk` is omitted. `-1` is the "unset" sentinel because `0` is a real risk score. |
 | `default-guard-timestamp-mode` | `s` | `"none"` | Strategy for filling `--guard-timestamp` when omitted. `"none"` preserves the historical "must be supplied" behaviour; `"now"` is reserved for a future commit that fills the current wall-clock time. |
@@ -3552,20 +3552,22 @@ system-wide defaults layer.
 
 `--timeout-ms`, or `default-timeout-ms` when it is omitted, bounds every
 daemon request a command sends: connecting, uploading the request (a fact
-batch included), and reading the answer. The default is 2000 ms and the
-limit is 60000 ms, so wyctl cannot wait for an operation that takes longer
-than a minute; raise the value for large fact batches, heavy queries, or
-long erasures, as the forget example above does. A request that runs out of
-time exits like any other transport failure, and the daemon may still have
-completed it. For policy grants, revokes and transitions, fact put and
-retract, fact forget, fact schema register, fact quota configure, graph
-create and seal, tenant create, seal and unseal, service-principal create
-and disable, and service-credential issue, rotate and revoke, wyctl adds a
-line saying that the outcome is unknown and how to find out; the online
-`mfa enroll` says whether a re-run is safe (see "First-Install Bootstrap");
-`auth logout` says how to settle the retained token files (see "HTTP API
-Summary" under "TOTP Multi-Factor Authentication (MFA)"); other commands
-report only the failure, so check the daemon's state before repeating them.
+batch included), and reading the answer. The default is 2000 ms and the limit
+is 3600000 ms (one hour); there is no unbounded value, so every request ends.
+Raise the value for large fact batches, heavy queries, or long erasures, as
+the forget example above does; for an operation that may run past a minute,
+pass a budget that covers it, such as `--timeout-ms 600000` for ten minutes. A
+request that runs out of time exits like any other transport failure, and the
+daemon may still have completed it. For policy grants, revokes and
+transitions, fact put and retract, fact forget, fact schema register, fact
+quota configure, graph create and seal, tenant create, seal and unseal,
+service-principal create and disable, and service-credential issue, rotate and
+revoke, wyctl adds a line saying that the outcome is unknown and how to find
+out; the online `mfa enroll` says whether a re-run is safe (see "First-Install
+Bootstrap"); `auth logout` says how to settle the retained token files (see
+"HTTP API Summary" under "TOTP Multi-Factor Authentication (MFA)"); other
+commands report only the failure, so check the daemon's state before repeating
+them.
 
 Example: configure the operator workstation once and let wyctl invocations
 in that same account and settings-backend environment pick up the defaults.

@@ -671,7 +671,9 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlSensitiveText,
     wyctl_sensitive_text_clear);
 
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
-#define WYCTL_MAX_TIMEOUT_MS 60000
+/* One hour: long enough to await a large fact batch, heavy query or long
+ * erasure, while every request stays bounded (#1324, #1327). */
+#define WYCTL_MAX_TIMEOUT_MS 3600000
 #define WYCTL_AUDIT_DEFAULT_LIMIT 100
 #define WYCTL_AUDIT_MAX_LIMIT 100
 #define WYCTL_KEYPROVIDER_FILE_BYTES 32
@@ -994,11 +996,14 @@ wyctl_check_proxy_environment (void)
 }
 
 /* Send MSG on SESSION and read the response, cancelling the exchange
- * once TIMEOUT_MS have passed. */
+ * once TIMEOUT_MS have passed.  That deadline is the only bound: libsoup's
+ * own 60 s I/O timeout would otherwise drop an answer a longer budget
+ * allows (#1327). */
 static GBytes *
 wyctl_send_and_read_bounded (SoupSession *session, SoupMessage *msg,
     guint timeout_ms, GError **error)
 {
+  soup_session_set_timeout (session, 0);
   g_autoptr (GCancellable) cancellable = g_cancellable_new ();
   WyctlTimeout timeout = {
     .cancellable = cancellable,
