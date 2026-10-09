@@ -606,13 +606,27 @@ test_replacement_and_insecure_root_fail_closed (void)
 }
 #else
 static void
-test_unsupported_platform_fails_closed (void)
+test_windows_writer_lease_lifecycle (void)
 {
-  g_autofree gchar *root = make_root ("wyrelog-root-lease-unsupported-XXXXXX");
+  g_autofree gchar *root = make_root ("wyrelog-root-lease-windows-XXXXXX");
   g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_autoptr (WylFactRootWriterLease) competing = NULL;
   g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
-      WYRELOG_E_POLICY);
-  g_assert_null (lease);
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (wyl_fact_root_writer_lease_verify (lease), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &competing), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (competing);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (wyl_fact_root_writer_lease_verify (lease), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   remove_root (root);
 }
 #endif
@@ -658,8 +672,8 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-root-writer-lease/replacement",
       test_replacement_and_insecure_root_fail_closed);
 #else
-  g_test_add_func ("/fact-root-writer-lease/unsupported-platform-fails-closed",
-      test_unsupported_platform_fails_closed);
+  g_test_add_func ("/fact-root-writer-lease/windows-writer-lease-lifecycle",
+      test_windows_writer_lease_lifecycle);
 #endif
   gint result = g_test_run ();
   g_clear_pointer (&self_path, g_free);

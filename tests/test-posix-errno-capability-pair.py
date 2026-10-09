@@ -304,8 +304,22 @@ def replace_once(files: dict[str, str], path: str, old: str, new: str) -> dict[s
 
 
 def expect_failure(files: dict[str, str], expected: str) -> None:
+    checker = {
+        "E_PAIR_ENOTSUP": check_pair_helper,
+        "E_PAIR_EOPNOTSUPP": check_pair_helper,
+        "E_FULLFSYNC_PAIR": check_publication,
+        "E_FULLFSYNC_CAPTURED_MAP": check_publication,
+        "E_FULLFSYNC_CAPTURE": check_publication,
+        "E_FULLFSYNC_FALLBACK": check_publication,
+        "E_ONE_SIDED": check_one_sided_inventory,
+        "E_TOKEN_PASTE": check_token_paste_inventory,
+        "E_STORE_GUARD": check_dormant_exceptions,
+        "E_GRAPH_GUARD": check_dormant_exceptions,
+    }.get(expected)
+    require(checker is not None, "E_SELF_DIAGNOSTIC",
+            f"no focused checker for {expected}")
     try:
-        check_contract(files)
+        checker(files)
     except ContractError as error:
         require(error.code == expected, "E_SELF_DIAGNOSTIC",
                 f"expected {expected}, got {error.code}")
