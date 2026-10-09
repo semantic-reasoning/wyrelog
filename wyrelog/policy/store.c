@@ -965,6 +965,18 @@ static const gchar offline_restore_receipts_sql[] =
     "final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),"
     "terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),"
     "completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),"
+    "graph_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 0 AND 1024),"
+    "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
+    "(scope='graph' AND selected_graph_id IS NOT NULL)));";
+static const gchar offline_restore_receipts_legacy_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts ("
+    "operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,"
+    "scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')) ,"
+    "selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK("
+    "typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),"
+    "final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),"
+    "terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')) ,"
+    "completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),"
     "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
     "(scope='graph' AND selected_graph_id IS NOT NULL)));";
 static const gchar offline_restore_terminal_history_sql[] =
@@ -1351,7 +1363,7 @@ static const gchar offline_restore_schema_ddl[] =
     "FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(tenant_id,selected_graph_id) REFERENCES fact_graphs(tenant_id,graph_id));"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_tenant_claims (tenant_id TEXT PRIMARY KEY,operation_uuid TEXT NOT NULL UNIQUE,FOREIGN KEY(tenant_id) REFERENCES tenants(tenant_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_graph_claims (tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,operation_uuid TEXT NOT NULL UNIQUE,PRIMARY KEY(tenant_id,graph_id),FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT);"
-    "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)));"
+    "CREATE TABLE IF NOT EXISTS fact_offline_restore_receipts (operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK(typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),graph_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(graph_count)='integer' AND graph_count BETWEEN 0 AND 1024),CHECK((scope='tenant' AND selected_graph_id IS NULL) OR (scope='graph' AND selected_graph_id IS NOT NULL)));"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_history (operation_uuid TEXT NOT NULL,tenant_id TEXT NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')) ,graph_id TEXT NOT NULL,replacement_uuid TEXT NOT NULL,old_provisioning_uuid TEXT NOT NULL,store_uuid TEXT NOT NULL,tenant_lifecycle_generation INTEGER NOT NULL,tenant_reconciliation_generation INTEGER NOT NULL,graph_lifecycle_generation INTEGER NOT NULL,graph_reconciliation_generation INTEGER NOT NULL,journal_revision INTEGER NOT NULL,companion_basename TEXT NOT NULL,phase TEXT NOT NULL,attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(operation_uuid,graph_id),FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid) DEFERRABLE INITIALLY DEFERRED);"
     "CREATE TABLE IF NOT EXISTS fact_offline_restore_terminal_guard (operation_uuid TEXT PRIMARY KEY,FOREIGN KEY(operation_uuid) REFERENCES fact_offline_restore_receipts(operation_uuid));"
     "CREATE TRIGGER IF NOT EXISTS fact_offline_restore_terminal_history_no_update BEFORE UPDATE ON fact_offline_restore_terminal_history BEGIN SELECT RAISE(ABORT,'restore terminal history is immutable'); END;"
@@ -11781,6 +11793,57 @@ graph_authority_canonical_sql (const gchar *sql)
 }
 
 static wyrelog_error_t
+migrate_offline_restore_receipt_graph_count (sqlite3 *db)
+{
+  wyrelog_error_t rc = graph_authority_object_matches (db, "table",
+          "fact_offline_restore_receipts", offline_restore_receipts_sql);
+  if (rc == WYRELOG_E_OK)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_POLICY)
+    return rc;
+  rc = graph_authority_object_matches (db, "table",
+          "fact_offline_restore_receipts", offline_restore_receipts_legacy_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Do not convert a receipt unless its terminal history proves a coherent
+   * committed count. Legacy tenant aborts have no surviving count evidence. */
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (db,
+          "SELECT 1 FROM main.fact_offline_restore_receipts r WHERE "
+          "(r.terminal_state='committed' AND ((SELECT count(*) FROM "
+          "main.fact_offline_restore_terminal_history h WHERE "
+          "h.operation_uuid=r.operation_uuid) NOT BETWEEN 1 AND 1024 OR "
+          "EXISTS(SELECT 1 FROM main.fact_offline_restore_terminal_history h "
+          "WHERE h.operation_uuid=r.operation_uuid AND (h.tenant_id!=r.tenant_id "
+          "OR h.scope!=r.scope OR (r.scope='graph' AND h.graph_id!=r.selected_graph_id))))) "
+          "OR (r.terminal_state='aborted' AND r.scope='graph' "
+          "AND r.selected_graph_id IS NULL) LIMIT 1;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  int step = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step == SQLITE_ROW)
+    return WYRELOG_E_POLICY;
+  if (step != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  rc = exec_sql (db,
+          "ALTER TABLE main.fact_offline_restore_receipts ADD COLUMN "
+          "graph_count INTEGER NOT NULL DEFAULT 0 CHECK(typeof(graph_count)="
+          "'integer' AND graph_count BETWEEN 0 AND 1024);");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (db,
+          "UPDATE main.fact_offline_restore_receipts SET graph_count=CASE "
+          "WHEN terminal_state='committed' THEN (SELECT count(*) FROM "
+          "main.fact_offline_restore_terminal_history h WHERE "
+          "h.operation_uuid=fact_offline_restore_receipts.operation_uuid) "
+          "WHEN scope='graph' THEN 1 ELSE 0 END;");
+  return rc;
+}
+
+static wyrelog_error_t
 validate_offline_restore_schema (sqlite3 *db)
 {
   static const struct
@@ -11827,6 +11890,24 @@ validate_offline_restore_schema (sqlite3 *db)
       return rc;
     }
   }
+  static const gchar *const invalid_receipt_sql =
+      "SELECT 1 FROM fact_offline_restore_receipts r WHERE "
+      "typeof(r.graph_count)!='integer' OR r.graph_count NOT BETWEEN 0 AND 1024 "
+      "OR (r.terminal_state='committed' AND (r.graph_count=0 OR "
+      "r.graph_count!=(SELECT count(*) FROM fact_offline_restore_terminal_history h "
+      "WHERE h.operation_uuid=r.operation_uuid))) OR "
+      "(r.terminal_state='aborted' AND r.scope='graph' AND r.graph_count!=1) "
+      "LIMIT 1;";
+  sqlite3_stmt *receipt_stmt = NULL;
+  if (sqlite3_prepare_v2 (db, invalid_receipt_sql, -1, &receipt_stmt, NULL)
+      != SQLITE_OK)
+    return WYRELOG_E_IO;
+  int receipt_step = sqlite3_step (receipt_stmt);
+  sqlite3_finalize (receipt_stmt);
+  if (receipt_step == SQLITE_ROW)
+    return WYRELOG_E_POLICY;
+  if (receipt_step != SQLITE_DONE)
+    return WYRELOG_E_IO;
   static const gchar *const invalid_queries[] = {
     "SELECT 1 FROM fact_offline_restore_journals WHERE "
     "typeof(operation_uuid)!='text' OR typeof(tenant_id)!='text' OR "
@@ -12016,6 +12097,8 @@ migrate_offline_restore_schema (sqlite3 *db)
     if (rc == WYRELOG_E_OK)
       rc = exec_sql (db, offline_restore_schema_ddl);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_offline_restore_receipt_graph_count (db);
   return rc == WYRELOG_E_OK ? validate_offline_restore_schema (db) : rc;
 }
 
@@ -40396,7 +40479,8 @@ wyl_policy_store_offline_restore_release (wyl_policy_store_t *store,
   rc = prepare_stmt (store->db,
           "INSERT INTO main.fact_offline_restore_receipts(operation_uuid,tenant_id,"
           "scope,selected_graph_id,manifest_sha256,final_revision,terminal_state,"
-          "completed_at) VALUES(?,?,?,?,?,?,'aborted',unixepoch());", &receipt);
+          "graph_count,completed_at) VALUES(?,?,?,?,?,?,'aborted',?,unixepoch());",
+          &receipt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (receipt, 1, expected->operation_uuid);
   if (rc == WYRELOG_E_OK)
@@ -40412,10 +40496,16 @@ wyl_policy_store_offline_restore_release (wyl_policy_store_t *store,
       && sqlite3_bind_null (receipt, 4) != SQLITE_OK)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
+      && (expected->graph_count == 0 || expected->graph_count > 1024
+      || (expected->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      && expected->graph_count != 1)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
       && (sqlite3_bind_blob (receipt, 5, expected->manifest_sha256, 32,
       SQLITE_TRANSIENT) != SQLITE_OK
       || sqlite3_bind_int64 (receipt, 6, (sqlite3_int64) expected->revision)
-      != SQLITE_OK))
+      != SQLITE_OK
+      || sqlite3_bind_int64 (receipt, 7, expected->graph_count) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && sqlite3_step (receipt) != SQLITE_DONE)
     rc = WYRELOG_E_IO;
@@ -40514,9 +40604,7 @@ wyl_policy_store_offline_restore_receipt_lookup (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = prepare_stmt (store->db,
             "SELECT tenant_id,scope,selected_graph_id,manifest_sha256,"
-            "final_revision,terminal_state,(SELECT count(*) FROM "
-            "main.fact_offline_restore_terminal_history h WHERE "
-            "h.operation_uuid=fact_offline_restore_receipts.operation_uuid) "
+            "final_revision,terminal_state,graph_count "
             "FROM main.fact_offline_restore_receipts WHERE operation_uuid=?;", &stmt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, operation_uuid);
@@ -44098,7 +44186,8 @@ offline_restore_commit_terminalize_locked (wyl_policy_store_t *store,
     rc = prepare_stmt (store->db,
             "INSERT INTO main.fact_offline_restore_receipts(operation_uuid,tenant_id,"
             "scope,selected_graph_id,manifest_sha256,final_revision,terminal_state,"
-            "completed_at) VALUES(?,?,?,?,?,?,'committed',unixepoch());", &stmt);
+            "graph_count,completed_at) VALUES(?,?,?,?,?,?,'committed',?,unixepoch());",
+            &stmt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, expected->operation_uuid);
   if (rc == WYRELOG_E_OK)
@@ -44113,9 +44202,15 @@ offline_restore_commit_terminalize_locked (wyl_policy_store_t *store,
       && sqlite3_bind_null (stmt, 4) != SQLITE_OK)
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK
+      && (expected->graph_count == 0 || expected->graph_count > 1024
+      || (expected->scope == WYL_POLICY_OFFLINE_RESTORE_SCOPE_GRAPH
+      && expected->graph_count != 1)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
       && (sqlite3_bind_blob (stmt, 5, expected->manifest_sha256, 32,
       SQLITE_TRANSIENT) != SQLITE_OK
-      || sqlite3_bind_int64 (stmt, 6, expected->revision) != SQLITE_OK))
+      || sqlite3_bind_int64 (stmt, 6, expected->revision) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 7, expected->graph_count) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
     rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));

@@ -1307,6 +1307,28 @@ main (void)
       == NULL)
     return wyl_test_normalize_exit_status (2891);
   wyl_client_fact_restore_result_clear (&restore_result);
+  WylClientFactRestoreRequest graph_restore_request = restore_request;
+  graph_restore_request.scope = WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH;
+  graph_restore_request.tenant_id = "tenant-a";
+  graph_restore_request.graph_id = "alpha";
+  http.body = "{\"scope\":\"graph\",\"tenant_id\":\"tenant-a\","
+      "\"graph_id\":\"alpha\",\"operation_uuid\":null,"
+      "\"revision\":0,\"graph_count\":1,"
+      "\"publication_eligible\":true,\"state\":\"eligible\","
+      "\"failure_code\":null}";
+  if (wyl_client_fact_restore_dry_run (management_client,
+      &graph_restore_request, &restore_result) != WYRELOG_E_OK
+      || restore_result.scope != WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH
+      || g_strcmp0 (restore_result.tenant_id, "tenant-a") != 0
+      || g_strcmp0 (restore_result.graph_id, "alpha") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_authorization,
+      "Bearer management-access") != 0
+      || strstr (http.last_body, "\"scope\":\"graph\"") == NULL
+      || strstr (http.last_body, "\"tenant_id\":\"tenant-a\"") == NULL
+      || strstr (http.last_body, "\"graph_id\":\"alpha\"") == NULL)
+    return wyl_test_normalize_exit_status (2895);
+  wyl_client_fact_restore_result_clear (&restore_result);
   restore_request.operation_uuid = "01890c10-2e3f-7000-8000-000000000001";
   restore_request.confirmed = TRUE;
   http.status = 500;

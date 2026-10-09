@@ -226,9 +226,130 @@ offline_restore_schema_migration_rejects_other_partial_shapes (void)
         corruption, NULL, NULL, NULL), ==, SQLITE_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_POLICY);
+    sqlite3_stmt *unchanged = NULL;
+    const gchar *unchanged_sql = malformed_receipt
+        ? "SELECT count(*) FROM pragma_table_info('fact_offline_restore_receipts');"
+        : "SELECT count(*) FROM sqlite_master WHERE name='fact_offline_restore_graph_claims';";
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+        unchanged_sql, -1, &unchanged, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (unchanged), ==, SQLITE_ROW);
+    g_assert_cmpint (sqlite3_column_int (unchanged, 0), ==,
+        malformed_receipt ? 1 : 0);
+    sqlite3_finalize (unchanged);
     g_clear_pointer (&store, wyl_policy_store_close);
     remove_test_directory (directory);
   }
+}
+
+static void
+offline_restore_receipt_graph_count_migration (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *directory = g_dir_make_tmp
+        ("wyl-restore-receipt-count-migration-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (directory);
+  g_autofree gchar *store_path = g_build_filename (directory,
+          "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (directory,
+          "policy.key", NULL);
+  g_assert_true (write_policy_key (key_path));
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (open_encrypted_store (store_path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  const gchar *legacy_schema =
+      "DROP TABLE fact_offline_restore_receipts;"
+      "CREATE TABLE fact_offline_restore_receipts ("
+      "operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,"
+      "scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),"
+      "selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK("
+      "typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),"
+      "final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),"
+      "terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),"
+      "completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),"
+      "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
+      "(scope='graph' AND selected_graph_id IS NOT NULL)));"
+      "INSERT INTO fact_offline_restore_receipts VALUES"
+      "('legacy-abort','tenant-a','tenant',NULL,zeroblob(32),1,'aborted',100);"
+      "INSERT INTO fact_offline_restore_receipts VALUES"
+      "('legacy-graph-abort','tenant-a','graph','alpha',zeroblob(32),1,'aborted',100);"
+      "INSERT INTO fact_offline_restore_receipts VALUES"
+      "('legacy-commit','tenant-a','tenant',NULL,zeroblob(32),2,'committed',101);"
+      "INSERT INTO fact_offline_restore_terminal_history VALUES"
+      "('legacy-commit','tenant-a','tenant','alpha','replacement','old',"
+      "'store',1,1,1,1,2,'alpha.db','verified',0,100,101);";
+  g_assert_cmpint (sqlite3_exec (db, legacy_schema, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (store,
+      "legacy-abort", &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (receipt->graph_count, ==, 0);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (store,
+      "legacy-graph-abort", &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (receipt->graph_count, ==, 1);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (store,
+      "legacy-commit", &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (receipt->graph_count, ==, 1);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (open_encrypted_store (store_path, key_path, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_receipt_lookup (store,
+      "legacy-commit", &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (receipt->graph_count, ==, 1);
+  wyl_policy_offline_restore_receipt_free (receipt);
+  g_clear_pointer (&store, wyl_policy_store_close);
+  remove_test_directory (directory);
+}
+
+static void
+offline_restore_receipt_graph_count_migration_rolls_back (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  const gchar *legacy_schema =
+      "DROP TABLE fact_offline_restore_receipts;"
+      "CREATE TABLE fact_offline_restore_receipts ("
+      "operation_uuid TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,"
+      "scope TEXT NOT NULL CHECK(scope IN ('tenant','graph')),"
+      "selected_graph_id TEXT,manifest_sha256 BLOB NOT NULL CHECK("
+      "typeof(manifest_sha256)='blob' AND length(manifest_sha256)=32),"
+      "final_revision INTEGER NOT NULL CHECK(typeof(final_revision)='integer' AND final_revision>=1),"
+      "terminal_state TEXT NOT NULL CHECK(terminal_state IN ('aborted','committed')),"
+      "completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer' AND completed_at>=0),"
+      "CHECK((scope='tenant' AND selected_graph_id IS NULL) OR "
+      "(scope='graph' AND selected_graph_id IS NOT NULL)));"
+      "INSERT INTO fact_offline_restore_receipts VALUES"
+      "('legacy-abort','tenant-a','tenant',NULL,zeroblob(32),1,'aborted',100);"
+      "CREATE TRIGGER force_receipt_backfill_failure BEFORE UPDATE ON "
+      "fact_offline_restore_receipts BEGIN SELECT RAISE(ABORT,'forced test failure'); END;";
+  g_assert_cmpint (sqlite3_exec (db, legacy_schema, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM pragma_table_info('fact_offline_restore_receipts') "
+      "WHERE name='graph_count';", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 0);
+  sqlite3_finalize (stmt);
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM fact_offline_restore_receipts WHERE "
+      "operation_uuid='legacy-abort';", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 1);
+  sqlite3_finalize (stmt);
 }
 
 static GBytes *
@@ -1388,6 +1509,10 @@ main (int argc, char **argv)
       encrypted_publication_and_reopen);
   g_test_add_func ("/fact/offline-restore-journal-store/migration-partial-shape",
       offline_restore_schema_migration_rejects_other_partial_shapes);
+  g_test_add_func ("/fact/offline-restore-journal-store/receipt-graph-count-migration",
+      offline_restore_receipt_graph_count_migration);
+  g_test_add_func ("/fact/offline-restore-journal-store/receipt-graph-count-migration-rollback",
+      offline_restore_receipt_graph_count_migration_rolls_back);
 #ifndef G_OS_WIN32
   g_test_add_func ("/fact/offline-restore-journal-store/encrypted-abrupt-exit",
       encrypted_abrupt_exit);
