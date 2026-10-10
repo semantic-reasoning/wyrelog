@@ -58,6 +58,13 @@ COVERAGE = {
     "/facts/quota/operation-status": ("fact", "quota", "operation-status"),
     "/facts/schema/register": ("fact", "schema", "register"),
     "/facts/schema/status": ("fact", "schema", "status"),
+    "/facts/restore/dry-run": ("fact", "restore", "dry-run"),
+    "/facts/restore/begin": ("fact", "restore", "begin"),
+    "/facts/restore/prepare": ("fact", "restore", "prepare"),
+    "/facts/restore/commit": ("fact", "restore", "commit"),
+    "/facts/restore/resume": ("fact", "restore", "resume"),
+    "/facts/restore/abort": ("fact", "restore", "abort"),
+    "/facts/restore/status": ("fact", "restore", "status"),
     "/facts/{tenant}/{graph}/{relation}:append": ("fact", "put"),
     "/facts/{tenant}/{graph}/{relation}:retract": ("fact", "retract"),
     "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),
@@ -117,6 +124,7 @@ DISPATCHERS = {
     ("policy",): "run_policy",
     ("graph",): "run_graph",
     ("fact",): "run_fact",
+    ("fact", "restore"): "run_fact_restore_command",
     ("fact", "schema"): "run_fact_schema",
     ("fact", "quota"): "run_fact_quota_command",
     ("datalog",): "run_datalog",
@@ -227,6 +235,9 @@ def daemon_routes(root: Path) -> list[str]:
             expanded.extend(FACT_OPERATION_ROUTE.format(
                 tenant="{tenant}", graph="{graph}", relation="{relation}",
                 op=op) for op in fact_operations(http_source))
+            expanded.extend(f"/facts/restore/{operation}" for operation in (
+                "dry-run", "begin", "prepare", "commit", "resume",
+                "abort", "status"))
         else:
             expanded.append(route)
     return expanded
