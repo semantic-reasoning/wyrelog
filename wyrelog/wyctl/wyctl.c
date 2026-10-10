@@ -196,6 +196,24 @@ typedef struct
 
 typedef struct
 {
+  gchar *scope;
+  gchar *tenant;
+  gchar *graph;
+  gchar *bundle;
+  gchar *digest;
+  gchar *uuid;
+  gchar *revision_arg;
+  gchar *format;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+  gboolean confirm;
+  gboolean retry_begin;
+} WyctlFactRestoreOptions;
+
+typedef struct
+{
   gchar *tenant;
   gchar *graph;
   gchar *access_token_file;
@@ -518,6 +536,26 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactStatusOptions,
     wyctl_fact_status_options_clear);
 
 static void
+wyctl_fact_restore_options_clear (WyctlFactRestoreOptions *opts)
+{
+  g_clear_pointer (&opts->scope, g_free);
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->bundle, g_free);
+  g_clear_pointer (&opts->digest, g_free);
+  g_clear_pointer (&opts->uuid, g_free);
+  g_clear_pointer (&opts->revision_arg, g_free);
+  g_clear_pointer (&opts->format, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactRestoreOptions,
+    wyctl_fact_restore_options_clear);
+
+static void
 wyctl_graph_seal_options_clear (WyctlGraphSealOptions *opts)
 {
   g_clear_pointer (&opts->tenant, g_free);
@@ -773,6 +811,20 @@ parse_positive_uint32 (const gchar *raw, guint32 *out_value)
     return FALSE;
 
   *out_value = (guint32) parsed;
+  return TRUE;
+}
+
+static gboolean
+parse_positive_uint64 (const gchar *raw, guint64 *out_value)
+{
+  if (raw == NULL || raw[0] == '\0' || out_value == NULL || raw[0] == '-')
+    return FALSE;
+  errno = 0;
+  gchar *end = NULL;
+  guint64 parsed = g_ascii_strtoull (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed == 0)
+    return FALSE;
+  *out_value = parsed;
   return TRUE;
 }
 
@@ -3797,6 +3849,430 @@ run_fact_quota_command (const WyctlOptions *global_opts, gint argc,
   return 2;
 }
 
+static const gchar *
+fact_restore_state_name (WylClientFactRestoreState state)
+{
+  switch (state) {
+    case WYL_CLIENT_FACT_RESTORE_STATE_ELIGIBLE: return "ELIGIBLE";
+    case WYL_CLIENT_FACT_RESTORE_STATE_PREPARING: return "PREPARING";
+    case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED: return "PREPARED";
+    case WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING: return "COMMITTING";
+    case WYL_CLIENT_FACT_RESTORE_STATE_ACTIVE: return "ACTIVE";
+    case WYL_CLIENT_FACT_RESTORE_STATE_ABORTING: return "ABORTING";
+    case WYL_CLIENT_FACT_RESTORE_STATE_ABORTED: return "ABORTED";
+    case WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED: return "COMMITTED";
+    case WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN:
+    default: return "UNKNOWN";
+  }
+}
+
+static const gchar *
+fact_restore_outcome_name (WylClientFactRestoreOutcome outcome)
+{
+  switch (outcome) {
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE: return "complete";
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED: return "refused";
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT: return "conflict";
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS: return "in_progress";
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_CANCELLED: return "cancelled";
+    case WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN: return "unknown";
+    default: return "unknown";
+  }
+}
+
+static void
+fact_restore_append_bundle_placeholders (GString *command)
+{
+  g_autofree gchar *bundle_arg = g_shell_quote ("<BUNDLE_PATH>");
+  g_autofree gchar *digest_arg = g_shell_quote ("<TRUSTED_SHA256>");
+  g_string_append_printf (command, " --bundle %s --trusted-sha256 %s",
+      bundle_arg, digest_arg);
+}
+
+static void
+fact_restore_append_execution_placeholders (GString *command)
+{
+  static const gchar *const options[][2] = {
+    {"--access-token-file", "<ACCESS_TOKEN_FILE>"},
+    {"--guard-timestamp", "<GUARD_TIMESTAMP_US>"},
+    {"--guard-loc-class", "<GUARD_LOC_CLASS>"},
+    {"--guard-risk", "<GUARD_RISK>"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (options); i++) {
+    g_autofree gchar *quoted = g_shell_quote (options[i][1]);
+    g_string_append_printf (command, " %s %s", options[i][0], quoted);
+  }
+}
+
+static gchar *
+fact_restore_next_command (const gchar *operation,
+    const WylClientFactRestoreRequest *request,
+    const WylClientFactRestoreResult *result, gboolean retry_begin)
+{
+  /* PREPARED is the durable point at which the operator must choose between
+   * commit and abort. A status query cannot make that choice for them. */
+  if (result->state == WYL_CLIENT_FACT_RESTORE_STATE_PREPARED
+      && g_strcmp0 (operation, "status") == 0)
+    return g_strdup ("-");
+  if (g_strcmp0 (operation, "status") == 0
+      && g_strcmp0 (result->failure_code, "restore_not_found") == 0
+      && !retry_begin)
+    return g_strdup ("-");
+  const gchar *verb = "status";
+  gboolean bundle = FALSE, confirm = FALSE, revision = FALSE;
+  if (g_strcmp0 (operation, "status") == 0 && retry_begin
+      && g_strcmp0 (result->failure_code, "restore_not_found") == 0) {
+    verb = "begin"; bundle = TRUE; confirm = TRUE;
+  } else {
+    switch (result->state) {
+      case WYL_CLIENT_FACT_RESTORE_STATE_ELIGIBLE:
+        if (g_strcmp0 (operation, "dry-run") == 0 && request->operation_uuid == NULL) {
+          verb = "begin"; bundle = TRUE; confirm = TRUE;
+        }
+        break;
+      case WYL_CLIENT_FACT_RESTORE_STATE_PREPARING:
+        verb = "prepare"; bundle = TRUE; revision = TRUE; break;
+      case WYL_CLIENT_FACT_RESTORE_STATE_PREPARED:
+        if (g_strcmp0 (operation, "abort") == 0) {
+          verb = "status";
+        } else {
+          verb = "commit"; bundle = TRUE; revision = TRUE; confirm = TRUE;
+        }
+        break;
+      case WYL_CLIENT_FACT_RESTORE_STATE_COMMITTING:
+        verb = "resume"; revision = TRUE; break;
+      case WYL_CLIENT_FACT_RESTORE_STATE_ABORTING:
+        verb = "abort"; revision = TRUE; confirm = TRUE; break;
+      case WYL_CLIENT_FACT_RESTORE_STATE_ACTIVE:
+      case WYL_CLIENT_FACT_RESTORE_STATE_COMMITTED:
+      case WYL_CLIENT_FACT_RESTORE_STATE_ABORTED:
+        return g_strdup ("-");
+      case WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN:
+        if (g_strcmp0 (operation, "dry-run") == 0
+            && request->operation_uuid == NULL
+            && request->bundle_path != NULL
+            && request->trusted_manifest_sha256 != NULL) {
+          verb = "dry-run"; bundle = TRUE;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  g_autofree gchar *daemon_url_arg = g_shell_quote ("<DAEMON_URL>");
+  g_autoptr (GString) cmd = g_string_new ("wyctl --daemon-url ");
+  g_string_append_printf (cmd, "%s fact restore ", daemon_url_arg);
+  g_autofree gchar *tenant_arg = g_shell_quote (request->tenant_id);
+  g_string_append_printf (cmd, "%s --scope %s --tenant %s",
+      verb, request->scope == WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH ? "graph" : "tenant",
+      tenant_arg);
+  if (request->graph_id != NULL) {
+    g_autofree gchar *graph_arg = g_shell_quote (request->graph_id);
+    g_string_append_printf (cmd, " --graph %s", graph_arg);
+  }
+  if (request->operation_uuid != NULL) {
+    g_autofree gchar *uuid_arg = g_shell_quote (request->operation_uuid);
+    g_string_append_printf (cmd, " --uuid %s", uuid_arg);
+  } else if (g_strcmp0 (verb, "begin") == 0) {
+    g_string_append (cmd, " --uuid NEW_OPERATION_UUID");
+  }
+  if (revision)
+    g_string_append_printf (cmd, " --revision %" G_GUINT64_FORMAT,
+        result->revision);
+  if (bundle)
+    fact_restore_append_bundle_placeholders (cmd);
+  gboolean carry_retry_begin = retry_begin ||
+      (g_strcmp0 (operation, "begin") == 0
+      && result->state == WYL_CLIENT_FACT_RESTORE_STATE_UNKNOWN);
+  if (g_strcmp0 (verb, "status") == 0 && carry_retry_begin
+      && request->bundle_path != NULL
+      && request->trusted_manifest_sha256 != NULL){
+    g_string_append (cmd, " --retry-begin");
+    fact_restore_append_bundle_placeholders (cmd);
+  }
+  if (confirm)
+    g_string_append (cmd, " --confirm");
+  fact_restore_append_execution_placeholders (cmd);
+  return g_string_free (g_steal_pointer (&cmd), FALSE);
+}
+
+static void
+fact_restore_append_optional_json (GString *json, const gchar *name,
+    const gchar *value)
+{
+  g_string_append_c (json, ',');
+  append_json_string (json, name);
+  g_string_append_c (json, ':');
+  if (value == NULL)
+    g_string_append (json, "null");
+  else
+    append_json_string (json, value);
+}
+
+static void
+fact_restore_print_result (const gchar *operation,
+    const WylClientFactRestoreRequest *request,
+    const WylClientFactRestoreResult *result, const gchar *format,
+    gboolean result_available, gboolean retry_begin)
+{
+  g_autofree gchar *revision = result->outcome != WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN
+      && (result->revision > 0 || result->outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE) ?
+      g_strdup_printf ("%" G_GUINT64_FORMAT, result->revision) : NULL;
+  g_autofree gchar *expected = request->expected_revision > 0 ?
+      g_strdup_printf ("%" G_GUINT64_FORMAT, request->expected_revision) : NULL;
+  g_autofree gchar *graph_count = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          result->graph_count);
+  g_autofree gchar *next = fact_restore_next_command (operation, request,
+          result, retry_begin);
+  const gchar *operation_uuid = result->operation_uuid != NULL ?
+      result->operation_uuid : request->operation_uuid;
+  const gchar *outcome = fact_restore_outcome_name (result->outcome);
+  const gchar *state = fact_restore_state_name (result->state);
+  const gchar *scope = request->scope == WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH ?
+      "graph" : "tenant";
+  gboolean eligible = result->publication_eligible;
+  if (g_strcmp0 (format, "json") == 0) {
+    GString *json = g_string_new ("{");
+    append_json_string (json, "operation"); g_string_append_c (json, ':'); append_json_string (json, operation);
+    g_string_append (json, ",\"outcome\":"); append_json_string (json, outcome);
+    g_string_append (json, ",\"scope\":"); append_json_string (json, scope);
+    g_string_append (json, ",\"tenant_id\":"); append_json_string (json, request->tenant_id);
+    fact_restore_append_optional_json (json, "graph_id", request->graph_id);
+    fact_restore_append_optional_json (json, "operation_uuid", operation_uuid);
+    g_string_append (json, ",\"revision\":"); g_string_append (json, revision != NULL ? revision : "null");
+    g_string_append (json, ",\"expected_revision\":"); g_string_append (json, expected != NULL ? expected : "null");
+    g_string_append (json, ",\"graph_count\":");
+    g_string_append (json, result_available ? graph_count : "null");
+    g_string_append (json, ",\"publication_eligible\":");
+    g_string_append (json, result_available ? (eligible ? "true" : "false") : "null");
+    g_string_append (json, ",\"state\":"); append_json_string (json, state);
+    fact_restore_append_optional_json (json, "failure_code", result->failure_code);
+    fact_restore_append_optional_json (json, "next_command", next);
+    g_string_append_c (json, '}');
+    g_print ("%s\n", json->str);
+    g_string_free (json, TRUE);
+    return;
+  }
+  const gchar *values[] = { operation, outcome, scope, request->tenant_id,
+                            request->graph_id, operation_uuid, revision, expected,
+                            result_available ? graph_count : NULL,
+                            result_available ? (eligible ? "true" : "false") : NULL, state,
+                            result->failure_code, next };
+  const gchar *keys[] = { "operation", "outcome", "scope", "tenant_id",
+                          "graph_id", "operation_uuid", "revision", "expected_revision",
+                          "graph_count", "publication_eligible", "state", "failure_code",
+                          "next_command" };
+  GString *line = g_string_new (NULL);
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
+    if (i > 0) g_string_append_c (line, ' ');
+    g_string_append_printf (line, "%s=", keys[i]);
+    if (values[i] == NULL) {
+      g_string_append_c (line, '-');
+    } else if (i == 9 || i == 7 || i == 8) {
+      g_string_append (line, values[i]);
+    } else {
+      g_autofree gchar *escaped = g_uri_escape_string (values[i],
+              "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-", TRUE);
+      g_string_append (line, escaped != NULL ? escaped : "-");
+    }
+  }
+  g_print ("%s\n", line->str);
+  g_string_free (line, TRUE);
+}
+
+static int
+fact_restore_exit (WylClient *client, wyrelog_error_t rc,
+    WylClientFactRestoreOutcome outcome, gboolean mutation)
+{
+  if (outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN)
+    return mutation ? 9 : 5;
+  if (outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT)
+    return 7;
+  if (outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS || rc == WYRELOG_E_BUSY)
+    return 8;
+  if (outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED ||
+      outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_CANCELLED || rc == WYRELOG_E_POLICY)
+    return 4;
+  if (rc == WYRELOG_E_OK)
+    return 0;
+  if (rc == WYRELOG_E_AUTH)
+    return 6;
+  if (rc == WYRELOG_E_INVALID)
+    return 2;
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return 4;
+  if (mutation && client != NULL && rc == WYRELOG_E_IO
+      && !wyl_client_last_response_is_complete (client))
+    return 9;
+  return 5;
+}
+
+static int
+run_fact_restore (const WyctlOptions *global_opts, const gchar *operation,
+    gint argc, gchar **argv)
+{
+  g_auto (WyctlFactRestoreOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"scope", 0, 0, G_OPTION_ARG_STRING, &opts.scope, "Restore scope", "tenant|graph"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Destination tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Destination graph", "GRAPH"},
+    {"bundle", 0, 0, G_OPTION_ARG_STRING, &opts.bundle, "Restore bundle path", "PATH"},
+    {"trusted-sha256", 0, 0, G_OPTION_ARG_STRING, &opts.digest, "Trusted bundle manifest digest", "SHA256"},
+    {"uuid", 0, 0, G_OPTION_ARG_STRING, &opts.uuid, "Restore operation UUID", "UUID"},
+    {"revision", 0, 0, G_OPTION_ARG_STRING, &opts.revision_arg, "Expected revision", "N"},
+    {"format", 0, 0, G_OPTION_ARG_STRING, &opts.format, "Output format", "text|json"},
+    {"confirm", 0, 0, G_OPTION_ARG_NONE, &opts.confirm, "Confirm the requested step", NULL},
+    {"retry-begin", 0, 0, G_OPTION_ARG_NONE, &opts.retry_begin,
+     "Keep the original bundle tuple available for not-found BEGIN recovery", NULL},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file, "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING, &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class, "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg, "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new ("- operate a durable offline restore");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error) || argc != 1) {
+    g_printerr ("wyctl: invalid fact restore arguments\n");
+    return 2;
+  }
+  if (opts.tenant == NULL || opts.tenant[0] == '\0' || opts.scope == NULL ||
+      (g_strcmp0 (opts.scope, "tenant") != 0 && g_strcmp0 (opts.scope, "graph") != 0) ||
+      (g_strcmp0 (opts.scope, "graph") == 0 ? opts.graph == NULL || opts.graph[0] == '\0' : opts.graph != NULL)) {
+    g_printerr ("wyctl: restore requires --scope and explicit --tenant; --graph is required only for graph scope\n");
+    return 2;
+  }
+  if (opts.format == NULL) opts.format = g_strdup ("text");
+  if (g_strcmp0 (opts.format, "text") != 0 && g_strcmp0 (opts.format, "json") != 0) {
+    g_printerr ("wyctl: --format must be text or json\n"); return 2;
+  }
+  gboolean bundle_op = g_strcmp0 (operation, "dry-run") == 0 || g_strcmp0 (operation, "begin") == 0 ||
+      g_strcmp0 (operation, "prepare") == 0 || g_strcmp0 (operation, "commit") == 0;
+  gboolean needs_uuid = g_strcmp0 (operation, "dry-run") != 0;
+  gboolean needs_revision = g_strcmp0 (operation, "prepare") == 0 || g_strcmp0 (operation, "commit") == 0 ||
+      g_strcmp0 (operation, "resume") == 0 || g_strcmp0 (operation, "abort") == 0;
+  gboolean needs_confirm = g_strcmp0 (operation, "begin") == 0 || g_strcmp0 (operation, "commit") == 0 || g_strcmp0 (operation, "abort") == 0;
+  gboolean is_status = g_strcmp0 (operation, "status") == 0;
+  gboolean has_bundle = opts.bundle != NULL || opts.digest != NULL;
+  gboolean bundle_pair = opts.bundle != NULL && opts.bundle[0] != '\0' &&
+      opts.digest != NULL && opts.digest[0] != '\0';
+  gboolean retry_begin = is_status && opts.retry_begin;
+  guint64 revision = 0;
+  if ((bundle_op && !bundle_pair) ||
+      (!bundle_op && has_bundle && !retry_begin) ||
+      (retry_begin && !bundle_pair) ||
+      (opts.retry_begin && !is_status) ||
+      (needs_uuid && (opts.uuid == NULL || opts.uuid[0] == '\0')) ||
+      (!needs_uuid && opts.uuid != NULL) ||
+      (needs_revision && !parse_positive_uint64 (opts.revision_arg, &revision)) ||
+      (!needs_revision && opts.revision_arg != NULL) ||
+      (needs_confirm && !opts.confirm) ||
+      (!needs_confirm && opts.confirm)) {
+    g_printerr ("wyctl: missing or invalid options for fact restore %s\n", operation);
+    return 2;
+  }
+  if (bundle_pair) {
+    if (strlen (opts.digest) != 64) {
+      g_printerr ("wyctl: invalid --trusted-sha256\n"); return 2;
+    }
+    for (const gchar *p = opts.digest; *p != '\0'; p++) {
+      if (!g_ascii_isxdigit (*p)) {
+        g_printerr ("wyctl: invalid --trusted-sha256\n"); return 2;
+      }
+    }
+  }
+  gint64 guard_timestamp = 0, guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk)) return 2;
+  g_autoptr (WylClient) client = NULL;
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (
+    global_opts->daemon_url, global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg = wyctl_resolve_uint_option_as_string (
+    global_opts->timeout_ms_arg, global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *access_token_file = wyctl_resolve_string_option (
+    opts.access_token_file, global_opts->settings, "access-token-file");
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg,
+          opts.tenant, access_token_file, &client);
+  if (client_rc != 0) return client_rc;
+  WylClientFactRestoreRequest request = {
+    .scope = g_strcmp0 (opts.scope, "graph") == 0 ? WYL_CLIENT_FACT_RESTORE_SCOPE_GRAPH : WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT,
+    .tenant_id = opts.tenant, .graph_id = opts.graph, .bundle_path = opts.bundle,
+    .trusted_manifest_sha256 = opts.digest, .operation_uuid = opts.uuid,
+    .expected_revision = revision, .confirmed = (g_strcmp0 (operation, "begin") == 0 || g_strcmp0 (operation, "commit") == 0),
+    .guard_timestamp = guard_timestamp, .guard_loc_class = opts.guard_loc_class, .guard_risk = guard_risk
+  };
+  WylClientFactRestoreResult result = { 0 };
+  wyrelog_error_t rc;
+  if (g_strcmp0 (operation, "dry-run") == 0) rc = wyl_client_fact_restore_dry_run (client, &request, &result);
+  else if (g_strcmp0 (operation, "begin") == 0) rc = wyl_client_fact_restore_begin (client, &request, &result);
+  else if (g_strcmp0 (operation, "prepare") == 0) rc = wyl_client_fact_restore_prepare (client, &request, &result);
+  else if (g_strcmp0 (operation, "commit") == 0) rc = wyl_client_fact_restore_commit (client, &request, &result);
+  else if (g_strcmp0 (operation, "resume") == 0) rc = wyl_client_fact_restore_resume (client, &request, &result);
+  else if (g_strcmp0 (operation, "abort") == 0) rc = wyl_client_fact_restore_abort (client, &request, &result);
+  else rc = wyl_client_fact_restore_status (client, &request, &result);
+  gboolean mutation = needs_uuid && !is_status;
+  if (rc == WYRELOG_E_IO && mutation
+      && result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE)
+    result.outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN;
+  if (rc == WYRELOG_E_NOT_FOUND &&
+      result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE)
+    result.outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED;
+  if (rc == WYRELOG_E_IO && !mutation
+      && result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_COMPLETE) {
+    result.outcome = WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN;
+    if (g_strcmp0 (operation, "status") == 0)
+      result.failure_code = g_strdup ("restore_status_unavailable");
+  }
+  if (result.failure_code == NULL && rc != WYRELOG_E_OK) {
+    const gchar *failure = rc == WYRELOG_E_NOT_FOUND ? "restore_not_found" :
+        result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN ?
+        "restore_outcome_unknown" :
+        result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT ?
+        "restore_conflict" :
+        result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS ?
+        "restore_in_progress" :
+        result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED ?
+        "restore_refused" : "restore_failed";
+    result.failure_code = g_strdup (failure);
+  }
+  if (rc == WYRELOG_E_OK || result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_UNKNOWN ||
+      result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_CONFLICT ||
+      result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_IN_PROGRESS ||
+      result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_REFUSED ||
+      result.outcome == WYL_CLIENT_FACT_RESTORE_OUTCOME_CANCELLED)
+    fact_restore_print_result (operation, &request, &result, opts.format,
+        rc == WYRELOG_E_OK, retry_begin);
+  int exit_rc = fact_restore_exit (client, rc, result.outcome, mutation);
+  wyl_client_fact_restore_result_clear (&result);
+  return exit_rc;
+}
+
+static int
+run_fact_restore_command (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing fact restore operation\n"); return 2;
+  }
+  if (g_strcmp0 (argv[1], "dry-run") == 0)
+    return run_fact_restore (global_opts, "dry-run", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "begin") == 0)
+    return run_fact_restore (global_opts, "begin", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "prepare") == 0)
+    return run_fact_restore (global_opts, "prepare", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "commit") == 0)
+    return run_fact_restore (global_opts, "commit", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "resume") == 0)
+    return run_fact_restore (global_opts, "resume", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "abort") == 0)
+    return run_fact_restore (global_opts, "abort", argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_fact_restore (global_opts, "status", argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown fact restore operation\n");
+  return 2;
+}
+
 static int
 run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -3808,6 +4284,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_schema (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "quota") == 0)
     return run_fact_quota_command (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "restore") == 0)
+    return run_fact_restore_command (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "put") == 0)
     return run_fact_put (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "retract") == 0)
@@ -7226,7 +7704,7 @@ main (int argc, char **argv)
       "  profile                    Report the daemon's profile\n"
       "  tenant                     List, create, seal and unseal tenants\n"
       "  graph                      Create, list and seal fact graphs\n"
-      "  fact                       Manage schemas, facts, and quotas\n"
+      "  fact                       Manage schemas, facts, quotas, and restores\n"
       "  datalog                    Query stored facts\n"
       "  audit                      Query the audit trail\n"
       "  key                        Inspect and rotate policy keys\n"

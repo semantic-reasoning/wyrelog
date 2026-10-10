@@ -51,6 +51,10 @@ EXPECTED_FIELDS = {
          "batch_id", "operator_id", "reason", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlFactStatusOptions": ("tenant", "graph", "access_token_file"),
+    "WyctlFactRestoreOptions":
+        ("scope", "tenant", "graph", "bundle", "digest", "uuid",
+         "revision_arg", "format", "access_token_file",
+         "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlTenantOptions":
         ("name", "request_id", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg"),
@@ -106,6 +110,7 @@ EXPECTED_PARSE_SITES = {
     "run_fact_mutation": "WyctlFactPutOptions",
     "run_fact_forget": "WyctlFactForgetOptions",
     "run_fact_status": "WyctlFactStatusOptions",
+    "run_fact_restore": "WyctlFactRestoreOptions",
     "run_fact_verify": "WyctlFactVerifyOptions",
     "run_datalog_query": "WyctlDatalogQueryOptions",
     "run_audit_query": "WyctlAuditOptions",
@@ -136,7 +141,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 237
+EXPECTED_STRING_DESTINATIONS = 249
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
