@@ -2821,8 +2821,9 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
    expected graph inventory. `/facts/status` supplies tenant-scoped graph
    detail; `/readyz?format=json` supplies process-wide aggregate counts.
 
-This is an offline file-level recovery procedure. Validated staged restore and
-publication are future work tracked by [#552](https://github.com/semantic-reasoning/wyrelog/issues/552).
+This is an offline file-level recovery procedure. For daemon-managed staged
+tenant or graph restore, including the command sequence and response-loss
+recovery rules, see [Offline restore daemon API](offline-restore-daemon-api.md).
 
 ## Template Upgrade
 
