@@ -58,6 +58,7 @@
 #include "fact/root-writer-lease-private.h"
 #include "fact/publication-lock-event-private.h"
 #include "fact/offline-restore-journal-private.h"
+#include "fact/rule-pack-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -900,6 +901,8 @@ static const gchar *const required_tables[] = {
   "fact_relation_schemas",
   "fact_relation_schema_columns",
   "fact_relation_query_allowlist",
+  "fact_rule_packs",
+  "fact_rule_pack_rules",
   "policy_signatures",
   "totp_enrollments",
   "service_principals",
@@ -15321,6 +15324,47 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "        schema_version),"
       "  FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)"
       ");"
+      /* A graph's rule pack (issue #1213), one header per version and one row
+       * per rule.  Versions are append-only so a rejection, an audit record
+       * and a read-back that cite (version, rule_index) keep resolving to the
+       * same text; the triggers below refuse any UPDATE. */
+      "CREATE TABLE IF NOT EXISTS fact_rule_packs ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  pack_version INTEGER NOT NULL CHECK (typeof(pack_version)='integer' "
+      "    AND pack_version BETWEEN 1 AND 4294967295),"
+      "  rule_count INTEGER NOT NULL CHECK (typeof(rule_count)='integer' "
+      "    AND rule_count BETWEEN 1 AND "
+      G_STRINGIFY (WYL_FACT_RULE_PACK_MAX_RULES) "),"
+      "  pack_digest BLOB NOT NULL CHECK (typeof(pack_digest)='blob' "
+      "    AND length(pack_digest)=32),"
+      "  created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' "
+      "    AND created_at>=0),"
+      "  PRIMARY KEY (tenant_id, graph_id, pack_version),"
+      "  FOREIGN KEY (tenant_id, graph_id) "
+      "    REFERENCES fact_graphs (tenant_id, graph_id) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_rule_pack_rules ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  pack_version INTEGER NOT NULL,"
+      "  rule_index INTEGER NOT NULL CHECK (typeof(rule_index)='integer' "
+      "    AND rule_index BETWEEN 1 AND "
+      G_STRINGIFY (WYL_FACT_RULE_PACK_MAX_RULES) "),"
+      "  rule_text TEXT NOT NULL CHECK (typeof(rule_text)='text' "
+      "    AND length(rule_text)>0),"
+      "  PRIMARY KEY (tenant_id, graph_id, pack_version, rule_index),"
+      "  FOREIGN KEY (tenant_id, graph_id, pack_version) "
+      "    REFERENCES fact_rule_packs (tenant_id, graph_id, pack_version) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TRIGGER IF NOT EXISTS fact_rule_packs_immutable "
+      "BEFORE UPDATE ON fact_rule_packs BEGIN "
+      "SELECT RAISE(ABORT,'immutable fact rule pack'); END;"
+      "CREATE TRIGGER IF NOT EXISTS fact_rule_pack_rules_immutable "
+      "BEFORE UPDATE ON fact_rule_pack_rules BEGIN "
+      "SELECT RAISE(ABORT,'immutable fact rule pack rule'); END;"
       /* Per-relation schema-version activation authority (issue #545).  Keyed
        * on the unversioned engine identity (tenant,graph,namespace,relation),
        * a single-valued active_schema_version makes exactly one version own the
@@ -24202,6 +24246,282 @@ wyl_policy_store_load_fact_relation_query_max_rows (wyl_policy_store_t *store,
   if (max_rows < 0 || max_rows > G_MAXUINT)
     return WYRELOG_E_IO;
   *out_max_rows = (guint) max_rows;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_policy_fact_rule_pack_info_clear (wyl_policy_fact_rule_pack_info_t *info)
+{
+  if (info == NULL)
+    return;
+  g_strfreev (info->rules);
+  memset (info, 0, sizeof *info);
+}
+
+wyrelog_error_t
+wyl_policy_fact_rule_pack_digest (const gchar *const *rules, gsize n_rules,
+    guint8 out_digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE])
+{
+  if (out_digest != NULL)
+    memset (out_digest, 0, WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE);
+  if (out_digest == NULL || (rules == NULL && n_rules > 0)
+      || n_rules > G_MAXUINT32)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < n_rules; i++)
+    if (rules[i] == NULL)
+      return WYRELOG_E_INVALID;
+
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!backup_digest_string (checksum, "wyrelog.fact.rule-pack.v1"))
+    return WYRELOG_E_INTERNAL;
+  backup_digest_u32 (checksum, (guint32) n_rules);
+  for (gsize i = 0; i < n_rules; i++) {
+    backup_digest_u32 (checksum, (guint32) (i + 1));
+    if (!backup_digest_string (checksum, rules[i]))
+      return WYRELOG_E_INVALID;
+  }
+  gsize length = WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE;
+  g_checksum_get_digest (checksum, out_digest, &length);
+  return length == WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE
+         ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+fact_rule_pack_next_version (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, guint32 *out_version)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT coalesce(max(pack_version), 0) FROM fact_rule_packs "
+      "WHERE tenant_id=? AND graph_id=?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || sqlite3_step (stmt) != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_int64 current = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (current < 0)
+    return WYRELOG_E_INTERNAL;
+  if (current >= G_MAXUINT32)
+    return WYRELOG_E_RESOURCE_LIMIT;
+  *out_version = (guint32) current + 1;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+insert_fact_rule_pack_header (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, guint32 version, gsize n_rules,
+    const guint8 *digest)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_rule_packs "
+      "(tenant_id, graph_id, pack_version, rule_count, pack_digest, "
+      " created_at) VALUES (?, ?, ?, ?, ?, unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 3, version) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 4, (sqlite3_int64) n_rules) != SQLITE_OK
+      || sqlite3_bind_blob (stmt, 5, digest,
+      WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE, SQLITE_STATIC) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_rule_pack_rule (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, guint32 version, gsize rule_index,
+    const gchar *rule_text)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_rule_pack_rules "
+      "(tenant_id, graph_id, pack_version, rule_index, rule_text) "
+      "VALUES (?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 3, version) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 4, (sqlite3_int64) rule_index) != SQLITE_OK
+      || bind_text (stmt, 5, rule_text) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_register_fact_rule_pack (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *const *rules,
+    gsize n_rules, guint32 *out_pack_version)
+{
+  if (out_pack_version != NULL)
+    *out_pack_version = 0;
+  if (store == NULL || store->db == NULL || out_pack_version == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || (rules == NULL && n_rules > 0))
+    return WYRELOG_E_INVALID;
+  /* The count is checked before rules[] is walked, so an oversized n_rules
+   * is refused without reading past the caller's array. */
+  if (n_rules == 0 || n_rules > WYL_FACT_RULE_PACK_MAX_RULES)
+    return WYRELOG_E_POLICY;
+  for (gsize i = 0; i < n_rules; i++)
+    if (rules[i] == NULL)
+      return WYRELOG_E_INVALID;
+  gsize total_bytes = 0;
+  for (gsize i = 0; i < n_rules; i++) {
+    total_bytes += strlen (rules[i]);
+    if (rules[i][0] == '\0' || strpbrk (rules[i], "\r\n") != NULL
+        || !g_utf8_validate (rules[i], -1, NULL)
+        || total_bytes > WYL_FACT_RULE_PACK_MAX_BYTES)
+      return WYRELOG_E_POLICY;
+  }
+
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  wyrelog_error_t rc = wyl_policy_fact_rule_pack_digest (rules, n_rules,
+          digest);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean active = FALSE;
+  rc = wyl_policy_store_fact_graph_is_active (store, tenant_id, graph_id,
+          &active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!active)
+    return WYRELOG_E_NOT_FOUND;
+
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint32 version = 0;
+  rc = fact_rule_pack_next_version (store, tenant_id, graph_id, &version);
+  if (rc == WYRELOG_E_OK)
+    rc = insert_fact_rule_pack_header (store, tenant_id, graph_id, version,
+            n_rules, digest);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < n_rules; i++)
+    rc = insert_fact_rule_pack_rule (store, tenant_id, graph_id, version,
+            i + 1, rules[i]);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc == WYRELOG_E_OK)
+    *out_pack_version = version;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    wyl_policy_fact_rule_pack_info_t *out_info)
+{
+  if (out_info != NULL)
+    memset (out_info, 0, sizeof *out_info);
+  if (store == NULL || store->db == NULL || out_info == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *header_sql =
+      "SELECT pack_version, rule_count, pack_digest FROM fact_rule_packs "
+      "WHERE tenant_id=? AND graph_id=? "
+      "ORDER BY pack_version DESC LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, header_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  }
+  sqlite3_int64 version = sqlite3_column_int64 (stmt, 0);
+  sqlite3_int64 rule_count = sqlite3_column_int64 (stmt, 1);
+  guint8 stored_digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  gboolean header_ok = version >= 1 && version <= G_MAXUINT32
+      && rule_count >= 1 && rule_count <= WYL_FACT_RULE_PACK_MAX_RULES
+      && sqlite3_column_type (stmt, 2) == SQLITE_BLOB
+      && sqlite3_column_bytes (stmt, 2)
+      == WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE;
+  if (header_ok)
+    memcpy (stored_digest, sqlite3_column_blob (stmt, 2),
+        sizeof stored_digest);
+  sqlite3_finalize (stmt);
+  if (!header_ok)
+    return WYRELOG_E_INTERNAL;
+
+  static const gchar *rules_sql =
+      "SELECT rule_index, rule_text FROM fact_rule_pack_rules "
+      "WHERE tenant_id=? AND graph_id=? AND pack_version=? "
+      "ORDER BY rule_index;";
+  rc = prepare_stmt (store->db, rules_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+      || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 3, version) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  g_autoptr (GPtrArray) rules = g_ptr_array_new_with_free_func (g_free);
+  while (rc == WYRELOG_E_OK && (step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *text = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (text == NULL
+        || sqlite3_column_int64 (stmt, 0) != (sqlite3_int64) rules->len + 1)
+      rc = WYRELOG_E_INTERNAL;
+    else
+      g_ptr_array_add (rules, g_strdup (text));
+  }
+  if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((sqlite3_int64) rules->len != rule_count)
+    return WYRELOG_E_INTERNAL;
+
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  rc = wyl_policy_fact_rule_pack_digest ((const gchar *const *) rules->pdata,
+          rules->len, digest);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (memcmp (digest, stored_digest, sizeof digest) != 0)
+    return WYRELOG_E_INTERNAL;
+
+  out_info->pack_version = (guint32) version;
+  memcpy (out_info->digest, digest, sizeof digest);
+  out_info->n_rules = rules->len;
+  g_ptr_array_add (rules, NULL);
+  out_info->rules = (gchar **) g_ptr_array_free (g_steal_pointer (&rules),
+          FALSE);
   return WYRELOG_E_OK;
 }
 

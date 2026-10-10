@@ -970,6 +970,57 @@ CREATE TABLE IF NOT EXISTS fact_relation_query_allowlist (
 );
 
 -- ---------------------------------------------------------------------------
+-- Table: fact_rule_packs
+-- One header per version of a graph's rule pack.  Versions are append-only;
+-- pack_digest is SHA-256 over the rules in rule_index order.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_rule_packs (
+    tenant_id    TEXT    NOT NULL,
+    graph_id     TEXT    NOT NULL,
+    pack_version INTEGER NOT NULL CHECK (typeof(pack_version) = 'integer'
+        AND pack_version BETWEEN 1 AND 4294967295),
+    rule_count   INTEGER NOT NULL CHECK (typeof(rule_count) = 'integer'
+        AND rule_count BETWEEN 1 AND 256),
+    pack_digest  BLOB    NOT NULL CHECK (typeof(pack_digest) = 'blob'
+        AND length(pack_digest) = 32),
+    created_at   INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'
+        AND created_at >= 0),
+    PRIMARY KEY (tenant_id, graph_id, pack_version),
+    FOREIGN KEY (tenant_id, graph_id)
+        REFERENCES fact_graphs (tenant_id, graph_id)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_rule_pack_rules
+-- The source text of each rule of one pack version, keyed by the 1-based
+-- rule_index the rule-pack compiler reports.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_rule_pack_rules (
+    tenant_id    TEXT    NOT NULL,
+    graph_id     TEXT    NOT NULL,
+    pack_version INTEGER NOT NULL,
+    rule_index   INTEGER NOT NULL CHECK (typeof(rule_index) = 'integer'
+        AND rule_index BETWEEN 1 AND 256),
+    rule_text    TEXT    NOT NULL CHECK (typeof(rule_text) = 'text'
+        AND length(rule_text) > 0),
+    PRIMARY KEY (tenant_id, graph_id, pack_version, rule_index),
+    FOREIGN KEY (tenant_id, graph_id, pack_version)
+        REFERENCES fact_rule_packs (tenant_id, graph_id, pack_version)
+        ON DELETE CASCADE
+);
+
+CREATE TRIGGER IF NOT EXISTS fact_rule_packs_immutable
+BEFORE UPDATE ON fact_rule_packs BEGIN
+    SELECT RAISE(ABORT, 'immutable fact rule pack');
+END;
+
+CREATE TRIGGER IF NOT EXISTS fact_rule_pack_rules_immutable
+BEFORE UPDATE ON fact_rule_pack_rules BEGIN
+    SELECT RAISE(ABORT, 'immutable fact rule pack rule');
+END;
+
+-- ---------------------------------------------------------------------------
 -- Inert service identity and credential authority (#353).
 -- No row in these tables is seeded by the schema.
 -- ---------------------------------------------------------------------------

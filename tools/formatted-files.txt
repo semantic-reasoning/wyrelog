@@ -80,6 +80,7 @@ tests/test-fact-replay-scheduler.c
 tests/test-fact-replay.c
 tests/test-fact-restore-replay-provider-parity.c
 tests/test-fact-root-writer-lease.c
+tests/test-fact-rule-pack-store.c
 tests/test-fact-rule-pack.c
 tests/test-fact-runtime.c
 tests/test-fact-schema.c

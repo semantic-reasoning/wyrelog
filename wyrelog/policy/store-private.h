@@ -2927,6 +2927,43 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_query_max_rows
     const gchar * graph_id, const gchar * namespace_id,
     const gchar * relation_name, guint32 schema_version,
     const gchar * query_name, guint * out_max_rows);
+
+#define WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE 32
+
+/* One stored version of a graph's rule pack.  rules[i] is the source text of
+ * rule_index i + 1, the index the rule-pack compiler reports in a rejection;
+ * rules is NULL-terminated. */
+typedef struct
+{
+  guint32 pack_version;
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  gchar **rules;
+  gsize n_rules;
+} wyl_policy_fact_rule_pack_info_t;
+
+void wyl_policy_fact_rule_pack_info_clear (wyl_policy_fact_rule_pack_info_t *
+    info);
+/* SHA-256 over u32be-length-prefixed "wyrelog.fact.rule-pack.v1", the u32be
+ * rule count, then per rule in order its u32be rule_index and its
+ * u32be-length-prefixed text.  The stored digest is this value. */
+wyrelog_error_t wyl_policy_fact_rule_pack_digest (const gchar * const *rules,
+    gsize n_rules, guint8 out_digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE]);
+/* Stores rules as the next version of the graph's pack; earlier versions
+ * stay stored and are never modified.  Checks only what storage needs: 1 to
+ * WYL_FACT_RULE_PACK_MAX_RULES non-empty single-line UTF-8 rules totalling
+ * at most WYL_FACT_RULE_PACK_MAX_BYTES (WYRELOG_E_POLICY otherwise).  It does
+ * not parse or check the rules against the graph; the caller compiles them
+ * first.  WYRELOG_E_NOT_FOUND when the graph is not active. */
+wyrelog_error_t wyl_policy_store_register_fact_rule_pack
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * const *rules, gsize n_rules,
+    guint32 * out_pack_version);
+/* Loads the graph's latest pack version in rule_index order.
+ * WYRELOG_E_NOT_FOUND when the graph has none; WYRELOG_E_INTERNAL when the
+ * stored rows disagree with their header's count or digest. */
+wyrelog_error_t wyl_policy_store_load_fact_rule_pack (wyl_policy_store_t *
+    store, const gchar * tenant_id, const gchar * graph_id,
+    wyl_policy_fact_rule_pack_info_t * out_info);
 typedef wyrelog_error_t (*WylPolicyFactRelationSchemaKeyCb)
   (const gchar *namespace_id, const gchar *relation_name,
     guint32 schema_version, gpointer user_data);
