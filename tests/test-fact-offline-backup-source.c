@@ -2074,12 +2074,13 @@ restore_http_post_and_drop_response (const gchar *base_url,
   if (!g_output_stream_write_all (output, request, strlen (request), &written,
       NULL, &error) || written != strlen (request))
     return FALSE;
-  /* Finish the request, consume and deliberately discard the response, then
-   * close. This waits for handler completion without returning its outcome to
-   * the caller that must recover it by UUID. */
-  if (!g_socket_shutdown (g_socket_connection_get_socket (connection), FALSE,
-      TRUE, &error))
-    return FALSE;
+  /* Consume and deliberately discard the response, then close. This waits for
+   * handler completion without returning its outcome to the caller that must
+   * recover it by UUID. Do not half-close the write side first: the daemon's
+   * policy-WRITE disconnect watch treats the resulting EOF as a departed
+   * client and cancels a request that has not yet acquired the writer, so the
+   * operation would intermittently never run. Connection: close ends the
+   * read loop once the response is sent. */
   guint8 discard[512];
   GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
   while (g_input_stream_read (input, discard, sizeof discard, NULL, &error) > 0)
