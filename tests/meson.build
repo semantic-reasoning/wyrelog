@@ -353,6 +353,7 @@ if get_option('enable_fact_store').allowed() and \
       '-DWYL_TEST_DAEMON_HTTP',
       '-DWYL_HAS_FACT_STORE',
       '-DWYL_HAS_SECURE_DUCKDB_BRIDGE',
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
     ],
     include_directories : include_directories('../wyrelog'),
     # wirelog_dep: the test includes wyl-engine-private.h, whose wirelog
@@ -368,6 +369,7 @@ if get_option('enable_fact_store').allowed() and \
   # wyl_test_normalize_exit_status would turn a 77 into a failure anyway.
   # TAP lets meson see the per-case results and report SKIP.
   test('fact-offline-backup-source', test_offline_backup_source,
+    depends : wyctl_exe,
     args : ['--tap',
             '-x', '/fact-offline-backup-source/coordinator',
             '-x', '/fact-offline-backup-source/import',
