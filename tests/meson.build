@@ -2057,6 +2057,16 @@ test_fact_schema = executable('test-fact-schema',
 
 test('fact-schema', test_fact_schema)
 
+test_fact_rule_pack_store = executable('test-fact-rule-pack-store',
+  'test-fact-rule-pack-store.c',
+  'fact-test-support.c',
+  c_args : fact_test_support_c_args,
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
+)
+
+test('fact-rule-pack-store', test_fact_rule_pack_store)
+
 if get_option('enable_fact_store').allowed()
   test_fact_provisioning = executable('test-fact-provisioning',
     'test-fact-provisioning.c',
