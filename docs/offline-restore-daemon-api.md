@@ -69,3 +69,63 @@ The typed client is declared in `wyrelog/client.h`. If a mutation loses its
 transport response, the client reports an unknown outcome and preserves the
 same operation UUID; callers should inspect status or resume with that UUID
 instead of starting a new operation.
+
+## `wyctl` workflow
+
+`wyctl fact restore` exposes these lifecycle routes. Every command needs the
+daemon URL, an access-token file, and the normal guard values. Obtain the
+64-character manifest digest through a separately trusted channel.
+
+```sh
+wyctl --daemon-url "$DAEMON_URL" fact restore dry-run \
+  --scope tenant --tenant "$TENANT" --bundle "$BUNDLE" \
+  --trusted-sha256 "$TRUSTED_SHA256" --format json \
+  --access-token-file "$TOKEN_FILE" --guard-timestamp "$GUARD_TIMESTAMP_US" \
+  --guard-loc-class "$GUARD_LOC_CLASS" --guard-risk "$GUARD_RISK"
+
+wyctl --daemon-url "$DAEMON_URL" fact restore begin \
+  --scope tenant --tenant "$TENANT" --uuid "$OPERATION_UUID" \
+  --bundle "$BUNDLE" --trusted-sha256 "$TRUSTED_SHA256" --confirm \
+  --format json --access-token-file "$TOKEN_FILE" \
+  --guard-timestamp "$GUARD_TIMESTAMP_US" \
+  --guard-loc-class "$GUARD_LOC_CLASS" --guard-risk "$GUARD_RISK"
+```
+
+For graph scope, add `--graph "$GRAPH"` to each command. After `begin`, use
+`status` to read the current revision, then pass that revision to `prepare`.
+After successful preflight, inspect status again and use the returned revision
+for `commit --confirm`. If commit was decided but interrupted, use `resume`;
+use `abort --confirm` only before commit has been decided. Each mutation uses
+the same `--uuid` throughout the lifecycle. Do not replace it after a lost
+response.
+
+`status --retry-begin` is for an unknown BEGIN that may never have reached the
+daemon. Supply the original `--bundle` and `--trusted-sha256`; its recovery
+command retains that tuple. Replay `begin` only with the same UUID, scope,
+destination, bundle, and digest. A status result of `PREPARING` means the BEGIN
+was recorded and the next step is `prepare`.
+
+The CLI emits one JSON object or one text line. JSON keys are stable and
+ordered: `operation`, `outcome`, `scope`, `tenant_id`, `graph_id`,
+`operation_uuid`, `revision`, `expected_revision`, `graph_count`,
+`publication_eligible`, `state`, `failure_code`, `next_command`. Text uses the
+same order as `key=value` fields; string values are URI-escaped. Missing values
+are JSON `null` and text `-`. Neither format includes bundle paths, digests,
+tokens, or fact data. Treat `next_command` as guidance and review its
+placeholders before running it.
+
+| Exit | Meaning | Next action |
+| --- | --- | --- |
+| `0` | Step completed | Continue using the returned revision and state |
+| `2` | Invalid CLI arguments | Correct the command before retrying |
+| `4` | Refused, cancelled, or not found | Check authorization, scope, and recovery guidance |
+| `5` | Other failure | Inspect the sanitized result and daemon logs |
+| `6` | Authentication failure | Refresh the access token |
+| `7` | Revision or tuple conflict | Read status and reconcile the operation |
+| `8` | Operation remains in progress | Read status; continue with the indicated step |
+| `9` | Mutation outcome is unknown | Keep the UUID and inspect status before retrying |
+
+An in-progress result can be returned with exit `8`; it is a durable state,
+not proof that the operation failed. Exit `9` means a mutation's result could
+not be trusted, including a lost, incomplete, malformed, or mismatched
+response. Status failures use the non-mutation failure codes.

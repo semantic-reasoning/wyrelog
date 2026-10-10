@@ -48,6 +48,10 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#ifndef WYL_TEST_WYCTL_PATH
+#error "WYL_TEST_WYCTL_PATH must be defined by the build."
+#endif
+
 typedef struct
 {
   gchar *root;
@@ -1960,6 +1964,7 @@ typedef struct
 typedef struct
 {
   SoupServer *server;
+  GMainContext *context;
   GMainLoop *loop;
 } RestoreHttpServer;
 
@@ -1967,7 +1972,11 @@ static gpointer
 restore_http_server_thread (gpointer data)
 {
   RestoreHttpServer *http = data;
+  if (http->context != NULL)
+    g_main_context_push_thread_default (http->context);
   g_main_loop_run (http->loop);
+  if (http->context != NULL)
+    g_main_context_pop_thread_default (http->context);
   return NULL;
 }
 
@@ -2044,7 +2053,8 @@ restore_http_post_for_tenant (SoupSession *session, const gchar *base_url,
 
 static gboolean
 restore_http_post_and_drop_response (const gchar *base_url,
-    const gchar *token, const gchar *operation, const gchar *body)
+    const gchar *token, const gchar *operation, const gchar *body,
+    guint *out_status, gchar **out_response)
 {
   g_autoptr (GError) error = NULL;
   g_autoptr (GUri) uri = g_uri_parse (base_url, G_URI_FLAGS_NONE, &error);
@@ -2055,6 +2065,7 @@ restore_http_post_and_drop_response (const gchar *base_url,
   if (host == NULL || port <= 0 || port > G_MAXUINT16)
     return FALSE;
   g_autoptr (GSocketClient) socket_client = g_socket_client_new ();
+  g_socket_client_set_enable_proxy (socket_client, FALSE);
   g_autoptr (GSocketConnection) connection =
       g_socket_client_connect_to_host (socket_client, host, (guint16) port,
           NULL, &error);
@@ -2081,12 +2092,249 @@ restore_http_post_and_drop_response (const gchar *base_url,
       TRUE, &error))
     return FALSE;
   guint8 discard[512];
+  g_autoptr (GString) response = g_string_new (NULL);
   GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (connection));
-  while (g_input_stream_read (input, discard, sizeof discard, NULL, &error) > 0)
-    ;
+  gssize read_count = 0;
+  while ((read_count = g_input_stream_read (input, discard, sizeof discard,
+      NULL, &error)) > 0)
+    g_string_append_len (response, (const gchar *) discard, read_count);
   if (error != NULL)
     return FALSE;
+  guint status = 0;
+  if (sscanf (response->str, "HTTP/%*u.%*u %u", &status) != 1)
+    return FALSE;
+  if (out_status != NULL)
+    *out_status = status;
+  if (out_response != NULL)
+    *out_response = g_strdup (response->str);
   return g_io_stream_close (G_IO_STREAM (connection), NULL, &error);
+}
+
+typedef struct
+{
+  GSocketListener *listener;
+  gchar *target_host;
+  gchar *target_base_url;
+  guint16 target_port;
+  guint16 listen_port;
+  gboolean forward_request;
+  guint response_status;
+  gchar *debug_request;
+  gchar *debug_response;
+} RestoreHttpFaultProxy;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  guint calls;
+  gboolean entered;
+  gboolean release;
+} RestorePrepareCheckpoint;
+
+typedef struct
+{
+  const gchar *const *argv;
+  gchar *stdout_text;
+  gchar *stderr_text;
+  gint wait_status;
+  GError *error;
+  gboolean spawned;
+} RestoreCliSpawn;
+
+static wyrelog_error_t
+restore_prepare_checkpoint (gpointer user_data)
+{
+  RestorePrepareCheckpoint *checkpoint = user_data;
+  g_mutex_lock (&checkpoint->mutex);
+  checkpoint->calls++;
+  if (checkpoint->calls == 1) {
+    checkpoint->entered = TRUE;
+    g_cond_broadcast (&checkpoint->cond);
+    while (!checkpoint->release)
+      g_cond_wait (&checkpoint->cond, &checkpoint->mutex);
+    g_mutex_unlock (&checkpoint->mutex);
+    return WYRELOG_E_OK;
+  }
+  g_mutex_unlock (&checkpoint->mutex);
+  return WYRELOG_E_BUSY;
+}
+
+static gpointer
+restore_cli_spawn_thread (gpointer user_data)
+{
+  RestoreCliSpawn *spawn = user_data;
+  spawn->spawned = g_spawn_sync (NULL, (gchar **) spawn->argv,
+          (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL }, G_SPAWN_DEFAULT,
+          NULL, NULL, &spawn->stdout_text, &spawn->stderr_text,
+          &spawn->wait_status, &spawn->error);
+  return NULL;
+}
+
+static gboolean
+restore_http_message_content_length (const guint8 *data, gsize length,
+    gsize *out_header_length, gsize *out_content_length)
+{
+  const gchar *separator = g_strstr_len ((const gchar *) data, length,
+          "\r\n\r\n");
+  if (separator == NULL)
+    return FALSE;
+  gsize header_length = (gsize) (separator - (const gchar *) data) + 4;
+  g_autofree gchar *headers = g_strndup ((const gchar *) data, header_length);
+  g_auto (GStrv) lines = g_strsplit (headers, "\r\n", -1);
+  gboolean found = FALSE;
+  gsize content_length = 0;
+  for (gsize i = 1; lines[i] != NULL; i++) {
+    if (g_ascii_strncasecmp (lines[i], "Content-Length:",
+        strlen ("Content-Length:")) != 0)
+      continue;
+    const gchar *value = lines[i] + strlen ("Content-Length:");
+    while (g_ascii_isspace (*value))
+      value++;
+    gchar *end = NULL;
+    guint64 parsed = g_ascii_strtoull (value, &end, 10);
+    if (end == value || parsed > G_MAXSIZE || *end != '\0' || found)
+      return FALSE;
+    content_length = (gsize) parsed;
+    found = TRUE;
+  }
+  if (!found || content_length > G_MAXSIZE - header_length)
+    return FALSE;
+  *out_header_length = header_length;
+  *out_content_length = content_length;
+  return TRUE;
+}
+
+static gpointer
+restore_http_fault_proxy_thread (gpointer data)
+{
+  RestoreHttpFaultProxy *proxy = data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) client = g_socket_listener_accept
+        (proxy->listener, NULL, NULL, &error);
+  if (client == NULL)
+    return NULL;
+  g_socket_set_timeout (g_socket_connection_get_socket (client), 15);
+  g_autoptr (GByteArray) request = g_byte_array_new ();
+  GInputStream *client_input = g_io_stream_get_input_stream
+        (G_IO_STREAM (client));
+  gsize request_length = 0;
+  guint8 buffer[4096];
+  while (request->len < request_length || request_length == 0) {
+    gssize count = g_input_stream_read (client_input, buffer, sizeof buffer,
+            NULL, &error);
+    if (count <= 0 || error != NULL)
+      return NULL;
+    g_byte_array_append (request, buffer, (guint) count);
+    gsize header_length = 0, content_length = 0;
+    if (restore_http_message_content_length (request->data, request->len,
+        &header_length, &content_length)) {
+      if (content_length > G_MAXSIZE - header_length)
+        return NULL;
+      request_length = header_length + content_length;
+    }
+  }
+  const gchar *request_line_end = g_strstr_len ((const gchar *) request->data,
+          request->len, "\r\n");
+  if (request_line_end != NULL)
+    proxy->debug_request = g_strndup ((const gchar *) request->data,
+            request_line_end - (const gchar *) request->data);
+  if (!proxy->forward_request) {
+    g_io_stream_close (G_IO_STREAM (client), NULL, NULL);
+    return NULL;
+  }
+
+  g_autofree gchar *request_text = g_strndup ((const gchar *) request->data,
+          request_length);
+  g_auto (GStrv) lines = g_strsplit (request_text, "\r\n", -1);
+  g_auto (GStrv) request_line = g_strsplit (lines[0], " ", 3);
+  if (request_line[0] == NULL || request_line[1] == NULL
+      || g_strcmp0 (request_line[0], "POST") != 0)
+    return NULL;
+  g_autofree gchar *target_url = g_strconcat (proxy->target_base_url,
+          request_line[1], NULL);
+  g_autoptr (SoupSession) target_session = soup_session_new ();
+  g_autoptr (SoupMessage) target_message = soup_message_new ("POST",
+          target_url);
+  if (target_message == NULL)
+    return NULL;
+  for (gsize i = 1; lines[i] != NULL && lines[i][0] != '\0'; i++) {
+    if (g_ascii_strncasecmp (lines[i], "Authorization:",
+        strlen ("Authorization:")) == 0) {
+      const gchar *value = lines[i] + strlen ("Authorization:");
+      while (g_ascii_isspace (*value))
+        value++;
+      soup_message_headers_replace (soup_message_get_request_headers
+            (target_message), "Authorization", value);
+    }
+  }
+  gsize header_length = 0, content_length = 0;
+  if (!restore_http_message_content_length (request->data, request_length,
+      &header_length, &content_length))
+    return NULL;
+  g_autoptr (GBytes) request_body = g_bytes_new (request->data + header_length,
+          content_length);
+  soup_message_set_request_body_from_bytes (target_message,
+      "application/json", request_body);
+  g_autoptr (GBytes) target_response = soup_session_send_and_read
+        (target_session, target_message, NULL, &error);
+  if (target_response == NULL || error != NULL)
+    return NULL;
+  proxy->response_status = soup_message_get_status (target_message);
+  proxy->debug_response = g_strdup_printf ("HTTP status %u",
+          proxy->response_status);
+  /* Deliberately close without writing the daemon response back to wyctl. */
+  g_io_stream_close (G_IO_STREAM (client), NULL, NULL);
+  return NULL;
+}
+
+static gboolean
+restore_http_fault_proxy_start (RestoreHttpFaultProxy *proxy,
+    const gchar *target_url, gboolean forward_request, gchar **out_url)
+{
+  if (proxy == NULL || out_url == NULL)
+    return FALSE;
+  *out_url = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GUri) uri = g_uri_parse (target_url, G_URI_FLAGS_NONE, &error);
+  if (uri == NULL || error != NULL || g_uri_get_host (uri) == NULL)
+    return FALSE;
+  gint target_port = g_uri_get_port (uri);
+  if (target_port <= 0 || target_port > G_MAXUINT16)
+    return FALSE;
+  proxy->target_host = g_strdup (g_uri_get_host (uri));
+  proxy->target_base_url = g_strdup (target_url);
+  while (g_str_has_suffix (proxy->target_base_url, "/"))
+    proxy->target_base_url[strlen (proxy->target_base_url) - 1] = '\0';
+  proxy->target_port = (guint16) target_port;
+  proxy->forward_request = forward_request;
+  proxy->listener = g_socket_listener_new ();
+  g_autoptr (GInetAddress) loopback = g_inet_address_new_loopback
+        (G_SOCKET_FAMILY_IPV4);
+  g_autoptr (GSocketAddress) bind_address = g_inet_socket_address_new
+        (loopback, 0);
+  g_autoptr (GSocketAddress) effective_address = NULL;
+  if (!g_socket_listener_add_address (proxy->listener,
+      G_SOCKET_ADDRESS (bind_address), G_SOCKET_TYPE_STREAM,
+      G_SOCKET_PROTOCOL_TCP, NULL, &effective_address, &error)
+      || effective_address == NULL || error != NULL)
+    return FALSE;
+  proxy->listen_port = g_inet_socket_address_get_port
+        (G_INET_SOCKET_ADDRESS (effective_address));
+  *out_url = g_strdup_printf ("http://127.0.0.1:%u", proxy->listen_port);
+  return TRUE;
+}
+
+static void
+restore_http_fault_proxy_clear (RestoreHttpFaultProxy *proxy)
+{
+  if (proxy == NULL)
+    return;
+  g_clear_object (&proxy->listener);
+  g_clear_pointer (&proxy->target_host, g_free);
+  g_clear_pointer (&proxy->target_base_url, g_free);
+  g_clear_pointer (&proxy->debug_request, g_free);
+  g_clear_pointer (&proxy->debug_response, g_free);
 }
 
 static gboolean
@@ -2106,6 +2354,7 @@ restore_http_send_parked_request (const gchar *base_url, const gchar *token,
   if (host == NULL || port <= 0 || port > G_MAXUINT16)
     return FALSE;
   g_autoptr (GSocketClient) socket_client = g_socket_client_new ();
+  g_socket_client_set_enable_proxy (socket_client, FALSE);
   g_autoptr (GSocketConnection) connection =
       g_socket_client_connect_to_host (socket_client, host, (guint16) port,
           NULL, &error);
@@ -2154,6 +2403,25 @@ restore_http_revision (const gchar *body)
   g_assert_nonnull (field);
   field += strlen ("\"revision\":");
   return g_ascii_strtoull (field, NULL, 10);
+}
+
+static void
+restore_cli_assert_field_order (const gchar *output, gboolean json)
+{
+  static const gchar *const fields[] = {
+    "operation", "outcome", "scope", "tenant_id", "graph_id",
+    "operation_uuid", "revision", "expected_revision", "graph_count",
+    "publication_eligible", "state", "failure_code", "next_command"
+  };
+  const gchar *cursor = output;
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) {
+    g_autofree gchar *field = json ?
+        g_strdup_printf ("\"%s\":", fields[i]) :
+        g_strdup_printf ("%s=", fields[i]);
+    const gchar *found = strstr (cursor, field);
+    g_assert_nonnull (found);
+    cursor = found + strlen (field);
+  }
 }
 
 static gchar *restore_http_request_body_for_scope (const gchar *scope,
@@ -2736,6 +3004,39 @@ test_restore_daemon_http_lifecycle (void)
   }
   g_autofree gchar *digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
           manifest_data, manifest_length);
+  g_autofree gchar *token_path = g_build_filename (f.fixture.root,
+          "restore-cli-access-token", NULL);
+  g_assert_true (g_file_set_contents (token_path, token, -1, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
+  const gchar *cli_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "dry-run", "--scope", "tenant",
+    "--tenant", "tenant-a", "--bundle", bundle_path,
+    "--trusted-sha256", digest, "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  gchar *cli_stdout = NULL, *cli_stderr = NULL;
+  gint cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  if (!g_spawn_check_wait_status (cli_wait_status, &file_error))
+    g_test_message ("wyctl restore dry-run failed (status %d): stdout=%s stderr=%s",
+        cli_wait_status, cli_stdout, cli_stderr);
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"operation\":\"dry-run\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ELIGIBLE\""));
+  restore_cli_assert_field_order (cli_stdout, TRUE);
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
   const gchar *operation_uuid = "01890c10-2e3f-7000-8000-000000000010";
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -2825,16 +3126,9 @@ test_restore_daemon_http_lifecycle (void)
   g_clear_pointer (&body, g_free);
   body = restore_http_request_body ("", "", aborted_uuid, abort_revision,
           FALSE);
-  g_assert_true (restore_http_post_and_drop_response (base_url, token, "abort",
-      body));
-  g_clear_pointer (&body, g_free);
-  g_clear_pointer (&response, g_free);
-  body = restore_http_request_body ("", "", aborted_uuid, 0, FALSE);
-  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+  g_assert_true (restore_http_post (session, base_url, token, "abort", body,
       &status, &response));
   g_assert_cmpuint (status, ==, 200);
-  if (strstr (response, "\"state\":\"aborted\"") == NULL)
-    g_test_message ("abort status response was: %s", response);
   g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
   g_assert_nonnull (strstr (response, aborted_uuid));
   g_assert_nonnull (strstr (response, "\"graph_count\":2"));
@@ -2853,6 +3147,557 @@ test_restore_daemon_http_lifecycle (void)
   g_assert_cmpint (sqlite3_column_int (aborted_rows, 1), ==, 1);
   g_assert_cmpint (sqlite3_column_int (aborted_rows, 2), ==, 2);
   g_assert_cmpint (sqlite3_finalize (aborted_rows), ==, SQLITE_OK);
+
+  /* Exercise the mutating CLI path against the live daemon, including the
+   * daemon-backed confirmation and revision checks. The later raw HTTP tests
+   * continue to cover response-loss and stale-revision recovery semantics. */
+  const gchar *refused_uuid = "01890c10-2e3f-7000-8000-000000000014";
+  const gchar *missing_confirm_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", refused_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) missing_confirm_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 2);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stderr, "missing or invalid options"));
+  g_assert_cmpstr (cli_stdout, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *wrong_digest_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", refused_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", wrong_digest,
+    "--confirm", "--format", "text", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) wrong_digest_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 4);
+  g_clear_error (&file_error);
+  g_assert_true (g_str_has_prefix (cli_stdout,
+      "operation=begin outcome=refused scope=tenant tenant_id=tenant-a graph_id=- "));
+  g_assert_nonnull (strstr (cli_stdout, "failure_code=restore_refused"));
+  restore_cli_assert_field_order (cli_stdout, FALSE);
+  g_assert_null (strstr (cli_stdout, wrong_digest));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+
+  const gchar *cli_uuid = "01890c10-2e3f-7000-8000-000000000013";
+  const gchar *begin_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--confirm", "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) begin_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"operation\":\"begin\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000013\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARING\""));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_autofree gchar *cli_revision = NULL;
+  const gchar *status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARING\""));
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *text_status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--format", "text", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) text_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_true (g_str_has_prefix (cli_stdout,
+      "operation=status outcome=in_progress scope=tenant tenant_id=tenant-a graph_id=- "));
+  g_assert_nonnull (strstr (cli_stdout, " state=PREPARING "));
+  restore_cli_assert_field_order (cli_stdout, FALSE);
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_autofree gchar *stale_cli_revision = g_strdup (cli_revision);
+  RestoreHttpFaultProxy prepare_proxy = { 0 };
+  g_autofree gchar *prepare_proxy_url = NULL;
+  g_assert_true (restore_http_fault_proxy_start (&prepare_proxy, base_url,
+      TRUE, &prepare_proxy_url));
+  GThread *prepare_proxy_thread = g_thread_new
+        ("restore-http-drop-prepare-response",
+          restore_http_fault_proxy_thread, &prepare_proxy);
+  const gchar *prepare_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", prepare_proxy_url,
+    "fact", "restore", "prepare", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--revision", cli_revision, "--bundle", bundle_path,
+    "--trusted-sha256", digest, "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) prepare_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 9);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"outcome\":\"unknown\""));
+  g_assert_nonnull (strstr (cli_stdout, cli_uuid));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_thread_join (prepare_proxy_thread);
+  g_assert_cmpuint (prepare_proxy.response_status, ==, 200);
+  restore_http_fault_proxy_clear (&prepare_proxy);
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  if (!g_spawn_check_wait_status (cli_wait_status, &file_error))
+    g_test_message ("wyctl restore ABORTING status failed: stdout=%s stderr=%s",
+        cli_stdout, cli_stderr);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARED\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *stale_abort_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "abort", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--revision", stale_cli_revision, "--confirm", "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) stale_abort_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 7);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"outcome\":\"conflict\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"UNKNOWN\""));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  /* Model a daemon restart after rollback was durably selected but before
+   * rollback cleanup completed. Status must expose ABORTING so the operator
+   * can retry abort with the revision observed from that status response. */
+  WylFactOfflineRestoreJournal aborting_journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (wyl_handle_get_policy_store (handle), cli_uuid, &aborting_journal), ==, WYRELOG_E_OK);
+  guint64 aborting_expected_revision = aborting_journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&aborting_journal,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreStoreResult aborting_store_result =
+      WYL_FACT_OFFLINE_RESTORE_STORE_CONFLICT;
+  WylFactOfflineRestoreJournal aborting_committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (wyl_handle_get_policy_store (handle), aborting_expected_revision, &aborting_journal,
+      &aborting_store_result, &aborting_committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (aborting_store_result, ==,
+      WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&aborting_journal);
+  wyl_fact_offline_restore_journal_clear (&aborting_committed);
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ABORTING\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  RestoreHttpFaultProxy abort_proxy = { 0 };
+  g_autofree gchar *abort_proxy_url = NULL;
+  g_assert_true (restore_http_fault_proxy_start (&abort_proxy, base_url,
+      TRUE, &abort_proxy_url));
+  GThread *abort_proxy_thread = g_thread_new
+        ("restore-http-drop-abort-response",
+          restore_http_fault_proxy_thread, &abort_proxy);
+  const gchar *abort_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", abort_proxy_url,
+    "fact", "restore", "abort", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--revision", cli_revision, "--confirm", "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) abort_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 9);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"outcome\":\"unknown\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000013\""));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_thread_join (abort_proxy_thread);
+  g_assert_cmpuint (abort_proxy.response_status, ==, 200);
+  restore_http_fault_proxy_clear (&abort_proxy);
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ABORTED\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *retry_abort_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "abort", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", cli_uuid,
+    "--revision", cli_revision, "--confirm", "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) retry_abort_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ABORTED\""));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+
+  /* Forward BEGIN to the daemon, consume its successful response inside the
+   * proxy, then close the client connection without returning that response. */
+  const gchar *unknown_uuid = "01890c10-2e3f-7000-8000-000000000015";
+  RestoreHttpFaultProxy proxy = { 0 };
+  g_autofree gchar *proxy_url = NULL;
+  g_assert_true (restore_http_fault_proxy_start (&proxy, base_url, TRUE,
+      &proxy_url));
+  GThread *proxy_thread = g_thread_new ("restore-http-drop-response",
+          restore_http_fault_proxy_thread, &proxy);
+  const gchar *unknown_begin_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", proxy_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", unknown_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--confirm", "--format", "text", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) unknown_begin_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 9);
+  g_clear_error (&file_error);
+  g_assert_true (g_str_has_prefix (cli_stdout,
+      "operation=begin outcome=unknown scope=tenant tenant_id=tenant-a graph_id=- operation_uuid=01890c10-2e3f-7000-8000-000000000015 "));
+  g_assert_nonnull (strstr (cli_stdout, "status%20--scope%20tenant"));
+  g_assert_nonnull (strstr (cli_stdout, "--retry-begin"));
+  restore_cli_assert_field_order (cli_stdout, FALSE);
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_thread_join (proxy_thread);
+  if (proxy.response_status != 200)
+    g_test_message ("restore proxy got HTTP %u for request %s; response %s",
+        proxy.response_status, proxy.debug_request, proxy.debug_response);
+  g_assert_cmpuint (proxy.response_status, ==, 200);
+  restore_http_fault_proxy_clear (&proxy);
+  const gchar *unknown_status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", unknown_uuid,
+    "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) unknown_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout,
+      "\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000015\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARING\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *unknown_prepare_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "prepare", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", unknown_uuid,
+    "--revision", cli_revision, "--bundle", bundle_path,
+    "--trusted-sha256", digest, "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) unknown_prepare_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARED\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *unknown_abort_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "abort", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", unknown_uuid,
+    "--revision", cli_revision, "--confirm", "--format", "json",
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) unknown_abort_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ABORTED\""));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+
+  /* A lost BEGIN request may never reach the daemon. Retain its original
+   * tuple in status guidance, then safely replay BEGIN with the same UUID. */
+  const gchar *retry_uuid = "01890c10-2e3f-7000-8000-000000000016";
+  RestoreHttpFaultProxy refused_proxy = { 0 };
+  g_autofree gchar *refused_proxy_url = NULL;
+  g_assert_true (restore_http_fault_proxy_start (&refused_proxy, base_url,
+      FALSE, &refused_proxy_url));
+  GThread *refused_proxy_thread = g_thread_new ("restore-http-drop-request",
+          restore_http_fault_proxy_thread, &refused_proxy);
+  const gchar *refused_begin_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", refused_proxy_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", retry_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--confirm", "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) refused_begin_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 9);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"outcome\":\"unknown\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"next_command\":"));
+  g_assert_nonnull (strstr (cli_stdout, "--retry-begin"));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  g_thread_join (refused_proxy_thread);
+  restore_http_fault_proxy_clear (&refused_proxy);
+  const gchar *retry_status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", retry_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--retry-begin", "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) retry_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 4);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"failure_code\":\"restore_not_found\""));
+  restore_cli_assert_field_order (cli_stdout, TRUE);
+  g_assert_nonnull (strstr (cli_stdout, "fact restore begin"));
+  g_assert_nonnull (strstr (cli_stdout, retry_uuid));
+  g_autofree gchar *retry_uuid_argument = g_strdup_printf ("--uuid '%s'",
+          retry_uuid);
+  g_assert_nonnull (strstr (cli_stdout, retry_uuid_argument));
+  g_assert_nonnull (strstr (cli_stdout, "<BUNDLE_PATH>"));
+  g_assert_null (strstr (cli_stdout, token));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *retry_begin_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "begin", "--scope", "tenant",
+    "--tenant", "tenant-a", "--uuid", retry_uuid,
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--confirm", "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) retry_begin_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARING\""));
+  g_assert_nonnull (strstr (cli_stdout, retry_uuid));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
@@ -2922,9 +3767,24 @@ test_restore_daemon_http_graph_lifecycle (void)
   g_assert_nonnull (http.server);
   GThread *thread = g_thread_new ("restore-http-graph-lifecycle",
           restore_http_server_thread, &http);
+  RestoreHttpServer retry_http = { 0 };
+  retry_http.context = g_main_context_new ();
+  retry_http.loop = g_main_loop_new (retry_http.context, FALSE);
+  g_main_context_push_thread_default (retry_http.context);
+  retry_http.server = wyl_daemon_start_http_server_with_runtime
+        (&daemon_options, handle, &daemon_runtime, &error);
+  g_main_context_pop_thread_default (retry_http.context);
+  g_assert_no_error (error);
+  g_assert_nonnull (retry_http.server);
+  GThread *retry_http_thread = g_thread_new ("restore-http-prepare-retry",
+          restore_http_server_thread, &retry_http);
   GSList *uris = soup_server_get_uris (http.server);
   g_assert_nonnull (uris);
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  uris = soup_server_get_uris (retry_http.server);
+  g_assert_nonnull (uris);
+  g_autofree gchar *retry_base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
@@ -2971,6 +3831,39 @@ test_restore_daemon_http_graph_lifecycle (void)
   }
   g_autofree gchar *digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
           manifest_data, manifest_length);
+  g_autofree gchar *token_path = g_build_filename (f.fixture.root,
+          "restore-cli-access-token", NULL);
+  g_assert_true (g_file_set_contents (token_path, token, -1, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
+  const gchar *cli_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "dry-run", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha",
+    "--bundle", bundle_path, "--trusted-sha256", digest,
+    "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  gchar *cli_stdout = NULL, *cli_stderr = NULL;
+  gint cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"scope\":\"graph\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"tenant_id\":\"tenant-a\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"graph_id\":\"alpha\""));
+  g_assert_nonnull (strstr (cli_stdout, "\"graph_count\":1"));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
   const gchar *operation_uuid = "01890c10-2e3f-7000-8000-000000000021";
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -3013,6 +3906,183 @@ test_restore_daemon_http_graph_lifecycle (void)
       "restore-http-admin", "wr.graph.manage", WYL_TENANT_DEFAULT,
       "armed"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
+
+  const gchar *cli_operation_uuid = "01890c10-2e3f-7000-8000-000000000022";
+  const gchar *cli_begin_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "begin", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha", "--uuid",
+    cli_operation_uuid, "--bundle", bundle_path, "--trusted-sha256",
+    digest, "--confirm", "--format", "json", "--access-token-file",
+    token_path, "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_begin_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 8);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARING\""));
+  g_autofree gchar *cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *cli_prepare_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "prepare", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha", "--uuid",
+    cli_operation_uuid, "--revision", cli_revision, "--bundle", bundle_path,
+    "--trusted-sha256", digest, "--format", "json", "--access-token-file",
+    token_path, "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  RestorePrepareCheckpoint checkpoint = { 0 };
+  g_mutex_init (&checkpoint.mutex);
+  g_cond_init (&checkpoint.cond);
+  wyl_fact_offline_restore_import_set_checkpoint_for_test
+    (restore_prepare_checkpoint, &checkpoint);
+  RestoreCliSpawn prepare_spawn = { .argv = cli_prepare_argv };
+  GThread *prepare_cli_thread = g_thread_new ("restore-cli-prepare",
+          restore_cli_spawn_thread, &prepare_spawn);
+  g_mutex_lock (&checkpoint.mutex);
+  gint64 checkpoint_deadline = g_get_monotonic_time () + 10 * G_USEC_PER_SEC;
+  while (!checkpoint.entered
+      && g_cond_wait_until (&checkpoint.cond, &checkpoint.mutex,
+      checkpoint_deadline))
+    ;
+  gboolean checkpoint_entered = checkpoint.entered;
+  g_mutex_unlock (&checkpoint.mutex);
+  g_assert_true (checkpoint_entered);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (WylClient) retry_client = NULL;
+  g_assert_cmpint (wyl_client_new (retry_base_url, &retry_client), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_login_skip_mfa (retry_client,
+      "restore-http-admin"), ==, WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_autofree gchar *retry_token = wyl_client_dup_access_token (retry_client);
+  g_assert_nonnull (retry_token);
+  g_autofree gchar *retry_token_path = g_build_filename (f.fixture.root,
+          "restore-cli-retry-access-token", NULL);
+  g_assert_true (g_file_set_contents (retry_token_path, retry_token, -1,
+      &file_error));
+  g_assert_no_error (file_error);
+  g_assert_cmpint (g_chmod (retry_token_path, 0600), ==, 0);
+  const gchar *retry_prepare_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--timeout-ms", "60000", "--daemon-url",
+    retry_base_url,
+    "fact", "restore", "prepare", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha", "--uuid",
+    cli_operation_uuid, "--revision", cli_revision, "--bundle", bundle_path,
+    "--trusted-sha256", digest, "--format", "json", "--access-token-file",
+    retry_token_path, "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  RestoreCliSpawn retry_spawn = { .argv = retry_prepare_argv };
+  GThread *retry_cli_thread = g_thread_new ("restore-cli-prepare-retry",
+          restore_cli_spawn_thread, &retry_spawn);
+  gboolean retry_queued = restore_http_waiting_writers (retry_http.server, 1,
+          -1);
+  g_mutex_lock (&checkpoint.mutex);
+  checkpoint.release = TRUE;
+  g_cond_broadcast (&checkpoint.cond);
+  g_mutex_unlock (&checkpoint.mutex);
+  g_thread_join (prepare_cli_thread);
+  g_thread_join (retry_cli_thread);
+  wyl_fact_offline_restore_import_set_checkpoint_for_test (NULL, NULL);
+  if (!retry_queued)
+    g_test_message ("concurrent restore prepare did not queue: status=%d stdout=%s stderr=%s",
+        retry_spawn.wait_status, retry_spawn.stdout_text,
+        retry_spawn.stderr_text);
+  g_assert_true (retry_queued);
+  g_assert_true (retry_spawn.spawned);
+  g_assert_no_error (retry_spawn.error);
+  gboolean retry_succeeded = g_spawn_check_wait_status (retry_spawn.wait_status,
+          &retry_spawn.error);
+  g_assert_false (retry_succeeded);
+  g_assert_true (g_error_matches (retry_spawn.error, G_SPAWN_EXIT_ERROR, 8)
+      || g_error_matches (retry_spawn.error, G_SPAWN_EXIT_ERROR, 7));
+  gboolean retry_reported_in_progress = retry_spawn.error->code == 8;
+  g_clear_error (&retry_spawn.error);
+  if (retry_reported_in_progress) {
+    g_assert_nonnull (strstr (retry_spawn.stdout_text,
+        "\"outcome\":\"in_progress\""));
+    g_assert_nonnull (strstr (retry_spawn.stdout_text,
+        "\"state\":\"PREPARING\""));
+  } else {
+    /* The daemon serializes policy writers. A queued retry can observe the
+     * revision conflict after the original prepare commits its PREPARED state. */
+    g_assert_nonnull (strstr (retry_spawn.stdout_text,
+        "\"outcome\":\"conflict\""));
+  }
+  g_assert_nonnull (strstr (retry_spawn.stdout_text, cli_operation_uuid));
+  g_assert_null (strstr (retry_spawn.stdout_text, bundle_path));
+  g_assert_null (strstr (retry_spawn.stdout_text, digest));
+  g_assert_null (strstr (retry_spawn.stdout_text, retry_token));
+  g_free (retry_spawn.stdout_text);
+  g_free (retry_spawn.stderr_text);
+  g_assert_true (prepare_spawn.spawned);
+  g_assert_no_error (prepare_spawn.error);
+  g_assert_true (g_spawn_check_wait_status (prepare_spawn.wait_status,
+      &prepare_spawn.error));
+  g_assert_no_error (prepare_spawn.error);
+  g_assert_nonnull (strstr (prepare_spawn.stdout_text,
+      "\"state\":\"PREPARED\""));
+  g_free (prepare_spawn.stdout_text);
+  g_free (prepare_spawn.stderr_text);
+  g_cond_clear (&checkpoint.cond);
+  g_mutex_clear (&checkpoint.mutex);
+  const gchar *cli_status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha", "--uuid",
+    cli_operation_uuid, "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"PREPARED\""));
+  g_free (cli_revision);
+  cli_revision = g_strdup_printf ("%" G_GUINT64_FORMAT,
+          restore_http_revision (cli_stdout));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
+  const gchar *cli_abort_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "abort", "--scope", "graph",
+    "--tenant", "tenant-a", "--graph", "alpha", "--uuid",
+    cli_operation_uuid, "--revision", cli_revision, "--confirm", "--format",
+    "json", "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) cli_abort_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_true (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"state\":\"ABORTED\""));
+  g_free (cli_stdout);
+  g_free (cli_stderr);
 
   body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
           bundle_path, digest, operation_uuid, 0, TRUE);
@@ -3064,7 +4134,7 @@ test_restore_daemon_http_graph_lifecycle (void)
     body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
             "", "", operation_uuid, revision, FALSE);
     g_assert_true (restore_http_post_and_drop_response (base_url, token,
-        "resume", body));
+        "resume", body, NULL, NULL));
     g_clear_pointer (&body, g_free);
     body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
             "", "", operation_uuid, 0, FALSE);
@@ -3117,7 +4187,41 @@ test_restore_daemon_http_graph_lifecycle (void)
   g_assert_null (strstr (response, "tenant-a"));
   g_assert_null (strstr (response, "alpha"));
   g_assert_null (strstr (response, "committed"));
+  const gchar *wrong_target_status_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", base_url,
+    "fact", "restore", "status", "--scope", "graph",
+    "--tenant", "tenant-b", "--graph", "alpha", "--uuid",
+    operation_uuid, "--format", "json", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL
+  };
+  cli_stdout = NULL;
+  cli_stderr = NULL;
+  cli_wait_status = 0;
+  g_assert_true (g_spawn_sync (NULL, (gchar **) wrong_target_status_argv,
+      (gchar *[]) { "WYCTL_DISABLE_GSETTINGS=1", NULL },
+      G_SPAWN_DEFAULT, NULL, NULL, &cli_stdout, &cli_stderr,
+      &cli_wait_status, &file_error));
+  g_assert_no_error (file_error);
+  g_assert_false (g_spawn_check_wait_status (cli_wait_status, &file_error));
+  g_assert_error (file_error, G_SPAWN_EXIT_ERROR, 4);
+  g_clear_error (&file_error);
+  g_assert_nonnull (strstr (cli_stdout, "\"failure_code\":\"restore_not_found\""));
+  g_assert_null (strstr (cli_stdout, "tenant-a"));
+  g_assert_null (strstr (cli_stdout, "committed"));
+  g_assert_null (strstr (cli_stdout, bundle_path));
+  g_assert_null (strstr (cli_stdout, digest));
+  g_assert_null (strstr (cli_stdout, token));
+  g_assert_cmpstr (cli_stderr, ==, "");
+  g_free (cli_stdout);
+  g_free (cli_stderr);
 
+  g_main_loop_quit (retry_http.loop);
+  g_thread_join (retry_http_thread);
+  soup_server_disconnect (retry_http.server);
+  g_clear_object (&retry_http.server);
+  g_clear_pointer (&retry_http.loop, g_main_loop_unref);
+  g_clear_pointer (&retry_http.context, g_main_context_unref);
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
   soup_server_disconnect (http.server);
