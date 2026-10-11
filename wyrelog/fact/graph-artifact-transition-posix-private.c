@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/artifact-durability-posix-private.h"
 #include "fact/graph-artifact-inventory-posix-private.h"
 
 #include "fact/graph-artifact-transition-names-private.h"
@@ -141,6 +142,7 @@ static gint transition_posix_test_fault;
 static gint transition_posix_consumed_test_fault;
 static gint transition_posix_test_rename_errno;
 static gint transition_posix_test_flush_errno;
+static gint transition_posix_test_retire_flush_errno;
 static WylFactArtifactTransitionPosixTestPostOpenHook
     transition_posix_test_post_open_hook;
 static gpointer transition_posix_test_post_open_data;
@@ -199,6 +201,13 @@ void
 wyl_fact_artifact_transition_posix_set_test_flush_errno (gint errno_value)
 {
   g_atomic_int_set (&transition_posix_test_flush_errno, errno_value);
+}
+
+void
+wyl_fact_artifact_transition_posix_set_test_retire_flush_errno
+  (gint errno_value)
+{
+  g_atomic_int_set (&transition_posix_test_retire_flush_errno, errno_value);
 }
 
 gboolean
@@ -302,20 +311,16 @@ identity_from_stat (const struct stat *st)
  * graph.  probe_preclean fails closed on exactly that error and this path
  * must match it.
  *
- * A FAILED DIRECTORY FLUSH IS NOT THAT, AND GATING ON IT WOULD BE A BUG.  The
- * names are already unlinked when it runs, so nothing is resident; the flush
- * only makes that durable.  Worse, on a filesystem whose directory flush is
- * legitimately unsupported -- precisely the case the capability model above
- * exists to describe -- gating on it would fail EVERY probe and deny restore
- * on the filesystems the bounded exit was built for.  A flush that fails
- * leaves at most a name that reappears after a crash, and the next probe's
- * step 0 clears it unconditionally.
+ * The cleanup attempt is best-effort, but a failed barrier cannot let this
+ * probe report a proven capability: a crash could resurrect an operation-
+ * owned unknown name. A later probe can preclean it. Unsupported is preserved
+ * as a typed capability gap; other cleanup failures return I/O failure.
  */
-static gboolean
+static WylFactArtifactDurabilityResult
 probe_retire (gint graph_fd, const WylFactArtifactTransitionNames *names)
 {
   if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_RETIRE))
-    return FALSE;
+    return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
   gboolean retired = TRUE;
   const gchar *targets[] = { names->probe, names->probe_moved };
   for (gsize index = 0; index < G_N_ELEMENTS (targets); index++) {
@@ -326,8 +331,19 @@ probe_retire (gint graph_fd, const WylFactArtifactTransitionNames *names)
         retired = FALSE;
     }
   }
-  (void) fsync (graph_fd);
-  return retired;
+  if (!retired)
+    return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
+  gint injected = posix_take_level (&transition_posix_test_retire_flush_errno);
+  if (injected != 0) {
+    if (injected == EINVAL || injected == ENOTSUP || injected == EOPNOTSUPP
+#ifdef __APPLE__
+        || injected == ENOTTY
+#endif
+        )
+      return WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED;
+    return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
+  }
+  return wyl_fact_artifact_durability_sync_fd (graph_fd);
 }
 
 /*
@@ -489,26 +505,29 @@ wyl_fact_artifact_transition_posix_probe_capability
    * that filesystem cannot run a restore AT ALL.  An if-chain and not a
    * switch, because on Linux the pair would be a duplicate-case error.
    *
-   * ERRNO IS CAPTURED INTO A LOCAL ON THE LINE THAT PRODUCES IT, matching the
-   * rename path, so the classification below reads a value rather than a
-   * global that any intervening call could clobber.
+   * The shared helper captures errno at the syscall and returns a classified
+   * result, so this branch never reads a stale process-global errno value.
    */
-  gint flush_result;
-  gint flush_errno;
+  WylFactArtifactDurabilityResult flush_result;
   if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_PROBE_DIRECTORY_FSYNC)) {
     /* Take-and-disarm, as above. */
     gint injected = posix_take_level (&transition_posix_test_flush_errno);
-    flush_result = -1;
-    flush_errno = injected != 0 ? injected : EIO;
+    flush_result = injected != 0
+        && (injected == EINVAL || injected == ENOTSUP
+        || injected == EOPNOTSUPP
+#ifdef __APPLE__
+        || injected == ENOTTY
+#endif
+        )
+        ? WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED
+        : WYL_FACT_ARTIFACT_DURABILITY_ERROR;
   } else {
-    flush_result = fsync (graph_fd);
-    flush_errno = flush_result == 0 ? 0 : errno;
+    flush_result = wyl_fact_artifact_durability_sync_fd (graph_fd);
   }
-  if (flush_result == 0) {
+  if (flush_result == WYL_FACT_ARTIFACT_DURABILITY_PROVEN) {
     out_capability->directory_flush
       = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN;
-  } else if (flush_errno == EINVAL || flush_errno == ENOTSUP
-      || flush_errno == EOPNOTSUPP) {
+  } else if (flush_result == WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED) {
     out_capability->directory_flush
       = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNSUPPORTED;
   } else {
@@ -523,7 +542,8 @@ done:
    * A probe that leaves either behind poisons the inventory gate's
    * unknown-entry count for every future operation on this graph, exactly as
    * a stranded stage would. */
-  gboolean retired = probe_retire (graph_fd, &names);
+  WylFactArtifactDurabilityResult retire_result
+    = probe_retire (graph_fd, &names);
   wyl_fact_artifact_transition_names_clear (&names);
   /*
    * A RETIRE THAT GENUINELY FAILED MUST NOT REPORT SUCCESS.  Dropping the
@@ -534,8 +554,16 @@ done:
    * path must match it.  Ordered so it reports the failure without masking an
    * earlier, more specific one.
    */
-  if (!retired && status == WYRELOG_E_OK)
+  if (retire_result == WYL_FACT_ARTIFACT_DURABILITY_ERROR
+      && status == WYRELOG_E_OK)
     status = WYRELOG_E_IO;
+  else if (retire_result == WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED
+      && status == WYRELOG_E_OK) {
+    /* Preserve the typed capability gap, while ensuring the probe can never
+     * claim a durable directory barrier after its own retirement failed. */
+    out_capability->directory_flush
+      = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNSUPPORTED;
+  }
   if (status != WYRELOG_E_OK)
     *out_capability = (WylFactArtifactTransitionPosixCapability) {
       .no_replace_supported = FALSE,
@@ -1007,7 +1035,8 @@ execute_sync_file (const WylFactArtifactTransitionPosix *provider,
     flush_res = -1;
     flush_errno = injected != 0 ? injected : EIO;
   } else {
-    flush_res = fsync (fd);
+    flush_res = wyl_fact_artifact_durability_sync_fd (fd)
+        == WYL_FACT_ARTIFACT_DURABILITY_PROVEN ? 0 : -1;
     flush_errno = flush_res == 0 ? 0 : errno;
   }
   close (fd);
@@ -1017,7 +1046,11 @@ execute_sync_file (const WylFactArtifactTransitionPosix *provider,
     *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN;
     return WYRELOG_E_OK;
   }
+#if defined(__APPLE__)
+  if (flush_errno == EBADF)
+#else
   if (flush_errno == EBADF || flush_errno == EINVAL)
+#endif
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
   else
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
@@ -1031,18 +1064,24 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNPROVEN;
-  gint flush_res;
-  gint flush_errno;
+  WylFactArtifactDurabilityResult flush_result;
   if (posix_fault_take (fsync_fault)) {
     gint injected = posix_take_level (&transition_posix_test_flush_errno);
-    flush_res = -1;
-    flush_errno = injected != 0 ? injected : EIO;
+    flush_result = injected != 0
+        && (injected == EINVAL || injected == ENOTSUP
+        || injected == EOPNOTSUPP
+#ifdef __APPLE__
+        || injected == ENOTTY
+#endif
+        )
+        ? WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED
+        : WYL_FACT_ARTIFACT_DURABILITY_ERROR;
   } else {
-    flush_res = fsync (provider->graph_fd);
-    flush_errno = flush_res == 0 ? 0 : errno;
+    flush_result = wyl_fact_artifact_durability_sync_fd
+          (provider->graph_fd);
   }
 
-  if (flush_res == 0) {
+  if (flush_result == WYL_FACT_ARTIFACT_DURABILITY_PROVEN) {
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
     *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_PROVEN;
     return WYRELOG_E_OK;
@@ -1050,17 +1089,13 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
 
   if (provider->capability.directory_flush
       == WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNSUPPORTED
-      && (flush_errno == EINVAL || flush_errno == ENOTSUP
-      || flush_errno == EOPNOTSUPP)) {
+      && flush_result == WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED) {
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
     *out_durability = WYL_FACT_ARTIFACT_MAIN_TRANSITION_DURABILITY_UNSUPPORTED;
     return WYRELOG_E_OK;
   }
 
-  if (flush_errno == EBADF)
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-  else
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   return WYRELOG_E_OK;
 }
 
@@ -1126,7 +1161,8 @@ sync_directory:
     (void) posix_take_level (&transition_posix_test_flush_errno);
     flush_res = -1;
   } else
-    flush_res = fsync (provider->graph_fd);
+    flush_res = wyl_fact_artifact_durability_sync_fd (provider->graph_fd)
+        == WYL_FACT_ARTIFACT_DURABILITY_PROVEN ? 0 : -1;
   *out_effect = flush_res == 0
       ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
       : WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
@@ -1362,7 +1398,8 @@ wyl_fact_artifact_transition_posix_with_retired_stage_recovery
       if (rc != WYRELOG_E_OK)
         return rc;
       if (posix_fault_take (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR)
-          || fsync (provider->graph_fd) != 0)
+          || wyl_fact_artifact_durability_sync_fd (provider->graph_fd)
+          != WYL_FACT_ARTIFACT_DURABILITY_PROVEN)
         return WYRELOG_E_IO;
       if (transition_posix_recovery_post_sync_hook != NULL)
         transition_posix_recovery_post_sync_hook (provider->graph_fd,
@@ -1445,7 +1482,8 @@ wyl_fact_artifact_transition_posix_with_unbound_absence
         return rc;
       if (posix_fault_take
             (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR)
-          || fsync (provider->graph_fd) != 0)
+          || wyl_fact_artifact_durability_sync_fd (provider->graph_fd)
+          != WYL_FACT_ARTIFACT_DURABILITY_PROVEN)
         return WYRELOG_E_IO;
       if (transition_posix_recovery_post_sync_hook != NULL)
         transition_posix_recovery_post_sync_hook (provider->graph_fd,

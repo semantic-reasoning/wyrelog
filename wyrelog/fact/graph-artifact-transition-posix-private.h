@@ -318,6 +318,9 @@ void wyl_fact_artifact_transition_posix_set_test_rename_errno
  * seam then reports EIO, which is the probe-fails row. */
 void wyl_fact_artifact_transition_posix_set_test_flush_errno
   (gint errno_value);
+/* Injects the post-unlink probe-retirement barrier result. */
+void wyl_fact_artifact_transition_posix_set_test_retire_flush_errno
+  (gint errno_value);
 /* Test mutation after the recovery fsync and before recapture; caller clears
  * it after use. */
 void wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test

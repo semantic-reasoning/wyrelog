@@ -19,6 +19,7 @@
 
 #include "fact-test-support.h"
 #include "fact-artifact-transition-driver-fixture.h"
+#include "fact/artifact-durability-posix-private.h"
 #include "fact/graph-artifact-inventory-private.h"
 #include "fact/graph-artifact-main-transition-private.h"
 #include "fact/graph-artifact-transition-names-private.h"
@@ -775,6 +776,9 @@ test_probe_flush_capability_rows (void)
     WylFactArtifactMainTransitionDurability expected;
   } rows[] = {
     { "einval", EINVAL, TRUE, MT (DURABILITY_UNSUPPORTED) },
+#ifdef __APPLE__
+    { "enotty", ENOTTY, TRUE, MT (DURABILITY_UNSUPPORTED) },
+#endif
     { "enotsup", ENOTSUP, TRUE, MT (DURABILITY_UNSUPPORTED) },
     { "eopnotsupp", EOPNOTSUPP, TRUE, MT (DURABILITY_UNSUPPORTED) },
     /* Not a capability answer.  Never silently reported as unsupported. */
@@ -818,6 +822,28 @@ test_probe_flush_capability_rows (void)
     fixture_clear (&fixture);
   }
 }
+
+#ifdef __APPLE__
+static void
+test_probe_retire_preserves_unsupported (void)
+{
+  Fixture fixture;
+  fixture_init (&fixture, "u2a-retire-unsupported-XXXXXX");
+  Capability capability = { 0 };
+  wyl_fact_artifact_transition_posix_set_test_flush_errno (ENOTTY);
+  wyl_fact_artifact_transition_posix_set_test_retire_flush_errno (ENOTTY);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (PROBE_DIRECTORY_FSYNC));
+  wyrelog_error_t status
+    = wyl_fact_artifact_transition_posix_probe_capability
+        (&fixture.directory, OPERATION_UUID, &capability);
+  g_assert_cmpint (status, ==, WYRELOG_E_OK);
+  g_assert_cmpint (capability.directory_flush,
+      ==, MT (DURABILITY_UNSUPPORTED));
+  g_assert_true (capability.no_replace_supported);
+  fixture_clear (&fixture);
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* T10 the probe leaves nothing behind                                 */
@@ -1247,6 +1273,30 @@ test_execute_sync_staged (void)
   g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
   g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed (
         PF (EXECUTE_SYNC_STAGED_FSYNC)));
+
+  const gint flush_errors[] = { EINVAL, ENOTTY, ENOTSUP, EOPNOTSUPP, EIO };
+  for (gsize index = 0; index < G_N_ELEMENTS (flush_errors); index++) {
+    wyl_fact_artifact_transition_posix_set_test_flush_errno
+      (flush_errors[index]);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_SYNC_STAGED_FSYNC));
+    effect = (WylFactArtifactMainTransitionEffect) 999;
+    durability = (WylFactArtifactMainTransitionDurabilityEvidence) {
+      .staged_file = MT (DURABILITY_PROVEN),
+    };
+    g_assert_cmpint (execute_current (provider,
+        MT (OP_SYNC_STAGED), &effect, &durability), ==, WYRELOG_E_OK);
+#if defined(__APPLE__)
+    g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+#else
+    g_assert_cmpint (effect, ==,
+        flush_errors[index] == EINVAL ? MT (EFFECT_NOT_APPLIED)
+                                     : MT (EFFECT_UNKNOWN));
+#endif
+    g_assert_cmpint (durability.staged_file, ==, MT (DURABILITY_UNPROVEN));
+    g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (EXECUTE_SYNC_STAGED_FSYNC)));
+  }
 
   fixture_clear (&fixture);
 }
@@ -3080,6 +3130,22 @@ test_child_crash_restarts_from_fresh_capture (void)
   fixture_clear (&fixture);
 }
 
+static void
+test_fullfsync_errno_classification (void)
+{
+  const gint unsupported[] = { EINVAL, ENOTTY, ENOTSUP, EOPNOTSUPP };
+  for (gsize i = 0; i < G_N_ELEMENTS (unsupported); i++)
+    g_assert_cmpint
+      (wyl_fact_artifact_durability_classify_fullfsync_errno
+          (unsupported[i]), ==, WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED);
+
+  const gint io_errors[] = { EIO, EBADF, ENOSPC };
+  for (gsize i = 0; i < G_N_ELEMENTS (io_errors); i++)
+    g_assert_cmpint
+      (wyl_fact_artifact_durability_classify_fullfsync_errno
+          (io_errors[i]), ==, WYL_FACT_ARTIFACT_DURABILITY_ERROR);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3087,6 +3153,12 @@ main (int argc, char **argv)
     return wyl_test_normalize_exit_status (run_posix_driver_crash_child (argv[2], argv[3], argv[4]));
   driver_test_executable = g_canonicalize_filename (argv[0], NULL);
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact/artifact-transition-posix/durability/fullfsync-errno",
+      test_fullfsync_errno_classification);
+#ifdef __APPLE__
+  g_test_add_func ("/fact/artifact-transition-posix/durability/probe-retire-unsupported",
+      test_probe_retire_preserves_unsupported);
+#endif
   g_test_add_func ("/fact/artifact-transition-posix/triple-and-identity",
       test_triple_and_identity);
   g_test_add_func ("/fact/artifact-transition-posix/absent-slots",
