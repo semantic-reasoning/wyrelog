@@ -110,6 +110,7 @@ static const gchar *const reject_names[] = {
   [WYL_FACT_RULE_PACK_REJECT_TYPE_MISMATCH] = "rule_pack_type_mismatch",
   [WYL_FACT_RULE_PACK_REJECT_CYCLE] = "rule_pack_cycle",
   [WYL_FACT_RULE_PACK_REJECT_COMPILE] = "rule_pack_compile",
+  [WYL_FACT_RULE_PACK_REJECT_EMPTY] = "rule_pack_empty",
 };
 
 const gchar *

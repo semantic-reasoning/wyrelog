@@ -10,6 +10,7 @@
 #include "offline-backup-manifest-private.h"
 #include "replay-scheduler-private.h"
 #include "replay-store-private.h"
+#include "rule-pack-private.h"
 #include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/wyl-log-private.h"
 #define WYL_FACT_STORE_CONNECTION_ROLE 1
@@ -726,11 +727,13 @@ list_replay_relations (wyl_policy_store_t *policy,
   return WYRELOG_E_OK;
 }
 
-static gchar *
-build_graph_program (GPtrArray *relations)
+/* Borrows each relation's names and columns; the array is valid while
+ * @relations is. */
+static wyl_fact_graph_program_relation_t *
+graph_program_relations (GPtrArray *relations)
 {
   guint n_relations = relations != NULL ? relations->len : 0;
-  g_autofree wyl_fact_graph_program_relation_t *program_relations =
+  wyl_fact_graph_program_relation_t *program_relations =
       g_new0 (wyl_fact_graph_program_relation_t, n_relations);
   for (guint i = 0; i < n_relations; i++) {
     ReplayRelation *rel = g_ptr_array_index (relations, i);
@@ -741,7 +744,78 @@ build_graph_program (GPtrArray *relations)
       .n_columns = rel->n_columns,
     };
   }
+  return program_relations;
+}
+
+static gchar *
+build_graph_program (GPtrArray *relations)
+{
+  guint n_relations = relations != NULL ? relations->len : 0;
+  g_autofree wyl_fact_graph_program_relation_t *program_relations =
+      graph_program_relations (relations);
   return wyl_fact_graph_program_render (program_relations, n_relations, NULL);
+}
+
+wyrelog_error_t
+wyl_fact_replay_register_rule_pack (wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *graph_info, const gchar *text,
+    gsize text_len, wyl_policy_fact_rule_pack_info_t *out_info,
+    wyl_fact_rule_pack_rejection_t *out_rejection)
+{
+  if (out_info != NULL)
+    *out_info = (wyl_policy_fact_rule_pack_info_t) {
+      0
+    };
+  if (out_rejection != NULL)
+    *out_rejection = (wyl_fact_rule_pack_rejection_t) {
+      0
+    };
+  if (policy == NULL || graph_info == NULL || graph_info->tenant_id == NULL
+      || graph_info->graph_id == NULL || text == NULL
+      || out_info == NULL || out_rejection == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* The store refuses an inactive graph too, but only after the check would
+   * have reported every relation of a missing graph as unknown. */
+  gboolean active = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_fact_graph_is_active (policy,
+          graph_info->tenant_id, graph_info->graph_id, &active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!active)
+    return WYRELOG_E_NOT_FOUND;
+
+  g_autoptr (GPtrArray) relations = NULL;
+  rc = list_replay_relations (policy, NULL, graph_info, NULL, NULL,
+          &relations);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree wyl_fact_graph_program_relation_t *program_relations =
+      graph_program_relations (relations);
+  g_autofree gchar *rules = NULL;
+  g_auto (GStrv) canonical = NULL;
+  rc = wyl_fact_rule_pack_compile_canonical (text, text_len,
+          program_relations, relations->len, &rules, &canonical, out_rejection);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (canonical[0] == NULL) {
+    out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_EMPTY;
+    return WYRELOG_E_POLICY;
+  }
+  gsize n_rules = g_strv_length (canonical);
+  guint32 version = 0;
+  rc = wyl_policy_store_register_fact_rule_pack (policy,
+          graph_info->tenant_id, graph_info->graph_id,
+          (const gchar * const *) canonical, n_rules, &version);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_fact_rule_pack_digest ((const gchar * const *) canonical,
+            n_rules, out_info->digest);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  out_info->pack_version = version;
+  out_info->rules = g_steal_pointer (&canonical);
+  out_info->n_rules = n_rules;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t

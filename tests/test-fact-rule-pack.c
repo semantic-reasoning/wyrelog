@@ -458,10 +458,12 @@ test_reason_names (void)
         (WYL_FACT_RULE_PACK_REJECT_UNSAFE_NEGATED_VARIABLE), ==,
       "rule_pack_unsafe_negated_variable");
   for (gint r = WYL_FACT_RULE_PACK_REJECT_NONE;
-      r <= WYL_FACT_RULE_PACK_REJECT_COMPILE; r++)
+      r <= WYL_FACT_RULE_PACK_REJECT_EMPTY; r++)
     g_assert_nonnull (wyl_fact_rule_pack_reject_name (r));
+  g_assert_cmpstr (wyl_fact_rule_pack_reject_name
+        (WYL_FACT_RULE_PACK_REJECT_EMPTY), ==, "rule_pack_empty");
   g_assert_null (wyl_fact_rule_pack_reject_name
-        (WYL_FACT_RULE_PACK_REJECT_COMPILE + 1));
+        (WYL_FACT_RULE_PACK_REJECT_EMPTY + 1));
 }
 
 int
