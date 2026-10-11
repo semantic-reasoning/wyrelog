@@ -234,6 +234,8 @@ wyrelog/daemon/signals.h
 wyrelog/daemon/wyrelogd.c
 wyrelog/error.h
 wyrelog/events.h
+wyrelog/fact/artifact-durability-posix-private.c
+wyrelog/fact/artifact-durability-posix-private.h
 wyrelog/fact/artifact-io-session-posix-private.c
 wyrelog/fact/artifact-io-session-private.h
 wyrelog/fact/artifact-io-session-windows-private.c

@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-locator-private.h"
+#include "fact/artifact-durability-posix-private.h"
 #include "fact/artifact-stat-change-test-private.h"
 #include "fact/graph-locator-darwin-private.h"
 #include "fact/graph-artifact-transition-names-private.h"
@@ -621,7 +622,7 @@ open_or_create_dir (gint parent_fd, const gchar *name, gboolean create,
   if (fd < 0 && errno == ENOENT && create) {
     if (mkdirat (parent_fd, name, 0700) != 0 && errno != EEXIST)
       return errno_to_resolver_error (errno);
-    if (fsync (parent_fd) != 0)
+    if (!wyl_fact_artifact_durability_sync_fd_proven (parent_fd))
       return WYRELOG_E_IO;
     fd = openat (parent_fd, name,
             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
@@ -904,7 +905,7 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   else if (!S_ISREG (opened.st_mode) || opened.st_uid != geteuid ()
       || opened.st_dev != before.st_dev || opened.st_ino != before.st_ino)
     rc = WYRELOG_E_POLICY;
-  else if (fchmod (fd, 0600) != 0 || fsync (fd) != 0)
+  else if (fchmod (fd, 0600) != 0 || !wyl_fact_artifact_durability_sync_fd_proven (fd))
     rc = WYRELOG_E_IO;
   else if (fstatat (directory->graph_fd, basename, &after,
       AT_SYMLINK_NOFOLLOW) != 0)
@@ -914,7 +915,7 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   else
     rc = validate_regular_fd (fd, 0600, NULL, NULL, NULL);
   close (fd);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
@@ -987,7 +988,7 @@ wyl_fact_graph_directory_create_darwin_provisioned_final (
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("darwin-final-created",
             directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK && fsync (fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("darwin-final-synced",
@@ -1005,7 +1006,7 @@ wyl_fact_graph_directory_create_darwin_provisioned_final (
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, fd,
             operation_uuid, out_evidence);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("darwin-directory-synced",
@@ -1736,7 +1737,7 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
           FALSE, out_stage);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-created", directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-create-parent-synced",
@@ -1790,7 +1791,7 @@ wyl_fact_graph_directory_restore_stage_create_exact
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("restore-stage-created",
             directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("restore-stage-parent-synced",
@@ -3064,7 +3065,7 @@ wyl_fact_graph_restore_selected_cleanup_execute
     if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
       rc = directory->checkpoint ("restore-selected-after-companion-unlink",
               directory->checkpoint_data);
-    if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
       rc = WYRELOG_E_IO;
 #ifdef WYL_TEST_HANDLE_SEAMS
     if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
@@ -3094,7 +3095,7 @@ wyl_fact_graph_restore_selected_cleanup_execute
       rc = directory->checkpoint ("restore-selected-after-rollback-unlink",
               directory->checkpoint_data);
   }
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
@@ -3436,12 +3437,12 @@ restore_companion_link_post_publish
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("restore-companion-before-main-fsync",
             directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK && fsync (main_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (main_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("restore-companion-before-dir-fsync",
             directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (main_fd >= 0)
     close (main_fd);
@@ -3514,7 +3515,7 @@ wyl_fact_graph_stage_sync (WylFactGraphStage *stage)
   wyrelog_error_t rc = validate_fd (stage->fd, FALSE, 0600, NULL, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return fsync (stage->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  return wyl_fact_artifact_durability_sync_fd_proven (stage->fd) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 static gboolean
@@ -3597,7 +3598,7 @@ wyl_fact_graph_directory_restore_stage_sync
         (directory, stage);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_stage_sync (stage);
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_restore_stage_revalidate (directory, stage);
@@ -3692,7 +3693,7 @@ exact_stage_publish (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
             &final_present, &final_exact);
   if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
     rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-parent-synced",
@@ -3751,7 +3752,7 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
     if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
       rc = WYRELOG_E_POLICY;
   }
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && stage_exact) {
     if (unlinkat (directory->graph_fd, stage->stage_basename, 0) != 0)
@@ -3759,7 +3760,7 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
     else if (directory->checkpoint != NULL)
       rc = directory->checkpoint ("stage-unlinked", directory->checkpoint_data);
   }
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK) {
     rc = named_stage_state (directory, stage->final_basename, stage,
@@ -3805,7 +3806,7 @@ wyl_fact_graph_stage_abort (WylFactGraphDirectory *directory,
   if (rc == WYRELOG_E_OK
       && unlinkat (directory->graph_fd, stage->stage_basename, 0) != 0)
     rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+  if (rc == WYRELOG_E_OK && !wyl_fact_artifact_durability_sync_fd_proven (directory->graph_fd))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     stage_mark_complete (stage);

@@ -99,6 +99,7 @@ else
   wyrelog_sources += files('fact/graph-artifact-namespace-private.c')
   wyrelog_sources += files('fact/artifact-io-session-posix-private.c')
   wyrelog_sources += files('fact/graph-artifact-transition-posix-private.c')
+  wyrelog_sources += files('fact/artifact-durability-posix-private.c')
 endif
 
 wyrelog_deps = [

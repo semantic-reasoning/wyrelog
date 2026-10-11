@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include "fact/artifact-durability-posix-private.h"
 #include "fact/publication-lock-event-private.h"
 #ifndef G_OS_WIN32
 #include "fact/graph-artifact-inventory-posix-private.h"
@@ -1263,7 +1264,7 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
      * Fsyncing in both paths makes publication wait for one directory barrier. */
     if (namespace_fault_take
           (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC)
-        || fsync (n->fd) != 0) {
+        || !wyl_fact_artifact_durability_sync_fd_proven (n->fd)) {
       close (pin);
       return WYRELOG_E_IO;
     }
@@ -2661,7 +2662,7 @@ wyl_fact_artifact_namespace_sync (WylFactArtifactNamespace *n,
       wyl_fact_artifact_namespace_open_file (n, a, FALSE, FALSE, &fd);
   if (r)
     return r;
-  r = fsync (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  r = wyl_fact_artifact_durability_sync_fd_proven (fd) ? WYRELOG_E_OK : WYRELOG_E_IO;
   close (fd);
   return r;
 }
@@ -3053,7 +3054,7 @@ wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *binding)
   binding->pin_fd = -1;
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
-      || fsync (lease->namespace_->fd) != 0)
+      || !wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd))
     r = WYRELOG_E_IO;
   else
     r = WYRELOG_E_OK;
@@ -3427,7 +3428,7 @@ wyl_fact_artifact_sidecar_binding_publish_no_replace
     goto done;
   }
   /* The source must reach stable storage before namespace publication. */
-  if (fsync (binding->pin_fd) != 0) {
+  if (!wyl_fact_artifact_durability_sync_fd_proven (binding->pin_fd)) {
     result = WYRELOG_E_IO;
     goto done;
   }
@@ -3467,7 +3468,8 @@ wyl_fact_artifact_sidecar_binding_publish_no_replace
 
   /* renameat2/renameatx_np is the linearization point. */
   binding->sidecar = destination;
-  result = fsync (lease->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  result = wyl_fact_artifact_durability_sync_fd_proven
+        (lease->namespace_->fd) ? WYRELOG_E_OK : WYRELOG_E_IO;
   wyrelog_error_t post = lease_revalidate_sidecar_unlocked (lease);
   if (post != WYRELOG_E_OK)
     result = post;
@@ -3535,7 +3537,7 @@ wyl_fact_artifact_sidecar_binding_replace_existing_wal
   /* The exact source identity is stable before the namespace change. */
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_SOURCE_FSYNC)
-      || fsync (source->pin_fd) != 0) {
+      || !wyl_fact_artifact_durability_sync_fd_proven (source->pin_fd)) {
     result = WYRELOG_E_IO;
     goto done;
   }
@@ -3653,7 +3655,7 @@ wyl_fact_artifact_sidecar_binding_replace_existing_wal
   }
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_REPLACE_DIRECTORY_FSYNC)
-      || fsync (lease->namespace_->fd) != 0) {
+      || !wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd)) {
     if (result == WYRELOG_E_OK)
       result = WYRELOG_E_IO;
   }
@@ -3794,7 +3796,7 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
   binding->active = FALSE;
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC)
-      || fsync (lease->namespace_->fd) != 0)
+      || !wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd))
     result = WYRELOG_E_IO;
   else
     result = WYRELOG_E_OK;
@@ -3864,7 +3866,7 @@ wyl_fact_artifact_temp_binding_replace_sidecar
     goto done;
   }
   /* The replacement contents are durable before their namespace name moves. */
-  if (fsync (source->pin_fd) != 0) {
+  if (!wyl_fact_artifact_durability_sync_fd_proven (source->pin_fd)) {
     result = WYRELOG_E_IO;
     goto done;
   }
@@ -3928,7 +3930,7 @@ wyl_fact_artifact_temp_binding_replace_sidecar
   }
   if (renamed && (!namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC)
-      && fsync (lease->namespace_->fd) == 0)) {
+      && wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd))) {
     /* Keep a prior syscall error: it is durable-state uncertainty, not a
      * successful operation report. */
   } else if (result == WYRELOG_E_OK) {
@@ -4018,7 +4020,7 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
   binding->token = g_steal_pointer (&next_token);
   if (namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
-      || fsync (lease->namespace_->fd) != 0)
+      || !wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd))
     r = WYRELOG_E_IO;
   else
     r = WYRELOG_E_OK;
@@ -4391,7 +4393,8 @@ wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
   }
   r = !namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
-      && fsync (l->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+      && wyl_fact_artifact_durability_sync_fd_proven (l->namespace_->fd)
+      ? WYRELOG_E_OK : WYRELOG_E_IO;
   r = post_mutation_check_unlocked (l, r);
   if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) == 0
       || errno != ENOENT)
@@ -4429,7 +4432,7 @@ wyl_fact_artifact_namespace_sync_directory (WylFactArtifactNamespace *n)
 {
   if (check (n) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
-  return fsync (n->fd) == 0 && check (n) == WYRELOG_E_OK
+  return wyl_fact_artifact_durability_sync_fd_proven (n->fd) && check (n) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
@@ -4570,7 +4573,7 @@ duckdb_temp_root_discard_unpublished_unlocked (WylFactDuckdbTempRoot *root)
   if (unlinkat (lease->namespace_->fd, root->name, AT_REMOVEDIR) != 0)
     return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   root->active = FALSE;
-  return fsync (lease->namespace_->fd) == 0
+  return wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd)
          && lease_revalidate_unlocked (lease) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
@@ -4678,7 +4681,7 @@ duckdb_temp_child_discard_unpublished_unlocked (WylFactDuckdbTempChild *child)
     close (child->pin_fd);
     child->pin_fd = -1;
   }
-  return fsync (root->fd) == 0
+  return wyl_fact_artifact_durability_sync_fd_proven (root->fd)
          && duckdb_temp_root_audit_unlocked (root) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
@@ -4836,7 +4839,7 @@ wyl_fact_duckdb_temp_root_create_with_orphan_evidence
   if (!root->logical_name || !root->children
       || namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR)
-      || fsync (lease->namespace_->fd) != 0
+      || !wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd)
       || duckdb_temp_root_audit_unlocked (root) != WYRELOG_E_OK) {
     wyrelog_error_t discard = root->children
         ? duckdb_temp_root_discard_unpublished_unlocked (root)
@@ -5060,7 +5063,8 @@ wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
   if (!child->active || !child->bindings
       || namespace_fault_take
         (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
-      || fsync (fd) != 0 || fsync (root->fd) != 0
+      || !wyl_fact_artifact_durability_sync_fd_proven (fd)
+      || !wyl_fact_artifact_durability_sync_fd_proven (root->fd)
       || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK
       || duckdb_temp_root_audit_unlocked (root) != WYRELOG_E_OK) {
     wyrelog_error_t discard = child->active
@@ -5200,7 +5204,7 @@ wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
   result = duckdb_temp_child_io_barrier_unlocked (child);
   if (result != WYRELOG_E_OK)
     goto done;
-  if (fsync (child->pin_fd) != 0) {
+  if (!wyl_fact_artifact_durability_sync_fd_proven (child->pin_fd)) {
     result = WYRELOG_E_IO;
     goto done;
   }
@@ -5211,7 +5215,7 @@ wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
   child->active = FALSE;
   close (child->pin_fd);
   child->pin_fd = -1;
-  if (fsync (child->root->fd) != 0)
+  if (!wyl_fact_artifact_durability_sync_fd_proven (child->root->fd))
     result = WYRELOG_E_IO;
   else if (duckdb_temp_root_audit_unlocked (child->root) != WYRELOG_E_OK)
     result = WYRELOG_E_POLICY;
@@ -5277,7 +5281,7 @@ wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
     goto done;
   }
   root->active = FALSE;
-  if (fsync (lease->namespace_->fd) != 0)
+  if (!wyl_fact_artifact_durability_sync_fd_proven (lease->namespace_->fd))
     result = WYRELOG_E_IO;
   else if (fstatat (lease->namespace_->fd, root->name, &(struct stat) { 0 },
       AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT

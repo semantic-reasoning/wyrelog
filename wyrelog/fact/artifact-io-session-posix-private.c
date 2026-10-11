@@ -6,6 +6,7 @@
 #endif
 
 #include "fact/artifact-io-session-private.h"
+#include "fact/artifact-durability-posix-private.h"
 #include "fact/secure-duckdb-filesystem-test-faults-private.h"
 
 #include <errno.h>
@@ -285,7 +286,7 @@ wyl_fact_artifact_io_session_flush (WylFactArtifactIoSession *session)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (fsync (session->fd) != 0)
+  if (!wyl_fact_artifact_durability_sync_fd_proven (session->fd))
     return WYRELOG_E_IO;
 
   return io_session_revalidate_unlocked (session);
