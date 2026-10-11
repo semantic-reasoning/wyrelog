@@ -1,8 +1,8 @@
 {
-  "aggregate": "8e45478267f911ed43a4350b9f4e3facd7abd27ef8a5db8662457b8d671d24eb",
+  "aggregate": "96c3f463d92c8541022f760695810675efdbc9c82fce64cf1f48bab387428d02",
   "directives": {
     "count": 558,
-    "sha256": "24464415323c69a858c289419155fd465de5413fe7386795310750e168e02e5f"
+    "sha256": "c8cffe5f118107576414dc79526689ee7d80e4f1925966d070e4af7af26fcfd1"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
@@ -25,6 +25,7 @@
     "policy_write_record_finalize_snapshot": "bde07c783dfc29508642b1d11c83c5a21fe6e798e530ba5272149dd0e72c9e75",
     "policy_write_record_non_http_finalize_snapshot": "6fbafe96a8d4657ad901624aaeb121d7f64cee8d26211e91524bfebffc9cd427",
     "role_membership_mutation_handler": "b3de96a368c5ad8e300d0ef26605dd08babd14b1887587745960f1fe58d20f13",
+    "rule_pack_register_handler": "fb6809f4ff94e9fb9a4f065ede843bed6099d8417120a8334b0a8901a26d4dbc",
     "schema_register_handler": "e42a7743cc9b7c0f7cf2873f7113f857352cb4846925b96cc8216c5b6cd12856",
     "service_credential_operation_reconcile_execute": "6f86d0b7a3430d2199f7b78c449c735c0e78e39c1abed12135b28fc321d7e257",
     "service_credential_operation_recover_execute": "1395b3874bcb04c6c69203b4bf19e8b23ef43829e31b998a3763286dc32936ca",
@@ -34,6 +35,8 @@
     "set_json_error": "c07b4fa386e9cb51e5a41f1a53b126f02d89b326862d2dc66f63804f41858c34",
     "set_json_ok": "57cc5536a5000743d78da3f3cabfe4c625ed60132516fd73082121020dee2256",
     "set_policy_mutation_ok_json": "e14bd579458e52aada4704a1e124a1adae53a4abe705d0f137f5130768d4218b",
+    "set_rule_pack_ok_json": "a8a4e368466e610b4dc0ad80c3f4aa1c408d00bd199eaaacdfa1b511d37ecf95",
+    "set_rule_pack_rejected_json": "11ba5d93a7eb236e916a6bf38093ccd15aa33aac5017e66dec85ae1e13d1a7a1",
     "set_schema_ok_json": "6c18fa976ffe032a659dd49635ec31a33dcb5a9c47b4dd18465276dc26149f32",
     "set_tenant_mutation_json": "f167a0efcff9bb2d342b6b8332a0ab446006ed9b5b31bba3a63432ea2b137fde",
     "tenant_create_durable_bundle": "b203b90ec04cfd8a62e5419834806a63b232fec59d8f721934367592880261d5",
@@ -68,8 +71,8 @@
     "wyl_daemon_policy_write_record_primary": "fd545eb0aa25baaf932a661079bf4cf18a04b49204f08d86f45db4ebbfae4e30"
   },
   "owners": {
-    "count": 18,
-    "sha256": "ade5c198456317599630f88585a06498dfa444108cf57e2a693401a13545758b"
+    "count": 19,
+    "sha256": "44922c1066490505b2c09fb5e91b49c7dcca14733dba6eddd07d8611df4ecfc0"
   },
   "profile": "raw-conditional-declarations-v1",
   "rationale": "Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.",

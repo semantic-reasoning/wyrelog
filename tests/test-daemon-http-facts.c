@@ -1354,6 +1354,183 @@ seam_batch_payload_digest (wyl_fact_store_op_t op, const gchar *batch_id,
   return wyl_fact_store_batch_content_hash (&schema, &batch);
 }
 
+#define RULE_PACK_QUERY "tenant=__wr_default&graph=rule-packs&" FACT_GUARD
+
+/* The stored pack's version and digest, as the route reports them. */
+static gchar *
+expected_rule_pack_identity (const gchar *const *rules, guint32 version)
+{
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  if (wyl_policy_fact_rule_pack_digest (rules, g_strv_length ((gchar **)
+      rules), digest) != WYRELOG_E_OK)
+    return NULL;
+  g_autoptr (GString) hex = g_string_new (NULL);
+  for (gsize i = 0; i < sizeof digest; i++)
+    g_string_append_printf (hex, "%02x", digest[i]);
+  return g_strdup_printf ("\"pack_version\":%u,\"rule_count\":%u,"
+             "\"pack_digest\":\"%s\"", version, g_strv_length ((gchar **) rules),
+             hex->str);
+}
+
+/* #1213: a rule pack is checked against the graph's relations, stored as
+ * canonical rules, and a refusal names the rule. */
+static gint
+check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
+    const gchar *base_url, const gchar *admin_token, const gchar *deny_token)
+{
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *request_id = NULL;
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+
+  gint rc = send_raw (session, "POST", base_url, "/graphs/create",
+          RULE_PACK_QUERY, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200)
+    return 4501;
+  static const gchar *const relations[] = { "orders", "big" };
+  static const gchar *const columns[] = {
+    "column_name\tcolumn_type\tnullable\tvisible\n"
+    "order_id\tstring\tfalse\ttrue\namount\tint64\tfalse\ttrue\n",
+    "column_name\tcolumn_type\tnullable\tvisible\n"
+    "order_id\tstring\tfalse\ttrue\n",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    g_autofree gchar *schema_query = g_strdup_printf ("%s&namespace=shop&"
+            "relation=%s&schema_version=1", RULE_PACK_QUERY, relations[i]);
+    rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+            schema_query, admin_token, columns[i], &status, &body);
+    if (rc != 0 || status != 200)
+      return 4502;
+  }
+
+  /* Accepted: stored as canonical text, the response and the audit record
+   * both cite the version and the digest. */
+  rc = send_raw_with_request_id (session, "POST", base_url,
+          "/facts/rule-pack/register", RULE_PACK_QUERY, admin_token,
+          "# large orders\nbig(O) :- orders(O, Amount),  shop.orders(O, 1000).\n",
+          &status, &body, &request_id, NULL);
+  const gchar *const stored[] = {
+    "big(O):-orders(O,Amount),shop.orders(O,1000).", NULL
+  };
+  g_autofree gchar *identity = expected_rule_pack_identity (stored, 1);
+  if (rc != 0 || status != 200 || identity == NULL
+      || strstr (body, "\"ok\":true") == NULL
+      || strstr (body, "\"graph_id\":\"rule-packs\"") == NULL
+      || strstr (body, identity) == NULL) {
+    g_printerr ("rule pack register: %u %s\n", status, body);
+    return 4503;
+  }
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  if (wyl_policy_store_load_fact_rule_pack (policy, WYL_TENANT_DEFAULT,
+      "rule-packs", &info) != WYRELOG_E_OK || info.pack_version != 1
+      || !g_strv_equal ((const gchar * const *) info.rules, stored)) {
+    wyl_policy_fact_rule_pack_info_clear (&info);
+    return 4504;
+  }
+  wyl_policy_fact_rule_pack_info_clear (&info);
+#ifdef WYL_HAS_AUDIT
+  g_autofree gchar *digest_hex = NULL;
+  {
+    const gchar *at = strstr (identity, "\"pack_digest\":\"");
+    digest_hex = g_strndup (at + strlen ("\"pack_digest\":\""), 64);
+  }
+  g_autofree gchar *audit_reason = g_strdup_printf ("1:%s", digest_hex);
+  LifecycleAuditProbe register_audit = {
+    .subject_id = "facts-admin",
+    .action = "rule_pack_register",
+    .resource_id = "__wr_default/rule-packs",
+    .deny_reason = audit_reason,
+    .request_id = request_id,
+    .require_allow = TRUE,
+  };
+  if (wyl_policy_store_foreach_audit_event (policy, lifecycle_audit_probe_cb,
+      &register_audit) != WYRELOG_E_OK || register_audit.matches != 1)
+    return 4505;
+#endif
+
+  /* Refused: the reason, the rule and the atom; nothing is stored. */
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token,
+          "big(O) :- orders(O, _).\nbig(O) :- refunds(O).\n", &status, &body);
+  if (rc != 0 || status != 400 || g_strcmp0 (body,
+      "{\"error\":\"rule_pack_rejected\","
+      "\"reason\":\"rule_pack_unknown_relation\","
+      "\"rule_index\":2,\"atom_index\":1}") != 0) {
+    g_printerr ("rule pack refusal: %u %s\n", status, body);
+    return 4506;
+  }
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token,
+          "big(O) :- orders(O, _).\nbig(O) :- big(O).\n", &status, &body);
+  if (rc != 0 || status != 400 || g_strcmp0 (body,
+      "{\"error\":\"rule_pack_rejected\",\"reason\":\"rule_pack_cycle\","
+      "\"rule_index\":2,\"atom_index\":0,\"cycle_rules\":[2]}") != 0) {
+    g_printerr ("rule pack cycle: %u %s\n", status, body);
+    return 4507;
+  }
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, "# nothing yet\n", &status, &body);
+  if (rc != 0 || status != 400 || g_strcmp0 (body,
+      "{\"error\":\"rule_pack_rejected\",\"reason\":\"rule_pack_empty\","
+      "\"rule_index\":0,\"atom_index\":0}") != 0)
+    return 4508;
+  if (wyl_policy_store_load_fact_rule_pack (policy, WYL_TENANT_DEFAULT,
+      "rule-packs", &info) != WYRELOG_E_OK || info.pack_version != 1) {
+    wyl_policy_fact_rule_pack_info_clear (&info);
+    return 4509;
+  }
+  wyl_policy_fact_rule_pack_info_clear (&info);
+
+  /* A replacement is the next version. */
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, "big(O) :- orders(O, _).", &status,
+          &body);
+  const gchar *const replaced[] = { "big(O):-orders(O,_).", NULL };
+  g_autofree gchar *replaced_identity =
+      expected_rule_pack_identity (replaced, 2);
+  if (rc != 0 || status != 200 || replaced_identity == NULL
+      || strstr (body, replaced_identity) == NULL)
+    return 4510;
+
+  /* Request shape, authority and graph state. */
+  rc = send_raw (session, "GET", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 405)
+    return 4511;
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          "tenant=__wr_default&" FACT_GUARD, admin_token, "big(O) :- big(O).",
+          &status, &body);
+  if (rc != 0 || status != 400
+      || strstr (body, "\"invalid_rule_pack_request\"") == NULL)
+    return 4512;
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, deny_token, "big(O) :- orders(O, _).", &status,
+          &body);
+  if (rc != 0 || status != 403)
+    return 4513;
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          "tenant=__wr_default&graph=no-such-graph&" FACT_GUARD, admin_token,
+          "big(O) :- orders(O, _).", &status, &body);
+  if (rc != 0 || status != 404
+      || strstr (body, "\"graph_not_found\"") == NULL)
+    return 4514;
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, "", &status, &body);
+  if (rc != 0 || status != 400
+      || strstr (body, "\"invalid_rule_pack_payload\"") == NULL)
+    return 4515;
+  rc = send_raw (session, "POST", base_url, "/graphs/seal", RULE_PACK_QUERY,
+          admin_token, NULL, &status, &body);
+  if (rc != 0 || status != 200)
+    return 4516;
+  rc = send_raw (session, "POST", base_url, "/facts/rule-pack/register",
+          RULE_PACK_QUERY, admin_token, "big(O) :- orders(O, _).", &status,
+          &body);
+  if (rc != 0 || status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
+    return 4517;
+  return 0;
+}
+
 static gint
 check_fact_http_contract (WylHandle *handle, SoupServer *server,
     const gchar *fact_root, const gchar *base_url)
@@ -3568,6 +3745,11 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
         G_GINT64_FORMAT "\n", rows_after_audit, rows_after_retry);
     return 295;
   }
+
+  rc = check_rule_pack_http_contract (handle, session, base_url, admin_token,
+          deny_token);
+  if (rc != 0)
+    return rc;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
