@@ -11,6 +11,7 @@
 #include "fact/graph-artifact-namespace-private.h"
 #include "fact/replay-scheduler-private.h"
 #include "fact/replay-store-private.h"
+#include "fact/rule-pack-private.h"
 
 G_BEGIN_DECLS;
 
@@ -179,6 +180,28 @@ wyrelog_error_t wyl_fact_replay_render_graph_program_for_test
     const wyl_policy_fact_graph_info_t * graph_info, gboolean from_snapshot,
     gchar ** out_program);
 #endif
+
+/* Checks a rule pack against the relations a graph's program declares and
+ * registers its canonical rules as the graph's next pack version.
+ *
+ * The relations are those the policy store alone determines: activated
+ * relations and uniquely registered visible schemas.  A relation that only
+ * durable batches name is not read here, so the check can refuse a pack the
+ * program would accept; it never accepts a relation the program lacks.
+ *
+ * Returns WYRELOG_E_OK with @out_info holding the version stored, its digest
+ * and its canonical rules, to be cleared with
+ * wyl_policy_fact_rule_pack_info_clear(); WYRELOG_E_POLICY with
+ * @out_rejection naming the rule when the pack is refused, including
+ * WYL_FACT_RULE_PACK_REJECT_EMPTY for a pack with no rule;
+ * WYRELOG_E_NOT_FOUND when the graph is not active; and the store's code
+ * otherwise, with @out_rejection's reason left NONE.  Clear @out_rejection
+ * with wyl_fact_rule_pack_rejection_clear(). */
+wyrelog_error_t wyl_fact_replay_register_rule_pack (wyl_policy_store_t *
+    policy, const wyl_policy_fact_graph_info_t * graph_info,
+    const gchar * text, gsize text_len,
+    wyl_policy_fact_rule_pack_info_t * out_info,
+    wyl_fact_rule_pack_rejection_t * out_rejection);
 
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
     const gchar * fact_root, WylFactGraphRuntimeManager * runtime_manager,

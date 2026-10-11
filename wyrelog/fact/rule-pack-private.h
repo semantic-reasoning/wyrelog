@@ -52,13 +52,16 @@ typedef enum
   /* The rendered program does not compile.  Never expected after the checks
    * above pass; the parse API carries no message, so no detail exists. */
   WYL_FACT_RULE_PACK_REJECT_COMPILE,
+  /* The pack holds no rule.  Set by registration, never by the compiler,
+   * which accepts an empty pack. */
+  WYL_FACT_RULE_PACK_REJECT_EMPTY,
 } wyl_fact_rule_pack_reject_t;
 
 typedef struct
 {
   wyl_fact_rule_pack_reject_t reason;
   /* 1-based ordinal of the offending rule, counting rules and not lines; 0
-   * when the pack as a whole is refused (TOO_LARGE, COMPILE). */
+   * when the pack as a whole is refused (TOO_LARGE, COMPILE, EMPTY). */
   guint rule_index;
   /* 0 for the head, n for the nth body atom.  Set for SYNTAX,
    * INVALID_CONSTANT, the relation, arity, safety and type reasons. */

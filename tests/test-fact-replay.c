@@ -6308,10 +6308,127 @@ test_graph_program_is_pinned_on_both_load_paths (void)
   remove_tree (root);
 }
 
+static void
+assert_stored_rule_pack (wyl_policy_store_t *policy, const gchar *graph_id,
+    guint32 version, const gchar *const *rules)
+{
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_fact_rule_pack (policy, "tenant-a",
+      graph_id, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (info.pack_version, ==, version);
+  g_assert_true (g_strv_equal ((const gchar * const *) info.rules, rules));
+  wyl_policy_fact_rule_pack_info_clear (&info);
+}
+
+/* A pack is checked against the relations the graph's program declares and
+ * stored as its canonical rules; a refused pack stores nothing and names the
+ * rule that failed. */
+static void
+test_register_rule_pack_checks_then_stores (void)
+{
+  TEST ("a rule pack is checked against the graph, then stored canonically");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-rule-pack-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  create_graph_with_schema (policy, root, "tenant-a", "orders");
+  const wyl_policy_fact_relation_schema_column_t big_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t big = make_schema ("tenant-a",
+          "orders", big_columns, G_N_ELEMENTS (big_columns));
+  big.relation_name = "big";
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+      &big), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_graph_info_t graph = {
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+  };
+  const gchar *pack = "# large orders\n"
+      "big(O) :- orders-rel(O, Amount, true).  # expedited\n"
+      "  big(O) :- orders-rel(O, 1000, false).\r\n";
+  const gchar *const stored[] = {
+    "big(O):-orders-rel(O,Amount,true).",
+    "big(O):-orders-rel(O,1000,false).",
+    NULL,
+  };
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph, pack,
+      strlen (pack), &info, &rejection), ==, WYRELOG_E_OK);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_NONE);
+  g_assert_cmpuint (info.pack_version, ==, 1);
+  g_assert_cmpuint (info.n_rules, ==, 2);
+  g_assert_true (g_strv_equal ((const gchar * const *) info.rules, stored));
+  guint8 digest[WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE];
+  g_assert_cmpint (wyl_policy_fact_rule_pack_digest (stored, 2, digest), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpmem (info.digest, sizeof info.digest, digest, sizeof digest);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  assert_stored_rule_pack (policy, "orders", 1, stored);
+
+  /* The second rule reads a relation the graph does not have. */
+  const gchar *unknown = "big(O) :- orders-rel(O, _, _).\n"
+      "big(O) :- refunds(O).\n";
+  info.pack_version = 7;
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
+      unknown, strlen (unknown), &info, &rejection), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (info.pack_version, ==, 0);
+  g_assert_null (info.rules);
+  g_assert_cmpstr (wyl_fact_rule_pack_reject_name (rejection.reason), ==,
+      "rule_pack_unknown_relation");
+  g_assert_cmpuint (rejection.rule_index, ==, 2);
+  g_assert_cmpuint (rejection.atom_index, ==, 1);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+
+  /* A pack of comments compiles to nothing, which is not a pack. */
+  const gchar *empty = "# nothing yet\n";
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph, empty,
+      strlen (empty), &info, &rejection), ==, WYRELOG_E_POLICY);
+  g_assert_cmpstr (wyl_fact_rule_pack_reject_name (rejection.reason), ==,
+      "rule_pack_empty");
+  g_assert_cmpuint (rejection.rule_index, ==, 0);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  assert_stored_rule_pack (policy, "orders", 1, stored);
+
+  /* A replacement is a new version. */
+  const gchar *replacement = "big(O) :- orders-rel(O, _, _).";
+  const gchar *const replaced[] = { "big(O):-orders-rel(O,_,_).", NULL };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph,
+      replacement, strlen (replacement), &info, &rejection), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (info.pack_version, ==, 2);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+  assert_stored_rule_pack (policy, "orders", 2, replaced);
+
+  const wyl_policy_fact_graph_info_t missing = {
+    .tenant_id = "tenant-a",
+    .graph_id = "missing",
+  };
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &missing,
+      replacement, strlen (replacement), &info, &rejection), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (rejection.reason, ==, WYL_FACT_RULE_PACK_REJECT_NONE);
+  g_assert_cmpint (wyl_fact_replay_register_rule_pack (policy, &graph, NULL,
+      0, &info, &rejection), ==, WYRELOG_E_INVALID);
+
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-replay/register-rule-pack",
+      test_register_rule_pack_checks_then_stores);
   g_test_add_func ("/fact-replay/graph-program-pinned",
       test_graph_program_is_pinned_on_both_load_paths);
   g_test_add_func ("/fact-replay/boot-converges-interrupted-forget",

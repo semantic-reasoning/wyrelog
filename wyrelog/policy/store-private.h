@@ -2930,9 +2930,10 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_query_max_rows
 
 #define WYL_POLICY_FACT_RULE_PACK_DIGEST_SIZE 32
 
-/* One stored version of a graph's rule pack.  rules[i] is the source text of
+/* One stored version of a graph's rule pack.  rules[i] is the text of
  * rule_index i + 1, the index the rule-pack compiler reports in a rejection;
- * rules is NULL-terminated. */
+ * registration stores the compiler's canonical text.  rules is
+ * NULL-terminated. */
 typedef struct
 {
   guint32 pack_version;
