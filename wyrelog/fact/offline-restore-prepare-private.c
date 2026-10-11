@@ -288,6 +288,11 @@ wyl_fact_offline_restore_prepare_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
+#ifndef __linux__
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#else
   g_autoptr (GBytes) manifest =
       wyl_fact_offline_backup_bundle_manifest_bytes (bundle);
   if (manifest == NULL)
@@ -405,6 +410,7 @@ wyl_fact_offline_restore_prepare_run
   }
   wyl_fact_offline_restore_journal_clear (&job.committed);
   return rc;
+#endif
 #endif
 }
 
