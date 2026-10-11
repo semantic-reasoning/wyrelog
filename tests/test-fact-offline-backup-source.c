@@ -865,10 +865,25 @@ capture_dry_run_graph_namespace (BackupFixture *fixture,
 }
 
 static void
+assert_restore_dry_run_bundle_refused (BackupFixture *fixture,
+    WylFactOfflineBackupBundle *bundle)
+{
+  WylFactOfflineRestoreDryRunReport report = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture->policy,
+      fixture->root, fixture->runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_BUNDLE);
+  g_assert_false (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+}
+
+static void
 test_restore_dry_run_read_only (void)
 {
-#ifndef __linux__
-  g_test_skip ("offline restore is Linux-only");
+#if !defined(__linux__) && !defined(__APPLE__)
+  g_test_skip ("offline restore dry-run requires Linux or macOS");
 #else
   BackupFixture fixture = { 0 };
   fixture_init (&fixture, "wyl-offline-restore-dry-run-XXXXXX");
@@ -976,6 +991,53 @@ test_restore_dry_run_read_only (void)
       WYRELOG_E_OK);
   g_assert_cmpuint (report.graphs->len, ==, 1);
   wyl_fact_offline_restore_dry_run_report_clear (&report);
+
+  g_autofree gchar *dry_run_alpha_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode ("alpha",
+      &dry_run_alpha_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *alpha_bundle_name = g_strdup_printf
+        ("graph-%s.duckdb", dry_run_alpha_component);
+  g_autofree gchar *alpha_bundle_path = g_build_filename (bundle_root,
+          alpha_bundle_name, NULL);
+  g_autofree gchar *saved_bundle_path = g_strconcat (alpha_bundle_path,
+          ".saved", NULL);
+  g_autofree gchar *hardlink_path = g_strconcat (bundle_root,
+          ".external-hardlink", NULL);
+  g_autofree gchar *original_bundle_bytes = NULL;
+  gsize original_bundle_length = 0;
+  g_assert_true (g_file_get_contents (alpha_bundle_path,
+      &original_bundle_bytes, &original_bundle_length, &error));
+  g_assert_no_error (error);
+
+  /* The opened bundle must fail closed when its named source is replaced by
+   * a symlink, even though its pinned descriptor still names the original. */
+  g_assert_cmpint (g_rename (alpha_bundle_path, saved_bundle_path), ==, 0);
+  g_assert_cmpint (symlink (saved_bundle_path, alpha_bundle_path), ==, 0);
+  assert_restore_dry_run_bundle_refused (&fixture, bundle);
+  g_assert_cmpint (g_remove (alpha_bundle_path), ==, 0);
+  g_assert_cmpint (g_rename (saved_bundle_path, alpha_bundle_path), ==, 0);
+
+  /* A hard link outside the exact bundle entry set must invalidate its
+   * pinned source identity before dry-run can authorize staging. */
+  g_assert_cmpint (link (alpha_bundle_path, hardlink_path), ==, 0);
+  assert_restore_dry_run_bundle_refused (&fixture, bundle);
+  g_assert_cmpint (g_remove (hardlink_path), ==, 0);
+
+  /* Same bytes at a newly created inode are still a substituted source. */
+  g_assert_cmpint (g_rename (alpha_bundle_path, saved_bundle_path), ==, 0);
+  g_assert_true (g_file_set_contents (alpha_bundle_path,
+      original_bundle_bytes, original_bundle_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (alpha_bundle_path, 0600), ==, 0);
+  assert_restore_dry_run_bundle_refused (&fixture, bundle);
+  g_assert_cmpint (g_remove (alpha_bundle_path), ==, 0);
+  g_assert_cmpint (g_rename (saved_bundle_path, alpha_bundle_path), ==, 0);
+
+  /* Owner-only file mode is part of the source contract. */
+  g_assert_cmpint (g_chmod (alpha_bundle_path, 0640), ==, 0);
+  assert_restore_dry_run_bundle_refused (&fixture, bundle);
+  g_assert_cmpint (g_chmod (alpha_bundle_path, 0600), ==, 0);
+
   WylFactGraphRuntimeManager *empty_runtime = NULL;
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&empty_runtime), ==,
       WYRELOG_E_OK);
