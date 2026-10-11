@@ -308,7 +308,7 @@ wyl_fact_offline_restore_dry_run (wyl_policy_store_t *policy,
       ? selected_graph_id != NULL
       : selected_graph_id == NULL || *selected_graph_id == '\0'))
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void) runtime;
   out_report->failure = WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_AUTHORITY;
   return WYRELOG_E_POLICY;
