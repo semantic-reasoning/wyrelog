@@ -776,9 +776,6 @@ test_probe_flush_capability_rows (void)
     WylFactArtifactMainTransitionDurability expected;
   } rows[] = {
     { "einval", EINVAL, TRUE, MT (DURABILITY_UNSUPPORTED) },
-#ifdef __APPLE__
-    { "enotty", ENOTTY, TRUE, MT (DURABILITY_UNSUPPORTED) },
-#endif
     { "enotsup", ENOTSUP, TRUE, MT (DURABILITY_UNSUPPORTED) },
     { "eopnotsupp", EOPNOTSUPP, TRUE, MT (DURABILITY_UNSUPPORTED) },
     /* Not a capability answer.  Never silently reported as unsupported. */
@@ -799,6 +796,9 @@ test_probe_flush_capability_rows (void)
       .no_replace_supported = TRUE,
       .directory_flush = MT (DURABILITY_PROVEN),
     };
+    if (rows[index].expected == MT (DURABILITY_UNSUPPORTED))
+      wyl_fact_artifact_transition_posix_set_test_retire_flush_errno
+        (rows[index].injected);
     wyl_fact_artifact_transition_posix_set_test_flush_errno
       (rows[index].injected);
     wyl_fact_artifact_transition_posix_set_test_fault
@@ -823,27 +823,7 @@ test_probe_flush_capability_rows (void)
   }
 }
 
-#ifdef __APPLE__
-static void
-test_probe_retire_preserves_unsupported (void)
-{
-  Fixture fixture;
-  fixture_init (&fixture, "u2a-retire-unsupported-XXXXXX");
-  Capability capability = { 0 };
-  wyl_fact_artifact_transition_posix_set_test_flush_errno (ENOTTY);
-  wyl_fact_artifact_transition_posix_set_test_retire_flush_errno (ENOTTY);
-  wyl_fact_artifact_transition_posix_set_test_fault
-    (PF (PROBE_DIRECTORY_FSYNC));
-  wyrelog_error_t status
-    = wyl_fact_artifact_transition_posix_probe_capability
-        (&fixture.directory, OPERATION_UUID, &capability);
-  g_assert_cmpint (status, ==, WYRELOG_E_OK);
-  g_assert_cmpint (capability.directory_flush,
-      ==, MT (DURABILITY_UNSUPPORTED));
-  g_assert_true (capability.no_replace_supported);
-  fixture_clear (&fixture);
-}
-#endif
+
 
 /* ------------------------------------------------------------------ */
 /* T10 the probe leaves nothing behind                                 */
@@ -3155,10 +3135,6 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact/artifact-transition-posix/durability/fullfsync-errno",
       test_fullfsync_errno_classification);
-#ifdef __APPLE__
-  g_test_add_func ("/fact/artifact-transition-posix/durability/probe-retire-unsupported",
-      test_probe_retire_preserves_unsupported);
-#endif
   g_test_add_func ("/fact/artifact-transition-posix/triple-and-identity",
       test_triple_and_identity);
   g_test_add_func ("/fact/artifact-transition-posix/absent-slots",

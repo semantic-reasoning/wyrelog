@@ -49,19 +49,19 @@ EXPECTED_POSIX_OPENAT_PROFILE_SHA256 = (
     "e53298e179e2c767efd021602bda7a69ae88ab46b28320d6f10dbb3ec86c0e17"
 )
 EXPECTED_POSIX_DIRECTIVE_PROFILE_SHA256 = (
-    "b9edd87a30b3602751e59b00a5abd476f70722226eb8fe6f36e8b13b3b89c6a2"
+    "87024983a5d5431165bbe51e5fc2866d81936b3504bb0a9839b15f8d0c4dd50c"
 )
 EXPECTED_POSIX_SYSCALL_PROFILE_SHA256 = (
     "dd48522fa6ad547569db5958756489866cf22f2e2f61e9693c511b42e68833cd"
 )
 EXPECTED_POSIX_CALL_PROFILE_SHA256 = (
-    "3c62e41ffe34928e73620caed46ff44e80db89883b102dc79f658b9cc41cb54f"
+    "82102f2b7c698170b306ff905e4c78522f891a70b99518e92885f91e6addd60c"
 )
 EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "17a6d96fd8ac91138b5f5b3856fcf6a92a0ec6dfcad21ceb8419823961f7c7b4"
+    "c002edede3a4a126121245485c934fa8bd65064b5812129198220e87ad0e0712"
 )
 BASELINE_POSIX_COMMENTLESS_SHA256 = (
-    "f7da76f746898486e91f8d0c68f1388e8939d7bfd2e813dbc03a020e044e189e"
+    "380fbc58dddc3de8832769aa4b0aa0869ad6a28ad60ceeec3fd36ef4505ecfb1"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_COUNTS = (
     13, 7, 10, 8, 2, 3, 4, 37, 6, 5,
@@ -645,6 +645,7 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
         include_directives
         == [
             ("#", '"fact/graph-artifact-namespace-private.h"'),
+            ("#", '"fact/artifact-durability-posix-private.h"'),
             ("#", '"fact/publication-lock-event-private.h"'),
             ("#", '"fact/graph-artifact-inventory-posix-private.h"'),
             ("#", '"fact/graph-provisioned-pair-internal.h"'),
@@ -719,7 +720,7 @@ def validate_artifact_lock_access_mode(inputs: dict[str, str]) -> None:
             "", commentless_source
         )
         semantic_tokens = c_tokens(strip_c_literals(semantic_source))
-        artifact_lock_require(len(semantic_tokens) == 32100)
+        artifact_lock_require(len(semantic_tokens) == 32051)
         artifact_lock_require(
             hashlib.sha256(repr(semantic_tokens).encode("utf-8")).hexdigest()
             == EXPECTED_POSIX_SEMANTIC_TOKEN_PROFILE_SHA256

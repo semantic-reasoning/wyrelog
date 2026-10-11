@@ -142,7 +142,7 @@ PROTECTED_INCLUDE_DIGESTS = {
     "tests/test-fact-artifact-transition-driver.c":
         "12cb6e5f5575b45926ddc1ada59760325e505524b66fa3174b7d455029bafefb",
     "tests/test-fact-artifact-transition-posix.c":
-        "46293b269398079a3088662bffeb1cfbb9421cf2463fd8371fe2f80550fb8730",
+        "67f950dc73bcd6163d9ecd2ce2c91e8f8814ab9d04748f097a823ec305fe5355",
     "tests/test-fact-artifact-transition-windows.c":
         "cb4e151894b9b7a1dc641c1bb323ba5113dc6c72facf1cb37dc14f0931ee411e",
     "tests/fact-artifact-transition-driver-fixture.c":
@@ -177,8 +177,8 @@ TEST_REGISTRATION_PROFILES = {
         "687d7ba994a2128fd9cee1d1f17df794bda684e91064064f522f03b81ca2f40d",
     ),
     "tests/test-fact-artifact-transition-posix.c": (
-        43,
-        "1244367116e4b749a7dd5b3697ccc5704d9671eabd3bf28047f41f0d18d5d845",
+        44,
+        "90b55bb9dce7f0a99c851f067f718039ad4492ef13b05b5485161b8ebf7fcef2",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
         24,
@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "49d4531fe95561ea792810a4a8207c0ba37cdbd31f6b0b0db83b9bc5f8e5c6b2",
+        "32de4e33c54903bcc493c93a5ea8b755845f020ad15433c296046d288c522a88",
     "tests/test-fact-artifact-transition-windows.c":
         "e28928fc2a46782f2558da57eab95c8a9ae831fb53857d816544d65a2e54f9fb",
 }
@@ -1422,6 +1422,7 @@ def verify(root: pathlib.Path, overrides: Mapping[str, str] | None = None) -> No
         TEST_REGISTERED_BODY_SHA256["tests/test-fact-artifact-transition-posix.c"],
         "POSIX runtime registration",
         [("ifdef", "__APPLE__"), ("endif", ""),
+         ("if", "defined(__APPLE__)"), ("else", ""), ("endif", ""),
          ("ifdef", "__APPLE__"), ("else", ""), ("endif", "")],
     )
     require_test_registrations(

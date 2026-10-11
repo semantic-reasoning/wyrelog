@@ -22,6 +22,15 @@ wyl_fact_artifact_durability_classify_fullfsync_errno (gint error_number)
   return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
 }
 
+WylFactArtifactDurabilityResult
+wyl_fact_artifact_durability_classify_directory_fsync_errno (gint error_number)
+{
+  if (error_number == EINVAL || error_number == ENOTSUP
+      || error_number == EOPNOTSUPP)
+    return WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED;
+  return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
+}
+
 #ifdef __APPLE__
 static WylFactArtifactDurabilityResult
 fullfsync_fd (gint fd)
@@ -34,7 +43,6 @@ fullfsync_fd (gint fd)
            (error_number);
 #else
   (void) fd;
-  errno = ENOTSUP;
   return WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED;
 #endif
 }
@@ -59,10 +67,8 @@ wyl_fact_artifact_durability_sync_fd (gint fd)
   if (S_ISDIR (st.st_mode)) {
     if (fsync (fd) != 0) {
       gint error_number = errno;
-      if (error_number == EINVAL || error_number == ENOTSUP
-          || error_number == EOPNOTSUPP)
-        return WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED;
-      return WYL_FACT_ARTIFACT_DURABILITY_ERROR;
+      return wyl_fact_artifact_durability_classify_directory_fsync_errno
+               (error_number);
     }
 #ifdef __APPLE__
     return fullfsync_fd (fd);

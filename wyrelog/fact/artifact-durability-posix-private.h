@@ -20,5 +20,7 @@ gboolean wyl_fact_artifact_durability_sync_fd_proven (gint fd);
 /* Stable classification seam for the Darwin F_FULLFSYNC error contract. */
 WylFactArtifactDurabilityResult
 wyl_fact_artifact_durability_classify_fullfsync_errno (gint error_number);
+WylFactArtifactDurabilityResult
+wyl_fact_artifact_durability_classify_directory_fsync_errno (gint error_number);
 
 G_END_DECLS
