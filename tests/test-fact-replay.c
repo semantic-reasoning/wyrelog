@@ -6199,10 +6199,121 @@ test_handle_unseal_traces_coordinator_before_publication (void)
 #endif
 }
 
+#define PROGRAM_SHOP "w_73_68_6f_70_"
+#define PROGRAM_AUDIT PROGRAM_SHOP "w_61_75_64_69_74"
+#define PROGRAM_HOLD PROGRAM_SHOP "w_68_6f_6c_64"
+#define PROGRAM_ROUTE PROGRAM_SHOP "w_72_6f_75_74_65"
+
+/* The program a graph engine is built from, read back through both of
+ * replay's policy load paths and pinned byte for byte.  A rule pack will be
+ * appended to this text, so a graph without one must keep producing exactly
+ * this program.  The three relation names hash in the order route, audit,
+ * hold, so a program ordered by hash-table iteration fails the pin. */
+static void
+test_graph_program_is_pinned_on_both_load_paths (void)
+{
+  TEST ("both policy load paths render the same pinned graph program");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-program-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  g_autoptr (wyl_policy_store_t) policy = NULL;
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_graph_column_t audit_graph[] = { {"id", "symbol"} };
+  const wyl_policy_fact_graph_column_t hold_graph[] = { {"qty", "int64"} };
+  const wyl_policy_fact_graph_column_t route_graph[] = {
+    {"ref", "compound_ref"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"audit", audit_graph, G_N_ELEMENTS (audit_graph)},
+    {"hold", hold_graph, G_N_ELEMENTS (hold_graph)},
+    {"route", route_graph, G_N_ELEMENTS (route_graph)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipping",
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = "tenant-a",
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph (policy, &graph_opts,
+      NULL), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t audit_columns[] = {
+    {"id", "symbol", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_column_t hold_columns[] = {
+    {"qty", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_column_t route_columns[] = {
+    {"ref", "compound_ref", FALSE, TRUE},
+  };
+  const struct
+  {
+    const gchar *name;
+    const wyl_policy_fact_relation_schema_column_t *columns;
+  } schemas[] = {
+    {"audit", audit_columns},
+    {"hold", hold_columns},
+    {"route", route_columns},
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (schemas); i++) {
+    const wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = "tenant-a",
+      .graph_id = "shipping",
+      .namespace_id = "shop",
+      .relation_name = schemas[i].name,
+      .schema_version = 1,
+      .relation_visible = TRUE,
+      .columns = schemas[i].columns,
+      .n_columns = 1,
+    };
+    g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (policy,
+        &schema), ==, WYRELOG_E_OK);
+  }
+
+  const wyl_policy_fact_graph_info_t graph = {
+    .tenant_id = "tenant-a",
+    .graph_id = "shipping",
+  };
+  g_autofree gchar *direct = NULL;
+  g_autofree gchar *captured = NULL;
+  g_assert_cmpint (wyl_fact_replay_render_graph_program_for_test (policy,
+      &graph, FALSE, &direct), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_render_graph_program_for_test (policy,
+      &graph, TRUE, &captured), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (direct, ==,
+      ".decl " PROGRAM_AUDIT "(w_69_64: symbol)\n"
+      ".decl " PROGRAM_AUDIT "_observed(w_69_64: symbol)\n"
+      PROGRAM_AUDIT "_observed(V0) :- " PROGRAM_AUDIT "(V0).\n"
+      ".decl " PROGRAM_HOLD "(w_71_74_79: int64)\n"
+      ".decl " PROGRAM_HOLD "_observed(w_71_74_79: int64)\n"
+      PROGRAM_HOLD "_observed(V0) :- " PROGRAM_HOLD "(V0).\n"
+      ".decl " PROGRAM_ROUTE "(w_72_65_66: int64)\n"
+      ".decl " PROGRAM_ROUTE "_observed(w_72_65_66: int64)\n"
+      PROGRAM_ROUTE "_observed(V0) :- " PROGRAM_ROUTE "(V0).\n");
+  g_assert_cmpstr (captured, ==, direct);
+
+  g_clear_pointer (&policy, wyl_policy_store_close);
+  remove_tree (root);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-replay/graph-program-pinned",
+      test_graph_program_is_pinned_on_both_load_paths);
   g_test_add_func ("/fact-replay/boot-converges-interrupted-forget",
       test_boot_converges_interrupted_forget);
   g_test_add_func ("/fact-replay/boot-forget-per-graph-never-aborts",
