@@ -1129,17 +1129,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
+  const guint expected_total = 41;
+  const guint expected_exact = 37;
+#elif defined(WYL_HAS_FACT_STORE)
   const guint expected_total = 40;
   const guint expected_exact = 36;
-#elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 39;
-  const guint expected_exact = 35;
 #elif defined(WYL_HAS_AUDIT)
+  const guint expected_total = 37;
+  const guint expected_exact = 33;
+#else
   const guint expected_total = 36;
   const guint expected_exact = 32;
-#else
-  const guint expected_total = 35;
-  const guint expected_exact = 31;
 #endif
   if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -1177,6 +1177,7 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/policy/roles/revoke",
     "/audit/events",
     "/facts/schema/status",
+    "/facts/rule-pack/register",
     /*
      * Feature-gated paths stay at the tail: check_exact_route_shape's
      * error base is 2281 + index * 13, so an entry inserted mid-list
@@ -1195,11 +1196,16 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
     "/auth/service-token",
 #endif
   };
+  /* Each path owns codes base..base + 12; the next codes in this file start
+   * at 2765.  A path appended past that would share codes with them. */
+  if (2281 + G_N_ELEMENTS (exact_paths) * 13 > 2765)
+    return 2276;
   for (gsize i = 0; i < G_N_ELEMENTS (exact_paths); i++) {
     guint canonical_method_status = 405;
 #ifndef WYL_HAS_FACT_STORE
     if (g_strcmp0 (exact_paths[i], "/facts/schema/register") == 0
         || g_strcmp0 (exact_paths[i], "/facts/schema/status") == 0
+        || g_strcmp0 (exact_paths[i], "/facts/rule-pack/register") == 0
         || g_strcmp0 (exact_paths[i], "/facts/quota") == 0
         || g_strcmp0 (exact_paths[i], "/facts/quota/operation-status") == 0)
       canonical_method_status = 503;
@@ -19509,6 +19515,7 @@ static const PolicyWriteOwnerFaultCase policy_write_owner_fault_cases[] = {
   {16, "fact_quota_configure", 0, 500,
    "fact_quota_configuration_failed"},
   {17, "fact_restore", 0, 500, "restore_operation_failed"},
+  {18, "rule_pack_register", 0, 500, "rule_pack_register_failed"},
 };
 
 static wyrelog_error_t
@@ -19808,6 +19815,25 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
       query = g_strdup_printf ("tenant=%s&%s", WYL_TENANT_DEFAULT, guard);
       body = "{\"scope\":\"tenant\",\"tenant_id\":\"__wr_default\",\"graph_id\":\"\",\"bundle_path\":\"\",\"trusted_manifest_sha256\":\"\",\"operation_uuid\":\"01890c10-2e3f-7000-8000-000000000001\",\"expected_revision\":\"0\",\"confirmed\":\"false\"}";
       break;
+    case 18:
+    {
+      /* An acceptable pack needs a head other than its body relation. */
+      if (policy_write_owner_fault_prepare_facts (env, TRUE, FALSE) != 0)
+        return 14;
+      g_autofree gchar *head_query = g_strdup_printf
+            ("tenant=%s&graph=owner-fault&namespace=owner&relation=big&"
+              "schema_version=1&%s", WYL_TENANT_DEFAULT, guard);
+      if (policy_write_owner_fault_send_expect_ok (env, "POST",
+          "/facts/schema/register", head_query,
+          "column_name\tcolumn_type\tnullable\tvisible\n"
+          "row_id\tsymbol\tfalse\ttrue\n") != 0)
+        return 15;
+    }
+      path = "/facts/rule-pack/register";
+      query = g_strdup_printf ("tenant=%s&graph=owner-fault&%s",
+              WYL_TENANT_DEFAULT, guard);
+      body = "big(R) :- rows(R, _).\n";
+      break;
     default:
       return 8;
   }
@@ -19849,7 +19875,7 @@ policy_write_owner_fault_invoke_http (ServiceDenialEnv *env,
 static gint
 check_policy_write_all_owner_faults (void)
 {
-  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 18);
+  G_STATIC_ASSERT (G_N_ELEMENTS (policy_write_owner_fault_cases) == 19);
   G_STATIC_ASSERT (POLICY_WRITE_OWNER_FAULT_MODE_COUNT == 2);
   for (guint mode = 0; mode < POLICY_WRITE_OWNER_FAULT_MODE_COUNT; mode++) {
     for (gsize i = 0; i < G_N_ELEMENTS (policy_write_owner_fault_cases); i++) {
@@ -20353,7 +20379,7 @@ check_service_management_self_arm_bundle_precommit_atomic (void)
       "human-principal-admin", perms[1], env.session_token) != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (env.handle) != WYRELOG_E_OK) {
     service_denial_env_clear (&env);
-    return 2760;
+    return 2765;
   }
 
   const WylDaemonSelfArmRowFault rows[] = {
@@ -20370,7 +20396,7 @@ check_service_management_self_arm_bundle_precommit_atomic (void)
       guint status = 0;
       if (self_arm_post (&env, &status) != 0 || status != 500) {
         service_denial_env_clear (&env);
-        return 2761;
+        return 2766;
       }
       /* Zero durable change: neither perm armed, no rows appended, and the
        * pair is NOT poisoned. */
@@ -20378,7 +20404,7 @@ check_service_management_self_arm_bundle_precommit_atomic (void)
           || self_arm_perm_armed (&env, perms[1])
           || wyl_handle_engine_pair_is_poisoned (env.handle)) {
         service_denial_env_clear (&env);
-        return 2762;
+        return 2767;
       }
       for (guint q = 0; q < G_N_ELEMENTS (perms); q++) {
         guint direct_events = 1;
@@ -20388,7 +20414,7 @@ check_service_management_self_arm_bundle_precommit_atomic (void)
             || self_arm_count_state_events (store, "human-principal-admin",
             perms[q], env.session_token) != 0) {
           service_denial_env_clear (&env);
-          return 2763;
+          return 2768;
         }
       }
     }
@@ -20401,7 +20427,7 @@ check_service_management_self_arm_bundle_precommit_atomic (void)
       || !self_arm_perm_armed (&env, perms[1])
       || wyl_handle_engine_pair_is_poisoned (env.handle)) {
     service_denial_env_clear (&env);
-    return 2764;
+    return 2769;
   }
 
   service_denial_env_clear (&env);

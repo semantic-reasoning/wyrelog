@@ -756,7 +756,8 @@ typedef enum
   X (MFA_CONFIRM, mfa_confirm) \
   X (SELF_ARM, self_arm) \
   X (FACT_QUOTA_CONFIGURE, fact_quota_configure) \
-  X (FACT_RESTORE, fact_restore)
+  X (FACT_RESTORE, fact_restore) \
+  X (RULE_PACK_REGISTER, rule_pack_register)
 
 typedef enum
 {
@@ -13179,6 +13180,172 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
 }
 
+static void
+set_rule_pack_rejected_json (SoupServerMessage *msg,
+    const wyl_fact_rule_pack_rejection_t *rejection)
+{
+  if (wyl_daemon_policy_write_finalize_for_response (msg, 400,
+      "rule_pack_rejected") != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_write_cleanup_failed");
+    return;
+  }
+  g_autoptr (GString) body =
+      g_string_new ("{\"error\":\"rule_pack_rejected\",\"reason\":");
+  append_json_string (body, wyl_fact_rule_pack_reject_name (rejection->reason));
+  g_string_append_printf (body, ",\"rule_index\":%u,\"atom_index\":%u",
+      rejection->rule_index, rejection->atom_index);
+  if (rejection->n_cycle_rules > 0) {
+    g_string_append (body, ",\"cycle_rules\":[");
+    for (guint i = 0; i < rejection->n_cycle_rules; i++)
+      g_string_append_printf (body, "%s%u", i > 0 ? "," : "",
+          rejection->cycle_rules[i]);
+    g_string_append_c (body, ']');
+  }
+  g_string_append_c (body, '}');
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 400, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static gchar *
+rule_pack_digest_hex (const wyl_policy_fact_rule_pack_info_t *info)
+{
+  g_autoptr (GString) hex = g_string_new (NULL);
+  for (gsize i = 0; i < sizeof info->digest; i++)
+    g_string_append_printf (hex, "%02x", info->digest[i]);
+  return g_string_free (g_steal_pointer (&hex), FALSE);
+}
+
+static void
+set_rule_pack_ok_json (SoupServerMessage *msg, const gchar *tenant,
+    const gchar *graph, const wyl_policy_fact_rule_pack_info_t *info,
+    const gchar *digest_hex)
+{
+  if (!wyl_daemon_policy_write_prepare_success_response (msg))
+    return;
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append_printf (body, ",\"pack_version\":%u,\"rule_count\":%"
+      G_GSIZE_FORMAT ",\"pack_digest\":\"%s\"}", info->pack_version,
+      info->n_rules, digest_hex);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+/* #1213: registers a graph's rule pack.  The body is the pack text; it is
+ * checked against the relations the graph's program declares and stored as
+ * the graph's next pack version.  A stored pack is not yet evaluated: replay
+ * does not read it until wirelog can bound a query's evaluation. */
+static void
+rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
+      !fact_http_customer_name_is_valid (graph)) {
+    set_json_error (msg, 400, "invalid_rule_pack_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+      "wr.schema.manage", tenant, "rule_pack_auth_required",
+      "invalid_rule_pack_auth", "rule_pack_denied", "rule_pack_auth_failed",
+      &actor))
+    return;
+
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+          WYL_DAEMON_POLICY_WRITE_OWNER_RULE_PACK_REGISTER, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "rule_pack_register_failed");
+    return;
+  }
+
+  GraphLookupCtx lookup = { 0 };
+  rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "rule_pack_register_failed");
+    return;
+  }
+  if (!lookup.found) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (lookup.info.sealed) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "graph_sealed");
+    return;
+  }
+  graph_lookup_clear (&lookup);
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 1024 * 1024, &body)) {
+    set_json_error (msg, 400, "invalid_rule_pack_payload");
+    return;
+  }
+
+  const wyl_policy_fact_graph_info_t graph_info = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+  };
+  wyl_policy_fact_rule_pack_info_t info = { 0 };
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  rc = wyl_fact_replay_register_rule_pack (write.store, &graph_info, body,
+          strlen (body), &info, &rejection);
+  if (rc == WYRELOG_E_POLICY
+      && rejection.reason != WYL_FACT_RULE_PACK_REJECT_NONE) {
+    set_rule_pack_rejected_json (msg, &rejection);
+    wyl_fact_rule_pack_rejection_clear (&rejection);
+    return;
+  }
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  /* The graph's own relations could not be resolved, e.g. a relation with
+   * several registered versions and none activated. */
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, "rule_pack_relations_unresolved");
+    return;
+  }
+  if (rc == WYRELOG_E_RESOURCE_LIMIT) {
+    set_json_error (msg, 409, "rule_pack_versions_exhausted");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "rule_pack_register_failed");
+    return;
+  }
+  /* A pack changes what a graph will answer, and wyl_decide's record of the
+   * authorization names only the tenant.  This names the graph and the pack
+   * stored, as "<version>:<digest>".  Discarded like the seal record: the pack
+   * is durable by now. */
+  g_autofree gchar *digest_hex = rule_pack_digest_hex (&info);
+  g_autofree gchar *pack_identity = g_strdup_printf ("%u:%s",
+          info.pack_version, digest_hex);
+  (void) emit_fact_lifecycle_audit (ctx, actor != NULL ? actor : "", tenant,
+      graph, "rule_pack_register", pack_identity, "registered",
+      ensure_request_id_header (msg));
+  set_rule_pack_ok_json (msg, tenant, graph, &info, digest_hex);
+  wyl_policy_fact_rule_pack_info_clear (&info);
+}
+
 typedef struct
 {
   const gchar *namespace_id;
@@ -15060,6 +15227,17 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 #else
 static void
 schema_register_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+}
+
+static void
+rule_pack_register_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   (void) server;
@@ -19095,6 +19273,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       schema_register_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/facts/schema/status",
       schema_status_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/facts/rule-pack/register",
+      rule_pack_register_handler, ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/facts", facts_route_handler,
       ctx, NULL);
   wyl_daemon_http_add_prefix_handler (server, "/datalog",
