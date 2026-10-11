@@ -32,6 +32,9 @@ EXPECTED_FIELDS = {
         ("tenant", "graph", "namespace_id", "relation", "schema_version_arg",
          "columns_arg", "max_rows_arg", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
+    "WyctlFactRulePackOptions":
+        ("tenant", "graph", "file", "access_token_file",
+         "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlFactQuotaOptions":
         ("tenant", "dimension", "limit_arg", "row_limit_arg",
          "rate_per_second_arg",
@@ -105,6 +108,7 @@ EXPECTED_PARSE_SITES = {
     "run_tenant_assign_owner": "WyctlTenantAssignOwnerOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
     "run_fact_schema_status": "WyctlFactSchemaOptions",
+    "run_fact_rule_pack_register": "WyctlFactRulePackOptions",
     "run_fact_quota": "WyctlFactQuotaOptions",
     "run_fact_quota_operation_status": "WyctlFactQuotaOperationOptions",
     "run_fact_mutation": "WyctlFactPutOptions",
@@ -141,7 +145,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 249
+EXPECTED_STRING_DESTINATIONS = 256
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

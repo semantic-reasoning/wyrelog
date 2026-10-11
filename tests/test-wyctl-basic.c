@@ -5696,6 +5696,95 @@ test_fact_schema_status (void)
   g_assert_null (refused.request);
 }
 
+#define RULE_PACK_DIGEST "35360fef0000000000000000000000000000000000000000" \
+  "000000000000ede1"
+
+/* #1213: registers the pack in a file and prints the stored identity; a
+ * refusal names the rule. */
+static void
+test_fact_rule_pack_register (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-rule-pack-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *pack_path = g_build_filename (dir, "pack.dl", NULL);
+  const gchar *pack = "# large orders\nbig(O) :- orders(O, 1000).\n";
+  g_assert_true (g_file_set_contents (pack_path, pack, -1, NULL));
+  const gchar *const args[] = {
+    "fact", "rule-pack", "register", "--tenant", "t", "--graph", "g",
+    "--file", pack_path, "--access-token-file", "@TOKEN@", GRAPH_GUARDS,
+    NULL,
+  };
+  g_auto (FactForgetRun) run = { 0 };
+  run_fake_daemon_case (200, "{\"ok\":true,\"tenant_id\":\"t\","
+      "\"graph_id\":\"g\",\"pack_version\":2,\"rule_count\":1,"
+      "\"pack_digest\":\"" RULE_PACK_DIGEST "\"}", NULL, args, FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "tenant=t graph=g pack_version=2 rules=1 "
+      "digest=" RULE_PACK_DIGEST "\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request,
+      "POST /facts/rule-pack/register?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "graph=g"));
+  g_assert_true (g_str_has_suffix (run.request, pack));
+
+  g_auto (FactForgetRun) cycle = { 0 };
+  run_fake_daemon_case (400, "{\"error\":\"rule_pack_rejected\","
+      "\"reason\":\"rule_pack_cycle\",\"rule_index\":2,\"atom_index\":0,"
+      "\"cycle_rules\":[2,3]}", NULL, args, FALSE, &cycle);
+  assert_fact_forget_exit (&cycle, 3);
+  g_assert_cmpstr (cycle.out, ==, "");
+  g_assert_cmpstr (cycle.err, ==,
+      "wyctl: fact rule-pack register failed: rule_pack_rejected\n"
+      "wyctl: rule 2 atom 0: rule_pack_cycle (cycle through rules 2,3)\n");
+
+  g_auto (FactForgetRun) arity = { 0 };
+  run_fake_daemon_case (400, "{\"error\":\"rule_pack_rejected\","
+      "\"reason\":\"rule_pack_arity\",\"rule_index\":1,\"atom_index\":1}",
+      NULL, args, FALSE, &arity);
+  assert_fact_forget_exit (&arity, 3);
+  g_assert_cmpstr (arity.err, ==,
+      "wyctl: fact rule-pack register failed: rule_pack_rejected\n"
+      "wyctl: rule 1 atom 1: rule_pack_arity\n");
+
+  g_auto (FactForgetRun) sealed = { 0 };
+  run_fake_daemon_case (409, "{\"error\":\"graph_sealed\"}", NULL, args,
+      FALSE, &sealed);
+  assert_fact_forget_exit (&sealed, 4);
+  g_assert_cmpstr (sealed.err, ==,
+      "wyctl: fact rule-pack register failed: graph_sealed\n");
+
+  g_autofree gchar *absent_path = g_build_filename (dir, "absent.dl", NULL);
+  const gchar *const absent_args[] = {
+    "fact", "rule-pack", "register", "--tenant", "t", "--graph", "g",
+    "--file", absent_path, "--access-token-file", "@TOKEN@", GRAPH_GUARDS,
+    NULL,
+  };
+  g_auto (FactForgetRun) unreadable = { 0 };
+  run_fake_daemon_case (200, "{}", NULL, absent_args, FALSE, &unreadable);
+  assert_fact_forget_exit (&unreadable, 2);
+  g_assert_true (g_str_has_prefix (unreadable.err,
+      "wyctl: cannot read --file: "));
+  g_assert_null (unreadable.request);
+
+  static const gchar *const missing[] = {
+    "fact", "rule-pack", "register", "--tenant", "t", "--graph", "g",
+    "--access-token-file", "@TOKEN@", GRAPH_GUARDS, NULL,
+  };
+  g_auto (FactForgetRun) refused = { 0 };
+  run_fake_daemon_case (200, "{}", NULL, missing, FALSE, &refused);
+  assert_fact_forget_exit (&refused, 2);
+  g_assert_cmpstr (refused.err, ==,
+      "wyctl: missing fact rule-pack target option\n");
+  g_assert_null (refused.request);
+
+  g_assert_cmpint (g_remove (pack_path), ==, 0);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+#undef RULE_PACK_DIGEST
+
 #define GRAPH_SEAL_UNKNOWN_HINT \
   "wyctl: the seal outcome is unknown; `wyctl graph list` shows whether " \
   "the graph is sealed\n"
@@ -6224,6 +6313,8 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/fact-verify", test_fact_verify);
   g_test_add_func ("/wyctl/graph-list", test_graph_list);
   g_test_add_func ("/wyctl/fact-schema-status", test_fact_schema_status);
+  g_test_add_func ("/wyctl/fact-rule-pack-register",
+      test_fact_rule_pack_register);
   g_test_add_func ("/wyctl/graph-seal", test_graph_seal);
   g_test_add_func ("/wyctl/graph-seal-refusals", test_graph_seal_refusals);
   g_test_add_func ("/wyctl/tenant-list-and-create",
