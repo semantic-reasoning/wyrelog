@@ -251,6 +251,9 @@ observe_graph (wyl_policy_store_t *policy, WylFactGraphResolver *resolver,
   WylFactGraphProvisionedPair *pair = NULL;
   g_autoptr (GPtrArray) provisioning = NULL;
   WylFactArtifactInventoryIdentity main_identity = { 0 };
+#ifdef __APPLE__
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+#endif
   wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list_for_graph
         (policy, tenant_id, authority->graph_id, &provisioning);
   if (rc == WYRELOG_E_OK && (provisioning == NULL
@@ -264,6 +267,21 @@ observe_graph (wyl_policy_store_t *policy, WylFactGraphResolver *resolver,
       || g_strcmp0 (record->graph_id, authority->graph_id) != 0
       || g_strcmp0 (record->store_uuid, authority->store_uuid) != 0))
     rc = WYRELOG_E_POLICY;
+#ifdef __APPLE__
+  /* Darwin reconstitutes the provisioned pair only from durable ADR 0006
+   * evidence; the name-only form fails closed there. */
+  if (rc == WYRELOG_E_OK) {
+    gsize length = 0;
+    const guint8 *bytes = record->darwin_operation_evidence == NULL ? NULL :
+        g_bytes_get_data (record->darwin_operation_evidence, &length);
+    if (bytes == NULL
+        || length != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = wyl_fact_graph_darwin_evidence_decode (bytes, length,
+              record->op_uuid, &evidence);
+  }
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_locator_init (&locator, tenant_id,
             authority->graph_id);
@@ -271,8 +289,13 @@ observe_graph (wyl_policy_store_t *policy, WylFactGraphResolver *resolver,
     rc = wyl_fact_graph_resolver_open_directory (resolver, &locator, FALSE,
             &directory);
   if (rc == WYRELOG_E_OK)
+#ifdef __APPLE__
+    rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+          (&directory, record->op_uuid, &evidence, &pair);
+#else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             record->op_uuid, &pair);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_provisioned_pair_main_identity (pair, &main_identity);
   if (rc == WYRELOG_E_OK)

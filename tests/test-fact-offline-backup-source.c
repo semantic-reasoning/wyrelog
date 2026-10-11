@@ -915,7 +915,9 @@ test_restore_dry_run_read_only (void)
       &capture_destination, &capture), ==, WYRELOG_E_OK);
   g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *bundle_root = g_dir_make_tmp
+  /* The bundle resolver walks every path component with O_NOFOLLOW, so the
+   * root must be canonical: on macOS $TMPDIR lives under the /var symlink. */
+  g_autofree gchar *bundle_root = wyl_test_make_secure_fact_root
         ("wyl-offline-restore-dry-run-bundle-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (bundle_root);
