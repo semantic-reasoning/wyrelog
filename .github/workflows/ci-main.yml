@@ -271,7 +271,8 @@ jobs:
       - name: Test offline backup and restore with secure DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 1 \
-            test-fact-offline-backup-source
+            test-fact-offline-backup-source \
+            wyctl
           meson test -C build-secure-duckdb --no-rebuild \
             fact-offline-backup-source \
             fact-offline-restore-tenant-old-binding \
