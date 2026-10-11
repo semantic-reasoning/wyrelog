@@ -513,13 +513,8 @@ wyl_fact_artifact_transition_posix_probe_capability
     /* Take-and-disarm, as above. */
     gint injected = posix_take_level (&transition_posix_test_flush_errno);
     flush_result = injected != 0
-        && (injected == EINVAL || injected == ENOTSUP
-        || injected == EOPNOTSUPP
-#ifdef __APPLE__
-        || injected == ENOTTY
-#endif
-        )
-        ? WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED
+        ? wyl_fact_artifact_durability_classify_directory_fsync_errno
+          (injected)
         : WYL_FACT_ARTIFACT_DURABILITY_ERROR;
   } else {
     flush_result = wyl_fact_artifact_durability_sync_fd (graph_fd);
@@ -1068,13 +1063,8 @@ execute_sync_dir (const WylFactArtifactTransitionPosix *provider,
   if (posix_fault_take (fsync_fault)) {
     gint injected = posix_take_level (&transition_posix_test_flush_errno);
     flush_result = injected != 0
-        && (injected == EINVAL || injected == ENOTSUP
-        || injected == EOPNOTSUPP
-#ifdef __APPLE__
-        || injected == ENOTTY
-#endif
-        )
-        ? WYL_FACT_ARTIFACT_DURABILITY_UNSUPPORTED
+        ? wyl_fact_artifact_durability_classify_directory_fsync_errno
+          (injected)
         : WYL_FACT_ARTIFACT_DURABILITY_ERROR;
   } else {
     flush_result = wyl_fact_artifact_durability_sync_fd
