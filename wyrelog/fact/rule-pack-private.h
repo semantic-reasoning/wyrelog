@@ -93,6 +93,18 @@ wyrelog_error_t wyl_fact_rule_pack_compile (const gchar * text, gsize text_len,
     const wyl_fact_graph_program_relation_t * relations, gsize n_relations,
     gchar ** out_rules, wyl_fact_rule_pack_rejection_t * out_rejection);
 
+/* As wyl_fact_rule_pack_compile(), and on success also sets @out_canonical,
+ * when it is not NULL, to a NULL-terminated array holding each rule's
+ * canonical text in rule order: the rule re-rendered in customer names as
+ * written, with no spaces or comment, integers in shortest decimal form,
+ * booleans as true/false and only \" and \\ escaped.  A canonical rule is
+ * one line, valid UTF-8, never longer than its source text, and compiles to
+ * the same rendered rule.  Free with g_strfreev(). */
+wyrelog_error_t wyl_fact_rule_pack_compile_canonical (const gchar * text,
+    gsize text_len, const wyl_fact_graph_program_relation_t * relations,
+    gsize n_relations, gchar ** out_rules, gchar *** out_canonical,
+    wyl_fact_rule_pack_rejection_t * out_rejection);
+
 void wyl_fact_rule_pack_rejection_clear (wyl_fact_rule_pack_rejection_t *
     rejection);
 

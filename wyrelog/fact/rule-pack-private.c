@@ -687,6 +687,68 @@ render_rules (GPtrArray *rules, const wyl_fact_graph_program_relation_t *rels)
   return g_string_free (g_steal_pointer (&out), FALSE);
 }
 
+/* The rule as the operator would write it compactly: customer names as
+ * written, no spaces, no comment.  Every element is no longer than the
+ * source it was parsed from, so the result is never longer than the rule's
+ * source text. */
+static void
+canonical_atom (GString *out, const RuleAtom *atom)
+{
+  if (atom->negated)
+    g_string_append_c (out, '!');
+  g_string_append (out, atom->name);
+  g_string_append_c (out, '(');
+  for (guint a = 0; a < atom->args->len; a++) {
+    const RuleArg *arg = &g_array_index (atom->args, RuleArg, a);
+    if (a > 0)
+      g_string_append_c (out, ',');
+    switch (arg->kind) {
+      case ARG_WILDCARD:
+        g_string_append_c (out, '_');
+        break;
+      case ARG_VARIABLE:
+        g_string_append (out, arg->text);
+        break;
+      case ARG_STRING:
+        g_string_append_c (out, '"');
+        for (const gchar * p = arg->text; *p != '\0'; p++) {
+          if (*p == '"' || *p == '\\')
+            g_string_append_c (out, '\\');
+          g_string_append_c (out, *p);
+        }
+        g_string_append_c (out, '"');
+        break;
+      case ARG_INTEGER:
+        g_string_append_printf (out, "%" G_GINT64_FORMAT, arg->integer);
+        break;
+      case ARG_BOOL:
+        g_string_append (out, arg->boolean ? "true" : "false");
+        break;
+    }
+  }
+  g_string_append_c (out, ')');
+}
+
+static gchar **
+canonical_rules (GPtrArray *rules)
+{
+  gchar **out = g_new0 (gchar *, rules->len + 1);
+  for (guint r = 0; r < rules->len; r++) {
+    PackRule *rule = g_ptr_array_index (rules, r);
+    g_autoptr (GString) text = g_string_new (NULL);
+    canonical_atom (text, &rule->head);
+    g_string_append (text, ":-");
+    for (guint b = 0; b < rule->body->len; b++) {
+      if (b > 0)
+        g_string_append_c (text, ',');
+      canonical_atom (text, g_ptr_array_index (rule->body, b));
+    }
+    g_string_append_c (text, '.');
+    out[r] = g_string_free (g_steal_pointer (&text), FALSE);
+  }
+  return out;
+}
+
 /* The backstop: wirelog compiles the program a rebuild would open.  An
  * acyclic pack is always stratifiable, so a recursive stratum here means the
  * acyclicity check above is wrong, not that the pack is. */
@@ -723,8 +785,20 @@ wyl_fact_rule_pack_compile (const gchar *text, gsize text_len,
     const wyl_fact_graph_program_relation_t *relations, gsize n_relations,
     gchar **out_rules, wyl_fact_rule_pack_rejection_t *out_rejection)
 {
+  return wyl_fact_rule_pack_compile_canonical (text, text_len, relations,
+             n_relations, out_rules, NULL, out_rejection);
+}
+
+wyrelog_error_t
+wyl_fact_rule_pack_compile_canonical (const gchar *text, gsize text_len,
+    const wyl_fact_graph_program_relation_t *relations, gsize n_relations,
+    gchar **out_rules, gchar ***out_canonical,
+    wyl_fact_rule_pack_rejection_t *out_rejection)
+{
   if (out_rules != NULL)
     *out_rules = NULL;
+  if (out_canonical != NULL)
+    *out_canonical = NULL;
   if (out_rejection != NULL)
     *out_rejection = (wyl_fact_rule_pack_rejection_t) {
       0
@@ -777,6 +851,8 @@ wyl_fact_rule_pack_compile (const gchar *text, gsize text_len,
     out_rejection->reason = WYL_FACT_RULE_PACK_REJECT_COMPILE;
     return WYRELOG_E_POLICY;
   }
+  if (out_canonical != NULL)
+    *out_canonical = canonical_rules (rules);
   *out_rules = g_steal_pointer (&rendered);
   return WYRELOG_E_OK;
 }
