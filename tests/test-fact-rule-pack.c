@@ -181,6 +181,81 @@ test_accept_empty_pack (void)
   g_assert_cmpstr (rules, ==, "");
 }
 
+static gchar **
+accept_canonical (const gchar *text, gchar **out_rules)
+{
+  gchar **canonical = NULL;
+  wyl_fact_rule_pack_rejection_t rejection = { 0 };
+  g_assert_cmpint (wyl_fact_rule_pack_compile_canonical (text, strlen (text),
+      relations, G_N_ELEMENTS (relations), out_rules, &canonical,
+      &rejection), ==, WYRELOG_E_OK);
+  g_assert_nonnull (canonical);
+  wyl_fact_rule_pack_rejection_clear (&rejection);
+  return canonical;
+}
+
+/* Each rule is stored as its canonical text: the rule re-rendered from its
+ * parse, without spaces or comments, with integers in shortest decimal form
+ * and only \" and \\ escaped.  Joined by newlines, the canonical texts are
+ * a pack that compiles to the same program and is its own canonical form. */
+static void
+test_canonical_rule_text (void)
+{
+  const gchar *pack = "# derived order sets\n"
+      "\n"
+      "vip(O) :- shop.orders(O, Amount), customers(O, true).  # trailing\n"
+      "shop.quiet(Order) :-\r shop.orders(Order, _),"
+      " ! customers(Order, _).\r\n"
+      "   big(O):-vip(O),shop.orders(O,-0),shop.orders(O, 007),"
+      "customers(O,false).\n"
+      "label(S) :- text(S), text(\"q\\\"x\\\\y caf\xc3\xa9\").\n";
+  g_autofree gchar *rules = NULL;
+  g_auto (GStrv) canonical = accept_canonical (pack, &rules);
+  g_assert_cmpuint (g_strv_length (canonical), ==, 4);
+  g_assert_cmpstr (canonical[0], ==,
+      "vip(O):-shop.orders(O,Amount),customers(O,true).");
+  g_assert_cmpstr (canonical[1], ==,
+      "shop.quiet(Order):-shop.orders(Order,_),!customers(Order,_).");
+  g_assert_cmpstr (canonical[2], ==,
+      "big(O):-vip(O),shop.orders(O,0),shop.orders(O,7),customers(O,false).");
+  g_assert_cmpstr (canonical[3], ==,
+      "label(S):-text(S),text(\"q\\\"x\\\\y caf\xc3\xa9\").");
+
+  g_autofree gchar *joined = g_strjoinv ("\n", canonical);
+  g_autofree gchar *again_rules = NULL;
+  g_auto (GStrv) again = accept_canonical (joined, &again_rules);
+  g_assert_cmpstr (again_rules, ==, rules);
+  g_assert_true (g_strv_equal ((const gchar * const *) again,
+      (const gchar * const *) canonical));
+
+  /* Without the canonical output the call is the plain compile. */
+  g_autofree gchar *plain = accept (pack);
+  g_assert_cmpstr (plain, ==, rules);
+}
+
+/* A canonical rule is never longer than the source text it came from, so a
+ * pack within WYL_FACT_RULE_PACK_MAX_BYTES stores within it too.  The tight
+ * case is a source already written compactly: every argument kind, a
+ * negation and an escape then come back byte for byte. */
+static void
+test_canonical_rule_text_of_compact_source (void)
+{
+  const gchar *compact[] = {
+    "a(X):-b(X),c(X),!amounts(-1),shop.orders(\"\\\"\",9).",
+    "shop.vip(O):-customers(O,true),!m.p:-q(_),"
+    "shop.orders(O,-9223372036854775808).",
+  };
+  g_autofree gchar *pack = g_strjoin ("\n", compact[0], compact[1], NULL);
+  g_autofree gchar *rules = NULL;
+  g_auto (GStrv) canonical = accept_canonical (pack, &rules);
+  g_assert_cmpuint (g_strv_length (canonical), ==, 2);
+  g_assert_cmpstr (canonical[0], ==, compact[0]);
+  g_assert_cmpstr (canonical[1], ==, compact[1]);
+
+  g_auto (GStrv) empty = accept_canonical ("# nothing\n", &rules);
+  g_assert_cmpuint (g_strv_length (empty), ==, 0);
+}
+
 static void
 test_refuse_size_limits (void)
 {
@@ -406,6 +481,9 @@ main (int argc, char **argv)
   g_test_add_func ("/fact/rule-pack/accept/compound",
       test_accept_compound_within_namespace);
   g_test_add_func ("/fact/rule-pack/accept/empty", test_accept_empty_pack);
+  g_test_add_func ("/fact/rule-pack/canonical", test_canonical_rule_text);
+  g_test_add_func ("/fact/rule-pack/canonical/compact",
+      test_canonical_rule_text_of_compact_source);
   g_test_add_func ("/fact/rule-pack/refuse/limits", test_refuse_size_limits);
   g_test_add_func ("/fact/rule-pack/refuse/syntax", test_refuse_syntax);
   g_test_add_func ("/fact/rule-pack/refuse/constants",
