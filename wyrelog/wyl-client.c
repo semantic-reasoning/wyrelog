@@ -1921,12 +1921,16 @@ client_store_fact_error_code (WylClient *client, const gchar *data,
   client_scrub_last_error_code (client);
 }
 
+/* As client_send_fact_message(), and on an error status also hands the
+ * response body to @out_error_body when it is not NULL. */
 static wyrelog_error_t
-client_send_fact_message (WylClient *client, SoupMessage *message,
-    GBytes **out_body)
+client_send_fact_message_full (WylClient *client, SoupMessage *message,
+    GBytes **out_body, GBytes **out_error_body)
 {
   if (out_body != NULL)
     g_clear_pointer (out_body, g_bytes_unref);
+  if (out_error_body != NULL)
+    g_clear_pointer (out_error_body, g_bytes_unref);
   if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
     return WYRELOG_E_INVALID;
   wyl_client_clear_last_http_error (client);
@@ -1949,7 +1953,10 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
   gsize size = 0;
   const gchar *data = g_bytes_get_data (body, &size);
   client_store_fact_error_code (client, data, size);
-  g_bytes_unref (body);
+  if (out_error_body != NULL)
+    *out_error_body = body;
+  else
+    g_bytes_unref (body);
   if (status == 400)
     return WYRELOG_E_INVALID;
   if (status == 401)
@@ -1957,6 +1964,13 @@ client_send_fact_message (WylClient *client, SoupMessage *message,
   if (status == 403 || status == 409)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+client_send_fact_message (WylClient *client, SoupMessage *message,
+    GBytes **out_body)
+{
+  return client_send_fact_message_full (client, message, out_body, NULL);
 }
 
 static wyrelog_error_t client_fact_prepare (WylClient *client,
@@ -3823,6 +3837,167 @@ wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
   return wyl_client_fact_schema_register_with_max_rows (client, tenant, graph,
              namespace_id, relation, schema_version, columns, n_columns, 0,
              guard_timestamp, guard_loc_class, guard_risk);
+}
+
+void
+wyl_client_fact_rule_pack_clear (WylClientFactRulePack *pack)
+{
+  if (pack == NULL)
+    return;
+  g_free (pack->tenant_id);
+  g_free (pack->graph_id);
+  g_free (pack->pack_digest);
+  memset (pack, 0, sizeof *pack);
+}
+
+void
+wyl_client_fact_rule_pack_rejection_clear (WylClientFactRulePackRejection *
+    rejection)
+{
+  if (rejection == NULL)
+    return;
+  g_free (rejection->reason);
+  g_free (rejection->cycle_rules);
+  memset (rejection, 0, sizeof *rejection);
+}
+
+static gboolean
+client_rule_pack_digest_is_well_formed (const gchar *digest)
+{
+  if (digest == NULL || strlen (digest) != 64)
+    return FALSE;
+  for (const gchar * p = digest; *p != '\0'; p++)
+    if (!g_ascii_isdigit (*p) && (*p < 'a' || *p > 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+static gboolean
+client_parse_uint_member (const gchar *data, gsize size, const gchar *member,
+    guint *out_value)
+{
+  guint64 value = 0;
+  if (!parse_simple_json_uint64_member (data, size, member, &value)
+      || value > G_MAXUINT)
+    return FALSE;
+  *out_value = (guint) value;
+  return TRUE;
+}
+
+/* "cycle_rules":[n,...] of a rule_pack_cycle refusal; absent is empty. */
+static gboolean
+client_parse_cycle_rules (const gchar *data, gsize size,
+    WylClientFactRulePackRejection *rejection)
+{
+  const gchar *needle = "\"cycle_rules\":[";
+  const gchar *at = g_strstr_len (data, (gssize) size, needle);
+  if (at == NULL)
+    return TRUE;
+  const gchar *p = at + strlen (needle);
+  const gchar *limit = data + size;
+  g_autoptr (GArray) rules = g_array_new (FALSE, FALSE, sizeof (guint));
+  while (p < limit && *p != ']') {
+    if (!g_ascii_isdigit (*p))
+      return FALSE;
+    guint64 value = 0;
+    while (p < limit && g_ascii_isdigit (*p)) {
+      value = value * 10 + (guint64) (*p - '0');
+      if (value > G_MAXUINT)
+        return FALSE;
+      p++;
+    }
+    guint rule = (guint) value;
+    g_array_append_val (rules, rule);
+    if (p < limit && *p == ',')
+      p++;
+  }
+  if (p >= limit || rules->len == 0)
+    return FALSE;
+  rejection->n_cycle_rules = rules->len;
+  rejection->cycle_rules = (guint *) g_array_free (g_steal_pointer (&rules),
+          FALSE);
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_fact_rule_pack_register (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *pack, gsize pack_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactRulePack *out_pack,
+    WylClientFactRulePackRejection *out_rejection)
+{
+  if (out_pack == NULL || out_rejection == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_fact_rule_pack_clear (out_pack);
+  wyl_client_fact_rule_pack_rejection_clear (out_rejection);
+  if (graph == NULL || graph[0] == '\0' || pack == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+          guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+          guard_timestamp, guard_loc_class, guard_risk,
+          access_token != NULL && access_token[0] != '\0' ? NULL :
+          session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+        ("%s/facts/rule-pack/register?%s&graph=%s", base_url, guard_query,
+          escaped_graph);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) request = g_bytes_new (pack, pack_len);
+  soup_message_set_request_body_from_bytes (message, "text/plain", request);
+
+  g_autoptr (GBytes) body = NULL;
+  g_autoptr (GBytes) error_body = NULL;
+  rc = client_send_fact_message_full (client, message, &body, &error_body);
+  gsize size = 0;
+  if (rc != WYRELOG_E_OK) {
+    g_autofree gchar *code = wyl_client_dup_last_error_code (client);
+    if (rc == WYRELOG_E_INVALID && error_body != NULL
+        && g_strcmp0 (code, "rule_pack_rejected") == 0) {
+      const gchar *data = g_bytes_get_data (error_body, &size);
+      out_rejection->reason = parse_simple_json_string_member (data, size,
+              "reason");
+      if (out_rejection->reason == NULL
+          || !client_parse_uint_member (data, size, "rule_index",
+          &out_rejection->rule_index)
+          || !client_parse_uint_member (data, size, "atom_index",
+          &out_rejection->atom_index)
+          || !client_parse_cycle_rules (data, size, out_rejection)) {
+        wyl_client_fact_rule_pack_rejection_clear (out_rejection);
+        return WYRELOG_E_IO;
+      }
+    }
+    return rc;
+  }
+
+  const gchar *data = g_bytes_get_data (body, &size);
+  out_pack->tenant_id = parse_simple_json_string_member (data, size,
+          "tenant_id");
+  out_pack->graph_id = parse_simple_json_string_member (data, size,
+          "graph_id");
+  out_pack->pack_digest = parse_simple_json_string_member (data, size,
+          "pack_digest");
+  guint version = 0;
+  if (g_strcmp0 (out_pack->tenant_id, tenant) != 0
+      || g_strcmp0 (out_pack->graph_id, graph) != 0
+      || !client_rule_pack_digest_is_well_formed (out_pack->pack_digest)
+      || !client_parse_uint_member (data, size, "pack_version", &version)
+      || version == 0 || version > G_MAXUINT32
+      || !client_parse_uint_member (data, size, "rule_count",
+      &out_pack->rule_count) || out_pack->rule_count == 0) {
+    wyl_client_fact_rule_pack_clear (out_pack);
+    return WYRELOG_E_IO;
+  }
+  out_pack->pack_version = (guint32) version;
+  return WYRELOG_E_OK;
 }
 
 typedef enum

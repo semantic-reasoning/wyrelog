@@ -251,6 +251,32 @@ typedef struct
   gsize n_versions;
 } WylClientFactSchemaStatus;
 
+/* A graph's rule pack as stored by wyl_client_fact_rule_pack_register(). */
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  guint32 pack_version;
+  guint rule_count;
+  /* SHA-256 of the stored rules, 64 lowercase hex characters. */
+  gchar *pack_digest;
+} WylClientFactRulePack;
+
+/* Why the daemon refused a rule pack. */
+typedef struct
+{
+  /* "rule_pack_<reason>", e.g. "rule_pack_cycle". */
+  gchar *reason;
+  /* 1-based rule ordinal, counting rules and not lines; 0 for the whole
+   * pack. */
+  guint rule_index;
+  /* 0 for the head, n for the nth body atom. */
+  guint atom_index;
+  /* rule_pack_cycle only: every rule on the cycle, ascending. */
+  guint *cycle_rules;
+  gsize n_cycle_rules;
+} WylClientFactRulePackRejection;
+
 typedef struct
 {
   gchar *tenant_id;
@@ -755,6 +781,23 @@ wyrelog_error_t wyl_client_fact_schema_status (WylClient * client,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientFactSchemaStatus * out_status);
 void wyl_client_fact_schema_status_clear (WylClientFactSchemaStatus * status);
+/* Registers @pack, one rule per line, as the graph's next rule pack
+ * version.  The daemon checks it against the graph's relations and stores
+ * it; it is not evaluated yet (#1213).  The client must carry credentials
+ * bound to tenant, and the caller needs wr.schema.manage there.  Both outputs
+ * must be zero-initialised or cleared, are owned by the caller and must be
+ * cleared after use.  On WYRELOG_E_OK @out_pack holds the stored version.  A
+ * refused pack is WYRELOG_E_INVALID with @out_rejection filled and the last
+ * error code rule_pack_rejected; any other 400 leaves @out_rejection empty.
+ * An answer naming another graph is WYRELOG_E_IO. */
+wyrelog_error_t wyl_client_fact_rule_pack_register (WylClient * client,
+    const gchar * tenant, const gchar * graph, const gchar * pack,
+    gsize pack_len, gint64 guard_timestamp, const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientFactRulePack * out_pack,
+    WylClientFactRulePackRejection * out_rejection);
+void wyl_client_fact_rule_pack_clear (WylClientFactRulePack * pack);
+void wyl_client_fact_rule_pack_rejection_clear
+  (WylClientFactRulePackRejection * rejection);
 void wyl_client_fact_restore_result_clear (WylClientFactRestoreResult *result);
 /* Typed offline restore operations. A transport failure during a mutation
  * reports OUTCOME_UNKNOWN with the same operation UUID so callers can query
@@ -1134,6 +1177,10 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientGraphList, wyl_client_graph_list_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientFactSchemaStatus, wyl_client_fact_schema_status_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactRulePack, wyl_client_fact_rule_pack_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+  (WylClientFactRulePackRejection, wyl_client_fact_rule_pack_rejection_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
   (WylClientTenant, wyl_client_tenant_clear)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC

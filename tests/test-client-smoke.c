@@ -1729,6 +1729,111 @@ main (void)
       != WYRELOG_E_INVALID)
     return wyl_test_normalize_exit_status (4141);
 
+  /* #1213: registering a graph's rule pack. */
+#define RULE_PACK_DIGEST "35360fef00000000000000000000000000000000" \
+  "00000000000000000000ede1"
+  g_auto (WylClientFactRulePack) pack = { 0 };
+  g_auto (WylClientFactRulePackRejection) refusal = { 0 };
+  const gchar *pack_text = "big(O) :- orders(O, _).\n";
+  http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
+      "\"graph_id\":\"orders\",\"pack_version\":3,\"rule_count\":1,"
+      "\"pack_digest\":\"" RULE_PACK_DIGEST "\"}";
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "orders", pack_text, strlen (pack_text), 123, "public", 49, &pack,
+      &refusal) != WYRELOG_E_OK
+      || pack.pack_version != 3 || pack.rule_count != 1
+      || g_strcmp0 (pack.pack_digest, RULE_PACK_DIGEST) != 0
+      || refusal.reason != NULL
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/facts/rule-pack/register") != 0
+      || g_strcmp0 (http.last_tenant, "__wr_default") != 0
+      || g_strcmp0 (http.last_graph, "orders") != 0
+      || g_strcmp0 (http.last_body, pack_text) != 0
+      || g_strcmp0 (http.last_guard_risk, "49") != 0
+      || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
+    return wyl_test_normalize_exit_status (4142);
+  /* An answer for another graph, or without a well-formed identity, is
+   * refused and leaves nothing behind. */
+  static const gchar *const bad_packs[] = {
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"other\","
+    "\"pack_version\":3,\"rule_count\":1,\"pack_digest\":\""
+    RULE_PACK_DIGEST "\"}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"pack_version\":0,\"rule_count\":1,\"pack_digest\":\""
+    RULE_PACK_DIGEST "\"}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"pack_version\":3,\"rule_count\":0,\"pack_digest\":\""
+    RULE_PACK_DIGEST "\"}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"pack_version\":3,\"rule_count\":1,\"pack_digest\":\"35360fef\"}",
+    "{\"ok\":true,\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+    "\"pack_version\":3,\"rule_count\":1,\"pack_digest\":\""
+    "Z5360fef00000000000000000000000000000000"
+    "00000000000000000000ede1\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_packs); i++) {
+    http.body = bad_packs[i];
+    if (wyl_client_fact_rule_pack_register (management_client,
+        "__wr_default", "orders", pack_text, strlen (pack_text), 123,
+        "public", 49, &pack, &refusal) != WYRELOG_E_IO
+        || pack.pack_version != 0 || pack.pack_digest != NULL) {
+      g_printerr ("bad rule pack answer %" G_GSIZE_FORMAT " accepted\n", i);
+      return wyl_test_normalize_exit_status (4143);
+    }
+  }
+  /* A refusal carries the reason, the rule, the atom and any cycle. */
+  http.status = 400;
+  http.body = "{\"error\":\"rule_pack_rejected\","
+      "\"reason\":\"rule_pack_cycle\",\"rule_index\":2,\"atom_index\":0,"
+      "\"cycle_rules\":[2,5,7]}";
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "orders", pack_text, strlen (pack_text), 123, "public", 49, &pack,
+      &refusal) != WYRELOG_E_INVALID
+      || !client_last_response_is (management_client, 400,
+      "rule_pack_rejected")
+      || g_strcmp0 (refusal.reason, "rule_pack_cycle") != 0
+      || refusal.rule_index != 2 || refusal.atom_index != 0
+      || refusal.n_cycle_rules != 3 || refusal.cycle_rules[0] != 2
+      || refusal.cycle_rules[1] != 5 || refusal.cycle_rules[2] != 7
+      || pack.pack_digest != NULL)
+    return wyl_test_normalize_exit_status (4144);
+  http.body = "{\"error\":\"rule_pack_rejected\","
+      "\"reason\":\"rule_pack_arity\",\"rule_index\":4,\"atom_index\":1}";
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "orders", pack_text, strlen (pack_text), 123, "public", 49, &pack,
+      &refusal) != WYRELOG_E_INVALID
+      || g_strcmp0 (refusal.reason, "rule_pack_arity") != 0
+      || refusal.rule_index != 4 || refusal.atom_index != 1
+      || refusal.n_cycle_rules != 0 || refusal.cycle_rules != NULL)
+    return wyl_test_normalize_exit_status (4145);
+  /* Any other 400 is not a refusal of the pack. */
+  http.body = "{\"error\":\"invalid_rule_pack_payload\"}";
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "orders", pack_text, strlen (pack_text), 123, "public", 49, &pack,
+      &refusal) != WYRELOG_E_INVALID || refusal.reason != NULL
+      || !client_last_response_is (management_client, 400,
+      "invalid_rule_pack_payload"))
+    return wyl_test_normalize_exit_status (4146);
+  http.status = 409;
+  http.body = "{\"error\":\"graph_sealed\"}";
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "orders", pack_text, strlen (pack_text), 123, "public", 49, &pack,
+      &refusal) != WYRELOG_E_POLICY
+      || !client_last_response_is (management_client, 409, "graph_sealed"))
+    return wyl_test_normalize_exit_status (4147);
+  http.status = 0;
+  if (wyl_client_fact_rule_pack_register (management_client, "__wr_default",
+      "", pack_text, strlen (pack_text), 123, "public", 49, &pack, &refusal)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_rule_pack_register (management_client,
+      "__wr_default", "orders", NULL, 0, 123, "public", 49, &pack, &refusal)
+      != WYRELOG_E_INVALID
+      || wyl_client_fact_rule_pack_register (management_client,
+      "__wr_default", "orders", pack_text, strlen (pack_text), 123, "public",
+      49, NULL, &refusal) != WYRELOG_E_INVALID)
+    return wyl_test_normalize_exit_status (4148);
+#undef RULE_PACK_DIGEST
+
   http.body = "{\"ok\":true,\"tenant_id\":\"__wr_default\","
       "\"graph_id\":\"orders\",\"sealed\":true}";
   if (wyl_client_graph_seal (management_client, "__wr_default", "orders",

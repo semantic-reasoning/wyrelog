@@ -1676,6 +1676,93 @@ target option, `4` when the daemon denies the caller (`403 schema_denied`),
 (`401`). The HTTP route is `GET /facts/schema/status` with the same `tenant`,
 `graph`, `namespace` and `relation` query parameters as registration.
 
+### Rule packs
+
+A rule pack is a set of non-recursive rules that will derive a graph's
+relations from its other relations. **Rules are stored but not evaluated
+yet:** registering a pack changes nothing a query answers. Replay will read
+packs only once wirelog can bound the work a query does (#1213,
+semantic-reasoning/wirelog#1817). Registering one now lets you check a pack
+against a graph and record it.
+
+A pack is plain text, with one rule per line in the form `head :- body.` and
+`#` starting a comment:
+
+```
+# orders worth at least 1000
+big(O) :- shop.orders(O, Amount), shop.orders(O, 1000).
+quiet(O) :- shop.orders(O, _), !flagged(O).
+```
+
+An atom names a relation registered for the graph, as `relation` or
+`namespace.relation`. A body atom may be negated with `!`. An argument is one
+of:
+
+- a variable: an uppercase letter, then letters, digits or `_`;
+- `_`;
+- a double-quoted string, in which only `\"` and `\\` are escapes;
+- a decimal 64-bit integer;
+- `true` or `false`.
+
+Every head must be a relation registered for the graph, and the rules must not
+derive a relation from itself, directly or through other rules. A pack holds
+at most 256 rules and 64 KiB, and a rule at most 16 body atoms. These limits
+bound the check, not what evaluating the pack will cost.
+
+`fact rule-pack register` checks the pack and stores it as the graph's next
+pack version. It needs `wr.schema.manage` and the guard options:
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact rule-pack register \
+  --tenant "$TENANT" --graph "$GRAPH" --file orders.rules \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+On success it prints the stored identity:
+
+```
+tenant=<tenant> graph=<graph> pack_version=N rules=N digest=<sha256 hex>
+```
+
+The daemon stores each rule as its canonical text: written compactly, with no
+spaces or comments. The digest is computed over those stored rules. The audit
+stream records a stored pack as action `rule_pack_register`, with the resource
+`<tenant>/<graph>` and the identity `<version>:<digest>`. Registering again
+stores a new version and leaves earlier versions unchanged.
+
+A refused pack stores nothing. The command prints the reason and where it
+failed:
+
+```
+wyctl: fact rule-pack register failed: rule_pack_rejected
+wyctl: rule 2 atom 1: rule_pack_unknown_relation
+```
+
+Rules are counted from 1, skipping blank and comment lines. Atom 0 is the
+head, and atom n is the nth body atom. A `rule_pack_cycle` refusal also lists
+every rule on the cycle. A pack with no rules is refused as
+`rule_pack_empty`.
+
+The command exits with:
+
+| Exit | When |
+|---|---|
+| `0` | The pack was stored. |
+| `2` | A target option is missing, or `--file` cannot be read. |
+| `3` | The pack, or the request, was refused (`400`). |
+| `4` | The daemon denies the caller, the graph is sealed (`409 graph_sealed`), or the graph's own relations cannot be resolved (`409 rule_pack_relations_unresolved`). |
+| `5` | The graph is not found. |
+| `6` | No valid access token is presented. |
+
+The HTTP route is `POST /facts/rule-pack/register` with `tenant` and `graph`
+query parameters and the pack as the request body.
+
+The check uses the relations that the policy store alone determines: activated
+relations, and visible relations registered with a single schema version. A
+relation that only stored fact batches name is not seen, so the check can
+refuse a pack that names such a relation.
+
 Fact mutation is schema-registered: append, retract, and forget operate only on
 relations registered through `fact schema register`. The daemon does not support
 raw Datalog atom deletion endpoints such as `DELETE /api/facts/fact(1)` or
@@ -3594,7 +3681,7 @@ pass a budget that covers it, such as `--timeout-ms 600000` for ten minutes. A
 request that runs out of time exits like any other transport failure, and the
 daemon may still have completed it. For policy grants, revokes and
 transitions, fact put and retract, fact forget, fact schema register, fact
-quota configure, graph create and seal, tenant create, seal and unseal,
+rule-pack register, fact quota configure, graph create and seal, tenant create, seal and unseal,
 service-principal create and disable, and service-credential issue, rotate and
 revoke, wyctl adds a line saying that the outcome is unknown and how to find
 out; the online `mfa enroll` says whether a re-run is safe (see "First-Install

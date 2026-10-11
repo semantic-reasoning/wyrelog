@@ -58,6 +58,7 @@ COVERAGE = {
     "/facts/quota/operation-status": ("fact", "quota", "operation-status"),
     "/facts/schema/register": ("fact", "schema", "register"),
     "/facts/schema/status": ("fact", "schema", "status"),
+    "/facts/rule-pack/register": ("fact", "rule-pack", "register"),
     "/facts/restore/dry-run": ("fact", "restore", "dry-run"),
     "/facts/restore/begin": ("fact", "restore", "begin"),
     "/facts/restore/prepare": ("fact", "restore", "prepare"),
@@ -116,9 +117,7 @@ UNSUPPORTED = {
         "with a tenant seal",
 }
 
-PENDING: dict[str, tuple[str, ...]] = {
-    "/facts/rule-pack/register": ("fact", "rule-pack", "register"),
-}
+PENDING: dict[str, tuple[str, ...]] = {}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {
@@ -128,6 +127,7 @@ DISPATCHERS = {
     ("fact",): "run_fact",
     ("fact", "restore"): "run_fact_restore_command",
     ("fact", "schema"): "run_fact_schema",
+    ("fact", "rule-pack"): "run_fact_rule_pack",
     ("fact", "quota"): "run_fact_quota_command",
     ("datalog",): "run_datalog",
     ("audit",): "run_audit",

@@ -129,6 +129,17 @@ typedef struct
 typedef struct
 {
   gchar *tenant;
+  gchar *graph;
+  gchar *file;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactRulePackOptions;
+
+typedef struct
+{
+  gchar *tenant;
   gchar *dimension;
   gchar *limit_arg;
   gchar *row_limit_arg;
@@ -446,6 +457,21 @@ wyctl_fact_schema_options_clear (WyctlFactSchemaOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactSchemaOptions,
     wyctl_fact_schema_options_clear);
+
+static void
+wyctl_fact_rule_pack_options_clear (WyctlFactRulePackOptions *opts)
+{
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->graph, g_free);
+  g_clear_pointer (&opts->file, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlFactRulePackOptions,
+    wyctl_fact_rule_pack_options_clear);
 
 static void
 wyctl_fact_quota_options_clear (WyctlFactQuotaOptions *opts)
@@ -3416,6 +3442,121 @@ run_fact_retract (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return run_fact_mutation (global_opts, argc, argv, TRUE);
 }
 
+/* #1213: registers the rule pack in --file as the graph's next pack version
+ * and prints the stored identity.  A refused pack names the rule, the atom
+ * and, for a cycle, every rule on it. */
+static int
+run_fact_rule_pack_register (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlFactRulePackOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"file", 0, 0, G_OPTION_ARG_STRING, &opts.file,
+     "Rule pack, one rule per line", "PATH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog fact rule-pack register");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact rule-pack register argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+          global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0' || opts.file == NULL
+      || opts.file[0] == '\0') {
+    g_printerr ("wyctl: missing fact rule-pack target option\n");
+    return 2;
+  }
+  g_autofree gchar *pack = NULL;
+  gsize pack_len = 0;
+  g_autoptr (GError) read_error = NULL;
+  if (!g_file_get_contents (opts.file, &pack, &pack_len, &read_error)) {
+    g_printerr ("wyctl: cannot read --file: %s\n", read_error->message);
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_auto (WylClientFactRulePack) stored = { 0 };
+  g_auto (WylClientFactRulePackRejection) refusal = { 0 };
+  wyrelog_error_t rc = wyl_client_fact_rule_pack_register (client, tenant,
+          graph, pack, pack_len, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &stored, &refusal);
+  int exit_rc = fact_remote_exit (client, "fact rule-pack register", rc,
+          "rule_pack_register_failed");
+  if (refusal.reason != NULL) {
+    g_autoptr (GString) line = g_string_new (NULL);
+    g_string_printf (line, "wyctl: rule %u atom %u: %s", refusal.rule_index,
+        refusal.atom_index, refusal.reason);
+    for (gsize i = 0; i < refusal.n_cycle_rules; i++)
+      g_string_append_printf (line, "%s%u", i == 0 ? " (cycle through rules "
+          : ",", refusal.cycle_rules[i]);
+    if (refusal.n_cycle_rules > 0)
+      g_string_append_c (line, ')');
+    g_printerr ("%s\n", line->str);
+  }
+  /* Every registration stores a new version, so a repeat is not a no-op. */
+  if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the rule-pack register outcome is unknown; if it "
+        "landed, repeating the command stores the same rules again as the "
+        "next version\n");
+  if (exit_rc == 0)
+    g_print ("tenant=%s graph=%s pack_version=%u rules=%u digest=%s\n",
+        stored.tenant_id, stored.graph_id, stored.pack_version,
+        stored.rule_count, stored.pack_digest);
+  return exit_rc;
+}
+
+static int
+run_fact_rule_pack (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing fact rule-pack command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "register") == 0)
+    return run_fact_rule_pack_register (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown fact rule-pack command: %s\n", argv[1]);
+  return 2;
+}
+
 static int
 run_fact_schema (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -4282,6 +4423,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "schema") == 0)
     return run_fact_schema (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "rule-pack") == 0)
+    return run_fact_rule_pack (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "quota") == 0)
     return run_fact_quota_command (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "restore") == 0)
