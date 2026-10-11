@@ -171,6 +171,13 @@ void wyl_fact_replay_set_validation_connected_test_hook
 wyrelog_error_t wyl_fact_replay_open_graph_engine_with_store_for_test
   (wyl_policy_store_t * policy, wyl_fact_store_t * store,
     const wyl_policy_fact_graph_info_t * graph_info, WylEngine ** out_engine);
+/* Renders the program a graph engine would be built from, using only the
+ * policy store: no durable batches are read.  @from_snapshot selects the
+ * captured-snapshot load path over the direct one. */
+wyrelog_error_t wyl_fact_replay_render_graph_program_for_test
+  (wyl_policy_store_t * policy,
+    const wyl_policy_fact_graph_info_t * graph_info, gboolean from_snapshot,
+    gchar ** out_program);
 #endif
 
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,

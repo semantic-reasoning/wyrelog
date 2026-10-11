@@ -674,6 +674,10 @@ list_replay_relations (wyl_policy_store_t *policy,
   g_autoptr (GHashTable) candidate_names =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
           (GDestroyNotify) g_ptr_array_unref);
+  /* The keys of candidate_names in the order registered lists them, which is
+   * by name.  Declaring in hash-table order would make the program text
+   * depend on GLib's hashing rather than on the stored schemas. */
+  g_autoptr (GPtrArray) candidate_order = g_ptr_array_new ();
   for (guint i = 0; rc == WYRELOG_E_OK && i < registered->len; i++) {
     if (job_context != NULL)
       rc = wyl_fact_replay_job_context_checkpoint (job_context);
@@ -691,20 +695,17 @@ list_replay_relations (wyl_policy_store_t *policy,
     GPtrArray *versions = g_hash_table_lookup (candidate_names, logical);
     if (versions == NULL) {
       versions = g_ptr_array_new ();
-      g_hash_table_insert (candidate_names, g_strdup (logical), versions);
+      gchar *key = g_strdup (logical);
+      g_hash_table_insert (candidate_names, key, versions);
+      g_ptr_array_add (candidate_order, key);
     }
     g_ptr_array_add (versions, schema);
   }
   if (rc != WYRELOG_E_OK)
     return rc;
-  GHashTableIter candidate_iter;
-  gpointer candidate_key = NULL;
-  gpointer candidate_value = NULL;
-  g_hash_table_iter_init (&candidate_iter, candidate_names);
-  while (rc == WYRELOG_E_OK
-      && g_hash_table_iter_next (&candidate_iter, &candidate_key,
-      &candidate_value)) {
-    GPtrArray *versions = candidate_value;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < candidate_order->len; i++) {
+    GPtrArray *versions = g_hash_table_lookup (candidate_names,
+            g_ptr_array_index (candidate_order, i));
     if (versions->len != 1) {
       rc = WYRELOG_E_POLICY;
       break;
@@ -1418,6 +1419,39 @@ wyl_fact_replay_open_graph_engine_with_store_for_test
 {
   return open_graph_engine_with_store (policy, store, graph_info, NULL, NULL,
              out_engine);
+}
+
+wyrelog_error_t
+wyl_fact_replay_render_graph_program_for_test (wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *graph_info, gboolean from_snapshot,
+    gchar **out_program)
+{
+  if (out_program != NULL)
+    *out_program = NULL;
+  if (policy == NULL || graph_info == NULL || out_program == NULL)
+    return WYRELOG_E_INVALID;
+
+  ReplayPolicyGraphSnapshot snapshot;
+  ReplayPolicyGraphSnapshot *policy_snapshot = NULL;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (from_snapshot) {
+    rc = capture_replay_policy_graph_snapshot (policy, graph_info, NULL,
+            &snapshot);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    policy_snapshot = &snapshot;
+  }
+  g_autoptr (GPtrArray) relations = NULL;
+  rc = list_replay_relations (policy, NULL, graph_info, policy_snapshot, NULL,
+          &relations);
+  if (rc == WYRELOG_E_OK) {
+    *out_program = build_graph_program (relations);
+    if (*out_program == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (policy_snapshot != NULL)
+    replay_policy_graph_snapshot_clear (policy_snapshot);
+  return rc;
 }
 #endif
 
