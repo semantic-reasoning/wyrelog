@@ -98,8 +98,9 @@ An upgrade is a security-contract change, not a dependency-only update.
    are still fail-closed on Windows, so `wyl_fact_graph_provisioning_construct`
    returns `WYRELOG_E_POLICY` there. The
    name-only `open_provisioned_pair_exact` and the fixed WAL replacement still
-   return `WYRELOG_E_POLICY`, and a pair cannot survive a restart until the
-   evidence tuple has a durable home (#816). What Windows still has no route to
+   return `WYRELOG_E_POLICY`; a pair that survives a restart is reconstituted
+   from the evidence tuple's durable home, the ACTIVE provisioning record
+   (#816). What Windows still has no route to
    is a live `wyl_fact_store_t` handle: `wyl_fact_store_open_provisioned_pair`
    and `wyl_fact_store_open_provisioned_graph` are compiled out there. Do not
    read a green Windows lane as native runtime authority.

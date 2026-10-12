@@ -107,8 +107,9 @@ typedef struct
  * final is at NumberOfLinks == 1 by construction; its substitute is the
  * WylFactGraphWinOperationEvidence tuple minted from the stage before the
  * rename, whose artifact identity survives it.  That tuple must be supplied by
- * the caller and cannot be read back from the filesystem, which is why a
- * Windows pair cannot survive a restart until #816 gives it a durable home. */
+ * the caller and cannot be read back from the filesystem; its durable home is
+ * the ACTIVE provisioning record (#816), from which a caller reconstitutes a
+ * pair after a restart. */
 typedef struct WylFactGraphProvisionedPair WylFactGraphProvisionedPair;
 
 typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
@@ -392,8 +393,9 @@ wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
  * closed: an operation UUID derives a name, and a name is not provenance
  * there.  Its callable form is
  * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence below.
- * Once the operation-evidence tuple has a durable home (#816) this becomes a
- * thin wrapper that loads it and calls that form. */
+ * Callers load the operation-evidence tuple from its durable home, the ACTIVE
+ * provisioning record (#816), and call that form; the locator has no
+ * policy-store access, so this never becomes a wrapper around it. */
 wyrelog_error_t wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphProvisionedPair ** out_pair);

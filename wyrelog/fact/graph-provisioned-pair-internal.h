@@ -23,8 +23,8 @@
  * it is load-bearing only behind the directory ACL, whereas a FileId captured
  * from the stage handle cannot be forged.  What Windows lacks is that its
  * witness must be SUPPLIED BY THE CALLER and cannot be read back from the
- * filesystem -- which is exactly why a pair cannot survive a restart until the
- * tuple has a durable home (#816).
+ * filesystem -- which is exactly why a pair that survives a restart is rebuilt
+ * from the tuple's durable home, the ACTIVE provisioning record (#816).
  *
  * |owner_token| is pinned once at construction and re-compared against the
  * live process token on every revalidation, mirroring the POSIX pair, which
@@ -33,7 +33,7 @@
  * one process that comparison cannot fire, and the DACL check that runs beside
  * it already resolves the same SID through the live token.  Catching an
  * impersonating thread would need OpenThreadToken.  The pinned copy earns its
- * place at the boundary #816 introduces, where a pair is reconstituted from a
+ * place at the boundary #816 introduced, where a pair is reconstituted from a
  * durable record and the identity that minted it is no longer implied. */
 struct WylFactGraphProvisionedPair
 {
