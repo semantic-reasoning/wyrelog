@@ -236,7 +236,10 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.graph.manage",
     "wr.tenant.manage",
     "wr.schema.manage",
-    "wr.fact.write",
+    "wr.fact.append",
+    "wr.fact.retract",
+    "wr.fact.forget",
+    "wr.fact.repair",
     "wr.fact.read",
     "wr.datalog.query",
   };
@@ -368,7 +371,7 @@ check_forget_attribution (const gchar *fact_root, wyl_policy_store_t *policy,
 #ifdef WYL_HAS_AUDIT
   LifecycleAuditProbe authorization = {
     .subject_id = "facts-admin",
-    .action = "wr.fact.write",
+    .action = "wr.fact.forget",
     .resource_id = WYL_TENANT_DEFAULT,
     .request_id = request_id,
     .require_allow = TRUE,
@@ -1528,6 +1531,77 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
           &body);
   if (rc != 0 || status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
     return 4517;
+  return 0;
+}
+
+/* #1343: each fact route checks the permission for its own operation.  A
+ * subject holding exactly one of them reaches past authorization on that
+ * route only; every other route refuses it with fact_denied.  The graph does
+ * not exist, so a request that is authorized fails later and changes
+ * nothing. */
+static gint
+check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
+    const gchar *base_url)
+{
+  static const struct
+  {
+    const gchar *permission;
+    const gchar *method;
+    const gchar *route;
+  } routes[] = {
+    {"wr.fact.append", "POST", "/facts/__wr_default/op-perms/rows:append"},
+    {"wr.fact.retract", "POST", "/facts/__wr_default/op-perms/rows:retract"},
+    {"wr.fact.forget", "DELETE", "/facts/__wr_default/op-perms/rows:forget"},
+    {"wr.fact.repair", "POST", "/facts/__wr_default/op-perms/rows:repair"},
+  };
+  static const gchar *const holders[] = {
+    "wr.fact.append", "wr.fact.retract", "wr.fact.update", "wr.fact.forget",
+    "wr.fact.repair", "wr.fact.read", "wr.datalog.query", "wr.datalog.infer",
+  };
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_autofree gchar *mutation_query = g_strdup_printf
+        ("tenant=%s&namespace=shop&schema_version=1&batch_id=op-perms&"
+          "idempotency_key=op-perms&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+
+  for (gsize h = 0; h < G_N_ELEMENTS (holders); h++) {
+    g_autofree gchar *subject = g_strdup_printf ("facts-only-%s", holders[h]);
+    if (wyl_policy_store_grant_direct_permission (store, subject, holders[h],
+        WYL_TENANT_DEFAULT) != WYRELOG_E_OK
+        || wyl_policy_store_set_permission_state (store, subject, holders[h],
+        WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK
+        || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 4601;
+    g_autoptr (WylClient) client = NULL;
+    if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
+      return 4602;
+    wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+    wyrelog_error_t login_rc = wyl_client_login_skip_mfa (client, subject);
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    g_autofree gchar *token = wyl_client_dup_access_token (client);
+    if (login_rc != WYRELOG_E_OK || token == NULL)
+      return 4603;
+
+    for (gsize r = 0; r < G_N_ELEMENTS (routes); r++) {
+      gboolean own = g_str_equal (routes[r].permission, holders[h]);
+      const gchar *body = g_str_has_suffix (routes[r].route, ":append")
+          || g_str_has_suffix (routes[r].route, ":retract")
+          ? "order_id\tamount\no-1\t42\n"
+          : "{\"batch_id\":\"op-perms\",\"operator\":\"admin\","
+          "\"reason\":\"permission probe\"}";
+      guint status = 0;
+      g_autofree gchar *response = NULL;
+      if (send_raw (session, routes[r].method, base_url, routes[r].route,
+          mutation_query, token, body, &status, &response) != 0)
+        return 4604;
+      gboolean denied = status == 403 && response != NULL
+          && strstr (response, "\"fact_denied\"") != NULL;
+      if (own == denied) {
+        g_printerr ("%s on %s: status=%u body=%s\n", holders[h],
+            routes[r].route, status, response != NULL ? response : "(null)");
+        return own ? 4605 : 4606;
+      }
+    }
+  }
   return 0;
 }
 
@@ -3748,6 +3822,9 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
 
   rc = check_rule_pack_http_contract (handle, session, base_url, admin_token,
           deny_token);
+  if (rc != 0)
+    return rc;
+  rc = check_fact_operation_permissions (handle, session, base_url);
   if (rc != 0)
     return rc;
 

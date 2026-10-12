@@ -844,7 +844,6 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.explain", "audit explanation read", "sensitive"},
   {"wr.audit.write", "audit write", "critical"},
   {"wr.graph.manage", "fact graph manage", "critical"},
-  {"wr.fact.write", "fact write", "critical"},
   {"wr.fact.append", "fact append", "critical"},
   {"wr.fact.retract", "fact retract", "critical"},
   {"wr.fact.update", "fact update", "critical"},
@@ -8284,6 +8283,82 @@ seed_builtin_permissions (sqlite3 *db)
   return WYRELOG_E_OK;
 }
 
+/* #1343 retired wr.fact.write and split wr.datalog.query.  Every stored
+ * grant and permission state for wr.fact.write becomes the same grant or
+ * state for each of the five fact operations it covered, and every one for
+ * wr.datalog.query is copied to wr.datalog.infer, so no principal gains or
+ * loses effective authority.  A copied state replaces one already there:
+ * before this runs only the old permission was ever checked, so its state is
+ * the one in force.  The event logs are history and keep the old id.  The
+ * migration runs once per store, recorded under a wyrelog_config key, so a
+ * later change to wr.datalog.infer is never overwritten. */
+#define WYL_OPERATION_PERMISSIONS_MIGRATED_KEY "operation_permissions_split"
+
+static wyrelog_error_t
+migrate_operation_permissions (sqlite3 *db)
+{
+  static const gchar *const marker_sql =
+      "SELECT COUNT(*) FROM wyrelog_config WHERE config_key = '"
+      WYL_OPERATION_PERMISSIONS_MIGRATED_KEY "';";
+#define WYL_OPERATION_PERMISSION_MAP \
+  "WITH m (old_id, new_id) AS (VALUES " \
+  "('wr.fact.write', 'wr.fact.append'), " \
+  "('wr.fact.write', 'wr.fact.retract'), " \
+  "('wr.fact.write', 'wr.fact.update'), " \
+  "('wr.fact.write', 'wr.fact.forget'), " \
+  "('wr.fact.write', 'wr.fact.repair'), " \
+  "('wr.datalog.query', 'wr.datalog.infer')) "
+  static const gchar *const migrate_sql =
+      WYL_OPERATION_PERMISSION_MAP
+      "INSERT OR IGNORE INTO role_permissions "
+      "  (role_id, perm_id, granted_at, granted_by) "
+      "SELECT r.role_id, m.new_id, r.granted_at, r.granted_by "
+      "FROM role_permissions r JOIN m ON r.perm_id = m.old_id;"
+      WYL_OPERATION_PERMISSION_MAP
+      "INSERT OR IGNORE INTO direct_permissions "
+      "  (subject_id, perm_id, scope, granted_at) "
+      "SELECT d.subject_id, m.new_id, d.scope, d.granted_at "
+      "FROM direct_permissions d JOIN m ON d.perm_id = m.old_id;"
+      WYL_OPERATION_PERMISSION_MAP
+      "INSERT OR REPLACE INTO permission_states "
+      "  (subject_id, perm_id, scope, state, updated_at) "
+      "SELECT s.subject_id, m.new_id, s.scope, s.state, s.updated_at "
+      "FROM permission_states s JOIN m ON s.perm_id = m.old_id;"
+      "DELETE FROM role_permissions WHERE perm_id = 'wr.fact.write';"
+      "DELETE FROM direct_permissions WHERE perm_id = 'wr.fact.write';"
+      "DELETE FROM permission_states WHERE perm_id = 'wr.fact.write';"
+      "DELETE FROM permissions WHERE perm_id = 'wr.fact.write';"
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "VALUES ('" WYL_OPERATION_PERMISSIONS_MIGRATED_KEY "', '1', "
+      "  unixepoch());";
+#undef WYL_OPERATION_PERMISSION_MAP
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db, marker_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_step (stmt) != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  gint64 migrated = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  if (migrated != 0)
+    return WYRELOG_E_OK;
+
+  rc = exec_sql (db, "SAVEPOINT wyrelog_operation_permissions;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (db, migrate_sql);
+  if (rc != WYRELOG_E_OK) {
+    if (exec_sql (db, "ROLLBACK TO SAVEPOINT wyrelog_operation_permissions;")
+        != WYRELOG_E_OK)
+      return WYRELOG_E_IO;
+    (void) exec_sql (db, "RELEASE SAVEPOINT wyrelog_operation_permissions;");
+    return rc;
+  }
+  return exec_sql (db, "RELEASE SAVEPOINT wyrelog_operation_permissions;");
+}
+
 static wyrelog_error_t
 seed_builtin_catalog (sqlite3 *db)
 {
@@ -8291,6 +8366,9 @@ seed_builtin_catalog (sqlite3 *db)
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = seed_builtin_permissions (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = migrate_operation_permissions (db);
   if (rc != WYRELOG_E_OK)
     return rc;
   return validate_builtin_catalog (db);

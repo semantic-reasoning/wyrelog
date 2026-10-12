@@ -875,7 +875,7 @@ test_template_artifact_info_reports_identity (void)
       info.latest_migration_version != 0)
     return 142;
   if (g_strcmp0 (info.sha256_hex,
-      "73f0a464562beaf6502716df0827185f742fc68a78b3edbb7257947e1b420129")
+      "b3ed95fa23cd108e4b18c02472d08f83005e90b7186adc7db5d25354aafdec44")
       != 0)
     return 143;
   return 0;

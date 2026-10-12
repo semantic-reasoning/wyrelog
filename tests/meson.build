@@ -3722,7 +3722,8 @@ endif
 test_decide = executable('test-decide',
   'test-decide.c',
   c_args : test_decide_c_args,
-  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep] + (get_option('enable_audit').allowed()
+  dependencies : [wyrelog_handle_test_seams_dep, wirelog_dep, sqlite_dep]
+      + (get_option('enable_audit').allowed()
       ? [duckdb_dep]
       : []),
 )

@@ -2414,7 +2414,6 @@ check_store_seeds_builtin_catalog (void)
     {"wr.audit.write", "critical"},
     {"wr.login.skip_mfa", "critical"},
     {"wr.graph.manage", "critical"},
-    {"wr.fact.write", "critical"},
     {"wr.fact.append", "critical"},
     {"wr.fact.retract", "critical"},
     {"wr.fact.update", "critical"},
