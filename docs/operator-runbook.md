@@ -2910,7 +2910,8 @@ and read the `BOOT` log lines, which name the graph and the reason directly.
 
 This is an offline file-level recovery procedure. For daemon-managed staged
 tenant or graph restore, including the command sequence and response-loss
-recovery rules, see [Offline restore daemon API](offline-restore-daemon-api.md).
+recovery rules, see [Offline restore operator runbook](fact-offline-restore-runbook.md)
+and its [daemon API reference](offline-restore-daemon-api.md).
 
 ## Template Upgrade
 
