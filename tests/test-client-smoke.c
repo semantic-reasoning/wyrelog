@@ -2087,6 +2087,28 @@ main (void)
       || wyl_client_fact_append_result_get_payload_digest (mutation_result)
       != NULL)
     return wyl_test_normalize_exit_status (297);
+  /* #1344: an update posts its op-prefixed rows, unchanged, to :update and
+   * reads the same receipt as put and retract. */
+  g_clear_pointer (&mutation_result, wyl_client_fact_append_result_free);
+  http.status = 200;
+  http.body = "{\"ok\":true,\"inserted\":true,\"batch_id\":\"batch-2\","
+      "\"committed\":true,\"mutation_class\":\"committed_ready\","
+      "\"queryable\":true,\"reconcile\":false,"
+      "\"committed_row_delta\":2,\"logical_byte_delta\":2,"
+      "\"engine_generation\":8}";
+  const guint8 update_payload[] = "op\tvalue\nretract\t1\nassert\t2\n";
+  if (wyl_client_fact_update_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "batch-2", "request-2", update_payload,
+      sizeof update_payload - 1, 123, "public", 49, &mutation_result)
+      != WYRELOG_E_OK
+      || !wyl_client_fact_append_result_get_inserted (mutation_result)
+      || wyl_client_fact_append_result_get_committed_row_delta
+        (mutation_result) != 2)
+    return wyl_test_normalize_exit_status (298);
+  if (g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/facts/__wr_default/orders/orders:update")
+      != 0 || g_strcmp0 (http.last_body, (const gchar *) update_payload) != 0)
+    return wyl_test_normalize_exit_status (299);
   http.status = 200;
 
   /*

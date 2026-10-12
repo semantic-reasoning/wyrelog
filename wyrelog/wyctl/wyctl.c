@@ -2494,7 +2494,8 @@ run_graph_seal (const WyctlOptions *global_opts, gint argc, gchar **argv)
       g_option_context_new ("- seal one graph against further writes");
   g_option_context_add_main_entries (context, entries, NULL);
   g_option_context_set_description (context,
-      "A sealed graph stays queryable but refuses append, retract and forget.\n"
+      "A sealed graph stays queryable but refuses append, retract, update and\n"
+      "forget.\n"
       "The seal cannot be undone.\n"
       "\n"
       "Exit codes:\n"
@@ -2854,12 +2855,28 @@ convert_csv_to_tsv (const gchar *input, gsize size)
   return g_string_free (g_steal_pointer (&out), FALSE);
 }
 
+typedef enum
+{
+  WYCTL_FACT_PUT,
+  WYCTL_FACT_RETRACT,
+  WYCTL_FACT_UPDATE,
+} WyctlFactMutation;
+
+/* fact put, retract and update share their options, input handling and
+ * receipt; they differ in the route, the failure code and the name they
+ * print.  An update's rows carry an op column first (#1344), which the CSV
+ * conversion passes through like any other column. */
 static int
 run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
-    gboolean retract)
+    WyctlFactMutation mutation)
 {
   g_auto (WyctlFactPutOptions) opts = { 0 };
-  const gchar *action = retract ? "fact retract" : "fact put";
+  const gchar *verb = mutation == WYCTL_FACT_RETRACT ? "retract"
+      : mutation == WYCTL_FACT_UPDATE ? "update" : "put";
+  const gchar *fail_code = mutation == WYCTL_FACT_RETRACT
+      ? "fact_retract_failed" : mutation == WYCTL_FACT_UPDATE
+      ? "fact_update_failed" : "fact_append_failed";
+  g_autofree gchar *action = g_strdup_printf ("fact %s", verb);
   GOptionEntry entries[] = {
     {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
@@ -2963,25 +2980,24 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
   if (client_rc != 0)
     return client_rc;
   g_autoptr (WylClientFactAppendResult) result = NULL;
-  wyrelog_error_t rc = retract
-      ? wyl_client_fact_retract_batch (client, tenant, graph, opts.namespace_id,
-          opts.relation, schema_version, opts.batch_id,
-          opts.idempotency_key, (const guint8 *) payload, payload_size,
-          guard_timestamp, opts.guard_loc_class, guard_risk, &result)
-      : wyl_client_fact_put_batch (client, tenant, graph, opts.namespace_id,
-          opts.relation, schema_version, opts.batch_id,
-          opts.idempotency_key, (const guint8 *) payload, payload_size,
-          guard_timestamp, opts.guard_loc_class, guard_risk, &result);
-  int exit_rc = fact_remote_exit (client, action, rc,
-          retract ? "fact_retract_failed" : "fact_append_failed");
+  wyrelog_error_t (*send) (WylClient *, const gchar *, const gchar *,
+      const gchar *, const gchar *, guint32, const gchar *, const gchar *,
+      const guint8 *, gsize, gint64, const gchar *, gint64,
+      WylClientFactAppendResult **) = mutation == WYCTL_FACT_RETRACT
+      ? wyl_client_fact_retract_batch : mutation == WYCTL_FACT_UPDATE
+      ? wyl_client_fact_update_batch : wyl_client_fact_put_batch;
+  wyrelog_error_t rc = send (client, tenant, graph, opts.namespace_id,
+          opts.relation, schema_version, opts.batch_id, opts.idempotency_key,
+          (const guint8 *) payload, payload_size, guard_timestamp,
+          opts.guard_loc_class, guard_risk, &result);
+  int exit_rc = fact_remote_exit (client, action, rc, fail_code);
   /* No answer, a success status with an unread body, or a server error:
    * the batch may have been applied (#1324).  The same test as the policy
    * mutation, graph seal and fact forget hints. */
   if (exit_rc != 0 && wyctl_remote_outcome_unknown (client, rc))
     g_printerr ("wyctl: the %s outcome is unknown; re-running the same "
         "command with the same --batch-id and --idempotency-key is safe, and "
-        "replay=true then means it was applied\n",
-        retract ? "retract" : "put");
+        "replay=true then means it was applied\n", verb);
   if (exit_rc == 0) {
     if (wyl_client_fact_append_result_get_reconcile (result)) {
       g_print ("committed-reconciling operation_id=%s batch_id=%s"
@@ -3007,7 +3023,7 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
         result_operation_id != NULL ? result_operation_id :
         opts.idempotency_key, NULL, TRUE);
       g_print ("action=%s batch_id=%s operation_id=%s replay=%s "
-          "mutation_class=%s effect=unknown\n", retract ? "retract" : "put",
+          "mutation_class=%s effect=unknown\n", verb,
           batch_id, operation_id,
           wyl_client_fact_append_result_get_inserted (result) ? "false" :
           "true", mutation_class != NULL ? mutation_class : "unknown");
@@ -3019,7 +3035,7 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
 static int
 run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  return run_fact_mutation (global_opts, argc, argv, FALSE);
+  return run_fact_mutation (global_opts, argc, argv, WYCTL_FACT_PUT);
 }
 
 static void
@@ -3439,7 +3455,13 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
 static int
 run_fact_retract (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  return run_fact_mutation (global_opts, argc, argv, TRUE);
+  return run_fact_mutation (global_opts, argc, argv, WYCTL_FACT_RETRACT);
+}
+
+static int
+run_fact_update (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  return run_fact_mutation (global_opts, argc, argv, WYCTL_FACT_UPDATE);
 }
 
 /* #1213: registers the rule pack in --file as the graph's next pack version
@@ -4433,6 +4455,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_put (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "retract") == 0)
     return run_fact_retract (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "update") == 0)
+    return run_fact_update (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "forget") == 0)
     return run_fact_forget (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "status") == 0)

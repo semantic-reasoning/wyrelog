@@ -4425,7 +4425,7 @@ assert_fact_mutation_unknown (const gchar *action, guint status,
     "wyctl: the %s outcome is unknown; re-running the same command with the "
     "same --batch-id and --idempotency-key is safe, and replay=true then "
     "means it was applied\n", action,
-    g_strcmp0 (action, "put") == 0 ? "append" : "retract", action);
+    g_strcmp0 (action, "put") == 0 ? "append" : action, action);
   g_assert_true (WIFEXITED (wait_status));
   g_assert_cmpint (WEXITSTATUS (wait_status), ==, 5);
   g_assert_cmpstr (out, ==, "");
@@ -4441,8 +4441,34 @@ test_fact_mutation_times_out (void)
       "{\"error\":\"fact_append_denied\"}", 2000);
   assert_fact_mutation_unknown ("retract", 403,
       "{\"error\":\"fact_retract_denied\"}", 2000);
+  assert_fact_mutation_unknown ("update", 403,
+      "{\"error\":\"fact_update_denied\"}", 2000);
   assert_fact_mutation_unknown ("put", 0, NULL, 0);
   assert_fact_mutation_unknown ("retract", 0, NULL, 0);
+  assert_fact_mutation_unknown ("update", 0, NULL, 0);
+}
+
+/* #1344: wyctl fact update posts to :update and prints the same receipt as
+ * put and retract, naming its own action. */
+static void
+test_fact_update_posts_update_route (void)
+{
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = NULL;
+  run_fact_mutation_case ("update", 200,
+      "{\"ok\":true,\"inserted\":true,\"batch_id\":\"b1\","
+      "\"committed\":true,\"mutation_class\":\"committed_ready\","
+      "\"queryable\":true,\"reconcile\":false}", 0, &wait_status, &out,
+      &err, &request);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_cmpstr (err, ==, "");
+  g_assert_cmpstr (out, ==, "action=update batch_id=b1 operation_id=k1 "
+      "replay=false mutation_class=committed_ready effect=unknown\n");
+  g_assert_nonnull (request);
+  g_assert_true (g_str_has_prefix (request, "POST /facts/t/g/r:update?"));
 }
 
 /*
@@ -6284,6 +6310,8 @@ main (int argc, char **argv)
       test_fact_forget_times_out);
   g_test_add_func ("/wyctl/fact-mutation-times-out",
       test_fact_mutation_times_out);
+  g_test_add_func ("/wyctl/fact-update-posts-update-route",
+      test_fact_update_posts_update_route);
   g_test_add_func ("/wyctl/graph-schema-quota-unknown-outcome",
       test_graph_schema_quota_unknown_outcome);
   g_test_add_func ("/wyctl/service-change-unknown-outcome",
