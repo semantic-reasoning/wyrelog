@@ -845,8 +845,14 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.write", "audit write", "critical"},
   {"wr.graph.manage", "fact graph manage", "critical"},
   {"wr.fact.write", "fact write", "critical"},
+  {"wr.fact.append", "fact append", "critical"},
+  {"wr.fact.retract", "fact retract", "critical"},
+  {"wr.fact.update", "fact update", "critical"},
+  {"wr.fact.forget", "fact forget", "critical"},
+  {"wr.fact.repair", "fact repair", "critical"},
   {"wr.fact.read", "fact read", "sensitive"},
   {"wr.datalog.query", "datalog query", "sensitive"},
+  {"wr.datalog.infer", "datalog infer", "sensitive"},
   {"wr.schema.manage", "fact schema manage", "critical"},
 };
 
