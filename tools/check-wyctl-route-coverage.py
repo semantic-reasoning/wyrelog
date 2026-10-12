@@ -117,7 +117,9 @@ UNSUPPORTED = {
         "with a tenant seal",
 }
 
-PENDING: dict[str, tuple[str, ...]] = {}
+PENDING: dict[str, tuple[str, ...]] = {
+    "/facts/{tenant}/{graph}/{relation}:update": ("fact", "update"),
+}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {

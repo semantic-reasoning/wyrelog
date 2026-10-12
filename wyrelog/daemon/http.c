@@ -12945,15 +12945,25 @@ line_is_fact_header (gchar **fields,
   return TRUE;
 }
 
+/* Parse a fact TSV body into rows.  With |with_op|, the :update body, each
+ * line starts with an op field, "retract" or "assert", and the optional
+ * header names that field "op".  The rows come back with every retract row
+ * first, each set in the order it arrived, and *out_n_retract counts them;
+ * without |with_op| it is always zero. */
 static gboolean
 parse_fact_tsv (const gchar *body,
     const wyl_policy_fact_relation_schema_column_info_t *columns,
-    gsize n_columns, wyl_fact_row_t **out_rows, gsize *out_n_rows)
+    gsize n_columns, gboolean with_op, wyl_fact_row_t **out_rows,
+    gsize *out_n_rows, gsize *out_n_retract)
 {
   *out_rows = NULL;
   *out_n_rows = 0;
+  *out_n_retract = 0;
+  const gsize lead = with_op ? 1 : 0;
   g_auto (GStrv) lines = g_strsplit (body, "\n", -1);
   g_autoptr (GArray) rows = g_array_new (FALSE, TRUE, sizeof (wyl_fact_row_t));
+  g_autoptr (GArray) retracts = g_array_new (FALSE, TRUE,
+          sizeof (wyl_fact_row_t));
   gboolean first_data = TRUE;
 
   for (gsize i = 0; lines[i] != NULL; i++) {
@@ -12962,16 +12972,27 @@ parse_fact_tsv (const gchar *body,
     tsv_strip_crlf (lines[i], lines[i + 1] != NULL);
     if (lines[i][0] == '\0') {
       fact_rows_clear_array (&rows);
+      fact_rows_clear_array (&retracts);
       return FALSE;
     }
-    g_auto (GStrv) fields = g_strsplit (lines[i], "\t", n_columns + 2);
-    if (first_data && line_is_fact_header (fields, columns, n_columns)) {
+    g_auto (GStrv) fields = g_strsplit (lines[i], "\t", n_columns + lead + 2);
+    if (first_data && (!with_op || g_strcmp0 (fields[0], "op") == 0)
+        && line_is_fact_header (fields + lead, columns, n_columns)) {
       first_data = FALSE;
       continue;
     }
     first_data = FALSE;
-    if (g_strv_length (fields) != n_columns) {
+    if (g_strv_length (fields) != n_columns + lead) {
       fact_rows_clear_array (&rows);
+      fact_rows_clear_array (&retracts);
+      return FALSE;
+    }
+    GArray *target = rows;
+    if (with_op && g_strcmp0 (fields[0], "retract") == 0) {
+      target = retracts;
+    } else if (with_op && g_strcmp0 (fields[0], "assert") != 0) {
+      fact_rows_clear_array (&rows);
+      fact_rows_clear_array (&retracts);
       return FALSE;
     }
     wyl_fact_value_t *values = g_new0 (wyl_fact_value_t, n_columns);
@@ -12980,7 +13001,7 @@ parse_fact_tsv (const gchar *body,
       .n_values = n_columns,
     };
     for (gsize j = 0; j < n_columns; j++) {
-      if (!parse_fact_value (fields[j], &columns[j], &values[j])) {
+      if (!parse_fact_value (fields[lead + j], &columns[j], &values[j])) {
         for (gsize k = 0; k < n_columns; k++) {
           if (values[k].type == WYL_FACT_VALUE_SYMBOL ||
               values[k].type == WYL_FACT_VALUE_STRING)
@@ -12988,17 +13009,26 @@ parse_fact_tsv (const gchar *body,
         }
         g_free (values);
         fact_rows_clear_array (&rows);
+        fact_rows_clear_array (&retracts);
         return FALSE;
       }
     }
-    g_array_append_val (rows, row);
+    g_array_append_val (target, row);
   }
-  if (rows->len == 0) {
+  if (rows->len + retracts->len == 0) {
     fact_rows_clear_array (&rows);
+    fact_rows_clear_array (&retracts);
     return FALSE;
   }
-  *out_n_rows = rows->len;
-  *out_rows = (wyl_fact_row_t *) g_array_free (g_steal_pointer (&rows), FALSE);
+  /* The rows move rather than copy: |rows| keeps no ownership of them, so
+   * freeing it below frees only its own buffer. */
+  const gsize n_retract = retracts->len;
+  g_array_append_vals (retracts, rows->data, rows->len);
+  g_array_set_size (rows, 0);
+  *out_n_retract = n_retract;
+  *out_n_rows = retracts->len;
+  *out_rows = (wyl_fact_row_t *) g_array_free (g_steal_pointer (&retracts),
+          FALSE);
   return TRUE;
 }
 
@@ -13513,6 +13543,7 @@ typedef enum
   FACT_HTTP_OP_RETRACT,
   FACT_HTTP_OP_FORGET,
   FACT_HTTP_OP_REPAIR,
+  FACT_HTTP_OP_UPDATE,
 } fact_http_op_t;
 
 #ifdef WYL_HAS_FACT_STORE
@@ -13693,6 +13724,9 @@ parse_fact_op_path (const gchar *path, gchar **out_tenant,
   } else if (g_str_has_suffix (parts[2], ":repair")) {
     op = FACT_HTTP_OP_REPAIR;
     suffix = ":repair";
+  } else if (g_str_has_suffix (parts[2], ":update")) {
+    op = FACT_HTTP_OP_UPDATE;
+    suffix = ":update";
   } else {
     return FALSE;
   }
@@ -13981,8 +14015,8 @@ emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s/%s", tenant, graph,
           namespace_id, relation);
-  const gchar *action = (op == WYL_FACT_STORE_OP_RETRACT) ? "fact_retract" :
-      "fact_append";
+  const gchar *action = op == WYL_FACT_STORE_OP_RETRACT ? "fact_retract"
+      : op == WYL_FACT_STORE_OP_UPDATE ? "fact_update" : "fact_append";
   wyl_audit_event_set_subject_id (ev, actor);
   wyl_audit_event_set_action (ev, action);
   wyl_audit_event_set_resource_id (ev, resource);
@@ -14658,7 +14692,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  /* :forget uses DELETE; :append/:retract/:repair use POST. */
+  /* :forget uses DELETE; :append/:retract/:update/:repair use POST. */
   if (op == FACT_HTTP_OP_FORGET) {
     if (g_strcmp0 (method, "DELETE") != 0) {
       set_json_error (msg, 405, "method_not_allowed");
@@ -14902,7 +14936,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  /* --- :append / :retract branch --- */
+  /* --- :append / :retract / :update branch --- */
   const gchar *namespace_id = lookup_required_query_string (query, "namespace");
   const gchar *batch_id = lookup_required_query_string (query, "batch_id");
   const gchar *idempotency_key = lookup_required_query_string (query,
@@ -14918,8 +14952,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *op_param =
       query != NULL ? g_hash_table_lookup (query, "op") : NULL;
   if (op_param != NULL) {
-    const gchar *expected_op =
-        (op == FACT_HTTP_OP_RETRACT) ? "retract" : "assert";
+    const gchar *expected_op = op == FACT_HTTP_OP_RETRACT ? "retract"
+        : op == FACT_HTTP_OP_UPDATE ? "update" : "assert";
     if (g_strcmp0 (op_param, expected_op) != 0) {
       set_json_error (msg, 400, "invalid_fact_request");
       return;
@@ -14931,15 +14965,15 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonAuthContext) auth_context = { 0 };
   g_autofree gchar *actor = NULL;
   if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
-      op == FACT_HTTP_OP_RETRACT ? "wr.fact.retract" : "wr.fact.append",
+      op == FACT_HTTP_OP_RETRACT ? "wr.fact.retract"
+      : op == FACT_HTTP_OP_UPDATE ? "wr.fact.update" : "wr.fact.append",
       tenant, "fact_auth_required", "invalid_fact_auth",
       "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
       NULL, NULL))
     return;
 
-  const gchar *fail_code =
-      (op == FACT_HTTP_OP_RETRACT) ? "fact_retract_failed" :
-      "fact_append_failed";
+  const gchar *fail_code = op == FACT_HTTP_OP_RETRACT ? "fact_retract_failed"
+      : op == FACT_HTTP_OP_UPDATE ? "fact_update_failed" : "fact_append_failed";
   g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
   wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
         (ctx->handle, tenant, graph, NULL, &replay_admission);
@@ -14996,7 +15030,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
   wyl_fact_row_t *rows = NULL;
   gsize n_rows = 0;
-  if (!parse_fact_tsv (body, loaded, n_loaded, &rows, &n_rows)) {
+  gsize n_retract_rows = 0;
+  if (!parse_fact_tsv (body, loaded, n_loaded, op == FACT_HTTP_OP_UPDATE,
+      &rows, &n_rows, &n_retract_rows)) {
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     set_json_error (msg, 400, "invalid_fact_payload");
@@ -15084,6 +15120,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *request_id = ensure_request_id_header (msg);
   wyl_fact_store_op_t store_op = (op == FACT_HTTP_OP_RETRACT) ?
       WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT;
+  if (op == FACT_HTTP_OP_UPDATE)
+    store_op = WYL_FACT_STORE_OP_UPDATE;
   wyl_fact_store_batch_t batch = {
     .batch_id = batch_id,
     .tenant_id = tenant,
@@ -15097,6 +15135,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .op = store_op,
     .rows = rows,
     .n_rows = n_rows,
+    .n_retract_rows = n_retract_rows,
   };
   g_autofree gchar *payload_digest =
       wyl_fact_store_batch_content_hash (&schema, &batch);

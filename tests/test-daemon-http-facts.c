@@ -238,6 +238,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.schema.manage",
     "wr.fact.append",
     "wr.fact.retract",
+    "wr.fact.update",
     "wr.fact.forget",
     "wr.fact.repair",
     "wr.fact.read",
@@ -1539,6 +1540,224 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
  * route only; every other route refuses it with fact_denied.  The graph does
  * not exist, so a request that is authorized fails later and changes
  * nothing. */
+/* Read the upd graph's store, opened read-only: the first column of every
+ * row |sql| returns, in its order, joined with ','.  |sql| may name the kv
+ * projection as %s.  The rows are joined here because the secure-bridge
+ * build's DuckDB has no core_functions extension, so no string_agg. */
+static gchar *
+update_store_rows (const gchar *root, const gchar *sql_format)
+{
+  WylFactGraphLocator locator = { 0 };
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator,
+      WYL_TENANT_DEFAULT, "upd"), ==, WYRELOG_E_OK);
+  g_autofree gchar *path = wyl_fact_graph_locator_descriptive_path (root,
+          &locator);
+  wyl_fact_graph_locator_clear (&locator);
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "k", "string", FALSE, TRUE }, { "v", "string", FALSE, TRUE }
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "upd",
+    .namespace_id = "shop", .relation_name = "kv", .schema_version = 1,
+    .columns = columns, .n_columns = 2, .relation_visible = TRUE,
+  };
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *sql = g_strdup_printf (sql_format, table);
+  duckdb_config config = NULL;
+  duckdb_database db = NULL;
+  duckdb_connection conn = NULL;
+  g_assert_cmpint (duckdb_create_config (&config), ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_set_config (config, "access_mode", "READ_ONLY"),
+      ==, DuckDBSuccess);
+  g_assert_cmpint (duckdb_open_ext (db_path, &db, config, NULL), ==,
+      DuckDBSuccess);
+  g_assert_cmpint (duckdb_connect (db, &conn), ==, DuckDBSuccess);
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (conn, sql, &result), ==, DuckDBSuccess);
+  GString *joined = g_string_new (NULL);
+  for (idx_t row = 0; row < duckdb_row_count (&result); row++) {
+    gchar *value = duckdb_value_varchar (&result, 0, row);
+    g_assert_nonnull (value);
+    if (row > 0)
+      g_string_append_c (joined, ',');
+    g_string_append (joined, value);
+    duckdb_free (value);
+  }
+  duckdb_destroy_result (&result);
+  duckdb_disconnect (&conn);
+  duckdb_close (&db);
+  duckdb_destroy_config (&config);
+  return g_string_free (joined, FALSE);
+}
+
+/* The kv relation as replay folds it: each (k, v) whose last row is valid,
+ * rendered "k=v,..." sorted. */
+static void
+update_check_state (const gchar *root, const gchar *expected)
+{
+  g_autofree gchar *state = update_store_rows (root,
+          "SELECT k || '=' || v FROM (SELECT k, v, __wyl_valid, row_number() "
+          "OVER (PARTITION BY k, v ORDER BY __wyl_seq DESC, "
+          "__wyl_row_index DESC) AS rn FROM %s) WHERE rn = 1 AND __wyl_valid "
+          "ORDER BY k, v;");
+  g_assert_cmpstr (state, ==, expected);
+}
+
+static void
+update_check_batches (const gchar *root, const gchar *expected)
+{
+  g_autofree gchar *batches = update_store_rows (root,
+          "SELECT batch_id || ':' || op || ':' || CAST(row_count AS VARCHAR) "
+          "FROM fact_batches ORDER BY batch_id;");
+  g_assert_cmpstr (batches, ==, expected);
+}
+
+static gchar *
+update_query (const gchar *batch_id)
+{
+  return g_strdup_printf ("tenant=%s&namespace=shop&schema_version=1&"
+             "batch_id=%s&idempotency_key=%s&%s", WYL_TENANT_DEFAULT, batch_id,
+             batch_id, FACT_GUARD);
+}
+
+#ifdef WYL_HAS_AUDIT
+static guint
+count_update_audit (WylHandle *handle, const gchar *batch_id)
+{
+  LifecycleAuditProbe probe = {
+    .subject_id = "facts-admin",
+    .action = "fact_update",
+    .resource_id = WYL_TENANT_DEFAULT "/upd/shop/kv",
+    .deny_reason = batch_id,
+    .require_allow = TRUE,
+  };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), lifecycle_audit_probe_cb,
+      &probe), ==, WYRELOG_E_OK);
+  return probe.matches;
+}
+#endif
+
+/* #1344: POST /facts/{tenant}/{graph}/{relation}:update retracts and asserts
+ * rows of one relation in one batch.  Each body row starts with an op field,
+ * "retract" or "assert", and an optional header names it "op".  The daemon
+ * orders the retract rows first whatever order they arrive in, so a row in
+ * both sets is present afterwards; the order within each set is kept.
+ *
+ * Both sets are charged to the logical quota, as the two batches they replace
+ * would be: an update the remaining budget cannot hold is refused before the
+ * commit, with nothing changed, even when its asserts alone would fit. */
+static void
+check_fact_update_route (WylHandle *handle, SoupSession *session,
+    const gchar *base_url, const gchar *token, const gchar *root)
+{
+  const gchar *create = "tenant=__wr_default&graph=upd&" FACT_GUARD;
+  tsv_post (session, base_url, token, "/graphs/create", create, "", 0,
+      200, "\"created\":true");
+  const gchar *schema_query = "tenant=__wr_default&graph=upd&namespace=shop&"
+      "relation=kv&schema_version=1&" FACT_GUARD;
+  const gchar *schema = "k\tstring\tfalse\ttrue\nv\tstring\tfalse\ttrue\n";
+  tsv_post (session, base_url, token, "/facts/schema/register", schema_query,
+      schema, strlen (schema), 200, "\"ok\":true");
+  const gchar *append = "/facts/__wr_default/upd/kv:append";
+  const gchar *update = "/facts/__wr_default/upd/kv:update";
+  g_autofree gchar *seed_query = update_query ("seed");
+  const gchar *seed = "k\tv\na\t1\nb\t2\n";
+  tsv_post (session, base_url, token, append, seed_query, seed,
+      strlen (seed), 200, "\"inserted\":true");
+
+  /* The assert arrives first and is still ordered after the retract. */
+  g_autofree gchar *u1_query = update_query ("u1");
+  const gchar *u1 = "op\tk\tv\nassert\ta\t10\nretract\ta\t1\nassert\tc\t3\n";
+  tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
+      200, "\"committed_row_delta\":3");
+  update_check_state (root, "a=10,b=2,c=3");
+  update_check_batches (root, "seed:assert:2,u1:update:3");
+  g_autofree gchar *events = update_store_rows (root,
+          "SELECT op FROM fact_event_log WHERE batch_id = 'u1' ORDER BY seq;");
+  g_assert_cmpstr (events, ==, "retract,assert,assert");
+
+  /* A replay is a no-op; the same keys with other rows are a conflict. */
+  tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
+      200, "\"inserted\":false");
+  const gchar *u1_changed = "op\tk\tv\nretract\ta\t1\nassert\ta\t10\n";
+  tsv_post (session, base_url, token, update, u1_query, u1_changed,
+      strlen (u1_changed), 409, "fact_batch_conflict");
+  update_check_batches (root, "seed:assert:2,u1:update:3");
+#ifdef WYL_HAS_AUDIT
+  /* One record per request that reached the commit: the original and its
+   * replay, not the refused conflict. */
+  g_assert_cmpuint (count_update_audit (handle, "u1"), ==, 2);
+#endif
+
+  /* No header; the same row on both sides stays present. */
+  g_autofree gchar *u2_query = update_query ("u2");
+  const gchar *u2 = "assert\tb\t2\nretract\tb\t2\n";
+  tsv_post (session, base_url, token, update, u2_query, u2, strlen (u2),
+      200, "\"inserted\":true");
+  update_check_state (root, "a=10,b=2,c=3");
+
+  g_autofree gchar *bad_query = update_query ("bad");
+  const gchar *bad_bodies[] = {
+    "upsert\ta\t1\n",           /* an op that is neither */
+    "a\t1\n",                   /* no op field */
+    "op\tk\tv\n",               /* a header and no rows */
+    "assert\ta\n",              /* a row too short */
+    "kind\tk\tv\nassert\ta\t1\n", /* a header whose first field is not op */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_bodies); i++)
+    tsv_post (session, base_url, token, update, bad_query, bad_bodies[i],
+        strlen (bad_bodies[i]), 400, "invalid_fact_payload");
+  g_autofree gchar *op_query = g_strdup_printf ("%s&op=assert", bad_query);
+  tsv_post (session, base_url, token, update, op_query, u2, strlen (u2),
+      400, "invalid_fact_request");
+  update_check_batches (root, "seed:assert:2,u1:update:3,u2:update:2");
+
+  /* Leave room for two more rows: three are refused even though only two
+   * of them assert. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylPolicyFactLogicalQuotaStatus before = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &before), ==, WYRELOG_E_OK);
+  const WylPolicyFactLogicalQuotaConfig tight = {
+    .has_limit = TRUE,
+    .logical_row_limit = before.committed_rows + before.pending_rows + 2,
+    .logical_byte_limit = G_MAXINT64,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &tight), ==, WYRELOG_E_OK);
+  g_autofree gchar *quota_query = update_query ("u-quota");
+  const gchar *over = "retract\tc\t3\nassert\tc\t4\nassert\td\t5\n";
+  tsv_post (session, base_url, token, update, quota_query, over,
+      strlen (over), 429, "fact_quota_exceeded");
+  update_check_state (root, "a=10,b=2,c=3");
+  update_check_batches (root, "seed:assert:2,u1:update:3,u2:update:2");
+  WylPolicyFactLogicalQuotaStatus after = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.committed_rows, ==, before.committed_rows);
+  g_assert_cmpuint (after.pending_rows, ==, before.pending_rows);
+  /* Positive control: the same update within the budget applies. */
+  const WylPolicyFactLogicalQuotaConfig roomy = {
+    .has_limit = TRUE,
+    .logical_row_limit = before.committed_rows + before.pending_rows + 3,
+    .logical_byte_limit = G_MAXINT64,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &roomy), ==, WYRELOG_E_OK);
+  tsv_post (session, base_url, token, update, quota_query, over,
+      strlen (over), 200, "\"inserted\":true");
+  update_check_state (root, "a=10,b=2,c=4,d=5");
+  const WylPolicyFactLogicalQuotaConfig restore = {
+    .has_limit = before.has_limit,
+    .logical_row_limit = before.logical_row_limit,
+    .logical_byte_limit = before.logical_byte_limit,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &restore), ==, WYRELOG_E_OK);
+}
+
 static gint
 check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
     const gchar *base_url)
@@ -1551,6 +1770,7 @@ check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
   } routes[] = {
     {"wr.fact.append", "POST", "/facts/__wr_default/op-perms/rows:append"},
     {"wr.fact.retract", "POST", "/facts/__wr_default/op-perms/rows:retract"},
+    {"wr.fact.update", "POST", "/facts/__wr_default/op-perms/rows:update"},
     {"wr.fact.forget", "DELETE", "/facts/__wr_default/op-perms/rows:forget"},
     {"wr.fact.repair", "POST", "/facts/__wr_default/op-perms/rows:repair"},
   };
@@ -1586,6 +1806,8 @@ check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
       const gchar *body = g_str_has_suffix (routes[r].route, ":append")
           || g_str_has_suffix (routes[r].route, ":retract")
           ? "order_id\tamount\no-1\t42\n"
+          : g_str_has_suffix (routes[r].route, ":update")
+          ? "op\torder_id\tamount\nassert\to-1\t42\n"
           : "{\"batch_id\":\"op-perms\",\"operator\":\"admin\","
           "\"reason\":\"permission probe\"}";
       guint status = 0;
@@ -3827,6 +4049,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   rc = check_fact_operation_permissions (handle, session, base_url);
   if (rc != 0)
     return rc;
+  check_fact_update_route (handle, session, base_url, admin_token, fact_root);
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
