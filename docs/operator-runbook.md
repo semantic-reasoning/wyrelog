@@ -1460,7 +1460,8 @@ wyctl --daemon-url "$BASE_URL" audit query \
   --guard-timestamp "$(date +%s)" \
   --guard-loc-class trusted --guard-risk 29
 
-for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
+for perm in wr.graph.manage wr.schema.manage wr.fact.append wr.fact.retract \
+    wr.datalog.query; do
   wyctl --daemon-url "$BASE_URL" policy permission-transition \
     --subject alice --perm "$perm" --scope "$TENANT" --event grant \
     --access-token-file "$TOKEN" \
@@ -1594,6 +1595,43 @@ or `auth login` first. A quota refusal repeats until the quota is raised with
 `fact quota configure` or usage drops. Then confirm the row with
 `datalog query`.
 
+### Data permissions
+
+Each fact and datalog operation has its own permission, so a principal can be
+given exactly the operations it needs. All of them are control-plane
+permissions: a service principal cannot hold them.
+
+| Permission | Allows |
+|---|---|
+| `wr.fact.read` | `fact verify` |
+| `wr.fact.append` | `fact put` (the `:append` route) |
+| `wr.fact.retract` | `fact retract` (the `:retract` route) |
+| `wr.fact.update` | an atomic retract-and-append; no route uses it yet (#1344) |
+| `wr.fact.forget` | `fact forget` (the `:forget` route), which erases a batch irreversibly |
+| `wr.fact.repair` | the `:repair` route for orphaned rows |
+| `wr.datalog.query` | `datalog query` (`POST /datalog/...`) over stored relations |
+| `wr.datalog.infer` | queries that evaluate rules; no route uses it yet, because rule packs are stored but not evaluated |
+| `wr.schema.manage` | schema and rule-pack registration and schema status |
+
+`wr.system_admin` and `wr.service_admin` hold all of them, `wr.svc_agent` holds
+the five fact mutation permissions, and `wr.analyst` holds `wr.fact.read`,
+`wr.datalog.query` and `wr.datalog.infer`.
+
+`wr.fact.write` and the single `wr.datalog.query` that covered inference are
+gone. The first time an upgraded daemon opens a policy store written before the
+split, it converts the store's grants and permission states once, so no
+principal gains or loses authority:
+
+- each role grant, direct grant or permission state for `wr.fact.write`
+  becomes the same one for `wr.fact.append`, `wr.fact.retract`,
+  `wr.fact.update`, `wr.fact.forget` and `wr.fact.repair`;
+- each one for `wr.datalog.query` is also given for `wr.datalog.infer`.
+
+Arm each permission separately, as in the loop above. The permission event
+history keeps the old `wr.fact.write` entries as they were written. After the
+upgrade, narrow a principal by revoking the permissions it does not need, for
+example `wr.fact.forget` and `wr.fact.repair` for an ingestion account.
+
 ### Erasing a batch
 
 A retract only hides a row behind a tombstone; the batch that wrote the row
@@ -1601,7 +1639,7 @@ stays in the fact store. `wyctl fact forget` erases every row of one committed
 batch, for example to honour an erasure request. It cannot be undone, so it
 requires `--confirm` and a `--tenant` and `--graph` typed on the command line;
 the configured default tenant and graph are never used as its target. The
-caller needs `wr.fact.write` in the tenant.
+caller needs `wr.fact.forget` in the tenant.
 
 ```sh
 wyctl --daemon-url "$BASE_URL" --timeout-ms 30000 fact forget \
@@ -1784,7 +1822,7 @@ completed zero-purge forget intent targeting another projection, and exactly
 one matching forget audit record. Ambiguous history is excluded.
 
 For each affected batch whose actual relation, namespace, and schema version
-are known, use an MFA-assured bearer granted `wr.fact.write` and send
+are known, use an MFA-assured bearer granted `wr.fact.repair` and send
 `POST /facts/<tenant>/<graph>/<actual-relation>:repair` with query parameters
 `tenant`, `namespace=<actual-namespace>`, `schema_version=<actual-version>`,
 and the normal guard context. The JSON body contains `batch_id`, `operator`,
@@ -2599,10 +2637,13 @@ The daemon's error code is printed on stderr for every remote failure.
   direct or inherited `wr.sys.*` administration, policy writes and role
   grants, tenant management or MFA bypass, service/security operations,
   service-principal or credential management, graph/schema/fact writes,
-  reserved-stream writes, and audit writes. Read-only permissions such as
-  `wr.policy.read`, `wr.fact.read`, and `wr.datalog.query` alone do not
-  disqualify an auditor. These boundaries apply across tenants because the
-  audit endpoint returns the whole profile stream. A policy decision uses the
+  reserved-stream writes, and audit writes. Read permissions disqualify an
+  auditor too, for example `wr.policy.read`, `wr.fact.read`,
+  `wr.datalog.query` and `wr.datalog.infer`: an auditor may hold only
+  `wr.audit.read`, `wr.audit.explain` and the data-plane permissions
+  `wr.stream.read`, `wr.stream.list` and `wr.svc.read_decision`. These
+  boundaries apply across tenants because the audit endpoint returns the
+  whole profile stream. A policy decision uses the
   published policy snapshot; a request already authorized may finish if the
   auditor grant is revoked while that request is in flight, while subsequent
   requests use the updated policy.
