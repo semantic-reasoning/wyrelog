@@ -287,6 +287,9 @@ def main():
         "outside-fact-retract-batch-delta": source +
             "\nvoid bad(void){ wyl_fact_store_retract_batch_delta "
             "(NULL, NULL, NULL, NULL, NULL); }\n",
+        "outside-fact-update-batch-delta": source +
+            "\nvoid bad(void){ wyl_fact_store_update_batch_delta "
+            "(NULL, NULL, NULL, NULL, NULL); }\n",
         "outside-create-tenant": source +
             "\nvoid bad(void){ wyl_policy_store_create_tenant "
             "(NULL, NULL, NULL); }\n",
@@ -321,7 +324,7 @@ def main():
         # In-function fixtures pin facts_route_handler's frozen token tree:
         # each is rejected with "token freeze mismatch", so they are freeze
         # canaries rather than semantic assertions about the thing their name
-        # describes.  The three "outside-*" fact fixtures above are the ones
+        # describes.  The four "outside-*" fact fixtures above are the ones
         # that exercise the MUTATORS ownership rule.
         "missing-commit-entry": mutate_function(source, "facts_route_handler",
             "rc = wyl_handle_commit_fact_mutation (ctx->handle",
