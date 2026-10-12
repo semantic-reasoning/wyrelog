@@ -107,6 +107,13 @@ command retains that tuple. Replay `begin` only with the same UUID, scope,
 destination, bundle, and digest. A status result of `PREPARING` means the BEGIN
 was recorded and the next step is `prepare`.
 
+On macOS the daemon admits `dry-run`, `begin`, `status`, and `abort --confirm`
+only. `prepare` and `commit` return `403 restore_refused` and leave the journal
+unchanged until the remaining #1303 work lands. `resume` is refused the same
+way for a tenant restore and reports the unchanged `preparing` state for a
+graph restore. After a macOS `begin` the only forward action is therefore
+`abort --confirm`, which records an `aborted` receipt and releases the claim.
+
 The CLI emits one JSON object or one text line. JSON keys are stable and
 ordered: `operation`, `outcome`, `scope`, `tenant_id`, `graph_id`,
 `operation_uuid`, `revision`, `expected_revision`, `graph_count`,
