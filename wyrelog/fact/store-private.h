@@ -40,6 +40,10 @@ typedef enum
 {
   WYL_FACT_STORE_OP_ASSERT = 0,
   WYL_FACT_STORE_OP_RETRACT,
+  /* Retract the first n_retract_rows rows and assert the rest, in one commit
+   * (#1344).  The retract rows are ordered first, so a row in both sets is
+   * present afterwards. */
+  WYL_FACT_STORE_OP_UPDATE,
 } wyl_fact_store_op_t;
 
 typedef struct
@@ -56,6 +60,9 @@ typedef struct
   wyl_fact_store_op_t op;
   const wyl_fact_row_t *rows;
   gsize n_rows;
+  /* WYL_FACT_STORE_OP_UPDATE only: how many of |rows|, from the first, are
+   * retracted; the rest are asserted.  Must be zero for any other op. */
+  gsize n_retract_rows;
 } wyl_fact_store_batch_t;
 
 /* Compute the authoritative logical payload cost used by fact_batches and
@@ -181,6 +188,19 @@ wyrelog_error_t wyl_fact_store_append_batch_delta (wyl_fact_store_t * store,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
     wyl_fact_commit_delta_t * out_delta);
 wyrelog_error_t wyl_fact_store_retract_batch_delta (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
+    wyl_fact_commit_delta_t * out_delta);
+/* Atomic update (#1344): |batch| must have op WYL_FACT_STORE_OP_UPDATE, and
+ * anything else is WYRELOG_E_INVALID.  One fact_batches row records the
+ * update; each row gets an event carrying its own op.  The delta charges
+ * every row, retract and assert alike, as the two separate batches would.
+ * A retracted row that was never asserted is recorded and removes nothing,
+ * exactly as for a plain retract. */
+wyrelog_error_t wyl_fact_store_update_batch (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_batch_t * batch, gboolean * out_inserted);
+wyrelog_error_t wyl_fact_store_update_batch_delta (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
     wyl_fact_commit_delta_t * out_delta);
