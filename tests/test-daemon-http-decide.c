@@ -19525,7 +19525,10 @@ policy_write_owner_fault_prepare_authority (ServiceDenialEnv *env)
     "wr.tenant.manage",
     "wr.graph.manage",
     "wr.schema.manage",
-    "wr.fact.write",
+    "wr.fact.append",
+    "wr.fact.retract",
+    "wr.fact.forget",
+    "wr.fact.repair",
     "wr.policy.write",
     "wr.policy.grant_role",
   };

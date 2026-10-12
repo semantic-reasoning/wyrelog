@@ -2,6 +2,7 @@
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
@@ -1093,6 +1094,233 @@ check_persistent_permission_state_authority_matrix (void)
   return 0;
 }
 
+/* #1343: a store written before the permission split holds grants and
+ * states for wr.fact.write.  Reopening it must leave every principal with
+ * exactly the authority it had: each of the five fact operations where it
+ * held wr.fact.write armed, wr.datalog.infer where it held wr.datalog.query
+ * armed, and nothing else.  The migration runs once, so a later change to
+ * the new permissions survives the next open. */
+typedef struct
+{
+  const gchar *subject;
+  gboolean fact_ops;
+  gboolean datalog;
+} MigrationExpect;
+
+static gint
+open_migration_handle (const gchar *policy_path, const gchar *audit_path,
+    WylHandle **out_handle)
+{
+  WylHandleOpenOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy_path,
+#ifdef WYL_HAS_AUDIT
+    .audit_store_path = audit_path,
+#endif
+  };
+#ifndef WYL_HAS_AUDIT
+  (void) audit_path;
+#endif
+  return wyl_handle_open_with_options (&opts, out_handle) == WYRELOG_E_OK
+      ? 0 : 1;
+}
+
+static gint
+check_migration_decisions (WylHandle *handle,
+    const MigrationExpect *expect, gsize n_expect)
+{
+  static const gchar *const fact_ops[] = {
+    "wr.fact.append", "wr.fact.retract", "wr.fact.update",
+    "wr.fact.forget", "wr.fact.repair",
+  };
+  static const gchar *const datalog_ops[] = {
+    "wr.datalog.query", "wr.datalog.infer",
+  };
+  for (gsize i = 0; i < n_expect; i++) {
+    for (gsize j = 0; j < G_N_ELEMENTS (fact_ops) + G_N_ELEMENTS (datalog_ops)
+        + 1; j++) {
+      const gchar *perm;
+      gboolean expected;
+      if (j < G_N_ELEMENTS (fact_ops)) {
+        perm = fact_ops[j];
+        expected = expect[i].fact_ops;
+      } else if (j < G_N_ELEMENTS (fact_ops) + G_N_ELEMENTS (datalog_ops)) {
+        perm = datalog_ops[j - G_N_ELEMENTS (fact_ops)];
+        expected = expect[i].datalog;
+      } else {
+        perm = "wr.fact.write";
+        expected = FALSE;
+      }
+      g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+      if (decide_policy_store_fixture (handle, expect[i].subject, perm,
+          "tenant/mig", resp) != WYRELOG_E_OK)
+        return 1;
+      gboolean allowed =
+          wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW;
+      if (allowed != expected) {
+        g_printerr ("%s %s: allowed=%d expected=%d\n", expect[i].subject,
+            perm, allowed, expected);
+        return 2;
+      }
+    }
+  }
+  return 0;
+}
+
+static gint
+check_operation_permission_migration (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyrelog-decide-XXXXXX", &error);
+  if (dir == NULL)
+    return 1901;
+  g_autofree gchar *policy_path = g_build_filename (dir, "policy.sqlite", NULL);
+  g_autoptr (GPtrArray) audit_paths = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < 3; i++) {
+    g_autofree gchar *name = g_strdup_printf ("audit%u.duckdb", i);
+    g_ptr_array_add (audit_paths, g_build_filename (dir, name, NULL));
+  }
+  static const struct
+  {
+    const gchar *subject;
+    const gchar *role;
+  } members[] = {
+    {"mig-admin", "wr.system_admin"},
+    {"mig-analyst", "wr.analyst"},
+    {"mig-direct", NULL},
+    {"mig-dormant", NULL},
+    {"mig-custom", "site.loader"},
+    {"mig-stale", NULL},
+  };
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    if (open_migration_handle (policy_path, audit_paths->pdata[0], &handle) != 0)
+      return 1902;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    if (wyl_policy_store_upsert_role (store, "site.loader", "site loader")
+        != WYRELOG_E_OK
+        || wyl_policy_store_set_session_state (store, "tenant/mig", "active")
+        != WYRELOG_E_OK)
+      return 1903;
+    for (gsize i = 0; i < G_N_ELEMENTS (members); i++) {
+      if (wyl_policy_store_set_principal_state (store, members[i].subject,
+          "authenticated") != WYRELOG_E_OK)
+        return 1904;
+      if (members[i].role != NULL
+          && wyl_policy_store_grant_role_membership (store,
+          members[i].subject, members[i].role, "tenant/mig")
+          != WYRELOG_E_OK)
+        return 1905;
+    }
+  }
+
+  /* Rewrite the store into its shape before the split: the catalogue row,
+   * a custom role, direct grants and states for wr.fact.write, and no
+   * migration marker.  mig-stale also carries a dormant wr.fact.append
+   * state, which the armed wr.fact.write state must replace. */
+  sqlite3 *db = NULL;
+  if (sqlite3_open_v2 (policy_path, &db, SQLITE_OPEN_READWRITE, NULL)
+      != SQLITE_OK) {
+    sqlite3_close (db);
+    return 1906;
+  }
+  int exec_rc = sqlite3_exec (db,
+          "DELETE FROM wyrelog_config "
+          "  WHERE config_key = 'operation_permissions_split';"
+          "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
+          "  VALUES ('wr.fact.write', 'fact write', 'critical', 0);"
+          "INSERT INTO role_permissions (role_id, perm_id, granted_at, "
+          "  granted_by) VALUES ('site.loader', 'wr.fact.write', 0, 'test');"
+          "INSERT INTO direct_permissions (subject_id, perm_id, scope, "
+          "  granted_at) VALUES "
+          "  ('mig-direct', 'wr.fact.write', 'tenant/mig', 0),"
+          "  ('mig-dormant', 'wr.fact.write', 'tenant/mig', 0),"
+          "  ('mig-stale', 'wr.fact.write', 'tenant/mig', 0);"
+          "INSERT INTO permission_states (subject_id, perm_id, scope, state, "
+          "  updated_at) VALUES "
+          "  ('mig-admin', 'wr.fact.write', 'tenant/mig', 'armed', 0),"
+          "  ('mig-admin', 'wr.datalog.query', 'tenant/mig', 'armed', 0),"
+          "  ('mig-analyst', 'wr.datalog.query', 'tenant/mig', 'armed', 0),"
+          "  ('mig-direct', 'wr.fact.write', 'tenant/mig', 'armed', 0),"
+          "  ('mig-dormant', 'wr.fact.write', 'tenant/mig', 'dormant', 0),"
+          "  ('mig-custom', 'wr.fact.write', 'tenant/mig', 'armed', 0),"
+          "  ('mig-stale', 'wr.fact.write', 'tenant/mig', 'armed', 0),"
+          "  ('mig-stale', 'wr.fact.append', 'tenant/mig', 'dormant', 0);",
+          NULL, NULL, NULL);
+  sqlite3_close (db);
+  if (exec_rc != SQLITE_OK)
+    return 1907;
+
+  static const MigrationExpect migrated[] = {
+    {"mig-admin", TRUE, TRUE},
+    {"mig-analyst", FALSE, TRUE},
+    {"mig-direct", TRUE, FALSE},
+    {"mig-dormant", FALSE, FALSE},
+    {"mig-custom", TRUE, FALSE},
+    {"mig-stale", TRUE, FALSE},
+  };
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    if (open_migration_handle (policy_path, audit_paths->pdata[1], &handle) != 0)
+      return 1908;
+    gint rc = check_migration_decisions (handle, migrated,
+            G_N_ELEMENTS (migrated));
+    if (rc != 0)
+      return 1908 + rc;
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    if (wyl_policy_store_set_permission_state (store, "mig-analyst",
+        "wr.datalog.infer", "tenant/mig", "dormant") != WYRELOG_E_OK)
+      return 1911;
+  }
+
+  if (sqlite3_open_v2 (policy_path, &db, SQLITE_OPEN_READONLY, NULL)
+      != SQLITE_OK) {
+    sqlite3_close (db);
+    return 1912;
+  }
+  sqlite3_stmt *stmt = NULL;
+  gint64 leftovers = -1;
+  if (sqlite3_prepare_v2 (db, "SELECT "
+      "  (SELECT COUNT(*) FROM permissions WHERE perm_id = 'wr.fact.write')"
+      "  + (SELECT COUNT(*) FROM role_permissions "
+      "     WHERE perm_id = 'wr.fact.write')"
+      "  + (SELECT COUNT(*) FROM direct_permissions "
+      "     WHERE perm_id = 'wr.fact.write')"
+      "  + (SELECT COUNT(*) FROM permission_states "
+      "     WHERE perm_id = 'wr.fact.write')"
+      "  + 1 - (SELECT COUNT(*) FROM wyrelog_config "
+      "     WHERE config_key = 'operation_permissions_split');", -1, &stmt,
+      NULL) == SQLITE_OK && sqlite3_step (stmt) == SQLITE_ROW)
+    leftovers = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  sqlite3_close (db);
+  if (leftovers != 0)
+    return 1913;
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    if (open_migration_handle (policy_path, audit_paths->pdata[2], &handle) != 0)
+      return 1914;
+    g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "mig-analyst",
+        "wr.datalog.query", "tenant/mig", resp) != WYRELOG_E_OK
+        || wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+      return 1915;
+    g_autoptr (wyl_decide_resp_t) infer_resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "mig-analyst",
+        "wr.datalog.infer", "tenant/mig", infer_resp) != WYRELOG_E_OK
+        || wyl_decide_resp_get_decision (infer_resp) != WYL_DECISION_DENY)
+      return 1916;
+  }
+
+  for (guint i = 0; i < audit_paths->len; i++)
+    g_remove (audit_paths->pdata[i]);
+  g_remove (policy_path);
+  g_rmdir (dir);
+  return 0;
+}
+
 static gint
 check_decide_cleans_guard_facts_after_guarded_deny (void)
 {
@@ -1916,6 +2144,8 @@ main (void)
   if ((rc = check_decide_service_bearer_data_plane_respects_freeze ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_decide_fail_closes_on_perm_state_cleanup_fault ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_operation_permission_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   return wyl_test_normalize_exit_status (0);
 }

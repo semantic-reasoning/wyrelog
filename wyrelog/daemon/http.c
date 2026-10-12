@@ -14690,8 +14690,9 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
     g_autofree gchar *actor = NULL;
     if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
-        "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
-        "fact_denied", "fact_auth_failed", &actor))
+        op == FACT_HTTP_OP_FORGET ? "wr.fact.forget" : "wr.fact.repair",
+        tenant, "fact_auth_required", "invalid_fact_auth", "fact_denied",
+        "fact_auth_failed", &actor))
       return;
     /* Mint one request identity after authorization and before any durable
      * work.  Every branch of this operation, including sealed refusal and the
@@ -14930,7 +14931,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonAuthContext) auth_context = { 0 };
   g_autofree gchar *actor = NULL;
   if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
-      "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
+      op == FACT_HTTP_OP_RETRACT ? "wr.fact.retract" : "wr.fact.append",
+      tenant, "fact_auth_required", "invalid_fact_auth",
       "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
       NULL, NULL))
     return;

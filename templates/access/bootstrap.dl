@@ -135,7 +135,6 @@ permission("wr.audit.write").              // only system_agent
 
 // fact graph family
 permission("wr.graph.manage").
-permission("wr.fact.write").
 permission("wr.fact.append").
 permission("wr.fact.retract").
 permission("wr.fact.update").
@@ -167,7 +166,6 @@ role_permission("wr.system_admin", "wr.policy.grant_role").
 role_permission("wr.system_admin", "wr.tenant.manage").
 role_permission("wr.system_admin", "wr.graph.manage").
 role_permission("wr.system_admin", "wr.schema.manage").
-role_permission("wr.system_admin", "wr.fact.write").
 role_permission("wr.system_admin", "wr.fact.append").
 role_permission("wr.system_admin", "wr.fact.retract").
 role_permission("wr.system_admin", "wr.fact.update").
@@ -209,7 +207,6 @@ role_permission("wr.service_admin", "wr.policy.read").
 role_permission("wr.service_admin", "wr.policy.write").
 role_permission("wr.service_admin", "wr.graph.manage").
 role_permission("wr.service_admin", "wr.schema.manage").
-role_permission("wr.service_admin", "wr.fact.write").
 role_permission("wr.service_admin", "wr.fact.append").
 role_permission("wr.service_admin", "wr.fact.retract").
 role_permission("wr.service_admin", "wr.fact.update").
@@ -225,7 +222,6 @@ role_permission("wr.security_officer", "wr.svc.unfreeze").
 
 role_permission("wr.svc_agent", "wr.stream.read").
 role_permission("wr.svc_agent", "wr.svc.read_decision").
-role_permission("wr.svc_agent", "wr.fact.write").
 role_permission("wr.svc_agent", "wr.fact.append").
 role_permission("wr.svc_agent", "wr.fact.retract").
 role_permission("wr.svc_agent", "wr.fact.update").

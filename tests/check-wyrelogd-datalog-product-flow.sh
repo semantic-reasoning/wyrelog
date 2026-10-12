@@ -637,7 +637,8 @@ case "$before" in
     exit 1
     ;;
 esac
-for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
+for perm in wr.graph.manage wr.schema.manage wr.fact.append wr.fact.retract \
+    wr.datalog.query; do
   arm_permission "$TOKEN_FILE" "$perm"
 done
 after=$(explain_permission "$TOKEN_FILE" wr.graph.manage)

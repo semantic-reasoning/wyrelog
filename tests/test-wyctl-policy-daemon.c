@@ -140,7 +140,9 @@ grant_fact_authority (WylHandle *handle, const gchar *subject)
   static const gchar *const perms[] = {
     "wr.graph.manage",
     "wr.schema.manage",
-    "wr.fact.write",
+    "wr.fact.append",
+    "wr.fact.retract",
+    "wr.fact.forget",
     "wr.fact.read",
     "wr.datalog.query",
   };
