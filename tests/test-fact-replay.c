@@ -5889,6 +5889,236 @@ test_tenant_admission_holds_query_snapshot_until_callback_returns (void)
   remove_tree (root);
 }
 
+/* Commit one batch on order-x through the handle, as the daemon route does.
+ * |n_retract| of |amounts| are retracted first and the rest asserted; with
+ * op ASSERT every amount is asserted. */
+static wyrelog_error_t
+commit_order_x (WylHandle *handle, wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *info, const gchar *batch_id,
+    wyl_fact_store_op_t op, const gint64 *amounts, gsize n_amounts,
+    gsize n_retract)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "orders");
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = wyl_fact_store_open (fact_path, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema ("tenant-a",
+          "orders", columns, G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2][3];
+  wyl_fact_row_t rows[2];
+  g_assert_cmpuint (n_amounts, <=, G_N_ELEMENTS (rows));
+  for (gsize i = 0; i < n_amounts; i++) {
+    values[i][0] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-x"
+    };
+    values[i][1] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_INT64,.as.int64_value = amounts[i]
+    };
+    values[i][2] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE
+    };
+    rows[i] = (wyl_fact_row_t) {
+      values[i], 3
+    };
+  }
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "test",
+    .idempotency_key = batch_id,
+    .op = op,
+    .rows = rows,
+    .n_rows = n_amounts,
+    .n_retract_rows = n_retract,
+  };
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  rc = wyl_handle_commit_fact_mutation (handle, &store, &schema, &batch, info,
+          NULL, &inserted, &outcome);
+  if (rc == WYRELOG_E_OK
+      && (!inserted || outcome.mutation_class
+      != WYL_FACT_MUTATION_COMMITTED_READY))
+    rc = WYRELOG_E_INTERNAL;
+  return rc;
+}
+
+/* Which of order-x's two amounts a snapshot shows: bit 0 for amount 1, bit 1
+ * for amount 2.  Exactly one bit is a whole state; none or both is a torn
+ * one. */
+typedef struct
+{
+  guint amounts;
+  guint rows;
+} OrderXProbe;
+
+static void
+order_x_probe_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  OrderXProbe *probe = user_data;
+  (void) engine;
+  (void) relation;
+  probe->rows++;
+  if (ncols < 2)
+    return;
+  if (row[1] == 1)
+    probe->amounts |= 1u;
+  else if (row[1] == 2)
+    probe->amounts |= 2u;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *policy;
+  const wyl_policy_fact_graph_info_t *info;
+  const gchar *observed;
+  guint updates;
+  volatile gint done;
+  volatile gint writer_failures;
+  volatile gint snapshot_failures;
+  volatile gint torn;
+  volatile gint observations;
+} UpdateRaceCtx;
+
+/* Flip order-x between amount 1 and amount 2, one update per flip. */
+static gpointer
+update_race_writer (gpointer data)
+{
+  UpdateRaceCtx *ctx = data;
+  for (guint i = 0; i < ctx->updates; i++) {
+    const gint64 from = i % 2 == 0 ? 1 : 2;
+    const gint64 amounts[2] = { from, 3 - from };
+    g_autofree gchar *batch_id = g_strdup_printf ("flip-%u", i);
+    if (commit_order_x (ctx->handle, ctx->policy, ctx->info, batch_id,
+        WYL_FACT_STORE_OP_UPDATE, amounts, 2, 1) != WYRELOG_E_OK)
+      g_atomic_int_inc (&ctx->writer_failures);
+  }
+  g_atomic_int_set (&ctx->done, 1);
+  return NULL;
+}
+
+static gpointer
+update_race_reader (gpointer data)
+{
+  UpdateRaceCtx *ctx = data;
+  while (!g_atomic_int_get (&ctx->done)) {
+    OrderXProbe probe = { 0, 0 };
+    if (wyl_handle_snapshot_fact_graph_relation (ctx->handle, "tenant-a",
+        "orders", ctx->observed, order_x_probe_cb, &probe) != WYRELOG_E_OK) {
+      g_atomic_int_inc (&ctx->snapshot_failures);
+      continue;
+    }
+    g_atomic_int_inc (&ctx->observations);
+    /* order-b plus exactly one order-x. */
+    if ((probe.amounts != 1u && probe.amounts != 2u) || probe.rows != 2)
+      g_atomic_int_inc (&ctx->torn);
+  }
+  return NULL;
+}
+
+/* #1344: an update is atomic to readers.  A query concurrent with updates
+ * sees order-x at its old amount or its new one, never neither (the retract
+ * without the assert) and never both (the reverse), and afterwards sees only
+ * the last update's result.
+ *
+ * Readers query the engine generation each commit's refresh publishes.  The
+ * gap the issue describes is between two commits, each refreshed on its own,
+ * which is what a retract followed by an append is: writing the flips that
+ * way makes this test fail.
+ *
+ * There is deliberately no extra refresher thread.  wyl_handle_refresh_fact_
+ * graph called outside the daemon's write serialization contends with the
+ * writer for the store file, and each side then refuses the other at random
+ * -- measured on both sides -- which tests the harness, not the update. */
+static void
+test_commit_fact_mutation_update_is_atomic_to_readers (void)
+{
+  TEST ("an update is atomic to concurrent readers");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-update-race-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_schema (policy, root, "tenant-a", "orders");
+    append_order_batches (policy, root, "tenant-a", "orders");
+  }
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+
+  const gint64 start[1] = { 1 };
+  g_assert_cmpint (commit_order_x (handle, policy, &target.info, "seed-x",
+      WYL_FACT_STORE_OP_ASSERT, start, 1, 0), ==, WYRELOG_E_OK);
+
+  UpdateRaceCtx ctx = {
+    .handle = handle,
+    .policy = policy,
+    .info = &target.info,
+    .observed = observed,
+    .updates = 40,
+  };
+  GThread *reader_a = g_thread_new ("update-reader-a", update_race_reader,
+          &ctx);
+  GThread *reader_b = g_thread_new ("update-reader-b", update_race_reader,
+          &ctx);
+  GThread *writer = g_thread_new ("update-writer", update_race_writer, &ctx);
+  g_thread_join (writer);
+  g_thread_join (reader_a);
+  g_thread_join (reader_b);
+
+  g_assert_cmpint (g_atomic_int_get (&ctx.writer_failures), ==, 0);
+  g_assert_cmpint (g_atomic_int_get (&ctx.snapshot_failures), ==, 0);
+  /* The readers really ran alongside the writer; zero torn reads out of zero
+   * reads would prove nothing. */
+  g_assert_cmpint (g_atomic_int_get (&ctx.observations), >, 0);
+  g_assert_cmpint (g_atomic_int_get (&ctx.torn), ==, 0);
+
+  /* 40 flips from amount 1 end at amount 1, and only there. */
+  OrderXProbe last = { 0, 0 };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, "tenant-a",
+      "orders", observed, order_x_probe_cb, &last), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (last.amounts, ==, 1u);
+  g_assert_cmpuint (last.rows, ==, 2);
+
+  clear_full_graph_info (&target.info);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 /* Issue #546: concurrent single-graph refreshes and queries on the same graph
  * stay race-free -- readers never see a partial generation.  Run under the
  * sanitizer builds this also exercises the runtime manager's generation swap
@@ -6516,6 +6746,8 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_reports_degraded);
   g_test_add_func ("/fact-replay/single-graph-refresh-race",
       test_handle_refresh_fact_graph_races_with_queries);
+  g_test_add_func ("/fact-replay/update-atomic-to-readers",
+      test_commit_fact_mutation_update_is_atomic_to_readers);
   g_test_add_func ("/fact-replay/tenant-admission-query-drain",
       test_tenant_admission_holds_query_snapshot_until_callback_returns);
   g_test_add_func ("/fact-replay/closed-graph-reports-sealed",

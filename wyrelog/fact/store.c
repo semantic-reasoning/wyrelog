@@ -710,6 +710,31 @@ validate_schema_shape (const wyl_policy_fact_relation_schema_options_t *schema)
   return WYRELOG_E_OK;
 }
 
+/* The op a batch records in fact_batches. */
+static const gchar *
+batch_op_name (const wyl_fact_store_batch_t *batch)
+{
+  switch (batch->op) {
+    case WYL_FACT_STORE_OP_RETRACT:
+      return "retract";
+    case WYL_FACT_STORE_OP_UPDATE:
+      return "update";
+    case WYL_FACT_STORE_OP_ASSERT:
+    default:
+      return "assert";
+  }
+}
+
+/* Does row |i| of |batch| retract?  An update retracts its first
+ * n_retract_rows rows and asserts the rest. */
+static gboolean
+batch_row_retracts (const wyl_fact_store_batch_t *batch, gsize i)
+{
+  if (batch->op == WYL_FACT_STORE_OP_UPDATE)
+    return i < batch->n_retract_rows;
+  return batch->op == WYL_FACT_STORE_OP_RETRACT;
+}
+
 static wyrelog_error_t
 validate_batch_shape (const wyl_policy_fact_relation_schema_options_t *schema,
     const wyl_fact_store_batch_t *batch)
@@ -725,7 +750,11 @@ validate_batch_shape (const wyl_policy_fact_relation_schema_options_t *schema,
       || batch->n_rows == 0)
     return WYRELOG_E_INVALID;
   if (batch->op != WYL_FACT_STORE_OP_ASSERT
-      && batch->op != WYL_FACT_STORE_OP_RETRACT)
+      && batch->op != WYL_FACT_STORE_OP_RETRACT
+      && batch->op != WYL_FACT_STORE_OP_UPDATE)
+    return WYRELOG_E_INVALID;
+  if (batch->op == WYL_FACT_STORE_OP_UPDATE
+      ? batch->n_retract_rows > batch->n_rows : batch->n_retract_rows != 0)
     return WYRELOG_E_INVALID;
   if (g_strcmp0 (schema->tenant_id, batch->tenant_id) != 0
       || g_strcmp0 (schema->graph_id, batch->graph_id) != 0
@@ -764,6 +793,15 @@ wyl_fact_store_batch_content_hash
   g_checksum_update (checksum, (const guchar *) &batch->schema_version,
       sizeof (batch->schema_version));
   g_checksum_update (checksum, (const guchar *) &batch->op, sizeof (batch->op));
+  /* Only an update carries the boundary, and only an update hashes it: the
+   * hash of an assert or retract batch is the stored fingerprint of every
+   * batch already committed, so it must not move.  The op bytes above
+   * already keep an update's hash apart from either. */
+  if (batch->op == WYL_FACT_STORE_OP_UPDATE) {
+    guint64 n_retract_rows = batch->n_retract_rows;
+    g_checksum_update (checksum, (const guchar *) &n_retract_rows,
+        sizeof (n_retract_rows));
+  }
   for (gsize i = 0; i < batch->n_rows; i++) {
     for (gsize j = 0; j < schema->n_columns; j++) {
       const wyl_fact_value_t *value = &batch->rows[i].values[j];
@@ -2521,8 +2559,7 @@ existing_batch_matches_unlocked (wyl_fact_store_t *store,
   gchar *key = duckdb_value_varchar (&result, 8, 0);
   gchar *op = duckdb_value_varchar (&result, 9, 0);
   gchar *stored_hash = duckdb_value_varchar (&result, 11, 0);
-  const gchar *expected_op =
-      batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" : "assert";
+  const gchar *expected_op = batch_op_name (batch);
   gboolean matches = g_strcmp0 (batch_id, batch->batch_id) == 0
       && g_strcmp0 (tenant, batch->tenant_id) == 0
       && g_strcmp0 (graph, batch->graph_id) == 0
@@ -2609,8 +2646,7 @@ insert_batch_unlocked (wyl_fact_store_t *store,
       | (batch->request_id != NULL ? duckdb_bind_varchar (stmt, 8,
       batch->request_id) : duckdb_bind_null (stmt, 8))
       | duckdb_bind_varchar (stmt, 9, batch->idempotency_key)
-      | duckdb_bind_varchar (stmt, 10,
-          batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" : "assert")
+      | duckdb_bind_varchar (stmt, 10, batch_op_name (batch))
       | duckdb_bind_int64 (stmt, 11, (gint64) batch->n_rows)
       | duckdb_bind_int64 (stmt, 12, logical_bytes)
       | duckdb_bind_varchar (stmt, 13, content_hash)
@@ -2626,7 +2662,8 @@ insert_batch_unlocked (wyl_fact_store_t *store,
 
 static wyrelog_error_t
 insert_event_unlocked (wyl_fact_store_t *store,
-    const wyl_fact_store_batch_t *batch, gint64 seq, gint64 created_at_us)
+    const wyl_fact_store_batch_t *batch, gboolean retracts, gint64 seq,
+    gint64 created_at_us)
 {
   duckdb_prepared_statement stmt = NULL;
   static const gchar *sql =
@@ -2641,9 +2678,8 @@ insert_event_unlocked (wyl_fact_store_t *store,
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
   }
-  const gchar *op = batch->op == WYL_FACT_STORE_OP_RETRACT ? "retract" :
-      "assert";
-  gboolean valid = batch->op != WYL_FACT_STORE_OP_RETRACT;
+  const gchar *op = retracts ? "retract" : "assert";
+  gboolean valid = !retracts;
   duckdb_state ok = duckdb_bind_int64 (stmt, 1, seq)
       | duckdb_bind_varchar (stmt, 2, batch->batch_id)
       | duckdb_bind_varchar (stmt, 3, batch->tenant_id)
@@ -2998,13 +3034,14 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
       rc = duckdb_append_int64 (appender, (gint64) i) == DuckDBSuccess ?
           WYRELOG_E_OK : WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_bool (appender, batch->op != WYL_FACT_STORE_OP_RETRACT)
+      rc = duckdb_append_bool (appender, !batch_row_retracts (batch, i))
           == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK
         && duckdb_appender_end_row (appender) != DuckDBSuccess)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK)
-      rc = insert_event_unlocked (store, batch, seq, created_at_us);
+      rc = insert_event_unlocked (store, batch, batch_row_retracts (batch, i),
+              seq, created_at_us);
   }
   if (appender != NULL
       && duckdb_appender_destroy (&appender) != DuckDBSuccess
@@ -3073,6 +3110,35 @@ wyl_fact_store_retract_batch_delta (wyl_fact_store_t *store,
           batch_copy, out_inserted, out_delta);
   g_free (batch_copy);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_store_update_batch (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
+{
+  return wyl_fact_store_update_batch_delta (store, schema, batch, out_inserted,
+             NULL);
+}
+
+/* The update shares the append path's one transaction, so its retract and
+ * assert rows commit or roll back together, under the same store lock, fault
+ * seams and idempotency check.  Unlike retract, the op is required rather
+ * than forced: n_retract_rows only means something for an update, and a
+ * batch that does not say it is one is not one. */
+wyrelog_error_t
+wyl_fact_store_update_batch_delta (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted,
+    wyl_fact_commit_delta_t *out_delta)
+{
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  wyl_fact_commit_delta_init (out_delta);
+  if (batch == NULL || batch->op != WYL_FACT_STORE_OP_UPDATE)
+    return WYRELOG_E_INVALID;
+  return wyl_fact_store_append_batch_delta (store, schema, batch, out_inserted,
+             out_delta);
 }
 
 /* Tier-2 retract-by-batch-id: SELECT trigger metadata + valid rows, then
@@ -3479,7 +3545,8 @@ wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
         && duckdb_appender_end_row (appender) != DuckDBSuccess)
       rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK)
-      rc = insert_event_unlocked (store, &batch_meta, seq, created_at_us);
+      rc = insert_event_unlocked (store, &batch_meta, TRUE, seq,
+              created_at_us);
   }
   if (appender != NULL) {
     if (duckdb_appender_destroy (&appender) != DuckDBSuccess

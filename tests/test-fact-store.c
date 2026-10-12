@@ -141,6 +141,10 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   3630-3639
  *       check_fact_store_logical_bytes_convergence_fails_closed_on_widened
  *   3700-3716    check_fact_store_converges_op_check_for_update
+ *   3800         check_fact_store_content_hash_is_stable
+ *   3810-3837    check_fact_store_updates_atomically
+ *   3850-3863    check_fact_store_update_commit_fault
+ *   3870-3876    check_fact_store_update_validation
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -5564,6 +5568,460 @@ check_fact_store_batch_commit_fault (void)
   return 0;
 }
 
+/* The effective state of the order relation in |table|: each (k, v) whose
+ * last row, in the (seq, row_index) order replay folds in, is valid.  Rendered
+ * as "k=v,..." sorted, so one string comparison checks the whole relation. */
+/* Column s of every row |rows| selects, ordered by |order_by| and joined
+ * with ','; "" for none.  The secure-bridge build's DuckDB has no
+ * core_functions extension, so string_agg is not available to do this in
+ * SQL.  |order_by| must be a total order: each row is a separate query. */
+static gboolean
+query_joined (wyl_fact_store_t *store, const gchar *rows,
+    const gchar *order_by, gchar **out_value)
+{
+  g_clear_pointer (out_value, g_free);
+  g_autofree gchar *count_sql = g_strdup_printf (
+    "SELECT COUNT(*) FROM (%s);", rows);
+  gint64 n = -1;
+  if (!count_i64 (store, count_sql, &n) || n < 0)
+    return FALSE;
+  g_autoptr (GString) joined = g_string_new (NULL);
+  for (gint64 i = 0; i < n; i++) {
+    g_autofree gchar *row_sql = g_strdup_printf (
+      "SELECT s FROM (%s) ORDER BY %s LIMIT 1 OFFSET %" G_GINT64_FORMAT ";",
+      rows, order_by, i);
+    g_autofree gchar *value = NULL;
+    if (!query_text (store, row_sql, &value))
+      return FALSE;
+    if (i > 0)
+      g_string_append_c (joined, ',');
+    g_string_append (joined, value);
+  }
+  *out_value = g_string_free (g_steal_pointer (&joined), FALSE);
+  return TRUE;
+}
+
+static gboolean
+effective_order_state (wyl_fact_store_t *store, const gchar *table,
+    gchar **out_state)
+{
+  g_autofree gchar *rows = g_strdup_printf (
+    "SELECT k || '=' || CAST(v AS VARCHAR) AS s, k, v FROM ("
+    "  SELECT k, v, __wyl_valid, row_number() OVER ("
+    "    PARTITION BY k, v ORDER BY __wyl_seq DESC, __wyl_row_index DESC"
+    "  ) AS rn FROM %s) WHERE rn = 1 AND __wyl_valid", table);
+  return query_joined (store, rows, "k, v", out_state);
+}
+
+static void
+set_order_row (wyl_fact_value_t *values, const gchar *k, gint64 v)
+{
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = k;
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = v;
+}
+
+/* The content hash of an assert or a retract batch must not move: it is the
+ * stored idempotency fingerprint of every batch already committed, so a
+ * change to it would turn every client's retry of an old batch into a
+ * conflict.  Pinned as literals computed before #1344.  The hash reads enum
+ * and integer bytes in host order, so these are the little-endian values,
+ * which is every platform the project builds on. */
+static gint
+check_fact_store_content_hash_is_stable (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2][2] = { 0 };
+  set_order_row (values[0], "a", 1);
+  set_order_row (values[1], "b", 2);
+  wyl_fact_row_t rows[2] = { {values[0], 2}, {values[1], 2} };
+  wyl_fact_store_batch_t batch = {
+    .batch_id = "hash-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .idempotency_key = "hash:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 2,
+  };
+  static const gchar *expected_assert =
+      "c393de9bd1836d566ed9c4b8bc3a100eedfe42328f4306928c7f5d8f3731b537";
+  static const gchar *expected_retract =
+      "6d28b21251b1647499f0741004954bfc1abacdb9aca66728c32f5951b09b29bd";
+  g_autofree gchar *assert_hash = wyl_fact_store_batch_content_hash (&schema,
+          &batch);
+  batch.op = WYL_FACT_STORE_OP_RETRACT;
+  g_autofree gchar *retract_hash = wyl_fact_store_batch_content_hash (&schema,
+          &batch);
+  if (g_strcmp0 (assert_hash, expected_assert) != 0
+      || g_strcmp0 (retract_hash, expected_retract) != 0) {
+    g_printerr ("content hash moved: assert=%s retract=%s\n",
+        assert_hash != NULL ? assert_hash : "(null)",
+        retract_hash != NULL ? retract_hash : "(null)");
+    return 3800;
+  }
+  return 0;
+}
+
+/* An update retracts and asserts rows of one relation in one commit (#1344).
+ * One fact_batches row with op 'update' and the combined row count and cost;
+ * one event row per row, carrying that row's own op; and the retract rows
+ * ordered before the assert rows, so a tuple in both sets ends up present.
+ *
+ * The same batch again is a no-op that reports what the original consumed.
+ * The same identifiers with the retract/assert boundary moved, or with the
+ * same rows as a plain assert, are different content and conflict. */
+static gint
+check_fact_store_updates_atomically (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3810;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 3811;
+
+  wyl_fact_value_t seed_values[2][2] = { 0 };
+  set_order_row (seed_values[0], "a", 1);
+  set_order_row (seed_values[1], "b", 2);
+  wyl_fact_row_t seed_rows[2] = { {seed_values[0], 2}, {seed_values[1], 2} };
+  const wyl_fact_store_batch_t seed = {
+    .batch_id = "seed-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:1",
+    .idempotency_key = "seed:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_rows, .n_rows = 2,
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &schema, &seed, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3812;
+
+  /* Retract a=1; assert a=10 and c=3. */
+  wyl_fact_value_t update_values[3][2] = { 0 };
+  set_order_row (update_values[0], "a", 1);
+  set_order_row (update_values[1], "a", 10);
+  set_order_row (update_values[2], "c", 3);
+  wyl_fact_row_t update_rows[3] = {
+    {update_values[0], 2}, {update_values[1], 2}, {update_values[2], 2},
+  };
+  wyl_fact_store_batch_t update = {
+    .batch_id = "update-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "update:1",
+    .idempotency_key = "update:1", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = update_rows, .n_rows = 3, .n_retract_rows = 1,
+  };
+  guint64 expected_bytes = 0;
+  if (wyl_fact_store_batch_logical_bytes (&schema, &update, &expected_bytes)
+      != WYRELOG_E_OK || expected_bytes == 0)
+    return 3813;
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  inserted = FALSE;
+  if (wyl_fact_store_update_batch_delta (store, &schema, &update, &inserted,
+      &delta) != WYRELOG_E_OK)
+    return 3814;
+  /* Both sets are charged: the log grows by every row it records. */
+  if (!inserted || !delta.inserted || delta.committed_row_delta != 3
+      || delta.logical_byte_delta != (gint64) expected_bytes)
+    return 3815;
+
+  g_autofree gchar *state = NULL;
+  if (!effective_order_state (store, table, &state))
+    return 3816;
+  if (g_strcmp0 (state, "a=10,b=2,c=3") != 0)
+    return 3817;
+
+  gint64 count = -1;
+  if (!count_i64 (store,
+      "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'update-1' "
+      "AND op = 'update' AND row_count = 3;", &count) || count != 1)
+    return 3818;
+  /* One event per row with that row's own op, the retract first. */
+  g_autofree gchar *events = NULL;
+  if (!query_joined (store,
+      "SELECT op || ':' || CAST(valid AS VARCHAR) AS s, seq "
+      "FROM fact_event_log WHERE batch_id = 'update-1'", "seq", &events))
+    return 3819;
+  if (g_strcmp0 (events, "retract:false,assert:true,assert:true") != 0)
+    return 3820;
+  g_autofree gchar *projection_sql = g_strdup_printf (
+    "SELECT k || '=' || CAST(v AS VARCHAR) || ':' "
+    "|| CAST(__wyl_valid AS VARCHAR) AS s, __wyl_seq, __wyl_row_index "
+    "FROM %s WHERE __wyl_batch_id = 'update-1'", table);
+  g_autofree gchar *projection = NULL;
+  if (!query_joined (store, projection_sql, "__wyl_seq, __wyl_row_index",
+      &projection))
+    return 3821;
+  if (g_strcmp0 (projection, "a=1:false,a=10:true,c=3:true") != 0)
+    return 3822;
+
+  /* A replay is a no-op that reports the original charge. */
+  wyl_fact_commit_delta_init (&delta);
+  inserted = TRUE;
+  if (wyl_fact_store_update_batch_delta (store, &schema, &update, &inserted,
+      &delta) != WYRELOG_E_OK)
+    return 3823;
+  if (inserted || delta.inserted || delta.committed_row_delta != 3
+      || delta.logical_byte_delta != (gint64) expected_bytes)
+    return 3824;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 5)
+    return 3825;
+
+  /* Same identifiers, same rows, boundary moved: a different update. */
+  update.n_retract_rows = 2;
+  if (wyl_fact_store_update_batch_delta (store, &schema, &update, &inserted,
+      NULL) != WYRELOG_E_POLICY)
+    return 3826;
+  /* Same identifiers and rows as a plain assert: also different content. */
+  update.op = WYL_FACT_STORE_OP_ASSERT;
+  update.n_retract_rows = 0;
+  if (wyl_fact_store_append_batch (store, &schema, &update, &inserted)
+      != WYRELOG_E_POLICY)
+    return 3827;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 5)
+    return 3828;
+
+  /* A tuple in both sets is present afterwards: retract first, then assert. */
+  wyl_fact_value_t same_values[2][2] = { 0 };
+  set_order_row (same_values[0], "b", 2);
+  set_order_row (same_values[1], "b", 2);
+  wyl_fact_row_t same_rows[2] = { {same_values[0], 2}, {same_values[1], 2} };
+  const wyl_fact_store_batch_t same = {
+    .batch_id = "update-2", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "update:2",
+    .idempotency_key = "update:2", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = same_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  if (wyl_fact_store_update_batch (store, &schema, &same, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3829;
+  if (!effective_order_state (store, table, &state))
+    return 3830;
+  if (g_strcmp0 (state, "a=10,b=2,c=3") != 0)
+    return 3831;
+
+  /* Retracting a row that was never asserted is recorded and succeeds, as a
+   * plain retract does (#1027); it removes nothing. */
+  wyl_fact_value_t ghost_values[2][2] = { 0 };
+  set_order_row (ghost_values[0], "zz", 9);
+  set_order_row (ghost_values[1], "d", 4);
+  wyl_fact_row_t ghost_rows[2] = { {ghost_values[0], 2},
+                                   {ghost_values[1], 2}};
+  const wyl_fact_store_batch_t ghost = {
+    .batch_id = "update-3", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "update:3",
+    .idempotency_key = "update:3", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = ghost_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  if (wyl_fact_store_update_batch (store, &schema, &ghost, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3832;
+  if (!effective_order_state (store, table, &state))
+    return 3833;
+  if (g_strcmp0 (state, "a=10,b=2,c=3,d=4") != 0)
+    return 3834;
+
+  /* An update batch is not a trigger for retract-by-batch-id, which
+   * reverses an assert batch's rows; it is refused, not half-applied. */
+  gint64 by_id_rows = -1;
+  if (wyl_fact_store_retract_by_batch_id (store, &schema, "update-1",
+      "retract-update-1", "unit-test", "update:retract", "update:retract",
+      &inserted, &by_id_rows) != WYRELOG_E_POLICY)
+    return 3835;
+  if (!effective_order_state (store, table, &state))
+    return 3836;
+  if (g_strcmp0 (state, "a=10,b=2,c=3,d=4") != 0)
+    return 3837;
+  return 0;
+}
+
+/* An update that fails at or just before its commit leaves nothing: not its
+ * retract rows without its assert rows, nor the reverse.  The relation reads
+ * exactly as before, also after the store is closed and reopened, and the
+ * aborted attempt has not claimed the batch, which then applies once. */
+static gint
+check_fact_store_update_commit_fault (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-update-fault-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3850;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  if (table == NULL)
+    return 3851;
+
+  wyl_fact_value_t seed_values[1][2] = { 0 };
+  set_order_row (seed_values[0], "a", 1);
+  wyl_fact_row_t seed_rows[1] = { {seed_values[0], 2} };
+  const wyl_fact_store_batch_t seed = {
+    .batch_id = "seed-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:1",
+    .idempotency_key = "seed:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_rows, .n_rows = 1,
+  };
+  wyl_fact_value_t update_values[2][2] = { 0 };
+  set_order_row (update_values[0], "a", 1);
+  set_order_row (update_values[1], "a", 2);
+  wyl_fact_row_t update_rows[2] = { {update_values[0], 2},
+                                    {update_values[1], 2}};
+  const wyl_fact_store_batch_t update = {
+    .batch_id = "update-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "update:1",
+    .idempotency_key = "update:1", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = update_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    gboolean inserted = FALSE;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &schema, NULL)
+        != WYRELOG_E_OK)
+      return 3852;
+    if (wyl_fact_store_append_batch (store, &schema, &seed, &inserted)
+        != WYRELOG_E_OK || !inserted)
+      return 3853;
+  }
+
+  const WylFactStoreBatchFault faults[] = {
+    WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT,
+    WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    {
+      g_autoptr (wyl_fact_store_t) store = NULL;
+      if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+          || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+        return 3854;
+      wyl_fact_store_set_batch_fault_once_for_test (store, faults[i]);
+      gboolean inserted = TRUE;
+      wyl_fact_commit_delta_t delta;
+      wyl_fact_commit_delta_init (&delta);
+      if (wyl_fact_store_update_batch_delta (store, &schema, &update,
+          &inserted, &delta) == WYRELOG_E_OK)
+        return 3855;
+      if (inserted || delta.inserted || delta.committed_row_delta != 0)
+        return 3856;
+    }
+    /* Reopened, as after a restart. */
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3857;
+    g_autofree gchar *state = NULL;
+    if (!effective_order_state (store, table, &state)
+        || g_strcmp0 (state, "a=1") != 0)
+      return 3858;
+    gint64 count = -1;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'update-1';",
+        &count) || count != 0)
+      return 3859;
+    if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+        || count != 1)
+      return 3860;
+  }
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3861;
+  if (wyl_fact_store_update_batch (store, &schema, &update, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3862;
+  g_autofree gchar *state = NULL;
+  if (!effective_order_state (store, table, &state)
+      || g_strcmp0 (state, "a=2") != 0)
+    return 3863;
+  return 0;
+}
+
+/* The boundary between the retract and assert rows only means something for
+ * an update: a plain batch that carries one is malformed, as is a boundary
+ * past the last row.  The update entry point refuses anything but an update,
+ * so a caller cannot reach it with a batch whose op says otherwise. */
+static gint
+check_fact_store_update_validation (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3870;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2][2] = { 0 };
+  set_order_row (values[0], "a", 1);
+  set_order_row (values[1], "b", 2);
+  wyl_fact_row_t rows[2] = { {values[0], 2}, {values[1], 2} };
+  wyl_fact_store_batch_t batch = {
+    .batch_id = "valid-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "valid:1",
+    .idempotency_key = "valid:1", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = rows, .n_rows = 2, .n_retract_rows = 3,
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_update_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3871;
+  batch.op = WYL_FACT_STORE_OP_ASSERT;
+  batch.n_retract_rows = 1;
+  if (wyl_fact_store_append_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3872;
+  if (wyl_fact_store_retract_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3873;
+  batch.n_retract_rows = 0;
+  if (wyl_fact_store_update_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3874;
+  gint64 count = -1;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 0)
+    return 3875;
+  /* Positive control: the same batch as an update with a valid boundary
+   * applies, so the refusals above were the boundary and the op. */
+  batch.op = WYL_FACT_STORE_OP_UPDATE;
+  batch.n_retract_rows = 2;
+  if (wyl_fact_store_update_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3876;
+  return 0;
+}
+
+
 /* Issue #546: append/retract report committed resource deltas; an idempotent
  * no-op reports the zero delta. */
 static gint
@@ -6576,6 +7034,18 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_converges_op_check_for_update ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_content_hash_is_stable ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_updates_atomically ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_update_commit_fault ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_update_validation ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_projection_batch_count_validates_scope ();
