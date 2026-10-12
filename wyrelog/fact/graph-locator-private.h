@@ -247,6 +247,18 @@ wyrelog_error_t wyl_fact_graph_resolver_open_directory
 wyrelog_error_t wyl_fact_graph_resolver_open_relative_regular
   (WylFactGraphResolver * resolver, const gchar * relative_path,
     WylFactGraphRegularFile * out_file);
+#ifdef G_OS_WIN32
+/* Open one exact, single-component child of the resolver's root as a regular
+ * file, with the proofs the relative form applies to a path's last component:
+ * reparse denial, regular-ness, a single link, the protected owner-only DACL
+ * and exactly one spelling of the name resolving to the held object.  The
+ * relative form requires a separator, so a flat directory such as an offline
+ * backup bundle has no other way to reach its entries.  Windows only: the
+ * POSIX readers open their children with openat. */
+wyrelog_error_t wyl_fact_graph_resolver_open_child_regular
+  (WylFactGraphResolver * resolver, const gchar * basename,
+    WylFactGraphRegularFile * out_file);
+#endif
 void wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile * file);
 void wyl_fact_graph_directory_clear (WylFactGraphDirectory * directory);
 gchar *wyl_fact_graph_directory_descriptive_path (const WylFactGraphDirectory

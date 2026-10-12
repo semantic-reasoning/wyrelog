@@ -916,6 +916,44 @@ wyl_fact_graph_resolver_open_relative_regular (WylFactGraphResolver *resolver,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t open_relative_regular (HANDLE parent,
+    const gchar *basename, ACCESS_MASK access, gboolean create,
+    gboolean strict_acl, HANDLE *out_handle,
+    WylFactGraphWinIdentity *out_identity);
+
+wyrelog_error_t
+wyl_fact_graph_resolver_open_child_regular (WylFactGraphResolver *resolver,
+    const gchar *basename, WylFactGraphRegularFile *out_file)
+{
+  HANDLE opened = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  FILE_STANDARD_INFO standard = { 0 };
+  if (out_file != NULL)
+    *out_file = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (resolver == NULL || !handle_is_valid (resolver->handle)
+      || resolver->path == NULL || out_file == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular (resolver->handle, basename, GENERIC_READ,
+            FALSE, TRUE, &opened, &identity);
+  if (rc == WYRELOG_E_OK
+      && (!GetFileInformationByHandleEx (opened, FileStandardInfo, &standard,
+      sizeof standard) || standard.EndOfFile.QuadPart < 0))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc != WYRELOG_E_OK) {
+    if (handle_is_valid (opened))
+      CloseHandle (opened);
+    return rc;
+  }
+  out_file->handle = opened;
+  out_file->identity = identity;
+  out_file->size_bytes = (guint64) standard.EndOfFile.QuadPart;
+  return WYRELOG_E_OK;
+}
+
 void
 wyl_fact_graph_directory_clear (WylFactGraphDirectory *directory)
 {

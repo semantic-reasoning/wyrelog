@@ -2466,6 +2466,70 @@ test_provisioned_pair_main_identity (void)
   pre_stage_fixture_clear (&fixture);
 }
 
+/* The single-component form a flat directory needs: absence is reported as
+ * such, everything that is not a plain, owner-only, uniquely spelled regular
+ * file fails closed. */
+static void
+test_resolver_open_child_regular (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphRegularFile file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_autofree gchar *path = g_build_filename (root, "manifest", NULL);
+  g_autofree gchar *target = g_build_filename (root, "target", NULL);
+
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", &file), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (file.handle);
+
+  g_assert_true (create_private_file (path, "manifest-bytes"));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", &file), ==, WYRELOG_E_OK);
+  g_assert_nonnull (file.handle);
+  g_assert_cmpuint (file.size_bytes, ==, strlen ("manifest-bytes"));
+  wyl_fact_graph_regular_file_clear (&file);
+  g_assert_null (file.handle);
+
+  /* A case alias names the same object by another spelling. */
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "MANIFEST", &file), ==, WYRELOG_E_POLICY);
+  g_assert_null (file.handle);
+  /* A separator is a path, not a child. */
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "sub/manifest", &file), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      NULL, &file), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (NULL,
+      "manifest", &file), ==, WYRELOG_E_INVALID);
+  remove_tree_no_follow (path);
+
+  g_assert_true (create_insecure_file (path, "x"));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", &file), ==, WYRELOG_E_POLICY);
+  g_assert_null (file.handle);
+  remove_tree_no_follow (path);
+
+  g_assert_true (create_private_directory (path));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", &file), ==, WYRELOG_E_POLICY);
+  g_assert_null (file.handle);
+  remove_tree_no_follow (path);
+
+  g_assert_true (create_private_directory (target));
+  g_assert_true (create_directory_junction (path, target));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_child_regular (&resolver,
+      "manifest", &file), ==, WYRELOG_E_POLICY);
+  g_assert_null (file.handle);
+  remove_tree_no_follow (path);
+
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2540,6 +2604,8 @@ main (int argc, char **argv)
       test_pre_stage_inventory_hard_link);
   g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-main-identity",
       test_provisioned_pair_main_identity);
+  g_test_add_func ("/fact-graph-locator/windows/resolver-open-child-regular",
+      test_resolver_open_child_regular);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 #endif
