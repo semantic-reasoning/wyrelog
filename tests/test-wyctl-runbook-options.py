@@ -35,6 +35,7 @@ COMMAND_PATHS = {
     ("fact", "quota", "operation-status"): 3,
     ("fact", "put"): 2,
     ("fact", "retract"): 2,
+    ("fact", "update"): 2,
     ("fact", "forget"): 2,
     ("fact", "status"): 2,
     ("fact", "verify"): 2,

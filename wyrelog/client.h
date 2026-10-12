@@ -834,8 +834,8 @@ wyrelog_error_t wyl_client_graph_list (WylClient * client,
     const gchar * tenant, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
     WylClientGraphList * out_graphs);
-/* Seals one graph: it stays queryable but refuses append, retract and forget
- * from then on.  Sealing cannot be undone.  Returns WYRELOG_E_NOT_FOUND for an
+/* Seals one graph: it stays queryable but refuses append, retract, update and
+ * forget from then on.  Sealing cannot be undone.  Returns WYRELOG_E_NOT_FOUND for an
  * unknown graph, WYRELOG_E_BUSY when the daemon could not take the graph in
  * time, and WYRELOG_E_IO when a success answer does not name the requested
  * tenant and graph as sealed. */
@@ -997,6 +997,25 @@ wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
  * uses the append result shape: inserted is TRUE for a new tombstone batch and
  * FALSE for an idempotent replay. */
 wyrelog_error_t wyl_client_fact_retract_batch (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * relation,
+    guint32 schema_version,
+    const gchar * batch_id,
+    const gchar * idempotency_key,
+    const guint8 * tsv_payload,
+    gsize tsv_len,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientFactAppendResult ** out_result);
+/* Retracts and asserts rows of one relation in one batch (#1344).  Each row
+ * of |tsv_payload| starts with an op field, "retract" or "assert", before the
+ * relation's columns, and an optional header names that field "op".  The
+ * daemon applies every retract row before every assert row, so a row in both
+ * sets is present afterwards.  The result uses the append result shape:
+ * inserted is TRUE for a new batch and FALSE for an idempotent replay. */
+wyrelog_error_t wyl_client_fact_update_batch (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
     const gchar * namespace_id,

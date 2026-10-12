@@ -4004,6 +4004,7 @@ typedef enum
 {
   WYL_CLIENT_FACT_MUTATION_APPEND,
   WYL_CLIENT_FACT_MUTATION_RETRACT,
+  WYL_CLIENT_FACT_MUTATION_UPDATE,
 } WylClientFactMutation;
 
 static wyrelog_error_t
@@ -4049,6 +4050,9 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
       break;
     case WYL_CLIENT_FACT_MUTATION_RETRACT:
       operation = "retract";
+      break;
+    case WYL_CLIENT_FACT_MUTATION_UPDATE:
+      operation = "update";
       break;
     default:
       return WYRELOG_E_INVALID;
@@ -4162,6 +4166,20 @@ wyl_client_fact_retract_batch (WylClient *client, const gchar *tenant,
              relation, schema_version, batch_id, idempotency_key, tsv_payload, tsv_len,
              guard_timestamp, guard_loc_class, guard_risk,
              WYL_CLIENT_FACT_MUTATION_RETRACT, out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_update_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id,
+    const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactAppendResult **out_result)
+{
+  return client_fact_mutate_batch (client, tenant, graph, namespace_id,
+             relation, schema_version, batch_id, idempotency_key, tsv_payload,
+             tsv_len, guard_timestamp, guard_loc_class, guard_risk,
+             WYL_CLIENT_FACT_MUTATION_UPDATE, out_result);
 }
 
 wyrelog_error_t

@@ -142,6 +142,7 @@ grant_fact_authority (WylHandle *handle, const gchar *subject)
     "wr.schema.manage",
     "wr.fact.append",
     "wr.fact.retract",
+    "wr.fact.update",
     "wr.fact.forget",
     "wr.fact.read",
     "wr.datalog.query",
@@ -1328,6 +1329,67 @@ main (void)
       "mutation_class=committed_ready effect=unknown\n");
   assert_wyctl_stdout (fact_logical_quota_status_argv,
       "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=3 committed_bytes=33 pending_rows=0 pending_bytes=0\n");
+
+  /* #1344: fact update retracts and asserts in one batch.  The CSV carries
+   * an op column first; the assert is listed before the retract and still
+   * lands after it.  Both rows are charged, 11 bytes each. */
+  gchar *update_input_path = NULL;
+  gint update_fd = g_file_open_tmp ("wyctl-facts-update-XXXXXX",
+          &update_input_path, &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (update_fd, >=, 0);
+  g_assert_true (g_close (update_fd, NULL));
+  g_assert_true (g_file_set_contents (update_input_path,
+      "op,order_id,amount\nassert,o-3,7\nretract,o-2,42\n", -1,
+      &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *update_input_path_autofree = update_input_path;
+  gchar *fact_update_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "update",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "update-1",
+    "--idempotency-key", "update-key-1",
+    "--format", "csv",
+    "--input", update_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_update_argv,
+      "action=update batch_id=update-1 operation_id=update-key-1 "
+      "replay=false mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout_contains (datalog_query_argv,
+      "\"rows\":[{\"O\":\"o-3\",\"A\":7}]");
+  g_assert_cmpint (check_fact_projection_batch_rows (handle, "update-1", 2),
+      ==, 0);
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=5 committed_bytes=55 pending_rows=0 pending_bytes=0\n");
+  assert_wyctl_stdout (fact_update_argv,
+      "action=update batch_id=update-1 operation_id=update-key-1 "
+      "replay=true mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout (fact_logical_quota_status_argv,
+      "tenant=__wr_default dimension=logical_bytes row_limit=10000 byte_limit=100000 committed_rows=5 committed_bytes=55 pending_rows=0 pending_bytes=0\n");
+  /* An update of retracts alone leaves the relation as later steps expect
+   * it: empty. */
+  g_assert_true (g_file_set_contents (update_input_path,
+      "op,order_id,amount\nretract,o-3,7\n", -1, &input_error));
+  g_assert_no_error (input_error);
+  g_assert_cmpstr (fact_update_argv[16], ==, "update-1");
+  g_assert_cmpstr (fact_update_argv[18], ==, "update-key-1");
+  fact_update_argv[16] = "update-2";
+  fact_update_argv[18] = "update-key-2";
+  assert_wyctl_stdout (fact_update_argv,
+      "action=update batch_id=update-2 operation_id=update-key-2 "
+      "replay=false mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
 
   /* #553: a committed-but-reconciling mutation prints the payload digest
    * that completes its operation identity, for put and retract alike. The
