@@ -72,6 +72,8 @@ instead of starting a new operation.
 
 ## `wyctl` workflow
 
+For complete tenant and graph operator walkthroughs, restart and abort recovery, and safe next actions for each CLI exit code, see the [offline restore operator runbook](fact-offline-restore-runbook.md).
+
 `wyctl fact restore` exposes these lifecycle routes. Every command needs the
 daemon URL, an access-token file, and the normal guard values. Obtain the
 64-character manifest digest through a separately trusted channel.
