@@ -1029,7 +1029,7 @@ fact_identity_execute (gpointer context, const gchar *sql,
 
 /* The column lists of fact_batches and fact_event_log, shared by the fresh
  * CREATE TABLE and by the #1103 rebuild that converges a migrated store's
- * logical_bytes to NOT NULL.  One definition each, for the reason given above
+ * fact_batches to the current shape.  One definition each, for the reason given above
  * FACT_FORGET_INTENT_COLUMNS below: a rebuild that restated the columns could
  * silently drop the primary key, the UNIQUE, the op CHECK -- or, for
  * fact_event_log, the foreign key that is the whole reason the rebuild exists.
@@ -1040,6 +1040,11 @@ fact_identity_execute (gpointer context, const gchar *sql,
  * can recover what a committed batch consumed after a restart instead of only
  * from the committing call's return value (#1013).  Distinct from the physical
  * artifact inventory of #622, which measures storage rather than fact payload.
+ * fact_batches.op admits 'update' for a batch that retracts and asserts rows
+ * of one relation in one commit (#1344).  fact_event_log.op does not: each
+ * event row records the one thing it did, so an update batch writes 'retract'
+ * and 'assert' events, never an 'update' one.
+ *
  * The rationale lives here rather than inside the macro so the macro body stays
  * string literals only, the shape the forget boundary test pins. */
 #define FACT_BATCHES_COLUMNS \
@@ -1052,7 +1057,7 @@ fact_identity_execute (gpointer context, const gchar *sql,
   "  source VARCHAR," \
   "  request_id VARCHAR," \
   "  idempotency_key VARCHAR NOT NULL UNIQUE," \
-  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract'))," \
+  "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract', 'update'))," \
   "  row_count BIGINT NOT NULL," \
   "  logical_bytes BIGINT NOT NULL," \
   "  content_hash VARCHAR NOT NULL," \
@@ -1890,12 +1895,15 @@ rename_metadata_value_column_once_unlocked (wyl_fact_store_t *store)
 }
 #endif
 
-/* Has this store's fact_batches.logical_bytes already been converged?
+/* Has this store's fact_batches already been converged to the current shape?
  *
- * Nullability only, by design: it is the one property the fresh DDL and the
- * ALTER-based migration disagree about, and it is the property the rebuild
- * establishes.  A store whose column is already NOT NULL does no work at all
- * here -- not even a BEGIN -- which is what keeps this off the cost of every
+ * Two properties, by design: they are the ones the fresh DDL and an older
+ * store can disagree about, and they are what the rebuild establishes.
+ * logical_bytes must be NOT NULL, which the ALTER-based migration cannot give
+ * it (#1103), and the op CHECK must admit 'update', which a store created
+ * before #1344 refuses.  The CHECK is matched by its text, the only place
+ * DuckDB exposes it.  A store that already has both does no work at all here
+ * -- not even a BEGIN -- which is what keeps this off the cost of every
  * subsequent open.
  *
  * database_name <> 'temp' excludes a same-named temp table, whose schema_name
@@ -1904,7 +1912,7 @@ rename_metadata_value_column_once_unlocked (wyl_fact_store_t *store)
  * hardened configuration the secure DuckDB bridge opens rejects that function,
  * so a probe built on it fails closed on every open of a bridge store. */
 static wyrelog_error_t
-fact_batches_logical_bytes_is_current (wyl_fact_store_t *store,
+fact_batches_shape_is_current (wyl_fact_store_t *store,
     gboolean *out_current)
 {
   *out_current = FALSE;
@@ -1915,7 +1923,14 @@ fact_batches_logical_bytes_is_current (wyl_fact_store_t *store,
       "AND schema_name = 'main' "
       "AND table_name = 'fact_batches' "
       "AND column_name = 'logical_bytes' "
-      "AND NOT is_nullable;";
+      "AND NOT is_nullable "
+      "AND EXISTS (SELECT 1 FROM duckdb_constraints() "
+      "  WHERE database_name <> 'temp' "
+      "  AND schema_name = 'main' "
+      "  AND table_name = 'fact_batches' "
+      "  AND constraint_type = 'CHECK' "
+      "  AND list_contains(constraint_column_names, 'op') "
+      "  AND constraint_text LIKE '%''update''%');";
   if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -1997,8 +2012,10 @@ fact_batches_logical_bytes_blockers (wyl_fact_store_t *store,
   return rc;
 }
 
-/* Converge fact_batches.logical_bytes so a store created before #1013 and one
- * created after it report the same column definition (#1103).
+/* Converge fact_batches so a store created before #1013 and one created after
+ * it report the same logical_bytes definition (#1103), and so a store created
+ * before #1344 admits an 'update' batch.  Both take the same rebuild, so one
+ * pass establishes whichever the store lacks.
  *
  * Fails closed rather than repairing.  A NULL logical_bytes means no writer
  * ever recorded a cost; the -1 the #1013 migration backfills means a cost was
@@ -2013,11 +2030,11 @@ fact_batches_logical_bytes_blockers (wyl_fact_store_t *store,
  * report: a server-side condition an operator has to resolve.  The log line is
  * what names the actual condition. */
 static wyrelog_error_t
-migrate_fact_batches_logical_bytes_unlocked (wyl_fact_store_t *store,
+migrate_fact_batches_shape_unlocked (wyl_fact_store_t *store,
     WylFactStoreConnectionSession *session)
 {
   gboolean current = FALSE;
-  wyrelog_error_t rc = fact_batches_logical_bytes_is_current (store, &current);
+  wyrelog_error_t rc = fact_batches_shape_is_current (store, &current);
   if (rc != WYRELOG_E_OK || current)
     return rc;
 
@@ -2037,8 +2054,8 @@ migrate_fact_batches_logical_bytes_unlocked (wyl_fact_store_t *store,
   if (columns != FACT_BATCHES_COLUMN_COUNT) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
         "fact_batches has %" G_GINT64_FORMAT " columns but the rebuild knows "
-        "%d; refusing to converge logical_bytes (#1103) rather than copy a "
-        "subset.  A migration that added a column must add it to "
+        "%d; refusing to rebuild fact_batches (#1103, #1344) rather than "
+        "copy a subset.  A migration that added a column must add it to "
         "FACT_BATCHES_COLUMNS and FACT_BATCHES_COLUMN_NAMES, and raise "
         "FACT_BATCHES_COLUMN_COUNT, which the macro-consistency gate checks.",
         columns, FACT_BATCHES_COLUMN_COUNT);
@@ -2057,9 +2074,9 @@ migrate_fact_batches_logical_bytes_unlocked (wyl_fact_store_t *store,
   if (orphans > 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
         "fact_event_log holds %" G_GINT64_FORMAT " row(s) referencing a "
-        "batch_id absent from fact_batches; refusing to converge "
-        "fact_batches.logical_bytes (#1103) because recreating the foreign "
-        "key would reject them.  Every open of this store will keep failing "
+        "batch_id absent from fact_batches; refusing to rebuild "
+        "fact_batches (#1103, #1344) because recreating the foreign key "
+        "would reject them.  Every open of this store will keep failing "
         "until an operator resolves those rows.", orphans);
     return WYRELOG_E_INTERNAL;
   }
@@ -2104,12 +2121,12 @@ finish:
    * for nothing else. */
   if (store->health == WYL_FACT_STORE_POISONED)
     WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
-        "fact_batches logical_bytes convergence failed and could not be "
-        "rolled back (#1103); the store is poisoned");
+        "fact_batches convergence failed and could not be rolled back "
+        "(#1103, #1344); the store is poisoned");
   else if (rc != WYRELOG_E_OK)
     WYL_LOG_ERROR (WYL_LOG_SECTION_IO,
-        "fact_batches logical_bytes convergence failed and was rolled back "
-        "(#1103); the store is unchanged");
+        "fact_batches convergence failed and was rolled back (#1103, "
+        "#1344); the store is unchanged");
   return rc;
 }
 
@@ -2195,7 +2212,7 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
               "operator_annotation VARCHAR;"
               /* DuckDB 1.5.5 refuses ADD COLUMN with a constraint, so this
                * step can only add logical_bytes as nullable.
-               * migrate_fact_batches_logical_bytes_unlocked below then
+               * migrate_fact_batches_shape_unlocked below then
                * converges it to NOT NULL by rebuilding both tables, which is
                * the one route the pinned version leaves open (#1103).
                *
@@ -2216,7 +2233,7 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
    * that backfill, so refusing to converge leaves it behaving exactly as it
    * did before rather than below it. */
   if (rc == WYRELOG_E_OK)
-    rc = migrate_fact_batches_logical_bytes_unlocked (store, &session);
+    rc = migrate_fact_batches_shape_unlocked (store, &session);
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   wyl_fact_store_connection_session_end (&session);

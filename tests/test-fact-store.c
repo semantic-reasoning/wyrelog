@@ -140,6 +140,7 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *       check_fact_store_logical_bytes_convergence_fails_closed_on_orphan
  *   3630-3639
  *       check_fact_store_logical_bytes_convergence_fails_closed_on_widened
+ *   3700-3716    check_fact_store_converges_op_check_for_update
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -2661,6 +2662,210 @@ check_fact_store_logical_bytes_convergence_fails_closed_on_null (void)
     if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &batches)
         || batches != 2)
       return 3603;
+  }
+  return 0;
+}
+
+/* Build a store in the pre-#1344 shape at |path| and leave it closed: one
+ * committed batch, its event row, and a fact_batches.op CHECK that admits
+ * only 'assert' and 'retract'.
+ *
+ * DuckDB cannot alter a CHECK in place, so the fixture rebuilds both tables
+ * the way the store's own convergence does, restoring the event log with its
+ * foreign key before the caller opens the store again. */
+static gboolean
+build_pre_update_op_store (const gchar *path,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, schema, NULL)
+      != WYRELOG_E_OK)
+    return FALSE;
+  if (wyl_fact_store_append_batch (store, schema, batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return FALSE;
+  return exec_ok (store,
+             "CREATE TABLE fact_event_log_keep AS SELECT * FROM fact_event_log;"
+             "CREATE TABLE fact_batches_keep AS SELECT * FROM fact_batches;"
+             "DROP TABLE fact_event_log;"
+             "DROP TABLE fact_batches;"
+             "CREATE TABLE fact_batches ("
+             "  batch_id VARCHAR PRIMARY KEY,"
+             "  tenant_id VARCHAR NOT NULL,"
+             "  graph_id VARCHAR NOT NULL,"
+             "  namespace_id VARCHAR NOT NULL,"
+             "  relation_name VARCHAR NOT NULL,"
+             "  schema_version BIGINT NOT NULL,"
+             "  source VARCHAR,"
+             "  request_id VARCHAR,"
+             "  idempotency_key VARCHAR NOT NULL UNIQUE,"
+             "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+             "  row_count BIGINT NOT NULL,"
+             "  logical_bytes BIGINT NOT NULL,"
+             "  content_hash VARCHAR NOT NULL,"
+             "  created_at_us BIGINT NOT NULL);"
+             "INSERT INTO fact_batches SELECT * FROM fact_batches_keep;"
+             "CREATE TABLE fact_event_log ("
+             "  seq BIGINT PRIMARY KEY,"
+             "  batch_id VARCHAR NOT NULL,"
+             "  tenant_id VARCHAR NOT NULL,"
+             "  graph_id VARCHAR NOT NULL,"
+             "  namespace_id VARCHAR NOT NULL,"
+             "  relation_name VARCHAR NOT NULL,"
+             "  schema_version BIGINT NOT NULL,"
+             "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
+             "  created_at_us BIGINT NOT NULL,"
+             "  valid BOOLEAN NOT NULL,"
+             "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id));"
+             "INSERT INTO fact_event_log SELECT * FROM fact_event_log_keep;"
+             "DROP TABLE fact_event_log_keep;"
+             "DROP TABLE fact_batches_keep;");
+}
+
+/* Does fact_batches.op admit |op|?  Every other column is valid and the keys
+ * are fresh, so a refusal can only be the CHECK.  The probe row is removed
+ * again on success. */
+static gboolean
+fact_batches_admits_op (wyl_fact_store_t *store, const gchar *op)
+{
+  g_autofree gchar *insert = g_strdup_printf (
+    "INSERT INTO fact_batches "
+    "(batch_id, tenant_id, graph_id, namespace_id, relation_name, "
+    " schema_version, idempotency_key, op, row_count, logical_bytes, "
+    " content_hash, created_at_us) VALUES ('probe-op', 'tenant-a', "
+    "'orders', 'shop', 'order', 1, 'probe-op-key', '%s', 1, 1, 'h', 1);",
+    op);
+  if (!exec_ok (store, insert))
+    return FALSE;
+  return exec_ok (store,
+             "DELETE FROM fact_batches WHERE batch_id = 'probe-op';");
+}
+
+/* Does fact_event_log.op admit |op| for a row of |batch_id|?  The batch
+ * exists, so the foreign key holds and a refusal can only be the CHECK. */
+static gboolean
+fact_event_log_admits_op (wyl_fact_store_t *store, const gchar *batch_id,
+    const gchar *op)
+{
+  g_autofree gchar *insert = g_strdup_printf (
+    "INSERT INTO fact_event_log (seq, batch_id, tenant_id, graph_id, "
+    "namespace_id, relation_name, schema_version, op, created_at_us, valid) "
+    "VALUES (99999, '%s', 'tenant-a', 'orders', 'shop', 'order', 1, '%s', "
+    "1, true);", batch_id, op);
+  if (!exec_ok (store, insert))
+    return FALSE;
+  return exec_ok (store, "DELETE FROM fact_event_log WHERE seq = 99999;");
+}
+
+/* An update batch is one fact_batches row whose op is 'update' (#1344), while
+ * its event rows keep the per-row 'assert' or 'retract'.  A store created
+ * before that has a CHECK that refuses the batch row, and DuckDB cannot widen
+ * a CHECK in place, so opening the store converges it by the same rebuild
+ * #1103 uses.  The rebuild must carry every batch and event row, keep the
+ * foreign key, and leave the event log's CHECK exactly as narrow as it was.
+ *
+ * The probes are paired: each refusal has a positive control on the same
+ * store, so "refused" cannot be a malformed statement or a key collision. */
+static gint
+check_fact_store_converges_op_check_for_update (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-update-op-XXXXXX", NULL);
+  if (dir == NULL)
+    return 3700;
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+          G_N_ELEMENTS (columns));
+  wyl_fact_value_t values[2] = { 0 };
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = "abcd";
+  values[1].type = WYL_FACT_VALUE_INT64;
+  values[1].as.int64_value = 11;
+  wyl_fact_row_t rows[1] = { {values, 2} };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "update-op-1", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "req-update-op",
+    .idempotency_key = "update-op:1", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows, .n_rows = 1,
+  };
+
+  /* A fresh store admits the batch kind from its first open. */
+  {
+    g_autofree gchar *fresh = g_build_filename (dir, "fresh.duckdb", NULL);
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (fresh, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3701;
+    if (!fact_batches_admits_op (store, "update"))
+      return 3702;
+  }
+
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  if (!build_pre_update_op_store (path, &schema, &batch))
+    return 3703;
+  /* The fixture really is the old shape: without this, every assertion
+   * below also passes on a fixture that failed to narrow the CHECK. */
+  gint64 expected_seq = 0;
+  {
+    g_autoptr (wyl_fact_store_t) probe = NULL;
+    if (wyl_fact_store_open (path, &probe) != WYRELOG_E_OK)
+      return 3704;
+    if (fact_batches_admits_op (probe, "update"))
+      return 3705;
+    if (!fact_batches_admits_op (probe, "retract"))
+      return 3706;
+    if (!count_i64 (probe,
+        "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;", &expected_seq)
+        || expected_seq < 1)
+      return 3707;
+  }
+
+  /* Twice: the second open must find the store already converged. */
+  for (int attempt = 0; attempt < 2; attempt++) {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3708;
+    if (!fact_batches_admits_op (store, "update"))
+      return 3709;
+    /* Event rows stay per-row: an update batch writes 'assert' and
+     * 'retract' events, never an 'update' one. */
+    if (fact_event_log_admits_op (store, "update-op-1", "update"))
+      return 3710;
+    if (!fact_event_log_admits_op (store, "update-op-1", "retract"))
+      return 3711;
+    gint64 batches = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'update-op-1' "
+        "AND op = 'assert' AND row_count = 1 AND logical_bytes > 0;",
+        &batches) || batches != 1)
+      return 3712;
+    gint64 events = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_event_log WHERE batch_id = 'update-op-1';",
+        &events) || events != 1)
+      return 3713;
+    gint64 max_seq = 0;
+    if (!count_i64 (store,
+        "SELECT COALESCE(MAX(seq), 0) FROM fact_event_log;", &max_seq)
+        || max_seq != expected_seq)
+      return 3714;
+    gint64 fks = 0;
+    if (!count_event_log_foreign_keys (store, &fks) || fks != 1)
+      return 3715;
+    gint64 staging = 0;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name IN "
+        "('fact_batches_rebuild', 'fact_event_log_stage');", &staging)
+        || staging != 0)
+      return 3716;
   }
   return 0;
 }
@@ -6368,6 +6573,9 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_logical_bytes_convergence_fails_closed_on_widened ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_converges_op_check_for_update ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_projection_batch_count_validates_scope ();
