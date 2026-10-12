@@ -13,6 +13,7 @@
 #include <wchar.h>
 
 #include "fact/graph-locator-private.h"
+#include "fact/root-writer-lease-private.h"
 
 typedef struct
 {
@@ -1961,6 +1962,510 @@ test_provisioned_pair_pins_ancestor_chain (void)
   remove_tree_no_follow (root);
 }
 
+/* The provider-neutral identity form the restore inventory contracts speak,
+ * built the same way the locator builds it from minted evidence. */
+static WylFactArtifactInventoryIdentity
+inventory_identity_from_evidence (const WylFactGraphWinIdentity *identity)
+{
+  WylFactArtifactInventoryIdentity result = { 0 };
+  result.domain = identity->volume_serial;
+  memcpy (result.object_bytes, identity->file_id, sizeof result.object_bytes);
+  result.object_width = sizeof result.object_bytes;
+  return result;
+}
+
+/* Extended-length paths bypass Win32 normalisation, which is the only way to
+ * plant a trailing-dot spelling beside an allowed name. */
+static gunichar2 *
+extended_wide_path (const gchar *path)
+{
+  g_autofree gchar *prefixed = g_strdup_printf ("\\\\?\\%s", path);
+  gunichar2 *wide = wide_path (prefixed);
+  for (gunichar2 *unit = wide; wide != NULL && *unit != 0; unit++) {
+    if (*unit == '/')
+      *unit = '\\';
+  }
+  return wide;
+}
+
+static gboolean
+create_private_file_extended (const gchar *path)
+{
+  TestSecurity security;
+  g_autofree gunichar2 *wide = extended_wide_path (path);
+  HANDLE handle;
+
+  if (wide == NULL || !test_security_init (&security, 0, TRUE))
+    return FALSE;
+  handle = CreateFileW ((LPCWSTR) wide, GENERIC_READ | GENERIC_WRITE | DELETE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          &security.attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+  test_security_clear (&security);
+  if (handle == INVALID_HANDLE_VALUE)
+    return FALSE;
+  CloseHandle (handle);
+  return TRUE;
+}
+
+static void
+delete_file_extended (const gchar *path)
+{
+  g_autofree gunichar2 *wide = extended_wide_path (path);
+  g_assert_nonnull (wide);
+  g_assert_true (DeleteFileW ((LPCWSTR) wide));
+}
+
+typedef struct
+{
+  gchar *root;
+  gchar *final_path;
+  WylFactGraphLocator locator;
+  WylFactGraphResolver resolver;
+  WylFactGraphDirectory graph;
+  WylFactGraphWinOperationEvidence evidence;
+  WylFactGraphProvisionedPair *pair;
+  WylFactRootWriterLease *lease;
+  WylFactArtifactInventoryIdentity expected_main;
+} PreStageFixture;
+
+/* A published, adopted pair under a live root writer lease: the exact state
+ * the offline restore dry-run observes before any stage exists. */
+static void
+pre_stage_fixture_init (PreStageFixture *fixture, const gchar *operation)
+{
+  memset (fixture, 0, sizeof *fixture);
+  fixture->root = make_root ();
+  fixture->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  fixture->graph = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  provisioned_pair_publish (fixture->root, operation, &fixture->locator,
+      &fixture->resolver, &fixture->graph, &fixture->evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&fixture->graph, operation, &fixture->evidence, &fixture->pair), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture->root,
+      &fixture->lease), ==, WYRELOG_E_OK);
+  fixture->expected_main =
+      inventory_identity_from_evidence (&fixture->evidence.artifact_identity);
+  fixture->final_path = g_build_filename (fixture->root,
+          fixture->locator.tenant_component, fixture->locator.graph_component,
+          "facts.duckdb", NULL);
+}
+
+static void
+pre_stage_fixture_clear (PreStageFixture *fixture)
+{
+  wyl_fact_root_writer_lease_release (fixture->lease);
+  wyl_fact_graph_provisioned_pair_free (fixture->pair);
+  wyl_fact_graph_directory_clear (&fixture->graph);
+  wyl_fact_graph_locator_clear (&fixture->locator);
+  wyl_fact_graph_resolver_clear (&fixture->resolver);
+  remove_tree_no_follow (fixture->root);
+  g_free (fixture->final_path);
+  g_free (fixture->root);
+}
+
+static wyrelog_error_t
+pre_stage_run (PreStageFixture *fixture,
+    WylFactGraphPreStageInventory *out_inventory)
+{
+  return wyl_fact_graph_directory_pre_stage_inventory (&fixture->resolver,
+             &fixture->graph, fixture->lease, fixture->pair,
+             &fixture->expected_main, out_inventory);
+}
+
+static void
+test_pre_stage_inventory_roundtrip (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory first = { 0 };
+  WylFactGraphPreStageInventory second = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070590");
+  g_assert_cmpint (pre_stage_run (&fixture, &first), ==, WYRELOG_E_OK);
+  g_assert_true (first.main_present);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.main_identity, &fixture.expected_main));
+  WylFactArtifactInventoryIdentity graph_identity =
+      inventory_identity_from_evidence (&fixture.evidence.graph_identity);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.observation.directory_identity, &graph_identity));
+  WylFactArtifactInventoryIdentity guard_identity =
+      inventory_identity_from_evidence (&fixture.resolver.identity);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.observation.guard_identity, &guard_identity));
+  g_assert_cmpuint (first.observation.entry_fingerprint, !=, 0);
+
+  /* The observation is a pure function of the directory state. */
+  g_assert_cmpint (pre_stage_run (&fixture, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (second.observation.entry_fingerprint, ==,
+      first.observation.entry_fingerprint);
+
+  /* A mutation that was reverted between two observations still shows: the
+   * directory's own times are part of the fingerprint, as its stat is in the
+   * POSIX digest. */
+  g_autofree gchar *transient =
+      wyl_fact_graph_directory_descriptive_file (&fixture.graph, "transient");
+  g_assert_true (create_private_file (transient, "transient"));
+  remove_tree_no_follow (transient);
+  g_assert_cmpint (pre_stage_run (&fixture, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (second.observation.entry_fingerprint, !=,
+      first.observation.entry_fingerprint);
+  first = second;
+
+  /* The existing lock file is allowed, and it is part of what was seen. */
+  g_autofree gchar *lock = g_strdup_printf ("%s.lock", fixture.final_path);
+  g_assert_true (create_private_file (lock, ""));
+  g_assert_cmpint (pre_stage_run (&fixture, &second), ==, WYRELOG_E_OK);
+  g_assert_true (second.main_present);
+  g_assert_cmpuint (second.observation.entry_fingerprint, !=,
+      first.observation.entry_fingerprint);
+  pre_stage_fixture_clear (&fixture);
+}
+
+/* POSIX pins nlink == 1 on every pinned entry; NumberOfLinks != 1 is the
+ * Windows rejecter, and a second link minted from outside the graph directory
+ * is the only way to exercise it without also being a foreign entry. */
+static void
+test_pre_stage_inventory_hard_link (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070599");
+  g_autofree gchar *outside = g_build_filename (fixture.root, "outside-link",
+          NULL);
+  g_autofree gunichar2 *outside_wide = wide_path (outside);
+  g_autofree gunichar2 *final_wide = wide_path (fixture.final_path);
+  g_assert_nonnull (outside_wide);
+  g_assert_nonnull (final_wide);
+  g_assert_true (CreateHardLinkW ((LPCWSTR) outside_wide,
+      (LPCWSTR) final_wide, NULL));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  g_assert_true (DeleteFileW ((LPCWSTR) outside_wide));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+
+  /* The lock has no pair binding to refuse it first, so a second link to it
+   * is caught only when the listed entry is pinned. */
+  g_autofree gchar *lock = g_strdup_printf ("%s.lock", fixture.final_path);
+  g_autofree gchar *lock_outside = g_build_filename (fixture.root,
+          "outside-lock-link", NULL);
+  g_autofree gunichar2 *lock_wide = wide_path (lock);
+  g_autofree gunichar2 *lock_outside_wide = wide_path (lock_outside);
+  g_assert_nonnull (lock_wide);
+  g_assert_nonnull (lock_outside_wide);
+  g_assert_true (create_private_file (lock, ""));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  g_assert_true (CreateHardLinkW ((LPCWSTR) lock_outside_wide,
+      (LPCWSTR) lock_wide, NULL));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  g_assert_true (DeleteFileW ((LPCWSTR) lock_outside_wide));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_empty_graph (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactRootWriterLease *lease = NULL;
+  WylFactArtifactInventoryIdentity none = { 0 };
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &none, &inventory), ==, WYRELOG_E_OK);
+  g_assert_false (inventory.main_present);
+  g_assert_cmpuint (inventory.observation.entry_fingerprint, !=, 0);
+
+  /* With no pair to refuse it first, a reparse point under the main's name
+   * fails closed on the entries themselves: nothing is adopted, and nothing is
+   * observed. */
+  g_autofree gchar *target = g_build_filename (root, "target", NULL);
+  g_autofree gchar *final =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_assert_true (create_private_directory (target));
+  g_assert_true (create_directory_junction (final, target));
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &none, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (inventory.observation.entry_fingerprint, ==, 0);
+  remove_tree_no_follow (final);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &none, &inventory), ==, WYRELOG_E_OK);
+
+  /* A main nobody vouches for is never adopted. */
+  g_assert_true (create_private_file (final, "stray"));
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory (&resolver,
+      &graph, lease, NULL, &none, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  g_assert_cmpuint (inventory.observation.entry_fingerprint, ==, 0);
+
+  wyl_fact_root_writer_lease_release (lease);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
+static void
+test_pre_stage_inventory_foreign_entry (void)
+{
+  static const gchar *const names[] = {
+    "note.txt", "facts.duckdb.wal", "facts.duckdb.wal.recovery",
+    "stage-01890f47-3c4b-7cc2-b8c4-dc0c0c070591.duckdb",
+  };
+  PreStageFixture fixture;
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070591");
+  for (gsize i = 0; i < G_N_ELEMENTS (names); i++) {
+    WylFactGraphPreStageInventory inventory = { 0 };
+    g_autofree gchar *path =
+        wyl_fact_graph_directory_descriptive_file (&fixture.graph, names[i]);
+    g_assert_true (create_private_file (path, "foreign"));
+    g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==,
+        WYRELOG_E_POLICY);
+    g_assert_false (inventory.main_present);
+    remove_tree_no_follow (path);
+    g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  }
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_reparse_and_directory (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070592");
+  g_autofree gchar *target = g_build_filename (fixture.root, "target", NULL);
+  g_assert_true (create_private_directory (target));
+
+  /* A junction under a foreign name is a foreign entry. */
+  g_autofree gchar *foreign =
+      wyl_fact_graph_directory_descriptive_file (&fixture.graph, "junction");
+  g_assert_true (create_directory_junction (foreign, target));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  remove_tree_no_follow (foreign);
+
+  /* A junction under the lock name is never the lock. */
+  g_autofree gchar *lock = g_strdup_printf ("%s.lock", fixture.final_path);
+  g_assert_true (create_directory_junction (lock, target));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  remove_tree_no_follow (lock);
+
+  /* Nor is a plain directory. */
+  g_assert_true (create_private_directory (lock));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  remove_tree_no_follow (lock);
+
+  /* A junction standing where the main was is the adoption that matters.  The
+   * main is parked outside the graph directory so no foreign entry shares the
+   * blame; the pair binding then fails closed before the entries are read. */
+  g_autofree gchar *aside = g_build_filename (fixture.root, "main-aside", NULL);
+  g_assert_true (move_path (fixture.final_path, aside));
+  g_assert_true (create_directory_junction (fixture.final_path, target));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  remove_tree_no_follow (fixture.final_path);
+  g_assert_true (move_path (aside, fixture.final_path));
+
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_acl (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070593");
+  g_autofree gchar *lock = g_strdup_printf ("%s.lock", fixture.final_path);
+  g_assert_true (create_insecure_file (lock, ""));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  remove_tree_no_follow (lock);
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+
+  unprotect_dacl (fixture.final_path);
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_identity_mismatch (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070594");
+  fixture.expected_main.object_bytes[0] ^= 0x01;
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  fixture.expected_main.object_bytes[0] ^= 0x01;
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  pre_stage_fixture_clear (&fixture);
+}
+
+/* Create and remove a foreign entry inside the observation window: every
+ * per-entry proof passes afterwards, so only the directory witness can see
+ * that the directory changed. */
+static wyrelog_error_t
+transient_entry_checkpoint (const gchar *point, gpointer user_data)
+{
+  ReplacementRace *race = user_data;
+  if (g_strcmp0 (point, race->expected_point) != 0)
+    return WYRELOG_E_OK;
+  g_assert_false (race->fired);
+  race->fired = TRUE;
+  g_assert_true (create_private_file (race->target, "transient"));
+  remove_tree_no_follow (race->target);
+  return WYRELOG_E_OK;
+}
+
+static void
+test_pre_stage_inventory_race (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070595");
+  g_autofree gchar *aside = g_strdup_printf ("%s-raced", fixture.final_path);
+  ReplacementRace race = {
+    .expected_point = "restore-inventory-enumerated",
+    .target = fixture.final_path,
+    .aside = aside,
+  };
+  fixture.graph.checkpoint = replace_file_checkpoint;
+  fixture.graph.checkpoint_data = &race;
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_true (race.fired);
+  g_assert_false (inventory.main_present);
+  fixture.graph.checkpoint = NULL;
+  fixture.graph.checkpoint_data = NULL;
+  restore_replacement (&race);
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+
+  g_autofree gchar *transient =
+      wyl_fact_graph_directory_descriptive_file (&fixture.graph, "transient");
+  ReplacementRace flicker = {
+    .expected_point = "restore-inventory-enumerated",
+    .target = transient,
+  };
+  fixture.graph.checkpoint = transient_entry_checkpoint;
+  fixture.graph.checkpoint_data = &flicker;
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_true (flicker.fired);
+  fixture.graph.checkpoint = NULL;
+  fixture.graph.checkpoint_data = NULL;
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_alias (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070596");
+  g_autofree gchar *lock_alias = g_strdup_printf ("%s.lock.",
+          fixture.final_path);
+  g_assert_true (create_private_file_extended (lock_alias));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  delete_file_extended (lock_alias);
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+
+  /* The alias beside the main is the one whose adoption would matter. */
+  g_autofree gchar *main_alias = g_strdup_printf ("%s.", fixture.final_path);
+  g_assert_true (create_private_file_extended (main_alias));
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_POLICY);
+  g_assert_false (inventory.main_present);
+  delete_file_extended (main_alias);
+  g_assert_cmpint (pre_stage_run (&fixture, &inventory), ==, WYRELOG_E_OK);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_pre_stage_inventory_contract (void)
+{
+  PreStageFixture fixture;
+  WylFactGraphPreStageInventory inventory = { 0 };
+  WylFactArtifactInventoryIdentity none = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070597");
+  inventory.main_present = TRUE;
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, NULL,
+      &fixture.expected_main, &inventory), ==, WYRELOG_E_INVALID);
+  g_assert_false (inventory.main_present);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair, &none,
+      &inventory), ==, WYRELOG_E_INVALID);
+
+  /* Only the sixteen-byte Windows identity form, or no identity, is valid. */
+  WylFactArtifactInventoryIdentity bad = fixture.expected_main;
+  bad.object_width = 8;
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair, &bad,
+      &inventory), ==, WYRELOG_E_INVALID);
+  bad = fixture.expected_main;
+  bad.object = 1;
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair, &bad,
+      &inventory), ==, WYRELOG_E_INVALID);
+  bad = none;
+  bad.domain = 1;
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, NULL, &bad,
+      &inventory), ==, WYRELOG_E_INVALID);
+
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, NULL, fixture.pair,
+      &fixture.expected_main, &inventory), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (NULL, &fixture.graph, fixture.lease, fixture.pair,
+      &fixture.expected_main, &inventory), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_directory_pre_stage_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      &fixture.expected_main, NULL), ==, WYRELOG_E_INVALID);
+  pre_stage_fixture_clear (&fixture);
+}
+
+static void
+test_provisioned_pair_main_identity (void)
+{
+  PreStageFixture fixture;
+  WylFactArtifactInventoryIdentity identity = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c070598");
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_main_identity (fixture.pair,
+      &identity), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&identity,
+      &fixture.expected_main));
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_main_identity (NULL,
+      &identity), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_main_identity (fixture.pair,
+      NULL), ==, WYRELOG_E_INVALID);
+
+  /* A pair that no longer revalidates names no identity at all. */
+  unprotect_dacl (fixture.final_path);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_main_identity (fixture.pair,
+      &identity), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (identity.object_width, ==, 0);
+  g_assert_cmpuint (identity.domain, ==, 0);
+  pre_stage_fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2013,6 +2518,28 @@ main (int argc, char **argv)
       test_provisioned_pair_revalidation_differential);
   g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-ancestor-pin",
       test_provisioned_pair_pins_ancestor_chain);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-roundtrip",
+      test_pre_stage_inventory_roundtrip);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-empty",
+      test_pre_stage_inventory_empty_graph);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-foreign",
+      test_pre_stage_inventory_foreign_entry);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-reparse",
+      test_pre_stage_inventory_reparse_and_directory);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-acl",
+      test_pre_stage_inventory_acl);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-identity",
+      test_pre_stage_inventory_identity_mismatch);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-race",
+      test_pre_stage_inventory_race);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-alias",
+      test_pre_stage_inventory_alias);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-contract",
+      test_pre_stage_inventory_contract);
+  g_test_add_func ("/fact-graph-locator/windows/pre-stage-inventory-hard-link",
+      test_pre_stage_inventory_hard_link);
+  g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-main-identity",
+      test_provisioned_pair_main_identity);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 #endif

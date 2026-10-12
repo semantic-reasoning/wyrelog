@@ -19,35 +19,6 @@
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
 
 wyrelog_error_t
-wyl_fact_graph_directory_pre_stage_inventory
-  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
-    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
-    const WylFactArtifactInventoryIdentity *expected_main,
-    WylFactGraphPreStageInventory *out_inventory)
-{
-  if (out_inventory != NULL)
-    memset (out_inventory, 0, sizeof *out_inventory);
-  if (resolver == NULL || directory == NULL || lease == NULL
-      || expected_main == NULL || out_inventory == NULL)
-    return WYRELOG_E_INVALID;
-  (void) pair;
-  /* The exact durable ACTIVE pair evidence is not available on Windows. */
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_graph_provisioned_pair_main_identity
-  (WylFactGraphProvisionedPair *pair,
-    WylFactArtifactInventoryIdentity *out_identity)
-{
-  if (out_identity != NULL)
-    memset (out_identity, 0, sizeof *out_identity);
-  if (pair == NULL || out_identity == NULL)
-    return WYRELOG_E_INVALID;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
 wyl_fact_graph_directory_restore_inventory
   (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
     WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
@@ -1682,8 +1653,9 @@ wyl_fact_graph_directory_open_provisioned_final_exact
 /* The name-only form.  An operation UUID derives a name, and a name is not
  * provenance on Windows, so this fails closed here.  The callable form is
  * wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence below.
- * Once the evidence tuple has a durable home (#816) this becomes a thin
- * wrapper that loads it and calls that form. */
+ * The evidence tuple's durable home is the ACTIVE provisioning record (#816);
+ * callers load it from there and call that form, because the locator has no
+ * policy-store access and so can never become a wrapper around it. */
 wyrelog_error_t
 wyl_fact_graph_directory_open_provisioned_pair_exact
   (WylFactGraphDirectory * directory, const gchar * operation_uuid,
@@ -1757,7 +1729,7 @@ provisioned_pair_directory_clone (WylFactGraphDirectory *source,
  * Within one process the live half cannot fire: a process token's user SID is
  * immutable for the process lifetime, and named_regular_bound_check already
  * validates the same DACL against that live SID.  The pinned half is what
- * matters at the boundary #816 introduces, where a pair is rebuilt from a
+ * matters at the boundary #816 introduced, where a pair is rebuilt from a
  * durable record and the identity that minted it is no longer implied by the
  * caller.  Neither half catches an impersonating thread; that would need
  * OpenThreadToken rather than OpenProcessToken. */
@@ -2591,5 +2563,445 @@ wyl_fact_graph_stage_clear (WylFactGraphStage *stage)
   g_free (stage->stage_basename);
   g_free (stage->final_basename);
   *stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+}
+
+/* Pre-stage restore inventory.
+ *
+ * POSIX pins the companion hard link and nlink == 2.  Windows publishes by
+ * rename, so the final is at NumberOfLinks == 1 by construction and the
+ * provisioned pair's operation evidence is the substitute witness.  What this
+ * provider proves is therefore: the writer lease authorizes this resolver, the
+ * held pair still binds this graph directory and names the expected main, the
+ * graph directory holds nothing but that main and the optional lock -- a
+ * stage, rollback, WAL sidecar, foreign entry, reparse point, directory or
+ * alias-equivalent spelling fails closed -- and that none of it changed while
+ * it was being observed.
+ *
+ * Alternate data streams are invisible to directory enumeration here as to
+ * every Windows enumeration.  They cannot be adopted as the main, because
+ * DuckDB opens the unnamed stream, so they are a documented residual rather
+ * than an opening.
+ *
+ * The enumeration is written here rather than borrowed from the artifact
+ * layer's inventory scan: that header already includes this one, so the edge
+ * would be a cycle, and POSIX enumerates in the locator too. */
+
+typedef struct
+{
+  const WCHAR *wide;
+  gsize units;
+  const gchar *utf8;
+} PreStageEntry;
+
+enum
+{
+  PRE_STAGE_SLOT_MAIN = 0,
+  PRE_STAGE_SLOT_LOCK,
+  PRE_STAGE_SLOT_COUNT
+};
+
+/* POSIX caps the scan at six entries including the dot entries. */
+#define PRE_STAGE_MAX_ENTRIES 4
+
+static const PreStageEntry pre_stage_entries[PRE_STAGE_SLOT_COUNT] = {
+  { L"facts.duckdb", 12, "facts.duckdb" },
+  { L"facts.duckdb.lock", 17, "facts.duckdb.lock" },
+};
+
+typedef struct
+{
+  gboolean listed;
+  guint8 listed_file_id[16];
+  guint64 listed_size;
+  HANDLE handle;
+  WylFactGraphWinIdentity identity;
+} PreStageSlot;
+
+typedef struct
+{
+  LARGE_INTEGER change_time;
+  LARGE_INTEGER write_time;
+} PreStageDirectoryWitness;
+
+static WylFactArtifactInventoryIdentity
+inventory_identity_from_win (const WylFactGraphWinIdentity *identity)
+{
+  WylFactArtifactInventoryIdentity result = { 0 };
+  result.domain = identity->volume_serial;
+  memcpy (result.object_bytes, identity->file_id, sizeof result.object_bytes);
+  result.object_width = sizeof result.object_bytes;
+  return result;
+}
+
+/* The Windows form of restore_inventory_identity_valid: object stays zero and
+ * the FileId occupies all sixteen bytes, or everything is zero for an absent
+ * main.  No provider publishes a partial width. */
+static gboolean
+inventory_identity_win_form (const WylFactArtifactInventoryIdentity *identity,
+    gboolean *out_present)
+{
+  static const guint8 zero[16] = { 0 };
+  *out_present = FALSE;
+  if (identity->object != 0)
+    return FALSE;
+  if (identity->object_width == 0)
+    return identity->domain == 0
+           && memcmp (identity->object_bytes, zero, sizeof zero) == 0;
+  if (identity->object_width != sizeof zero)
+    return FALSE;
+  *out_present = TRUE;
+  return TRUE;
+}
+
+static WylFactGraphWinIdentity
+win_identity_from_inventory (const WylFactArtifactInventoryIdentity *identity)
+{
+  WylFactGraphWinIdentity result = { 0 };
+  result.volume_serial = identity->domain;
+  memcpy (result.file_id, identity->object_bytes, sizeof result.file_id);
+  return result;
+}
+
+/* The POSIX restore_inventory_authority.  It runs before and after the
+ * enumeration so a substitution cannot straddle the observation window. */
+static wyrelog_error_t
+pre_stage_authority (WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *directory, WylFactRootWriterLease *lease,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactGraphWinIdentity *main_identity)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+          resolver);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!identity_equal (&directory->root_identity, &resolver->identity))
+    return WYRELOG_E_POLICY;
+  rc = directory_revalidate (directory);
+  if (rc != WYRELOG_E_OK || pair == NULL)
+    return rc;
+  if (!identity_equal (&pair->directory.root_identity,
+      &directory->root_identity)
+      || !identity_equal (&pair->directory.tenant_identity,
+      &directory->tenant_identity)
+      || !identity_equal (&pair->directory.graph_identity,
+      &directory->graph_identity)
+      || !identity_equal (&pair->evidence.artifact_identity, main_identity))
+    return WYRELOG_E_POLICY;
+  return wyl_fact_graph_provisioned_pair_revalidate (pair);
+}
+
+/* Adding, removing or renaming an entry moves a directory's ChangeTime and
+ * LastWriteTime on NTFS; this is the before/after stat POSIX takes of
+ * graph_fd, and it is what notices an entry that appeared and vanished
+ * between the two authority passes. */
+static wyrelog_error_t
+pre_stage_directory_witness (HANDLE graph, PreStageDirectoryWitness *out)
+{
+  FILE_BASIC_INFO basic = { 0 };
+  if (!GetFileInformationByHandleEx (graph, FileBasicInfo, &basic,
+      sizeof basic))
+    return WYRELOG_E_IO;
+  out->change_time = basic.ChangeTime;
+  out->write_time = basic.LastWriteTime;
+  return WYRELOG_E_OK;
+}
+
+/* Kernel-supplied offsets are still bounds-checked before they are followed,
+ * as the artifact layer's inventory scan does. */
+static gboolean
+pre_stage_entry_bounds_valid (const BYTE *buffer, gsize capacity,
+    const WylFileIdExtdDirInfo *entry)
+{
+  const BYTE *start = (const BYTE *) entry;
+  gsize header = offsetof (WylFileIdExtdDirInfo, file_name);
+  if (start < buffer || start > buffer + capacity
+      || (gsize) (buffer + capacity - start) < header
+      || entry->file_name_length > buffer + capacity - start - header
+      || entry->file_name_length % sizeof (WCHAR) != 0)
+    return FALSE;
+  if (entry->next_entry_offset != 0
+      && (entry->next_entry_offset < header
+      || entry->next_entry_offset > buffer + capacity - start))
+    return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+pre_stage_enumerate (HANDLE graph, PreStageSlot slots[PRE_STAGE_SLOT_COUNT])
+{
+  BYTE buffer[64 * 1024];
+  gboolean restart = TRUE;
+  guint count = 0;
+  for (;;) {
+    FILE_INFO_BY_HANDLE_CLASS info_class = (FILE_INFO_BY_HANDLE_CLASS)
+        (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
+        : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+    if (!GetFileInformationByHandleEx (graph, info_class, buffer,
+        sizeof buffer)) {
+      DWORD error = GetLastError ();
+      if (error == ERROR_NO_MORE_FILES)
+        break;
+      return error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+    restart = FALSE;
+    WylFileIdExtdDirInfo *entry = (WylFileIdExtdDirInfo *) buffer;
+    for (;;) {
+      if (!pre_stage_entry_bounds_valid (buffer, sizeof buffer, entry))
+        return WYRELOG_E_POLICY;
+      gsize units = entry->file_name_length / sizeof (WCHAR);
+      gboolean dot = (units == 1 && entry->file_name[0] == L'.')
+          || (units == 2 && entry->file_name[0] == L'.'
+          && entry->file_name[1] == L'.');
+      if (!dot) {
+        gint slot = -1;
+        if (++count > PRE_STAGE_MAX_ENTRIES)
+          return WYRELOG_E_POLICY;
+        for (gint i = 0; slot < 0 && i < PRE_STAGE_SLOT_COUNT; i++) {
+          const PreStageEntry *allowed = &pre_stage_entries[i];
+          if (!directory_name_is_alias (entry->file_name, units,
+              allowed->wide, allowed->units))
+            continue;
+          /* An alias-equivalent spelling of an allowed name is a collision:
+           * never a foreign entry, never the entry itself. */
+          if (units != allowed->units
+              || memcmp (entry->file_name, allowed->wide,
+              units * sizeof (WCHAR)) != 0)
+            return WYRELOG_E_POLICY;
+          slot = i;
+        }
+        if (slot < 0 || slots[slot].listed
+            || (entry->file_attributes
+            & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0
+            || entry->end_of_file.QuadPart < 0)
+          return WYRELOG_E_POLICY;
+        slots[slot].listed = TRUE;
+        memcpy (slots[slot].listed_file_id, &entry->file_id,
+            sizeof slots[slot].listed_file_id);
+        slots[slot].listed_size = (guint64) entry->end_of_file.QuadPart;
+      }
+      if (entry->next_entry_offset == 0)
+        break;
+      entry = (WylFileIdExtdDirInfo *) ((BYTE *) entry
+          + entry->next_entry_offset);
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+pre_stage_size (HANDLE handle, guint64 *out_size)
+{
+  FILE_STANDARD_INFO standard = { 0 };
+  if (!GetFileInformationByHandleEx (handle, FileStandardInfo, &standard,
+      sizeof standard))
+    return WYRELOG_E_IO;
+  if (standard.EndOfFile.QuadPart < 0)
+    return WYRELOG_E_POLICY;
+  *out_size = (guint64) standard.EndOfFile.QuadPart;
+  return WYRELOG_E_OK;
+}
+
+/* Open a listed entry and prove the listing described the object its name
+ * resolves to.  open_relative_regular adds FILE_READ_ATTRIBUTES, READ_CONTROL
+ * and SYNCHRONIZE itself and, with strict_acl, the protected-owner DACL check
+ * and validate_parent_entry's single-spelling proof.  The token it checks is
+ * the live process token; within one process the pinned pair->owner_token
+ * cannot differ from it, and the main's identity is in any case required to
+ * equal the evidence identity whose DACL the pair revalidation already proved
+ * under that pinned token. */
+static wyrelog_error_t
+pre_stage_pin (HANDLE graph, const PreStageEntry *allowed, PreStageSlot *slot)
+{
+  guint64 size = 0;
+  wyrelog_error_t rc = open_relative_regular (graph, allowed->utf8,
+          FILE_READ_ATTRIBUTES, FALSE, TRUE, &slot->handle, &slot->identity);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (memcmp (slot->listed_file_id, slot->identity.file_id,
+      sizeof slot->listed_file_id) != 0)
+    return WYRELOG_E_POLICY;
+  rc = pre_stage_size (slot->handle, &size);
+  if (rc == WYRELOG_E_OK && size != slot->listed_size)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+/* The held object is unchanged and its name still resolves to it. */
+static wyrelog_error_t
+pre_stage_recheck (HANDLE graph, const PreStageEntry *allowed,
+    const PreStageSlot *slot)
+{
+  WylFactGraphWinIdentity held = { 0 };
+  WylFactGraphWinIdentity named = { 0 };
+  HANDLE reopened = INVALID_HANDLE_VALUE;
+  guint64 size = 0;
+  wyrelog_error_t rc = query_regular_identity (slot->handle, &held);
+  if (rc == WYRELOG_E_OK && !identity_equal (&held, &slot->identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_size (slot->handle, &size);
+  if (rc == WYRELOG_E_OK && size != slot->listed_size)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = open_relative_regular (graph, allowed->utf8, FILE_READ_ATTRIBUTES,
+          FALSE, TRUE, &reopened, &named);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!CloseHandle (reopened))
+    return WYRELOG_E_IO;
+  return identity_equal (&named, &slot->identity) ? WYRELOG_E_OK
+         : WYRELOG_E_POLICY;
+}
+
+static void
+pre_stage_digest_u64 (GChecksum *sum, guint64 value)
+{
+  guint8 bytes[8];
+  for (guint b = 0; b < sizeof bytes; b++)
+    bytes[b] = (guint8) (value >> (8 * b));
+  g_checksum_update (sum, bytes, sizeof bytes);
+}
+
+/* The same shape as the POSIX digest: the directory's identity and the stat
+ * it was observed with, then per slot a marker, and for a listed slot its
+ * name, identity and size.  Folding the directory times in is what lets a
+ * caller comparing two observations notice a mutate-and-revert between them. */
+static wyrelog_error_t
+pre_stage_fingerprint (const WylFactGraphWinIdentity *graph,
+    const PreStageDirectoryWitness *witness,
+    const PreStageSlot slots[PRE_STAGE_SLOT_COUNT], guint64 *out_fingerprint)
+{
+  GChecksum *sum = g_checksum_new (G_CHECKSUM_SHA256);
+  guint8 digest[32];
+  gsize length = sizeof digest;
+  guint64 fingerprint = 0;
+  if (sum == NULL)
+    return WYRELOG_E_NOMEM;
+  g_checksum_update (sum, (const guint8 *) &graph->volume_serial,
+      sizeof graph->volume_serial);
+  g_checksum_update (sum, graph->file_id, sizeof graph->file_id);
+  pre_stage_digest_u64 (sum, (guint64) witness->change_time.QuadPart);
+  pre_stage_digest_u64 (sum, (guint64) witness->write_time.QuadPart);
+  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++) {
+    guint8 marker[2] = { (guint8) i, (guint8) (slots[i].listed ? 1 : 0) };
+    g_checksum_update (sum, marker, sizeof marker);
+    if (!slots[i].listed)
+      continue;
+    g_checksum_update (sum, (const guint8 *) pre_stage_entries[i].utf8,
+        strlen (pre_stage_entries[i].utf8) + 1);
+    g_checksum_update (sum, (const guint8 *) &slots[i].identity.volume_serial,
+        sizeof slots[i].identity.volume_serial);
+    g_checksum_update (sum, slots[i].identity.file_id,
+        sizeof slots[i].identity.file_id);
+    pre_stage_digest_u64 (sum, slots[i].listed_size);
+  }
+  g_checksum_get_digest (sum, digest, &length);
+  g_checksum_free (sum);
+  for (guint i = 0; i < 8; i++)
+    fingerprint = (fingerprint << 8) | digest[i];
+  *out_fingerprint = fingerprint;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_pre_stage_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphPreStageInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || expected_main == NULL || out_inventory == NULL)
+    return WYRELOG_E_INVALID;
+  gboolean present = FALSE;
+  if (!inventory_identity_win_form (expected_main, &present)
+      || present != (pair != NULL))
+    return WYRELOG_E_INVALID;
+  WylFactGraphWinIdentity main_identity =
+      win_identity_from_inventory (expected_main);
+  PreStageSlot slots[PRE_STAGE_SLOT_COUNT] = { 0 };
+  PreStageDirectoryWitness before = { 0 };
+  PreStageDirectoryWitness after = { 0 };
+  WylFactGraphPreStageInventory result = { 0 };
+  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++)
+    slots[i].handle = INVALID_HANDLE_VALUE;
+
+  wyrelog_error_t rc = pre_stage_authority (resolver, directory, lease, pair,
+          &main_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_directory_witness (directory->graph_handle, &before);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_enumerate (directory->graph_handle, slots);
+  if (rc == WYRELOG_E_OK && present != slots[PRE_STAGE_SLOT_MAIN].listed)
+    rc = WYRELOG_E_POLICY;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < PRE_STAGE_SLOT_COUNT; i++) {
+    if (slots[i].listed)
+      rc = pre_stage_pin (directory->graph_handle, &pre_stage_entries[i],
+              &slots[i]);
+  }
+  if (rc == WYRELOG_E_OK && present
+      && !identity_equal (&slots[PRE_STAGE_SLOT_MAIN].identity,
+      &main_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-inventory-enumerated",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_authority (resolver, directory, lease, pair,
+            &main_identity);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < PRE_STAGE_SLOT_COUNT; i++) {
+    if (slots[i].listed)
+      rc = pre_stage_recheck (directory->graph_handle, &pre_stage_entries[i],
+              &slots[i]);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_directory_witness (directory->graph_handle, &after);
+  if (rc == WYRELOG_E_OK
+      && (before.change_time.QuadPart != after.change_time.QuadPart
+      || before.write_time.QuadPart != after.write_time.QuadPart))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_fingerprint (&directory->graph_identity, &before, slots,
+            &result.observation.entry_fingerprint);
+  if (rc == WYRELOG_E_OK) {
+    result.observation.directory_identity =
+        inventory_identity_from_win (&directory->graph_identity);
+    result.observation.guard_identity =
+        inventory_identity_from_win (&resolver->identity);
+    result.main_identity = *expected_main;
+    result.main_present = present;
+  }
+  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++) {
+    if (handle_is_valid (slots[i].handle) && !CloseHandle (slots[i].handle)
+        && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK)
+    *out_inventory = result;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_main_identity
+  (WylFactGraphProvisionedPair *pair,
+    WylFactArtifactInventoryIdentity *out_identity)
+{
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (pair == NULL || out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_identity =
+      inventory_identity_from_win (&pair->evidence.artifact_identity);
+  return WYRELOG_E_OK;
 }
 #endif
