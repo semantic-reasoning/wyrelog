@@ -1269,22 +1269,85 @@ static void create_restore_journal_for_manifest_internal
     const gchar *operation_uuid, gboolean session_identity,
     const gchar *mode);
 
+/* A refused step must leave the durable journal byte-identical to the
+ * journal that preceded the attempt. */
+static void
+assert_restore_journal_unchanged (wyl_policy_store_t *policy,
+    const gchar *operation, GBytes *expected, guint64 expected_revision)
+{
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (policy, operation, &journal), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, expected_revision);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &encoded), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (expected, encoded));
+  wyl_fact_offline_restore_journal_clear (&journal);
+}
+
+/* A released abort leaves exactly one aborted receipt and no journal or
+ * claim row for the operation. */
+static void
+assert_restore_operation_aborted (wyl_policy_store_t *policy,
+    const gchar *operation, guint expected_graph_count)
+{
+  sqlite3_stmt *rows = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (policy),
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals "
+      "WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_tenant_claims "
+      "WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims "
+      "WHERE operation_uuid=?1), "
+      "(SELECT count(*) FROM fact_offline_restore_receipts "
+      "WHERE operation_uuid=?1 AND terminal_state='aborted'), "
+      "(SELECT graph_count FROM fact_offline_restore_receipts "
+      "WHERE operation_uuid=?1);", -1, &rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (rows, 1, operation, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (rows), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (rows, 0), ==, 0);
+  g_assert_cmpint (sqlite3_column_int (rows, 1), ==, 1);
+  g_assert_cmpuint ((guint) sqlite3_column_int (rows, 2), ==,
+      expected_graph_count);
+  g_assert_cmpint (sqlite3_finalize (rows), ==, SQLITE_OK);
+}
+
+/* A refused begin must not leave a journal, a claim, or a receipt. */
+static void
+assert_restore_operation_absent (wyl_policy_store_t *policy,
+    const gchar *operation)
+{
+  sqlite3_stmt *rows = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (policy),
+      "SELECT (SELECT count(*) FROM fact_offline_restore_journals "
+      "WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_tenant_claims "
+      "WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_graph_claims "
+      "WHERE operation_uuid=?1) + "
+      "(SELECT count(*) FROM fact_offline_restore_receipts "
+      "WHERE operation_uuid=?1);", -1, &rows, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (rows, 1, operation, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (rows), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (rows, 0), ==, 0);
+  g_assert_cmpint (sqlite3_finalize (rows), ==, SQLITE_OK);
+}
+
 static void
 test_restore_begin_authenticated (void)
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
   const WylFactOfflineRestoreScope scopes[] = {
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
-    WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
-  };
-#elif defined(__APPLE__)
-  const WylFactOfflineRestoreScope scopes[] = {
     WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
   };
 #else
-  g_test_skip ("Darwin restore refusal requires the macOS secure build");
+  g_test_skip ("offline restore begin requires Linux or macOS");
   return;
 #endif
   for (guint pass = 0; pass < G_N_ELEMENTS (scopes); pass++) {
@@ -1428,60 +1491,6 @@ test_restore_begin_authenticated (void)
         "018f22d0-7b6d-7a5b-8c31-123456789ad1" :
         "018f22d0-7b6d-7a5b-8c31-123456789ad2";
     WylFactOfflineRestoreJournal committed = { 0 };
-#ifdef __APPLE__
-    {
-      WylFactOfflineRestoreDryRunReport report = { 0 };
-      g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
-          fixture.root, fixture.runtime, bundle, scopes[pass], selected,
-          &report), ==, WYRELOG_E_OK);
-      g_assert_false (report.publication_eligible);
-      wyl_fact_offline_restore_dry_run_report_clear (&report);
-      g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
-          fixture.root, fixture.runtime, bundle, scopes[pass], selected,
-          operation, TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-            (fixture.policy, operation, &committed), ==, WYRELOG_E_NOT_FOUND);
-      create_restore_journal_for_manifest_internal (&fixture,
-          capture.manifest, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha",
-          operation, TRUE, NULL);
-      g_autoptr (GBytes) before_journal = NULL;
-      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-            (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
-      g_assert_cmpuint (committed.revision, ==, 1);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
-          &before_journal), ==, WYRELOG_E_OK);
-      wyl_fact_offline_restore_journal_clear (&committed);
-      WylFactReplaySchedulerConfig config;
-      wyl_fact_replay_scheduler_config_defaults (&config);
-      g_autoptr (WylFactReplayScheduler) scheduler = NULL;
-      g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
-          &scheduler), ==, WYRELOG_E_OK);
-      g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
-          fixture.root, fixture.runtime, scheduler, bundle, operation, 1, 0,
-          NULL, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-            (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
-      g_autoptr (GBytes) after_journal = NULL;
-      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
-          &after_journal), ==, WYRELOG_E_OK);
-      g_assert_true (g_bytes_equal (before_journal, after_journal));
-      g_assert_cmpuint (committed.revision, ==, 1);
-      wyl_fact_offline_restore_journal_clear (&committed);
-      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
-          alpha_before);
-      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
-          zeta_before);
-      g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
-          WYRELOG_E_OK);
-      g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
-      remove_tree (bundle_root);
-      destination_capture_clear (&capture);
-      fixture_clear (&fixture);
-      continue;
-    }
-#endif
     if (schema_transition) {
       /* The selected definition is wrong even though the old active v2
        * version and sealed graph authority are unchanged. */
@@ -1588,6 +1597,116 @@ test_restore_begin_authenticated (void)
         alpha_before);
     assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
         zeta_before);
+#ifdef __APPLE__
+    /* macOS admits begin and abort only (#1303).  Every step that would
+     * stage or publish an artifact still refuses, and each refusal leaves
+     * the journal and the graph namespaces untouched.  Abort then recovers
+     * the begun journal and releases it, so an operator is never left with
+     * a claim that nothing can clear. */
+    {
+      g_autoptr (GBytes) begun_journal = NULL;
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, 1);
+      const guint begun_graphs = committed.graphs->len;
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+          &begun_journal), ==, WYRELOG_E_OK);
+      wyl_fact_offline_restore_journal_clear (&committed);
+      WylFactReplaySchedulerConfig refused_config;
+      wyl_fact_replay_scheduler_config_defaults (&refused_config);
+      g_autoptr (WylFactReplayScheduler) refused_scheduler = NULL;
+      g_assert_cmpint (wyl_fact_replay_scheduler_new (&refused_config, NULL,
+          &refused_scheduler), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
+          fixture.root, fixture.runtime, refused_scheduler, bundle, operation,
+          1, 0, NULL, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
+          1);
+      /* Commit is barred by the bind step that precedes admission. */
+      if (selected != NULL) {
+        g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            selected, 1, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
+            1);
+        g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+              (fixture.policy, fixture.root, fixture.runtime,
+            refused_scheduler, bundle, operation, 1, 0, NULL, &committed),
+            ==, WYRELOG_E_POLICY);
+      } else {
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            "alpha", 1, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
+            1);
+        g_assert_cmpint
+          (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation, 1, 0,
+            &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
+            1);
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_admit_run
+              (fixture.policy, fixture.root, fixture.runtime,
+            refused_scheduler, bundle, operation, 1, 0, NULL, &committed),
+            ==, WYRELOG_E_POLICY);
+      }
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
+          1);
+      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+          alpha_before);
+      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+          zeta_before);
+      /* One rollback decision abandons every unstaged graph at once, so
+       * both scopes settle at revision 2. */
+      g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+            (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+          &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, 2);
+      g_assert_cmpint (committed.decision, ==,
+          WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+      g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+          ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+      g_assert_cmpuint (committed.graphs->len, ==, begun_graphs);
+      for (guint i = 0; i < committed.graphs->len; i++) {
+        WylFactOfflineRestoreJournalGraph *graph =
+            g_ptr_array_index (committed.graphs, i);
+        g_assert_cmpint (graph->transition_state, ==,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+      }
+      const guint64 aborted_revision = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+      g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          aborted_revision, 0), ==, WYRELOG_E_OK);
+      assert_restore_operation_aborted (fixture.policy, operation,
+          begun_graphs);
+      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
+          alpha_before);
+      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
+          zeta_before);
+      if (schema_transition) {
+        WylPolicyRelationActivationRecord *active = NULL;
+        g_assert_cmpint (wyl_policy_store_read_relation_activation
+              (fixture.policy, "tenant-a", "alpha", "backup", "items",
+            &active), ==, WYRELOG_E_OK);
+        g_assert_true (active->has_active_schema_version);
+        g_assert_cmpuint (active->active_schema_version, ==, 2);
+        wyl_policy_relation_activation_record_free (active);
+      }
+      g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (refused_scheduler),
+          ==, WYRELOG_E_OK);
+      g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+      remove_tree (bundle_root);
+      destination_capture_clear (&capture);
+      fixture_clear (&fixture);
+      continue;
+    }
+#endif
     WylFactReplaySchedulerConfig config;
     wyl_fact_replay_scheduler_config_defaults (&config);
     g_autoptr (WylFactReplayScheduler) scheduler = NULL;
@@ -1838,6 +1957,228 @@ test_restore_begin_authenticated (void)
     destination_capture_clear (&capture);
     fixture_clear (&fixture);
   }
+}
+
+/* Materialise a captured backup as an on-disk bundle and return the trusted
+ * manifest digest a restore caller must present. */
+static void
+write_bundle_from_capture (const gchar *bundle_root,
+    DestinationCapture *capture, guint8 digest[32])
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *manifest_path = g_build_filename (bundle_root,
+          "manifest", NULL);
+  gsize manifest_length = 0;
+  const guint8 *manifest_data = g_bytes_get_data (capture->manifest,
+          &manifest_length);
+  g_assert_true (g_file_set_contents (manifest_path,
+      (const gchar *) manifest_data, manifest_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  for (guint i = 0; i < capture->completed_graphs->len; i++) {
+    const gchar *id = g_ptr_array_index (capture->completed_graphs, i);
+    GBytes *bytes = g_ptr_array_index (capture->artifact_bytes, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (id, &component), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+    gsize length = 0;
+    const gchar *data = g_bytes_get_data (bytes, &length);
+    g_assert_true (g_file_set_contents (path, data, length, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  }
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (checksum, manifest_data, manifest_length);
+  gsize digest_length = 32;
+  g_checksum_get_digest (checksum, digest, &digest_length);
+  g_assert_cmpuint (digest_length, ==, 32);
+}
+
+/* Copy a destination artifact byte for byte into a fresh inode with the
+ * secure mode.  A swap made from such a copy differs from the provisioned
+ * file only by identity: Darwin refuses it at the evidence comparison and
+ * Linux at the stage/final link-pair check, never for content or mode. */
+static void
+copy_artifact_secure (const gchar *source, const gchar *destination)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *data = NULL;
+  gsize length = 0;
+  g_assert_true (g_file_get_contents (source, &data, &length, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_file_set_contents (destination, data, length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (destination, 0600), ==, 0);
+}
+
+/* Begin must refuse a destination whose main artifact is not the exact
+ * provisioned file: a swapped inode, an extra hard link, a symlink, an
+ * insecure mode, or a foreign sidecar.  macOS reconstitutes the provisioned
+ * pair from durable ADR 0006 evidence, so missing or corrupt evidence must
+ * refuse there as well.  A refused begin leaves no journal, claim, or
+ * receipt behind.  The "none" mode is the positive control: the untouched
+ * fixture is admitted and then aborted, so a fixture regression cannot let
+ * the refusals pass vacuously.  A "tenant-" prefix selects tenant scope. */
+static void
+test_restore_begin_rejects (gconstpointer data)
+{
+#if !defined(__linux__) && !defined(__APPLE__)
+  (void) data;
+  g_test_skip ("offline restore begin requires Linux or macOS");
+#else
+  const gchar *mode = data;
+  const gboolean tenant_scope = g_str_has_prefix (mode, "tenant-");
+  const gchar *mutation = tenant_scope ? mode + strlen ("tenant-") : mode;
+#ifndef __APPLE__
+  if (g_str_has_suffix (mutation, "-evidence")) {
+    g_test_skip ("Darwin provisioning evidence is macOS-only");
+    return;
+  }
+#endif
+  BackupFixture fixture = { 0 };
+  fixture_init (&fixture, "wyl-offline-restore-begin-reject-XXXXXX");
+  create_tenant (&fixture);
+  create_graph (&fixture, "alpha");
+  create_graph (&fixture, "zeta");
+  seal_graph (&fixture, "alpha");
+  seal_graph (&fixture, "zeta");
+  seal_tenant (&fixture);
+  const gchar *ids[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (ids); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", ids[i]), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (fixture.runtime,
+        &key, session_build_engine, NULL, NULL), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture.runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  DestinationCapture capture;
+  destination_capture_init (&capture, &fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, &capture), ==, WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *bundle_root = wyl_test_make_secure_fact_root
+        ("wyl-offline-restore-begin-reject-bundle-XXXXXX", &error);
+  g_assert_no_error (error);
+  guint8 digest[32];
+  write_bundle_from_capture (bundle_root, &capture, digest);
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (bundle_root, digest,
+      &bundle), ==, WYRELOG_E_OK);
+  g_autoptr (GHashTable) zeta_before =
+      capture_dry_run_graph_namespace (&fixture, "zeta");
+
+  g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  g_autofree gchar *outside_root = NULL;
+  if (g_strcmp0 (mutation, "none") == 0) {
+    /* Positive control: the destination is left exactly as provisioned. */
+  } else if (g_str_has_suffix (mutation, "-evidence")) {
+    /* Bypass only the fixture's immutable-record guard so the read side of
+     * the evidence contract is what refuses. */
+    sqlite3 *db = wyl_policy_store_get_db (fixture.policy);
+    g_assert_cmpint (sqlite3_exec (db,
+        "DROP TRIGGER fact_graph_provisioning_immutable;"
+        "DROP TRIGGER fact_graph_provisioning_update_guard;", NULL, NULL,
+        NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_exec (db,
+        g_strcmp0 (mutation, "missing-evidence") == 0
+        ? "UPDATE fact_graph_provisioning SET darwin_operation_evidence=NULL "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';"
+        : "UPDATE fact_graph_provisioning SET darwin_operation_evidence="
+        "zeroblob(length(darwin_operation_evidence)) "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';", NULL, NULL,
+        NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  } else if (g_strcmp0 (mutation, "substituted-main") == 0) {
+    g_autofree gchar *swap = graph_file_path (&fixture, "alpha",
+            "facts.duckdb.swap");
+    copy_artifact_secure (main_path, swap);
+    g_assert_cmpint (g_rename (swap, main_path), ==, 0);
+  } else if (g_strcmp0 (mutation, "hard-link") == 0) {
+    g_autofree gchar *extra = graph_file_path (&fixture, "alpha",
+            "facts.duckdb.extra");
+    g_assert_cmpint (link (main_path, extra), ==, 0);
+  } else if (g_strcmp0 (mutation, "symlink-main") == 0) {
+    /* The target lives outside the graph directory so the inventory sees
+     * the symlink itself, not an extra entry. */
+    outside_root = wyl_test_make_secure_fact_root
+          ("wyl-offline-restore-begin-reject-target-XXXXXX", &error);
+    g_assert_no_error (error);
+    g_autofree gchar *target = g_build_filename (outside_root,
+            "facts.duckdb", NULL);
+    copy_artifact_secure (main_path, target);
+    g_assert_cmpint (g_remove (main_path), ==, 0);
+    g_assert_cmpint (symlink (target, main_path), ==, 0);
+  } else if (g_strcmp0 (mutation, "bad-mode") == 0) {
+    g_assert_cmpint (g_chmod (main_path, 0644), ==, 0);
+  } else if (g_strcmp0 (mutation, "sidecar") == 0) {
+    g_autofree gchar *sidecar = graph_file_path (&fixture, "alpha",
+            "facts.duckdb.wal");
+    g_assert_true (g_file_set_contents (sidecar, "", 0, &error));
+    g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (sidecar, 0600), ==, 0);
+  } else {
+    g_assert_not_reached ();
+  }
+
+  g_clear_pointer (&fixture.runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture.runtime), ==,
+      WYRELOG_E_OK);
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-123456789ad4";
+  const WylFactOfflineRestoreScope scope = tenant_scope
+      ? WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT
+      : WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH;
+  const gchar *selected = tenant_scope ? NULL : "alpha";
+  WylFactOfflineRestoreJournal committed = { 0 };
+  if (g_strcmp0 (mutation, "none") == 0) {
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scope, selected, operation,
+        TRUE, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, 1);
+    const guint begun_graphs = committed.graphs->len;
+    g_assert_cmpuint (begun_graphs, ==, tenant_scope ? 2 : 1);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+        &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, 2);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+        ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 2, 0),
+        ==, WYRELOG_E_OK);
+    assert_restore_operation_aborted (fixture.policy, operation,
+        begun_graphs);
+  } else {
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scope, selected, operation,
+        TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &committed), ==, WYRELOG_E_NOT_FOUND);
+    assert_restore_operation_absent (fixture.policy, operation);
+  }
+  assert_dry_run_graph_namespace_unchanged (&fixture, "zeta", zeta_before);
+
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  if (outside_root != NULL)
+    remove_tree (outside_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
 }
 
 static void
@@ -3961,12 +4302,14 @@ test_restore_daemon_http_stateful_refusal (void)
   g_assert_cmpuint (status, ==, 200);
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&response, g_free);
+  /* BEGIN is admitted on macOS and records a revision-1 journal. */
   body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
           bundle_root, digest, operation, 0, TRUE);
   g_assert_true (restore_http_post (session, base_url, token, "begin", body,
       &status, &response));
-  g_assert_cmpuint (status, ==, 403);
-  g_assert_nonnull (strstr (response, "restore_refused"));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 1);
+  g_assert_nonnull (strstr (response, "\"state\":\"preparing\""));
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
   g_clear_pointer (&body, g_free);
@@ -3975,32 +4318,68 @@ test_restore_daemon_http_stateful_refusal (void)
   wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (policy,
-      operation, &journal), ==, WYRELOG_E_NOT_FOUND);
-  BackupFixture seed_fixture = f.fixture;
-  seed_fixture.policy = policy;
-  create_restore_journal_for_manifest_internal (&seed_fixture,
-      f.capture.manifest, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha",
-      operation, TRUE, NULL);
-  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (policy,
       operation, &journal), ==, WYRELOG_E_OK);
   g_assert_cmpuint (journal.revision, ==, 1);
-  g_autoptr (GBytes) before_journal = NULL;
+  g_autoptr (GBytes) begun_journal = NULL;
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
-      &before_journal), ==, WYRELOG_E_OK);
+      &begun_journal), ==, WYRELOG_E_OK);
   wyl_fact_offline_restore_journal_clear (&journal);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          "", "", operation, 0, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "status", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 1);
+  g_assert_nonnull (strstr (response, "\"state\":\"preparing\""));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+
+  /* Every step that would stage or publish an artifact is refused with the
+   * journal and the namespaces untouched. */
   body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
           bundle_root, digest, operation, 1, FALSE);
   g_assert_true (restore_http_post (session, base_url, token, "prepare", body,
       &status, &response));
   g_assert_cmpuint (status, ==, 403);
   g_assert_nonnull (strstr (response, "restore_refused"));
-  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (policy,
-      operation, &journal), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (journal.revision, ==, 1);
-  g_autoptr (GBytes) after_journal = NULL;
-  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
-      &after_journal), ==, WYRELOG_E_OK);
-  g_assert_true (g_bytes_equal (before_journal, after_journal));
+  assert_restore_journal_unchanged (policy, operation, begun_journal,
+      1);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          bundle_root, digest, operation, 1, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "commit", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 403);
+  g_assert_nonnull (strstr (response, "restore_refused"));
+  assert_restore_journal_unchanged (policy, operation, begun_journal,
+      1);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  /* A begun graph journal has nothing to resume, so the daemon reports the
+   * unchanged state instead of refusing. */
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          "", "", operation, 1, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "resume", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 1);
+  g_assert_nonnull (strstr (response, "\"state\":\"preparing\""));
+  assert_restore_journal_unchanged (policy, operation, begun_journal,
+      1);
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+
+  /* ABORT is the one forward action and leaves a durable receipt. */
+  body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
+          "", "", operation, 1, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "abort", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
+  assert_restore_operation_aborted (policy, operation, 1);
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
 
@@ -13932,6 +14311,18 @@ main (int argc, char **argv)
       test_restore_dry_run_read_only);
   g_test_add_func ("/fact-offline-backup-source/restore-begin-authenticated",
       test_restore_begin_authenticated);
+  const gchar *begin_reject_modes[] = {
+    "none", "missing-evidence", "corrupt-evidence", "substituted-main",
+    "hard-link", "symlink-main", "bad-mode", "sidecar",
+    "tenant-none", "tenant-substituted-main", "tenant-sidecar",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (begin_reject_modes); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/restore-begin-reject/",
+            begin_reject_modes[i], NULL);
+    g_test_add_data_func (path, begin_reject_modes[i],
+        test_restore_begin_rejects);
+  }
 #ifdef WYL_HAS_DAEMON_HTTP
   g_test_add_func
     ("/fact-offline-backup-source/restore-daemon-http-stateful-refusal",

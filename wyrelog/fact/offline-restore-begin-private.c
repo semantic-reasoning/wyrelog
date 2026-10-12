@@ -4,6 +4,9 @@
 #include <string.h>
 
 #include "fact/graph-locator-private.h"
+#ifdef __APPLE__
+#include "fact/graph-locator-darwin-private.h"
+#endif
 #include "fact/offline-backup-manifest-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 #include "fact/root-writer-lease-private.h"
@@ -152,14 +155,37 @@ observe (WylFactGraphResolver *resolver, WylFactRootWriterLease *lease,
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphProvisionedPair *pair = NULL;
   WylFactArtifactInventoryIdentity identity = { 0 };
-  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
-          authority->tenant_id, authority->graph_id);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef __APPLE__
+  /* Darwin reconstitutes the provisioned pair only from durable ADR 0006
+   * evidence; the name-only form fails closed there.  Missing or malformed
+   * evidence is a refusal, never a fallback. */
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  gsize length = 0;
+  const guint8 *bytes = provisioning->darwin_operation_evidence == NULL
+      ? NULL : g_bytes_get_data (provisioning->darwin_operation_evidence,
+          &length);
+  if (bytes == NULL
+      || length != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+    rc = WYRELOG_E_POLICY;
+  else
+    rc = wyl_fact_graph_darwin_evidence_decode (bytes, length,
+            provisioning->op_uuid, &evidence);
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_locator_init (&locator, authority->tenant_id,
+            authority->graph_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_directory (resolver, &locator, FALSE,
             &directory);
   if (rc == WYRELOG_E_OK)
+#ifdef __APPLE__
+    rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+          (&directory, provisioning->op_uuid, &evidence, &pair);
+#else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             provisioning->op_uuid, &pair);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_provisioned_pair_main_identity (pair, &identity);
   if (rc == WYRELOG_E_OK)
@@ -281,7 +307,7 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (!confirmed)
     return WYRELOG_E_POLICY;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
