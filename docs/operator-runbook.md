@@ -1582,18 +1582,40 @@ as one that matched. The final query must no longer contain `o-1, 42`; query
 results are the proof that the row was removed, rather than the batch receipt
 or HTTP status alone.
 
-There is no update command. Changing a row is a `fact retract` of the old
-value followed by a `fact put` of the new one: two batches with separate
-idempotency keys, not one atomic change. If the second batch fails (a quota
-refusal, an expired token, a daemon restart), the relation is left without
-the row, and neither command reports the half-applied change. Recover by
-re-running the failed `fact put` with the same `--batch-id`,
-`--idempotency-key` and input file; a batch that was in fact recorded answers
-`replay=true` instead of writing twice, and different rows under the same keys
-answer `409 fact_batch_conflict`. Renew an expired token with `auth refresh`
-or `auth login` first. A quota refusal repeats until the quota is raised with
-`fact quota configure` or usage drops. Then confirm the row with
-`datalog query`.
+To change a row, use `fact update`. It retracts the old value and asserts the
+new one in one batch, so a query sees either the old row or the new one,
+never neither and never both, and a failure leaves the relation as it was.
+The input carries an `op` column first, `retract` or `assert`:
+
+```sh
+printf 'op,order_id,amount\nretract,o-1,42\nassert,o-1,43\n' >/tmp/orders-update.csv
+wyctl --daemon-url "$BASE_URL" fact update \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --batch-id orders-update-1 --idempotency-key orders-update-1 \
+  --format csv --input /tmp/orders-update.csv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints the same receipt with `action=update`. Every retract row is applied
+before every assert row, whatever order the file lists them in, so a row on
+both sides is present afterwards. As with `fact retract`, retracting a row
+that is not there is recorded and removes nothing. One update changes one
+relation; changing rows of two relations is still two batches.
+
+An update is charged for every row it records, retract and assert alike: the
+example costs two rows against the logical quota, as the `fact retract` and
+`fact put` it replaces would. An update the remaining quota cannot hold is
+refused whole, before anything is written, even if its asserts alone would
+fit. Re-running it with the same `--batch-id`, `--idempotency-key` and input
+answers `replay=true`; different rows under the same keys answer
+`409 fact_batch_conflict`. A sealed graph refuses an update as it refuses any
+other write.
+
+The route is `POST /facts/{tenant}/{graph}/{relation}:update`, with the query
+parameters of `:append` and a TSV body whose rows begin with the op field. An
+optional header line names that field `op`, followed by the column names.
 
 ### Data permissions
 
@@ -1606,7 +1628,7 @@ permissions: a service principal cannot hold them.
 | `wr.fact.read` | `fact verify` |
 | `wr.fact.append` | `fact put` (the `:append` route) |
 | `wr.fact.retract` | `fact retract` (the `:retract` route) |
-| `wr.fact.update` | an atomic retract-and-append; no route uses it yet (#1344) |
+| `wr.fact.update` | `fact update` (the `:update` route), an atomic retract and assert |
 | `wr.fact.forget` | `fact forget` (the `:forget` route), which erases a batch irreversibly |
 | `wr.fact.repair` | the `:repair` route for orphaned rows |
 | `wr.datalog.query` | `datalog query` (`POST /datalog/...`) over stored relations |
@@ -2022,10 +2044,10 @@ The first query returns values `1`, `2`, and `3`. The query after the retract
 returns only `2` and `3`; the raw atom `fact(1)` is not deleted through a
 separate `/api/facts` API.
 
-`wyctl fact put` and `wyctl fact retract` print a one-line receipt,
-`action=<put|retract> batch_id=... operation_id=... replay=<true|false>
-mutation_class=... effect=unknown`, or a `committed-reconciling` line when the
-commit is still reconciling. `replay=true` is the route's `"inserted":false`.
+`wyctl fact put`, `wyctl fact retract` and `wyctl fact update` print a
+one-line receipt, `action=<put|retract|update> batch_id=... operation_id=...
+replay=<true|false> mutation_class=... effect=unknown`, or a
+`committed-reconciling` line when the commit is still reconciling. `replay=true` is the route's `"inserted":false`.
 The JSON responses below are the HTTP route's body, which also carries the
 deltas that the receipt omits.
 
@@ -2500,9 +2522,10 @@ not be recorded, the daemon answers HTTP `202` instead of `200`:
 ```
 
 The data is durable, and `queryable`, `mutation_class` and the deltas mean
-exactly what they mean on a `200`; a `202` is never a refusal. `wyctl fact put`
-and `wyctl fact retract` print `committed-reconciling operation_id=<key>
-batch_id=<id> payload_digest=<hex>` for it; a non-empty `payload_digest` marks
+exactly what they mean on a `200`; a `202` is never a refusal. `wyctl fact put`,
+`wyctl fact retract` and `wyctl fact update` print
+`committed-reconciling operation_id=<key> batch_id=<id> payload_digest=<hex>`
+for it; a non-empty `payload_digest` marks
 the quota `202`, because the same line with an empty `operation_id` and
 `payload_digest` reports a `200` whose runtime needs a reconcile. `operation_id`
 is the request's idempotency key, and `payload_digest` is the daemon's digest of
