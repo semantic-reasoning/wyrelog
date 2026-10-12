@@ -6973,9 +6973,18 @@ tenant_preflight_test_worker (TenantPreflightTestJob *job)
   return rc;
 }
 
+#ifndef __linux__
+static void test_tenant_provisioned_binding_fail_closed (void);
+#endif
+
 static void
 test_tenant_provisioned_binding (void)
 {
+#ifndef __linux__
+  /* Off Linux, pin the binding refusal before reporting SKIP. */
+  test_tenant_provisioned_binding_fail_closed ();
+  return;
+#endif
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
   TenantPreflightTestJob job = { &f, 3, f.capture.manifest };
@@ -7024,6 +7033,10 @@ test_tenant_provisioned_binding (void)
 static void
 test_tenant_provisioned_binding_all (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
@@ -7161,6 +7174,10 @@ test_tenant_provisioned_binding_all (gconstpointer data)
 static void
 test_tenant_provisioned_binding_all_replay_rejects (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
@@ -7229,6 +7246,10 @@ tenant_sync_test_begin_effect (GBytes *journal, const GPtrArray *active_uuids,
 static void
 test_tenant_commit_resume_v5 (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   SessionFixture f = { 0 };
   gboolean schema_transition = data != NULL;
   session_fixture_init (&f, schema_transition ?
@@ -7440,6 +7461,10 @@ static wyrelog_error_t fail_retain_once (const gchar *point,
 static void
 test_tenant_commit_v5_dispatch (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
@@ -7576,6 +7601,10 @@ test_tenant_commit_v5_dispatch (gconstpointer data)
 static void
 test_tenant_replacements_dispatch (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
@@ -7796,6 +7825,10 @@ arm_tenant_finalize_completion_response (const gchar *point,
 static void
 test_tenant_selected_cleanup_dispatch (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "success");
@@ -8069,6 +8102,10 @@ arm_tenant_completion_response (const gchar *point, gpointer user_data)
 static void
 test_tenant_commit_v5_dispatch_restart_step (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   gboolean effect = g_str_has_suffix (mode, "-effect");
   gboolean cas = g_str_has_suffix (mode, "-cas");
@@ -8203,6 +8240,10 @@ test_tenant_commit_v5_dispatch_restart_step (gconstpointer data)
 static void
 test_tenant_commit_sync_staged_first (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   gboolean pending = g_strcmp0 (data, "pending") == 0;
   gboolean ambiguous_begin = g_strcmp0 (data, "begin-response") == 0;
   gboolean ambiguous_complete = g_strcmp0 (data, "complete-response") == 0;
@@ -8911,6 +8952,10 @@ static wyrelog_error_t fail_companion_linked_once
 static void
 test_tenant_commit_sync_staged_both (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   gboolean reverse = g_str_equal (mode, "reverse")
       || g_str_equal (mode, "retain-reverse")
@@ -10913,6 +10958,10 @@ tenant_bind_reject_effect (GBytes *journal, const GPtrArray *uuids,
 static void
 test_tenant_provisioned_binding_rejects (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   gboolean all = g_str_has_prefix (mode, "all-");
   if (all)
@@ -11073,6 +11122,10 @@ test_tenant_provisioned_binding_rejects (gconstpointer data)
 static void
 test_tenant_external_import (gconstpointer data)
 {
+#ifndef __linux__
+  g_test_skip ("offline restore is Linux-only");
+  return;
+#endif
   const gchar *mode = data;
   SessionFixture f = { 0 };
   session_fixture_init (&f, "coordinator/tenant");
@@ -13697,7 +13750,9 @@ test_source_match_ignores_live_allocation (void)
 #ifndef __linux__
 /* Offline restore runs only on Linux; elsewhere the binding entry points
  * refuse with WYRELOG_E_POLICY.  Pin that refusal, then skip, so the suite
- * reports SKIP off Linux instead of passing with no cases run. */
+ * reports SKIP off Linux instead of passing with no cases run.  Windows
+ * registers this function directly; macOS reaches it from
+ * test_tenant_provisioned_binding, which is registered like Linux. */
 static void
 test_tenant_provisioned_binding_fail_closed (void)
 {
@@ -13736,7 +13791,7 @@ main (int argc, char **argv)
       test_restore_validation_session_invalid_constructor);
   g_test_add_func ("/fact-offline-backup-source/session-windows-fail-closed",
       test_restore_validation_session_windows_fail_closed);
-#ifdef __linux__
+#ifndef G_OS_WIN32
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/straight",
       "straight", test_tenant_external_import);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-external-import/restart",
@@ -14024,10 +14079,8 @@ main (int argc, char **argv)
       "retain-sync-dir-publish-sync-companion-foreign", test_tenant_commit_sync_staged_both);
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/sibling-foreign",
       "retain-sync-dir-publish-sync-companion-sibling-foreign", test_tenant_commit_sync_staged_both);
-#ifdef __linux__
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/symlink",
       "retain-sync-dir-publish-sync-companion-symlink", test_tenant_commit_sync_staged_both);
-#endif
   g_test_add_data_func ("/fact-offline-backup-source/tenant-companion-sync/phase-fail",
       "retain-sync-dir-publish-sync-companion-phase-fail", test_tenant_commit_sync_staged_both);
 #ifdef WYL_TEST_HANDLE_SEAMS
