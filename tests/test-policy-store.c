@@ -2415,15 +2415,21 @@ check_store_seeds_builtin_catalog (void)
     {"wr.login.skip_mfa", "critical"},
     {"wr.graph.manage", "critical"},
     {"wr.fact.write", "critical"},
+    {"wr.fact.append", "critical"},
+    {"wr.fact.retract", "critical"},
+    {"wr.fact.update", "critical"},
+    {"wr.fact.forget", "critical"},
+    {"wr.fact.repair", "critical"},
     {"wr.fact.read", "sensitive"},
     {"wr.datalog.query", "sensitive"},
+    {"wr.datalog.infer", "sensitive"},
     {"wr.schema.manage", "critical"},
     {"wr.service_principal.manage", "critical"},
     {"wr.service_credential.manage", "critical"},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (permission_seeds); i++) {
     gint rc = check_permission_seed (store, permission_seeds[i].perm_id,
-            permission_seeds[i].klass, (gint) (244 + (i * 2)));
+            permission_seeds[i].klass, (gint) (300 + (i * 2)));
     if (rc != 0)
       return rc;
   }

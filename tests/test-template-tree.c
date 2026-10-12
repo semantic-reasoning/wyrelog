@@ -146,6 +146,55 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
   return 0;
 }
 
+/* Each fact and datalog operation has its own permission (#1343).  The
+ * roles that hold them are pinned exactly, so a role that gains or loses
+ * one of them is a visible change to this list. */
+static gint
+check_operation_permission_roles (const gchar *contents)
+{
+  static const gchar *const fact_ops[] = {
+    "wr.fact.append", "wr.fact.retract", "wr.fact.update",
+    "wr.fact.forget", "wr.fact.repair",
+  };
+  static const gchar *const fact_roles[] = {
+    "wr.system_admin", "wr.service_admin", "wr.svc_agent",
+  };
+  static const gchar *const infer_roles[] = {
+    "wr.system_admin", "wr.service_admin", "wr.analyst",
+  };
+  g_autoptr (GHashTable) expected = g_hash_table_new_full (g_str_hash,
+          g_str_equal, g_free, NULL);
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_ops); i++) {
+    for (gsize j = 0; j < G_N_ELEMENTS (fact_roles); j++)
+      g_hash_table_add (expected, g_strdup_printf ("%s %s", fact_roles[j],
+          fact_ops[i]));
+  }
+  for (gsize j = 0; j < G_N_ELEMENTS (infer_roles); j++)
+    g_hash_table_add (expected, g_strdup_printf ("%s wr.datalog.infer",
+        infer_roles[j]));
+
+  g_autoptr (GRegex) regex = g_regex_new ("^role_permission"
+          "\\(\"([^\"]+)\", \"(wr\\.fact\\.(append|retract|update|forget"
+          "|repair)|wr\\.datalog\\.infer)\"\\)\\.$", 0, 0, NULL);
+  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_str_hash,
+          g_str_equal, g_free, NULL);
+  g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_autoptr (GMatchInfo) match = NULL;
+    if (!g_regex_match (regex, lines[i], 0, &match))
+      continue;
+    g_autofree gchar *role = g_match_info_fetch (match, 1);
+    g_autofree gchar *perm = g_match_info_fetch (match, 2);
+    gchar *key = g_strdup_printf ("%s %s", role, perm);
+    if (!g_hash_table_contains (expected, key)) {
+      g_free (key);
+      return 250;
+    }
+    g_hash_table_add (seen, key);
+  }
+  return g_hash_table_size (seen) == g_hash_table_size (expected) ? 0 : 251;
+}
+
 static gint
 check_bootstrap_seed_consistency (void)
 {
@@ -160,6 +209,9 @@ check_bootstrap_seed_consistency (void)
   if (count_substring (contents, "\"wr.login.skip_mfa\"") != 1)
     return 33;
   gint rc = check_bootstrap_seed_contract (contents, len);
+  if (rc != 0)
+    return rc;
+  rc = check_operation_permission_roles (contents);
   if (rc != 0)
     return rc;
 
