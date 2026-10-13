@@ -1349,16 +1349,83 @@ WINDOWS_ACTIVE_COMMANDS = (
     'builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
     "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows",
+    "if errorlevel 1 goto :fail",
     "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs",
+    "if errorlevel 1 goto :fail",
     'meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"',
+    "if errorlevel 1 goto :fail",
     ") else (",
     "meson test -C builddir --print-errorlogs --suite wyrelog"
     " --logbase testlog-fullsuite",
     ")",
+    "exit /b %ERRORLEVEL%",
+    ":fail",
+    "exit /b 1",
     "'@",
     '& "$env:GITHUB_WORKSPACE\\tools\\run-windows-with-symbolic-link-privilege.ps1" -Command $command',
     "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
 )
+
+
+WINDOWS_FAIL_FAST_GUARD = "if errorlevel 1 goto :fail"
+WINDOWS_FAIL_FAST_TAIL = ("exit /b %ERRORLEVEL%", ":fail", "exit /b 1")
+
+
+def validate_windows_fail_fast(path: str, windows_active: list[str]) -> None:
+    """The Windows step is one cmd batch, and a batch exits with the status of
+    its last command only.  Every meson invocation in the secure-bridge branch
+    therefore needs its own guard, or a failing suite is reported as the later
+    command's success -- which is how the row stayed green through the #1304
+    reconstitution suite's ERROR.  The guard must leave the parenthesized
+    block before exiting: an `exit /b 1` inside the block leaves cmd's process
+    status at 0 (measured), so it jumps to a top-level :fail label, and the
+    else branch's status survives through `exit /b %ERRORLEVEL%`."""
+    begin = next(
+        (
+            index
+            for index, command in enumerate(windows_active)
+            if command == 'if "${{ matrix.secure_bridge }}"=="enabled" ('
+        ),
+        -1,
+    )
+    end = next(
+        (
+            index
+            for index, command in enumerate(windows_active)
+            if index > begin and command == ") else ("
+        ),
+        -1,
+    )
+    require(
+        begin >= 0 and end > begin,
+        "E_INVENTORY_CI_WINDOWS_FAIL_FAST",
+        f"{path} secure native-Windows branch is missing",
+    )
+    for index in range(begin + 1, end):
+        command = windows_active[index]
+        if not command.startswith("meson "):
+            continue
+        require(
+            index + 1 < end and windows_active[index + 1] == WINDOWS_FAIL_FAST_GUARD,
+            "E_INVENTORY_CI_WINDOWS_FAIL_FAST",
+            f"{path} secure native-Windows row lets a failing command pass: "
+            f"{command[:48]!r}",
+        )
+    close = next(
+        (
+            index
+            for index, command in enumerate(windows_active)
+            if index > end and command == ")"
+        ),
+        -1,
+    )
+    require(
+        close >= 0
+        and tuple(windows_active[close + 1:close + 1 + len(WINDOWS_FAIL_FAST_TAIL)])
+        == WINDOWS_FAIL_FAST_TAIL,
+        "E_INVENTORY_CI_WINDOWS_FAIL_FAST",
+        f"{path} secure native-Windows row has no top-level :fail exit",
+    )
 
 
 def named_step(job: str, name: str) -> str:
@@ -1713,6 +1780,7 @@ def validate_workflow(path: str, workflow: str) -> None:
         "E_INVENTORY_CI_SANITIZER",
         f"{path} sanitizer job omits an inventory consumer/provider gate",
     )
+    validate_windows_fail_fast(path, windows_active)
     require(
         windows_test_command == WINDOWS_SECURE_TEST_COMMAND
         and tuple(windows_active) == WINDOWS_ACTIVE_COMMANDS,
@@ -3448,11 +3516,54 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "fact-offline-restore-windows-reconstitution --print-errorlogs",
-            "fact-offline-restore-windows-reconstitution --print-errorlogs & exit /b 0",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs & exit /b 0",
         )
     mutations.append(
         ("windows-failure-swallow", windows_swallow, {"E_INVENTORY_CI_WINDOWS"})
+    )
+
+    # The shape that hid #1395's failing suite: the guard after the suite
+    # list goes, so the trailing single-case run decides the step's status.
+    windows_trailing_swallow = dict(inputs)
+    for path in (CI_PR, CI_MAIN):
+        windows_trailing_swallow[path] = replace_in_named_step(
+            windows_trailing_swallow[path],
+            "  build-windows:",
+            None,
+            "Build and test (clang-cl)",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "            if errorlevel 1 goto :fail\n",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n",
+        )
+    mutations.append(
+        (
+            "windows-trailing-command-swallow",
+            windows_trailing_swallow,
+            {"E_INVENTORY_CI_WINDOWS_FAIL_FAST"},
+        )
+    )
+
+    # An exit inside the parenthesized block looks like a guard and is not
+    # one: cmd reports the process status as 0.  The guard has to jump out.
+    windows_exit_in_block = dict(inputs)
+    for path in (CI_PR, CI_MAIN):
+        windows_exit_in_block[path] = replace_in_named_step(
+            windows_exit_in_block[path],
+            "  build-windows:",
+            None,
+            "Build and test (clang-cl)",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "            if errorlevel 1 goto :fail\n",
+            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "            if errorlevel 1 exit /b 1\n",
+        )
+    mutations.append(
+        (
+            "windows-guard-exits-inside-block",
+            windows_exit_in_block,
+            {"E_INVENTORY_CI_WINDOWS_FAIL_FAST"},
+        )
     )
 
     windows_wrong_branch = dict(inputs)
