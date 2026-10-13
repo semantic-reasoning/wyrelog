@@ -368,6 +368,14 @@ if get_option('enable_fact_store').allowed() and \
   # matches no case at all, reports Ok: GLib exits 0 for it, and main's
   # wyl_test_normalize_exit_status would turn a 77 into a failure anyway.
   # TAP lets meson see the per-case results and report SKIP.
+  #
+  # SKIP cannot show a case that was never registered, so
+  # fact-offline-backup-source-registrations compares the binary's -l
+  # listing with tests/test-fact-offline-backup-source.paths in every
+  # non-Windows secure-bridge build (#1391).  Register a new case on
+  # every non-Windows host and skip it at runtime, then regenerate the
+  # manifest from a Linux build with
+  # tools/check-glib-test-list.sh --print <binary>.
   test('fact-offline-backup-source', test_offline_backup_source,
     depends : wyctl_exe,
     args : ['--tap',
@@ -409,6 +417,15 @@ if get_option('enable_fact_store').allowed() and \
               '-p', '/fact-offline-backup-source/restore-begin-windows'],
       protocol : 'tap',
       timeout : 180,
+    )
+  endif
+  if host_machine.system() != 'windows'
+    test('fact-offline-backup-source-registrations', find_program('sh'),
+      args : [files('../tools/check-glib-test-list.sh'),
+              test_offline_backup_source.full_path(),
+              files('test-fact-offline-backup-source.paths')],
+      depends : test_offline_backup_source,
+      timeout : 30,
     )
   endif
 endif
@@ -461,6 +478,13 @@ test('wyrelogd-check', wyrelogd_exe,
 
 if host_machine.system() != 'windows'
   sh = find_program('sh')
+  # The registration guard below must itself fail closed, so its
+  # self-test runs wherever sh does, secure bridge or not.
+  test('check-glib-test-list-self-test', sh,
+    args : [files('../tools/test-check-glib-test-list.sh'),
+            files('../tools/check-glib-test-list.sh')],
+    timeout : 30,
+  )
   test('wyrelogd-production-gates', sh,
     args : [
       meson.current_source_dir() / 'check-wyrelogd-production-gates.sh',
