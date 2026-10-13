@@ -1179,12 +1179,23 @@ test_restore_inventory_rejects (gconstpointer data)
   copy_fixture_clear (&fixture);
 }
 
-#ifndef __APPLE__
 static void
 test_restore_inventory_pair (void)
 {
   CopyFixture fixture;
   copy_fixture_init (&fixture);
+#ifdef __APPLE__
+  /* The exact pair open refuses on macOS, so restore inventory has no
+   * provisioned pair to bind.  Pin that refusal before reporting SKIP. */
+  WylFactGraphProvisionedPair *refused = NULL;
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
+        (&fixture.directory, "01900000-0000-7000-8000-000000000001",
+      &refused), ==, WYRELOG_E_POLICY);
+  g_assert_null (refused);
+  copy_fixture_clear (&fixture);
+  g_test_skip ("provisioned restore is not yet ported to macOS");
+  return;
+#endif
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
@@ -1247,7 +1258,6 @@ test_restore_inventory_pair (void)
   wyl_fact_graph_stage_clear (&stage);
   copy_fixture_clear (&fixture);
 }
-#endif
 
 static void
 test_restore_inventory_authority (void)
@@ -1357,10 +1367,8 @@ main (int argc, char **argv)
       test_restore_inventory);
   g_test_add_func ("/fact-offline-restore-stage/inventory/authority",
       test_restore_inventory_authority);
-#ifndef __APPLE__
   g_test_add_func ("/fact-offline-restore-stage/inventory/pair",
       test_restore_inventory_pair);
-#endif
   static const gchar *inventory_cases[] = {
     "unknown", "restore-01900000-0000-7000-8000-000000000001.duckdb",
     "provision-01900000-0000-7000-8000-000000000001.sqlite",

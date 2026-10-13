@@ -1731,7 +1731,13 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
   dependencies : [wyrelog_dep],
 )
 
-test('fact-graph-locator', test_fact_graph_locator)
+# Cases that cannot run on macOS yet call g_test_skip there.  Under the
+# exit-code protocol meson sees only the exit status, so a skipped case reads
+# as a pass.  TAP lets meson record each case and its SKIP.
+test('fact-graph-locator', test_fact_graph_locator,
+  args : ['--tap'],
+  protocol : 'tap',
+)
 
 test_offline_restore_stage = executable('test-fact-offline-restore-stage',
   'test-fact-offline-restore-stage.c',
@@ -1739,7 +1745,11 @@ test_offline_restore_stage = executable('test-fact-offline-restore-stage',
   include_directories : include_directories('../wyrelog'),
   dependencies : [wyrelog_dep],
 )
-test('fact-offline-restore-stage', test_offline_restore_stage)
+# TAP for the same reason as fact-graph-locator.
+test('fact-offline-restore-stage', test_offline_restore_stage,
+  args : ['--tap'],
+  protocol : 'tap',
+)
 
 test_fact_artifact_transition_names = executable(
   'test-fact-artifact-transition-names',

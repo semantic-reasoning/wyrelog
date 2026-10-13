@@ -758,6 +758,88 @@ create_provisioned_pair (const gchar *stage_path, const gchar *final_path)
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
   g_assert_cmpint (link (stage_path, final_path), ==, 0);
 }
+#ifdef __APPLE__
+
+static const gchar darwin_restore_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+static const gchar darwin_replacement_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070547";
+
+/* macOS has no native evidence for a provisioned restore yet, so each
+ * restore witness, shape and companion-link entry point must refuse before
+ * it reads or changes the graph.  The fixture holds a provisioned pair that
+ * Linux would accept as READY_MAIN, so a refusal here is the platform's.
+ * Once provisioned restore is ported to macOS these refusals fail, and the
+ * Darwin branches below should give way to the Linux bodies. */
+typedef struct
+{
+  gchar *root;
+  WylFactRootWriterLease *lease;
+  WylFactGraphResolver resolver;
+  WylFactGraphLocator locator;
+  WylFactGraphDirectory graph;
+  gchar *companion;
+  gchar *main_path;
+  gchar *replacement;
+  WylFactArtifactInventoryIdentity old_main;
+  WylFactArtifactInventoryIdentity new_main;
+} DarwinRestoreFixture;
+
+static void
+darwin_restore_fixture_init (DarwinRestoreFixture *f)
+{
+  *f = (DarwinRestoreFixture) {
+    .resolver = WYL_FACT_GRAPH_RESOLVER_INIT,
+    .graph = WYL_FACT_GRAPH_DIRECTORY_INIT,
+  };
+  f->root = make_root ();
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (f->root, &f->lease),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&f->locator, "tenant",
+      "graph"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (f->root, &f->resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&f->resolver,
+      &f->locator, TRUE, &f->graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&f->graph);
+  f->companion = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  f->main_path = g_build_filename (graph_path, "facts.duckdb", NULL);
+  f->replacement = g_build_filename (graph_path,
+          "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070547.sqlite", NULL);
+  create_provisioned_pair (f->companion, f->main_path);
+  GStatBuf st = { 0 };
+  g_assert_cmpint (g_stat (f->main_path, &st), ==, 0);
+  f->old_main = (WylFactArtifactInventoryIdentity) {
+    .domain = (guint64) st.st_dev, .object = (guint64) st.st_ino,
+  };
+  f->new_main = f->old_main;
+  f->new_main.object++;
+}
+
+static void
+darwin_restore_fixture_clear (DarwinRestoreFixture *f)
+{
+  /* A refused entry point leaves the pair exactly as provisioned. */
+  GStatBuf st = { 0 };
+  g_assert_cmpint (g_stat (f->main_path, &st), ==, 0);
+  g_assert_cmpuint ((guint64) st.st_ino, ==, f->old_main.object);
+  g_assert_cmpuint (st.st_nlink, ==, 2);
+  g_assert_cmpint (g_stat (f->companion, &st), ==, 0);
+  g_assert_cmpuint ((guint64) st.st_ino, ==, f->old_main.object);
+  g_assert_false (g_file_test (f->replacement, G_FILE_TEST_EXISTS));
+  wyl_fact_graph_directory_clear (&f->graph);
+  wyl_fact_graph_resolver_clear (&f->resolver);
+  wyl_fact_graph_locator_clear (&f->locator);
+  g_clear_pointer (&f->lease, wyl_fact_root_writer_lease_release);
+  remove_tree (f->root);
+  g_free (f->replacement);
+  g_free (f->main_path);
+  g_free (f->companion);
+  g_free (f->root);
+}
+#endif
 
 static void
 test_posix_resolver_open_provisioned_final_exact (void)
@@ -1211,7 +1293,21 @@ static void
 test_posix_provisioned_restore_witness (void)
 {
 #ifdef __APPLE__
-  return;
+  DarwinRestoreFixture f;
+  darwin_restore_fixture_init (&f);
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&f.graph, exact_operation_uuid, darwin_restore_uuid, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &witness), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open
+        (&f.graph, exact_operation_uuid, darwin_restore_uuid, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  darwin_restore_fixture_clear (&f);
+  g_test_skip ("provisioned restore is not yet ported to macOS");
 #else
   const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   g_autofree gchar *root = make_root ();
@@ -1342,7 +1438,16 @@ static void
 test_posix_provisioned_restore_dual_witness (void)
 {
 #ifdef __APPLE__
-  return;
+  DarwinRestoreFixture f;
+  darwin_restore_fixture_init (&f);
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_dual_witness_open
+        (&f.graph, exact_operation_uuid, darwin_restore_uuid,
+      darwin_replacement_uuid, &f.old_main, &f.new_main, &witness), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  darwin_restore_fixture_clear (&f);
+  g_test_skip ("provisioned restore is not yet ported to macOS");
 #else
   const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   const gchar *replacement_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070547";
@@ -1444,7 +1549,53 @@ static void
 test_posix_restore_companion_post_publish (void)
 {
 #ifdef __APPLE__
-  return;
+  DarwinRestoreFixture f;
+  darwin_restore_fixture_init (&f);
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  WylFactGraphRestorePostPublishLayout layout =
+      WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK;
+  WylFactGraphRestoreSelectedCleanupShape shape =
+      WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_DUAL;
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&f.resolver, &f.graph, f.lease, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_MAIN_ONE_LINK,
+      &witness), ==, WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
+        (&f.resolver, &f.graph, f.lease, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION,
+      &witness), ==, WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_restore_post_publish_reserved_shape_open
+        (&f.resolver, &f.graph, f.lease, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, &layout, &witness), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (layout, ==, WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_INVALID);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish
+        (&f.resolver, &f.graph, f.lease, NULL, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, &witness), ==, WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_restore_companion_link_post_publish_for_layout
+        (&f.resolver, &f.graph, f.lease, NULL, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION,
+      &witness), ==, WYRELOG_E_POLICY);
+  g_assert_null (witness);
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_shape_open
+        (&f.resolver, &f.graph, f.lease, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main, &shape), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (shape, ==, WYL_FACT_GRAPH_RESTORE_SELECTED_CLEANUP_INVALID);
+  g_assert_cmpint (wyl_fact_graph_restore_selected_cleanup_execute
+        (&f.resolver, &f.graph, f.lease, exact_operation_uuid,
+      darwin_restore_uuid, darwin_replacement_uuid, &f.old_main,
+      &f.new_main), ==, WYRELOG_E_POLICY);
+  darwin_restore_fixture_clear (&f);
+  g_test_skip ("provisioned restore is not yet ported to macOS");
 #else
   const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   const gchar *replacement_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070547";
