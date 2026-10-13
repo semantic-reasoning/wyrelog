@@ -267,6 +267,14 @@ observe_graph (wyl_policy_store_t *policy, WylFactGraphResolver *resolver,
       || g_strcmp0 (record->graph_id, authority->graph_id) != 0
       || g_strcmp0 (record->store_uuid, authority->store_uuid) != 0))
     rc = WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+  /* Windows reconstitutes the provisioned pair only from the operation
+   * evidence tuple the ACTIVE record carries (#816); the name-only form fails
+   * closed there, and a record without the tuple is a refusal, never a
+   * fallback. */
+  if (rc == WYRELOG_E_OK && !record->has_windows_evidence)
+    rc = WYRELOG_E_POLICY;
+#endif
 #ifdef __APPLE__
   /* Darwin reconstitutes the provisioned pair only from durable ADR 0006
    * evidence; the name-only form fails closed there. */
@@ -292,6 +300,9 @@ observe_graph (wyl_policy_store_t *policy, WylFactGraphResolver *resolver,
 #ifdef __APPLE__
     rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
           (&directory, record->op_uuid, &evidence, &pair);
+#elif defined(G_OS_WIN32)
+    rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&directory, record->op_uuid, &record->windows_evidence, &pair);
 #else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             record->op_uuid, &pair);
@@ -331,7 +342,7 @@ wyl_fact_offline_restore_dry_run (wyl_policy_store_t *policy,
       ? selected_graph_id != NULL
       : selected_graph_id == NULL || *selected_graph_id == '\0'))
     return WYRELOG_E_INVALID;
-#if !defined(__linux__) && !defined(__APPLE__)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
   (void) runtime;
   out_report->failure = WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_AUTHORITY;
   return WYRELOG_E_POLICY;

@@ -17,6 +17,8 @@
 #ifndef G_OS_WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#else
+#include <windows.h>
 #endif
 
 #include "fact-test-support.h"
@@ -61,8 +63,18 @@ typedef struct
 
 static gchar *graph_file_path (BackupFixture *fixture,
     const gchar *graph_id, const gchar *basename);
-static wyrelog_error_t session_build_engine (const WylFactGraphKey *key,
-    WylEngine **out_engine, gpointer data);
+/* An in-memory engine for runtime sessions.  The Windows cases use it
+ * too, so it lives outside the POSIX-only session block below. */
+static wyrelog_error_t
+session_build_engine (const WylFactGraphKey *key, WylEngine **out_engine,
+    gpointer data)
+{
+  (void) key;
+  (void) data;
+  return wyl_engine_open_source (".decl marker(value: int64)\n"
+             ".decl observed(value: int64)\nobserved(V) :- marker(V).\n",
+             1, out_engine);
+}
 
 static void
 remove_tree (const gchar *path)
@@ -1973,7 +1985,8 @@ write_bundle_from_capture (const gchar *bundle_root,
   g_assert_true (g_file_set_contents (manifest_path,
       (const gchar *) manifest_data, manifest_length, &error));
   g_assert_no_error (error);
-  g_assert_cmpint (g_chmod (manifest_path, 0600), ==, 0);
+  g_assert_true (wyl_test_secure_regular_file (manifest_path, &error));
+  g_assert_no_error (error);
   for (guint i = 0; i < capture->completed_graphs->len; i++) {
     const gchar *id = g_ptr_array_index (capture->completed_graphs, i);
     GBytes *bytes = g_ptr_array_index (capture->artifact_bytes, i);
@@ -1986,7 +1999,8 @@ write_bundle_from_capture (const gchar *bundle_root,
     const gchar *data = g_bytes_get_data (bytes, &length);
     g_assert_true (g_file_set_contents (path, data, length, &error));
     g_assert_no_error (error);
-    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+    g_assert_true (wyl_test_secure_regular_file (path, &error));
+    g_assert_no_error (error);
   }
   g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
   g_checksum_update (checksum, manifest_data, manifest_length);
@@ -2919,17 +2933,6 @@ restore_http_request_body_for_scope (const gchar *scope, const gchar *tenant,
     "\"expected_revision\":\"%" G_GUINT64_FORMAT "\","
     "\"confirmed\":\"%s\"}", scope, tenant, graph, bundle_path, digest,
     uuid != NULL ? uuid : "", revision, confirmed ? "true" : "false");
-}
-
-static wyrelog_error_t
-session_build_engine (const WylFactGraphKey *key, WylEngine **out_engine,
-    gpointer data)
-{
-  (void) key;
-  (void) data;
-  return wyl_engine_open_source (".decl marker(value: int64)\n"
-             ".decl observed(value: int64)\nobserved(V) :- marker(V).\n",
-             1, out_engine);
 }
 
 static wyrelog_error_t
@@ -13773,6 +13776,352 @@ test_tenant_provisioned_binding_fail_closed (void)
 }
 #endif
 
+#ifdef G_OS_WIN32
+/* Change one byte in place: same object, same length, different bytes. */
+static void
+windows_overwrite_byte (const gchar *path, guint64 offset, guint8 value)
+{
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  OVERLAPPED overlapped = { 0 };
+  DWORD written = 0;
+  g_assert_nonnull (wide);
+  HANDLE handle = CreateFileW ((LPCWSTR) wide, GENERIC_WRITE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  overlapped.Offset = (DWORD) (offset & 0xffffffffu);
+  overlapped.OffsetHigh = (DWORD) (offset >> 32);
+  g_assert_true (WriteFile (handle, &value, 1, &written, &overlapped));
+  g_assert_cmpuint (written, ==, 1);
+  g_assert_true (FlushFileBuffers (handle));
+  g_assert_true (CloseHandle (handle));
+}
+
+/* Same bytes, same name, same owner-only DACL, but a new object.  Only the
+ * identity the ACTIVE record's operation evidence pins can tell the two
+ * apart.  The original is parked outside the graph directory and removed
+ * before the next observation, so the closed entry set is not what
+ * refuses. */
+static void
+windows_replace_with_same_bytes (const gchar *path)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *contents = NULL;
+  gsize length = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &length, &error));
+  g_assert_no_error (error);
+  g_autofree gchar *directory = g_path_get_dirname (path);
+  g_autofree gchar *parked = g_build_filename (directory, "..",
+          "parked-main.duckdb", NULL);
+  g_assert_cmpint (g_rename (path, parked), ==, 0);
+  g_assert_true (g_file_set_contents (path, contents, (gssize) length,
+      &error));
+  g_assert_no_error (error);
+  g_assert_true (wyl_test_secure_regular_file (path, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_remove (parked), ==, 0);
+}
+
+static void
+windows_remove_bundle (const gchar *bundle_root, DestinationCapture *capture)
+{
+  g_autofree gchar *manifest_path = g_build_filename (bundle_root,
+          "manifest", NULL);
+  g_assert_cmpint (g_remove (manifest_path), ==, 0);
+  for (guint i = 0; i < capture->completed_graphs->len; i++) {
+    const gchar *graph_id = g_ptr_array_index (capture->completed_graphs, i);
+    g_autofree gchar *component = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+        &component), ==, WYRELOG_E_OK);
+    g_autofree gchar *name = g_strdup_printf ("graph-%s.duckdb", component);
+    g_autofree gchar *path = g_build_filename (bundle_root, name, NULL);
+    g_assert_cmpint (g_remove (path), ==, 0);
+  }
+  g_assert_cmpint (g_rmdir (bundle_root), ==, 0);
+}
+
+/* Two sealed graphs with closed admission and a backup of the tenant, as the
+ * POSIX dry-run and begin cases build them.  Each graph was provisioned
+ * through the real path, so its ACTIVE record carries the operation evidence
+ * the Windows restore arm reconstitutes the pair from. */
+static void
+windows_restore_fixture_init (BackupFixture *fixture, const gchar *name,
+    DestinationCapture *capture, gchar **out_bundle_root,
+    WylFactOfflineBackupBundle **out_bundle)
+{
+  fixture_init (fixture, name);
+  create_tenant (fixture);
+  create_graph (fixture, "alpha");
+  create_graph (fixture, "zeta");
+  seal_graph (fixture, "alpha");
+  seal_graph (fixture, "zeta");
+  seal_tenant (fixture);
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graphs[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh
+          (fixture->runtime, &key, session_build_engine, NULL, NULL), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture->runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture->policy,
+      fixture->root, fixture->runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  destination_capture_init (capture, fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, capture), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (capture->completed_graphs->len, ==, 2);
+  g_autoptr (GError) error = NULL;
+  *out_bundle_root = wyl_test_make_secure_fact_root
+        ("wyl-offline-restore-win-bundle-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (*out_bundle_root);
+  guint8 digest[32];
+  write_bundle_from_capture (*out_bundle_root, capture, digest);
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (*out_bundle_root,
+      digest, out_bundle), ==, WYRELOG_E_OK);
+}
+
+/* Swap in a runtime manager that knows no graph, so the next observation
+ * takes the missing-closed path dry-run and begin both accept, as the POSIX
+ * begin case does before its final run.  The session engines are in-memory
+ * and hold no artifact; the swap is about the admission state, not handles. */
+static void
+windows_release_runtime (BackupFixture *fixture)
+{
+  g_clear_pointer (&fixture->runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->runtime),
+      ==, WYRELOG_E_OK);
+}
+#endif
+
+/* #1304: on Windows the dry-run reconstitutes each provisioned pair from the
+ * operation evidence its ACTIVE record carries, so an authentic bundle
+ * against untouched graphs is eligible, the observation leaves the policy
+ * store and the artifacts byte-identical, and the same bytes under the main
+ * name at a different object is a collision only that evidence can see. */
+static void
+test_restore_dry_run_windows (void)
+{
+#ifndef G_OS_WIN32
+  g_test_skip ("Windows reconstitution of the provisioned pair");
+#else
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-dry-run-win-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
+          "facts.duckdb");
+  g_autofree gchar *policy_path = g_build_filename (fixture.root,
+          "policy.db", NULL);
+  g_autofree gchar *policy_before = NULL;
+  gsize policy_length = 0;
+  g_assert_true (g_file_get_contents (policy_path, &policy_before,
+      &policy_length, &error));
+  g_assert_no_error (error);
+  g_autofree gchar *main_before = NULL;
+  gsize main_length = 0;
+  g_assert_true (g_file_get_contents (main_path, &main_before, &main_length,
+      &error));
+  g_assert_no_error (error);
+
+  WylFactOfflineRestoreDryRunReport report = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, &report), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_NONE);
+  g_assert_true (report.observed_eligible_for_staging);
+  g_assert_cmpint (report.replay_result, ==,
+      WYL_FACT_OFFLINE_RESTORE_REPLAY_NOT_RUN);
+  g_assert_cmpuint (report.graphs->len, ==, 2);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  g_assert_true (report.observed_eligible_for_staging);
+  g_assert_cmpuint (report.graphs->len, ==, 1);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+
+  /* Read-only: the observation wrote nothing. */
+  g_autofree gchar *policy_after = NULL;
+  gsize policy_after_length = 0;
+  g_assert_true (g_file_get_contents (policy_path, &policy_after,
+      &policy_after_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (policy_after_length, ==, policy_length);
+  g_assert_cmpint (memcmp (policy_before, policy_after, policy_length), ==,
+      0);
+  g_autofree gchar *main_after = NULL;
+  gsize main_after_length = 0;
+  g_assert_true (g_file_get_contents (main_path, &main_after,
+      &main_after_length, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (main_after_length, ==, main_length);
+  g_assert_cmpint (memcmp (main_before, main_after, main_length), ==, 0);
+
+  /* Control: re-applying the owner-only DACL to the original is not what
+   * the next step's refusal is about. */
+  windows_release_runtime (&fixture);
+  g_assert_true (wyl_test_secure_regular_file (main_path, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_OK);
+  g_assert_true (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  /* Same bytes at a new object under the same DACL: the pair's evidence
+   * names the original artifact identity, so reconstitution refuses and the
+   * graph collides. */
+  windows_replace_with_same_bytes (main_path);
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "alpha", &report), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_COLLISION);
+  g_assert_cmpstr (report.failed_graph_id, ==, "alpha");
+  g_assert_false (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+  /* The untouched sibling still observes. */
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", &report), ==,
+      WYRELOG_E_OK);
+  g_assert_true (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+
+  /* A mutated bundle artifact is refused before any graph is observed. */
+  g_autofree gchar *zeta_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode ("zeta",
+      &zeta_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *zeta_name = g_strdup_printf ("graph-%s.duckdb",
+          zeta_component);
+  g_autofree gchar *zeta_bundle_path = g_build_filename (bundle_root,
+          zeta_name, NULL);
+  windows_overwrite_byte (zeta_bundle_path, 0, 'X');
+  g_assert_cmpint (wyl_fact_offline_restore_dry_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", &report), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (report.failure, ==,
+      WYL_FACT_OFFLINE_RESTORE_DRY_RUN_FAILURE_BUNDLE);
+  g_assert_false (report.observed_eligible_for_staging);
+  wyl_fact_offline_restore_dry_run_report_clear (&report);
+
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+/* #1304: begin on Windows proves each graph through the same reconstituted
+ * pair, twice, and commits the journal; a replay of the operation is a
+ * committed no-op, and a substituted main artifact under a new operation
+ * refuses before anything is journaled. */
+static void
+test_restore_begin_windows (void)
+{
+#ifndef G_OS_WIN32
+  g_test_skip ("Windows reconstitution of the provisioned pair");
+#else
+  const WylFactOfflineRestoreScope scopes[] = {
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
+    WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
+  };
+  for (guint pass = 0; pass < G_N_ELEMENTS (scopes); pass++) {
+    const gchar *selected = scopes[pass] ==
+        WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH ? "zeta" : NULL;
+    const gchar *operation = pass == 0 ?
+        "018f22d0-7b6d-7a5b-8c31-1234567a0001" :
+        "018f22d0-7b6d-7a5b-8c31-1234567a0002";
+    const gchar *substituted = pass == 0 ?
+        "018f22d0-7b6d-7a5b-8c31-1234567a0011" :
+        "018f22d0-7b6d-7a5b-8c31-1234567a0012";
+    BackupFixture fixture = { 0 };
+    DestinationCapture capture;
+    g_autofree gchar *bundle_root = NULL;
+    g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+    windows_restore_fixture_init (&fixture,
+        "wyl-offline-restore-begin-win-XXXXXX", &capture, &bundle_root,
+        &bundle);
+    WylFactOfflineRestoreJournal committed = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, 1);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+    g_assert_cmpuint (committed.graphs->len, ==, selected == NULL ? 2 : 1);
+    for (guint i = 0; i < committed.graphs->len; i++) {
+      const WylFactOfflineRestoreTargetGraph *target =
+          g_ptr_array_index (committed.graphs, i);
+      g_assert_false (target->expected_main_absent);
+      /* The pinned main identity is the artifact identity the record's
+       * operation evidence carries: volume serial as the domain, the 16-byte
+       * file id as the object. */
+      g_autoptr (GPtrArray) records = NULL;
+      g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+            (fixture.policy, "tenant-a", target->graph_id, &records), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpuint (records->len, ==, 1);
+      const WylPolicyGraphProvisioningRecord *record =
+          g_ptr_array_index (records, 0);
+      g_assert_true (record->has_windows_evidence);
+      g_assert_cmpuint (target->expected_main_identity.domain, ==,
+          record->windows_evidence.artifact_identity.volume_serial);
+      g_assert_cmpuint (target->expected_main_identity.object_width, ==,
+          sizeof record->windows_evidence.artifact_identity.file_id);
+      g_assert_cmpint (memcmp (target->expected_main_identity.object_bytes,
+          record->windows_evidence.artifact_identity.file_id,
+          sizeof record->windows_evidence.artifact_identity.file_id), ==, 0);
+    }
+    wyl_fact_offline_restore_journal_clear (&committed);
+    /* The same operation again is a committed no-op, not a second begin. */
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        operation, TRUE, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, 1);
+    wyl_fact_offline_restore_journal_clear (&committed);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+
+    /* A substituted main artifact fails the pair's identity re-proof, so a
+     * new operation against it journals nothing. */
+    windows_release_runtime (&fixture);
+    g_autofree gchar *main_path = graph_file_path (&fixture,
+            selected == NULL ? "alpha" : "zeta", "facts.duckdb");
+    windows_replace_with_same_bytes (main_path);
+    g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+        fixture.root, fixture.runtime, bundle, scopes[pass], selected,
+        substituted, TRUE, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.graphs);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, substituted, &committed), ==,
+        WYRELOG_E_NOT_FOUND);
+
+    g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+    windows_remove_bundle (bundle_root, &capture);
+    destination_capture_clear (&capture);
+    fixture_clear (&fixture);
+  }
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -14363,6 +14712,10 @@ main (int argc, char **argv)
       test_restore_dry_run_read_only);
   g_test_add_func ("/fact-offline-backup-source/restore-begin-authenticated",
       test_restore_begin_authenticated);
+  g_test_add_func ("/fact-offline-backup-source/restore-dry-run-windows",
+      test_restore_dry_run_windows);
+  g_test_add_func ("/fact-offline-backup-source/restore-begin-windows",
+      test_restore_begin_windows);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",

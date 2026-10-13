@@ -314,6 +314,14 @@ operation_evidence_equal (const WylFactGraphWinOperationEvidence *left,
          && identity_equal (&left->artifact_identity, &right->artifact_identity);
 }
 
+gboolean
+wyl_fact_graph_windows_operation_evidence_equal
+  (const WylFactGraphWinOperationEvidence *left,
+    const WylFactGraphWinOperationEvidence *right)
+{
+  return operation_evidence_equal (left, right);
+}
+
 static gboolean
 operation_evidence_matches_id (const WylFactGraphWinOperationEvidence *evidence,
     const wyl_id_t *operation_id)

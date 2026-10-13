@@ -319,6 +319,13 @@ wyrelog_error_t wyl_fact_graph_directory_stage_open_exact
 wyrelog_error_t wyl_fact_graph_stage_get_windows_operation_evidence
   (const WylFactGraphStage * stage,
     WylFactGraphWinOperationEvidence * out_evidence);
+/* Exact equality of two operation-evidence tuples, each of which must also be
+ * well formed (current version, a UUIDv7 operation id, non-zero graph and
+ * artifact identities).  A caller that re-reads an ACTIVE record under proof
+ * compares the tuple it loaded earlier with this. */
+gboolean wyl_fact_graph_windows_operation_evidence_equal
+  (const WylFactGraphWinOperationEvidence * left,
+    const WylFactGraphWinOperationEvidence * right);
 /* Reopen only the canonical UUIDv7-derived stage after exact equality with
  * durable operation evidence.  UUID-only stage reopen remains fail-closed on
  * Windows because a name does not establish provenance. */
