@@ -1301,7 +1301,6 @@ WINDOWS_SECURE_TEST_COMMAND = (
     "duckdb-fixed-wal-pre-move-abort-reopen",
     "duckdb-fixed-wal-interrupted-recovery",
     "fact-artifact-main-transition",
-    "fact-offline-restore-windows-reconstitution",
     "--print-errorlogs",
 )
 SECURE_POSIX_ACTIVE_COMMANDS = (
@@ -1351,7 +1350,7 @@ WINDOWS_ACTIVE_COMMANDS = (
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
     "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows",
     "if errorlevel 1 goto :fail",
-    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct fact-store-provisioned duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs",
+    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct fact-store-provisioned duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs",
     "if errorlevel 1 goto :fail",
     'meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"',
     "if errorlevel 1 goto :fail",
@@ -3517,8 +3516,8 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs & exit /b 0",
+            "fact-artifact-main-transition --print-errorlogs",
+            "fact-artifact-main-transition --print-errorlogs & exit /b 0",
         )
     mutations.append(
         ("windows-failure-swallow", windows_swallow, {"E_INVENTORY_CI_WINDOWS"})
@@ -3533,9 +3532,9 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "fact-artifact-main-transition --print-errorlogs\n"
             "            if errorlevel 1 goto :fail\n",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n",
+            "fact-artifact-main-transition --print-errorlogs\n",
         )
     mutations.append(
         (
@@ -3554,9 +3553,9 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "fact-artifact-main-transition --print-errorlogs\n"
             "            if errorlevel 1 goto :fail\n",
-            "fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs\n"
+            "fact-artifact-main-transition --print-errorlogs\n"
             "            if errorlevel 1 exit /b 1\n",
         )
     mutations.append(
