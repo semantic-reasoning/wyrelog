@@ -169,56 +169,56 @@
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 202,
+    "line": 249,
     "api": "_Exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 233,
+    "line": 280,
     "api": "_Exit",
     "expression": "91",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 242,
+    "line": 289,
     "api": "_Exit",
     "expression": "92",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 336,
+    "line": 383,
     "api": "_Exit",
     "expression": "93",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 343,
+    "line": 390,
     "api": "_Exit",
     "expression": "rc == WYRELOG_E_IO ? 0 : 94",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 404,
+    "line": 451,
     "api": "_Exit",
     "expression": "95",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 412,
+    "line": 459,
     "api": "_Exit",
     "expression": "96",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-provisioning-run.c",
-    "line": 419,
+    "line": 466,
     "api": "_Exit",
     "expression": "97",
     "platform": "posix-normalized-wrapper"

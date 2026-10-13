@@ -5,6 +5,9 @@
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
 
 #include <duckdb.h>
 
@@ -82,9 +85,29 @@ remove_root (const gchar *root)
   (void) g_rmdir (root);
 }
 
+#ifdef G_OS_WIN32
+/* Read the link count the POSIX arm gets from stat. */
+static gboolean
+file_information (const gchar *path, BY_HANDLE_FILE_INFORMATION *out_info)
+{
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wide == NULL)
+    return FALSE;
+  HANDLE handle = CreateFileW ((LPCWSTR) wide, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, 0, NULL);
+  if (handle == INVALID_HANDLE_VALUE)
+    return FALSE;
+  gboolean ok = GetFileInformationByHandle (handle, out_info);
+  CloseHandle (handle);
+  return ok;
+}
+#endif
+
 /* Assert the platform provisioning shape.  Linux retains the stage/final
- * nlink-2 pair.  Darwin binds authority to the single-link final with durable
- * operation evidence and requires the legacy stage to remain absent. */
+ * nlink-2 pair.  Darwin and Windows bind authority to the single-link final
+ * with durable operation evidence and require the stage name to be absent:
+ * Darwin never creates it, Windows retires it by the publishing rename. */
 static void
 assert_retained_pair (const gchar *root, const gchar *tenant_id,
     const gchar *graph_id, const gchar *stage_basename)
@@ -101,7 +124,15 @@ assert_retained_pair (const gchar *root, const gchar *tenant_id,
           graph_component, stage_basename, NULL);
   struct stat final_status;
   g_assert_cmpint (stat (final_path, &final_status), ==, 0);
-#ifdef __APPLE__
+#ifdef G_OS_WIN32
+  /* The C runtime's stat reports one link for every file on Windows, so the
+   * single-link proof reads NumberOfLinks from the handle instead. */
+  BY_HANDLE_FILE_INFORMATION final_info = { 0 };
+  g_assert_true (file_information (final_path, &final_info));
+  g_assert_cmpuint (final_info.nNumberOfLinks, ==, 1);
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_IS_SYMLINK));
+#elif defined(__APPLE__)
   g_assert_cmpuint (final_status.st_nlink, ==, 1);
   g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
   g_assert_false (g_file_test (stage_path, G_FILE_TEST_IS_SYMLINK));
@@ -130,7 +161,8 @@ assert_authority_active (wyl_policy_store_t *store, const gchar *tenant_id,
 
 /* A fresh graph is reserved, staged, published, verified, and activated in one
  * call: the record reaches ACTIVE, the authority is ACTIVE with a bound
- * identity, and the on-disk store is the retained nlink-2 pair. */
+ * identity, and the on-disk store has the platform shape asserted by
+ * assert_retained_pair. */
 static void
 test_run_drives_fresh_graph_to_active (void)
 {
@@ -153,6 +185,21 @@ test_run_drives_fresh_graph_to_active (void)
   g_assert_nonnull (record->darwin_operation_evidence);
   g_assert_cmpuint (g_bytes_get_size (record->darwin_operation_evidence), ==,
       WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
+#elif defined(G_OS_WIN32)
+  /* Windows publishes by rename, so the record's witness is the evidence
+   * tuple the coordinator persisted before that rename, and the final opens
+   * as a provisioned pair only through it. */
+  g_assert_true (record->has_windows_evidence);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store, root,
+      "tenant-run", "graph-run", FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, record->op_uuid, &record->windows_evidence, &pair), ==,
+      WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
 #endif
 
   assert_retained_pair (root, "tenant-run", "graph-run", record->stage_basename);
@@ -1216,10 +1263,19 @@ test_recover_drives_reserved_to_active (void)
 }
 
 #ifndef __APPLE__
+#ifndef G_OS_WIN32
 /* Build the retained pair on disk with committed identity (as a crash after
  * publish/verify would leave it), then stamp a policy provisioning record at
  * |phase_sql| plus its reserved authority.  Recovery must then drive the durable
- * phase forward over the already-published pair to ACTIVE. */
+ * phase forward over the already-published pair to ACTIVE.
+ *
+ * Linux only.  The record this stamps carries no operation evidence, and on
+ * Windows the coordinator persists the stage's evidence tuple before it ever
+ * advances RESERVED to STAGED (provisioning-run-private.c, provisioning_drive),
+ * so a PUBLISHED, VERIFIED or write-behind STAGED record without a tuple is
+ * not a state a Windows crash can leave; recovery there would verify the
+ * final against a zero tuple and degrade.  The Windows crash states carry
+ * the tuple and get their own cases. */
 static void
 recover_over_published_pair (const gchar *phase_sql)
 {
@@ -1309,6 +1365,7 @@ test_recover_from_verified (void)
 {
   recover_over_published_pair ("verified");
 }
+#endif
 
 static gboolean
 run_exec (wyl_fact_store_t *store, const gchar *sql)
@@ -1356,6 +1413,7 @@ test_open_for_graph_serves_active_graph (void)
 }
 #endif
 
+#ifndef G_OS_WIN32
 /* Locate the directory holding a graph's artifacts by finding the one that
  * contains the lock file, rather than reconstructing the layout here. */
 static gchar *
@@ -1380,6 +1438,7 @@ find_artifact_dir (const gchar *root)
   }
   return NULL;
 }
+#endif
 
 /* #869 rules that a read-only fact root needs no disposition of its own -- no
  * third probe outcome, no new status state, no "expected permanent
@@ -1444,6 +1503,16 @@ find_artifact_dir (const gchar *root)
 static void
 test_read_only_open_is_not_more_permissive_than_writable (void)
 {
+#ifdef G_OS_WIN32
+  /* Both gates named above are POSIX constructions: the unconditional O_RDWR
+   * lock open and the 0600 mode equality.  The Windows artifact namespace
+   * opens its lock entry through its own lock domain with neither, and a
+   * read-only attribute on the lock file is a different lever with a
+   * different meaning, so this case has nothing to measure there.  Kept
+   * registered so the skip, and its reason, stay visible on that row. */
+  g_test_skip ("POSIX lock-file mode gates; the Windows namespace has no "
+      "permission-bit lever");
+#else
   if (geteuid () == 0) {
     g_test_skip ("running as root; directory permissions do not bind");
     return;
@@ -1502,6 +1571,7 @@ test_read_only_open_is_not_more_permissive_than_writable (void)
   g_assert_cmpint (read_only, !=, WYRELOG_E_OK);
 
   remove_root (root);
+#endif
 }
 
 /* #869 U1's behavioural claim, and the only test that falsifies it.
@@ -1583,8 +1653,6 @@ int
 main (int argc, char *argv[])
 {
   g_test_init (&argc, &argv, NULL);
-  g_test_add_func ("/fact/provisioning-run/probe-survives-held-reader-guard",
-      test_boot_forget_probe_survives_a_held_reader_guard);
   g_test_add_func ("/fact/provisioning-run/read-open-not-more-permissive",
       test_read_only_open_is_not_more_permissive_than_writable);
   g_test_add_func ("/fact/provisioning-run/drives-fresh-graph-to-active",
@@ -1623,14 +1691,22 @@ main (int argc, char *argv[])
   g_test_add_func ("/fact/provisioning-run/recover-preserves-wedge",
       test_recover_preserves_final_without_evidence_wedge);
 #else
+#ifndef G_OS_WIN32
   g_test_add_func ("/fact/provisioning-run/recover-from-published-pair",
       test_recover_from_published_pair);
   g_test_add_func ("/fact/provisioning-run/recover-from-staged-write-behind",
       test_recover_from_staged_write_behind);
   g_test_add_func ("/fact/provisioning-run/recover-from-verified",
       test_recover_from_verified);
+#endif
   g_test_add_func ("/fact/provisioning-run/open-for-graph-serves-active-graph",
       test_open_for_graph_serves_active_graph);
 #endif
+  /* Last on purpose: a failed assertion aborts the binary, and this case is
+   * the one whose Windows preconditions (two read-only bridge opens of one
+   * file in a single process) are first exercised on that row.  Registered
+   * last, a failure there still reports every case above it. */
+  g_test_add_func ("/fact/provisioning-run/probe-survives-held-reader-guard",
+      test_boot_forget_probe_survives_a_held_reader_guard);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
