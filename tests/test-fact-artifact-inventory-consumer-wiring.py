@@ -70,10 +70,10 @@ EXPECTED_POSIX_LOCK_HEADER_CLOSURE_DIRECTIVE_PROFILE_SHA256 = (
     "a2ab1e9b1fbbc38280b021edbb8e1aab168d122b066ca365a70135e65c89028b"
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_COUNTS = (
-    1326, 130, 65, 98, 99, 474, 532, 1620, 120, 315,
+    1326, 130, 65, 98, 99, 474, 532, 1634, 120, 315,
 )
 EXPECTED_POSIX_LOCK_HEADER_CLOSURE_SEMANTIC_TOKEN_PROFILE_SHA256 = (
-    "d84f8b59cfda3bbd359955e65b3260635a38eaa0ecd5d678d54b730ca73146c5"
+    "8f609044e7c43aaaab546c3a884f49664b605126c889e895d2907e3b3bdb987d"
 )
 POSIX_CALL_CALLEE_PATTERN = re.compile(
     r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("
@@ -1300,6 +1300,7 @@ WINDOWS_SECURE_TEST_COMMAND = (
     "duckdb-fixed-wal-pre-move-abort-reopen",
     "duckdb-fixed-wal-interrupted-recovery",
     "fact-artifact-main-transition",
+    "fact-offline-restore-windows-reconstitution",
     "--print-errorlogs",
 )
 SECURE_POSIX_ACTIVE_COMMANDS = (
@@ -1348,7 +1349,7 @@ WINDOWS_ACTIVE_COMMANDS = (
     'builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
     "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows",
-    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition --print-errorlogs",
+    "meson test -C builddir secure-duckdb-bridge secure-duckdb-recording-filesystem secure-duckdb-temp-child-windows fact-artifact-inventory-contract fact-artifact-inventory-consumer-contract fact-artifact-inventory-consumer-wiring fact-artifact-inventory-consumer-wiring-self fact-artifact-transition-driver fact-artifact-transition-driver-wiring fact-artifact-transition-driver-wiring-self fact-artifact-transition-windows fact-artifact-namespace-windows fact-artifact-namespace-windows-inventory fact-artifact-namespace-windows-sidecar-replacement-isolated fact-artifact-namespace-windows-temp-binding-replacement-isolated fact-artifact-namespace-windows-lock-entry-replacement-isolated fact-artifact-namespace-windows-temp-token-real-crash-recovery fact-artifact-namespace-windows-cross-process fact-artifact-namespace-windows-temp-root-spill-child-capabilities fact-artifact-namespace-windows-temp-root-wrapper-ownership fact-provisioning-construct duckdb-after-walstart-no-wal duckdb-after-walstart-rendezvous duckdb-valid-commit-failure duckdb-valid-rollback-failure duckdb-fixed-wal-successful-checkpoint duckdb-fixed-wal-pre-move-abort-reopen duckdb-fixed-wal-interrupted-recovery fact-artifact-main-transition fact-offline-restore-windows-reconstitution --print-errorlogs",
     'meson test -C builddir secure-duckdb-recording-filesystem --no-rebuild --print-errorlogs --test-args="-p /secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery"',
     ") else (",
     "meson test -C builddir --print-errorlogs --suite wyrelog"
@@ -3447,8 +3448,8 @@ def run_self_test(inputs: dict[str, str]) -> None:
             "  build-windows:",
             None,
             "Build and test (clang-cl)",
-            "fact-artifact-main-transition --print-errorlogs",
-            "fact-artifact-main-transition --print-errorlogs & exit /b 0",
+            "fact-offline-restore-windows-reconstitution --print-errorlogs",
+            "fact-offline-restore-windows-reconstitution --print-errorlogs & exit /b 0",
         )
     mutations.append(
         ("windows-failure-swallow", windows_swallow, {"E_INVENTORY_CI_WINDOWS"})

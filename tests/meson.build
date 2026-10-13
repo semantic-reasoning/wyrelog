@@ -398,6 +398,19 @@ if get_option('enable_fact_store').allowed() and \
     protocol : 'tap',
     timeout : 120,
   )
+  # The Windows secure-bridge row names its suites explicitly and cannot run
+  # the whole binary (its POSIX cases have never run there), so the two
+  # Windows reconstitution cases get an invocation of their own.
+  if host_machine.system() == 'windows'
+    test('fact-offline-restore-windows-reconstitution',
+      test_offline_backup_source,
+      args : ['--tap',
+              '-p', '/fact-offline-backup-source/restore-dry-run-windows',
+              '-p', '/fact-offline-backup-source/restore-begin-windows'],
+      protocol : 'tap',
+      timeout : 180,
+    )
+  endif
 endif
 
 if get_option('enable_fact_store').allowed()

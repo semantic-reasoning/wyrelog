@@ -36,6 +36,10 @@ typedef struct
   gchar *stage_basename;
   guint64 provisioning_attempt;
   GBytes *darwin_evidence;
+#ifdef G_OS_WIN32
+  gboolean has_windows_evidence;
+  WylFactGraphWinOperationEvidence windows_evidence;
+#endif
   WylFactGraphPreStageInventory inventory;
 } BeginGraph;
 
@@ -136,6 +140,12 @@ provisioning_matches (const WylPolicyGraphProvisioningRecord *record,
          && g_strcmp0 (record->stage_basename,
          initial->stage_basename) == 0
          && record->attempt == initial->provisioning_attempt
+#ifdef G_OS_WIN32
+         && record->has_windows_evidence == initial->has_windows_evidence
+         && (!record->has_windows_evidence
+         || wyl_fact_graph_windows_operation_evidence_equal
+           (&record->windows_evidence, &initial->windows_evidence))
+#endif
          && ((record->darwin_operation_evidence == NULL
          && initial->darwin_evidence == NULL)
          || (record->darwin_operation_evidence != NULL
@@ -156,6 +166,14 @@ observe (WylFactGraphResolver *resolver, WylFactRootWriterLease *lease,
   WylFactGraphProvisionedPair *pair = NULL;
   WylFactArtifactInventoryIdentity identity = { 0 };
   wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef G_OS_WIN32
+  /* Windows reconstitutes the provisioned pair only from the operation
+   * evidence tuple the ACTIVE record carries (#816); the name-only form fails
+   * closed there.  A record without the tuple is a refusal, never a
+   * fallback. */
+  if (!provisioning->has_windows_evidence)
+    rc = WYRELOG_E_POLICY;
+#endif
 #ifdef __APPLE__
   /* Darwin reconstitutes the provisioned pair only from durable ADR 0006
    * evidence; the name-only form fails closed there.  Missing or malformed
@@ -182,6 +200,10 @@ observe (WylFactGraphResolver *resolver, WylFactRootWriterLease *lease,
 #ifdef __APPLE__
     rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
           (&directory, provisioning->op_uuid, &evidence, &pair);
+#elif defined(G_OS_WIN32)
+    rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&directory, provisioning->op_uuid, &provisioning->windows_evidence,
+            &pair);
 #else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             provisioning->op_uuid, &pair);
@@ -307,7 +329,7 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
     return WYRELOG_E_INVALID;
   if (!confirmed)
     return WYRELOG_E_POLICY;
-#if !defined(__linux__) && !defined(__APPLE__)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -462,6 +484,10 @@ wyl_fact_offline_restore_begin_run (wyl_policy_store_t *policy,
       graph->provisioning_attempt = record->attempt;
       graph->darwin_evidence = record->darwin_operation_evidence == NULL ?
           NULL : g_bytes_ref (record->darwin_operation_evidence);
+#ifdef G_OS_WIN32
+      graph->has_windows_evidence = record->has_windows_evidence;
+      graph->windows_evidence = record->windows_evidence;
+#endif
       WylFactOfflineRestoreTargetGraph *target = g_new0
             (WylFactOfflineRestoreTargetGraph, 1);
       target->graph_id = g_strdup (authority->graph_id);
