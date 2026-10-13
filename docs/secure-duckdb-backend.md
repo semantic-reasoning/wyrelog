@@ -89,21 +89,23 @@ An upgrade is a security-contract change, not a dependency-only update.
    `secure-duckdb-filesystem`, and `secure-duckdb-bridge` from the pinned
    source build on Linux and macOS. Windows builds the same pinned source and
    runs `secure-duckdb-bridge`, `secure-duckdb-recording-filesystem`,
-   `fact-artifact-namespace-windows` and `fact-provisioning-construct`: the
-   bridge object is platform-neutral and succeeds there. Windows can now
-   construct a provisioned pair and open a namespace from it, from operation
-   evidence held in the constructing process (#815). DuckDB reaches the
-   published `facts.duckdb` through the bounded filesystem but does not yet
-   complete against it: the reader guard and the sidecar retirement authority
-   are still fail-closed on Windows, so `wyl_fact_graph_provisioning_construct`
-   returns `WYRELOG_E_POLICY` there. The
-   name-only `open_provisioned_pair_exact` and the fixed WAL replacement still
-   return `WYRELOG_E_POLICY`; a pair that survives a restart is reconstituted
-   from the evidence tuple's durable home, the ACTIVE provisioning record
-   (#816). What Windows still has no route to
-   is a live `wyl_fact_store_t` handle: `wyl_fact_store_open_provisioned_pair`
-   and `wyl_fact_store_open_provisioned_graph` are compiled out there. Do not
-   read a green Windows lane as native runtime authority.
+   `fact-artifact-namespace-windows`, `fact-provisioning-construct`,
+   `fact-store-provisioned` and the Windows cases of
+   `test-fact-offline-backup-source`: the bridge object is platform-neutral
+   and succeeds there. Windows constructs a provisioned pair from operation
+   evidence held in the constructing process (#815), persists that tuple on
+   the provisioning record before the publishing rename (#816), and opens a
+   live `wyl_fact_store_t` through `wyl_fact_store_open_provisioned_graph`
+   from the ACTIVE record's tuple. The offline backup source opens each
+   sealed graph the same way (#1304): a graph whose ACTIVE record carries no
+   tuple, as one provisioned before #816 does, cannot be opened or backed up
+   on Windows and is refused with `WYRELOG_E_POLICY`. The name-only
+   `open_provisioned_pair_exact`, the name-only
+   `wyl_fact_artifact_namespace_open` and the fixed WAL replacement still
+   return `WYRELOG_E_POLICY` there by design: a name is not provenance on
+   Windows. Do not read a green Windows lane as native runtime authority for
+   the restore paths past dry-run and begin (staging, import, commit), which
+   have no Windows run yet.
 
 The POSIX CI jobs execute the real adapter target; compilation or recording
 evidence alone is not an acceptance signal.

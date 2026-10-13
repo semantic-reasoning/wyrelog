@@ -360,11 +360,9 @@ find_active_operation (WylFactOfflineBackupSource *source,
 }
 
 static wyrelog_error_t
-open_graph_source (WylFactOfflineBackupSource *source,
-    WylFactGraphResolver *resolver, const gchar *fact_root,
+open_graph_source (WylFactOfflineBackupSource *source, const gchar *fact_root,
     const WylPolicyGraphAuthorityRecord *record, OfflineBackupGraph *graph)
 {
-  (void) resolver;
   WylFactGraphLocator locator = { 0 };
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphProvisionedPair *pair = NULL;
@@ -421,9 +419,11 @@ open_graph_source (WylFactOfflineBackupSource *source,
     LARGE_INTEGER size = { 0 };
     if (!GetFileSizeEx ((HANDLE) pair->held_final_handle, &size))
       rc = WYRELOG_E_IO;
-    main_view.handle = pair->held_final_handle;
-    main_view.identity = pair->evidence.artifact_identity;
-    main_view.size_bytes = (guint64) size.QuadPart;
+    else {
+      main_view.handle = pair->held_final_handle;
+      main_view.identity = pair->evidence.artifact_identity;
+      main_view.size_bytes = (guint64) size.QuadPart;
+    }
   }
 #endif
   if (rc == WYRELOG_E_OK
@@ -635,7 +635,7 @@ offline_backup_source_new (wyl_policy_store_t *policy,
       break;
     }
     g_ptr_array_add (source->graphs, graph);
-    rc = open_graph_source (source, &resolver, fact_root, record, graph);
+    rc = open_graph_source (source, fact_root, record, graph);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_revalidate (&resolver);
