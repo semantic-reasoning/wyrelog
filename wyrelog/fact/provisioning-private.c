@@ -106,6 +106,34 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_directory (&out_stage->resolver, &locator,
             TRUE, &out_stage->directory);
+#ifdef G_OS_WIN32
+  /* Probe the final before minting the stage.  Windows publishes by rename,
+   * so once a final exists the stage name is free again and
+   * stage_create_exact would create a NEW empty stage here before the probe
+   * below notices the final; cleared, that stage stays behind as an orphan
+   * the restore inventory fails closed on.  POSIX never gets this far: its
+   * create answers BUSY against the retained pair's second name.  The probe
+   * after creation stays, for a final published between the two steps. */
+  if (rc == WYRELOG_E_OK) {
+    gint published_fd = -1;
+    rc = wyl_fact_graph_directory_open_file (&out_stage->directory,
+            "facts.duckdb", FALSE, &published_fd);
+    if (published_fd >= 0)
+      _close (published_fd);
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    else if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+    /* Return the probe's own verdict here: the BUSY branch below belongs to
+     * stage_create_exact, and a probe BUSY (a sharing refusal on the final)
+     * must not be read as "the stage already exists". */
+    if (rc != WYRELOG_E_OK) {
+      wyl_fact_graph_locator_clear (&locator);
+      wyl_fact_graph_provisioning_stage_clear (out_stage);
+      return rc;
+    }
+  }
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_stage_create_exact (&out_stage->directory,
             record->op_uuid, &out_stage->stage);

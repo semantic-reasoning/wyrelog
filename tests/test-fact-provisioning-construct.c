@@ -202,20 +202,23 @@ test_construct_never_overwrites_published_store (void)
   g_autofree gchar *final_path = g_build_filename (root, tenant_component,
           graph_component, "facts.duckdb", NULL);
 #ifdef G_OS_WIN32
+  g_autofree gchar *stage_path = g_build_filename (root, tenant_component,
+          graph_component, record.stage_basename, NULL);
   BY_HANDLE_FILE_INFORMATION before = { 0 };
   g_assert_true (file_information (final_path, &before));
 
   g_assert_cmpint (wyl_fact_graph_provisioning_construct (root, &record,
       &authority), ==, WYRELOG_E_POLICY);
 
-  /* The rename freed the stage name, so this retry re-creates it before the
-   * final-exists gate refuses, and stage_clear only closes the descriptor.  A
-   * rejected Windows retry therefore leaves an orphan provisioning file where
-   * POSIX creates nothing (its stage_create_exact answers BUSY against the
-   * retained pair).  Deliberately not asserted: pinning it would make the #816
-   * fix a test change.  What the store owes either way is asserted below.
-   *
-   * Unchanged: same FileId, same size, still a single link. */
+  /* The rename freed the stage name, so this retry used to re-create it
+   * before the final-exists gate refused and, since stage_clear only closes
+   * the descriptor, leave it behind as an orphan.  stage_prepare now probes
+   * the final before it creates anything, so a rejected Windows retry
+   * creates nothing, as a POSIX one never did (its stage_create_exact
+   * answers BUSY against the retained pair). */
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+
+  /* Unchanged: same FileId, same size, still a single link. */
   BY_HANDLE_FILE_INFORMATION after = { 0 };
   g_assert_true (file_information (final_path, &after));
   g_assert_cmpuint (after.nFileIndexHigh, ==, before.nFileIndexHigh);
