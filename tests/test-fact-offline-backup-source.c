@@ -1339,17 +1339,15 @@ assert_restore_operation_absent (wyl_policy_store_t *policy,
 static void
 test_restore_begin_authenticated (void)
 {
-#if defined(__linux__) || defined(__APPLE__)
+#if !defined(__linux__) && !defined(__APPLE__)
+  g_test_skip ("offline restore begin requires Linux or macOS");
+#else
   const WylFactOfflineRestoreScope scopes[] = {
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT,
     WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
   };
-#else
-  g_test_skip ("offline restore begin requires Linux or macOS");
-  return;
-#endif
   for (guint pass = 0; pass < G_N_ELEMENTS (scopes); pass++) {
     const gboolean schema_transition = pass >= 2;
     BackupFixture fixture = { 0 };
@@ -1957,6 +1955,7 @@ test_restore_begin_authenticated (void)
     destination_capture_clear (&capture);
     fixture_clear (&fixture);
   }
+#endif
 }
 
 /* Materialise a captured backup as an on-disk bundle and return the trusted
@@ -14376,7 +14375,7 @@ main (int argc, char **argv)
     g_test_add_data_func (path, begin_reject_modes[i],
         test_restore_begin_rejects);
   }
-#ifdef WYL_HAS_DAEMON_HTTP
+#if defined(WYL_HAS_DAEMON_HTTP) && !defined(G_OS_WIN32)
   g_test_add_func
     ("/fact-offline-backup-source/restore-daemon-http-stateful-refusal",
       test_restore_daemon_http_stateful_refusal);
