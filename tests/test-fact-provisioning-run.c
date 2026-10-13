@@ -156,6 +156,7 @@ assert_authority_active (wyl_policy_store_t *store, const gchar *tenant_id,
   g_assert_cmpint (authority->lifecycle_state, ==,
       WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE);
   g_assert_true (authority->has_store_identity);
+  g_assert_cmpstr (authority->store_uuid, ==, store_uuid);
   wyl_policy_graph_authority_record_free (authority);
 }
 
@@ -1413,6 +1414,257 @@ test_open_for_graph_serves_active_graph (void)
 }
 #endif
 
+#ifdef G_OS_WIN32
+/* The crash states a Windows provisioning can leave behind, in the order
+ * provisioning_drive produces them.  POSIX recovers every one of these by
+ * name: its stage and final are one inode under two names, so a stage
+ * reopens by its exact name and a published pair is adopted as such, with
+ * no evidence involved (the Linux recover-from cases above stamp records
+ * with none).  Windows publishes by rename and reopens a stage or adopts a
+ * final only through the operation-evidence tuple the coordinator persists
+ * while the record is still RESERVED, so every state below carries that
+ * tuple, and a Windows record past RESERVED without one is not a state a
+ * crash can leave. */
+typedef enum
+{
+  /* Evidence persisted, stage file present, phase still RESERVED. */
+  WINDOWS_CRASH_RESERVED_WITH_STAGE,
+  /* As above after the RESERVED->STAGED step. */
+  WINDOWS_CRASH_STAGED_WITH_STAGE,
+  /* Published on disk, durable phase still STAGED (write-behind).  No case
+   * yet: recovery reaches ACTIVE from here but mints an orphan stage on the
+   * way, because stage_prepare creates the exact stage before it notices the
+   * final; the fix and the case land together. */
+  WINDOWS_CRASH_STAGED_PUBLISHED,
+  /* Published and recorded; the store identity not yet initialized. */
+  WINDOWS_CRASH_PUBLISHED,
+  /* Identity committed and recorded; only the activation step is missing. */
+  WINDOWS_CRASH_VERIFIED,
+} WindowsCrashState;
+
+static void
+windows_transition (wyl_policy_store_t *store, const gchar *op_uuid,
+    WylPolicyGraphProvisioningPhase from, WylPolicyGraphProvisioningPhase to)
+{
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+      op_uuid, from, to, 0, WYL_POLICY_GRAPH_ERROR_NONE, &result), ==,
+      WYRELOG_E_OK);
+  /* An illegal step returns OK with a non-applied result, so rc alone
+   * proves nothing. */
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+}
+
+static void
+assert_windows_record (wyl_policy_store_t *store, const gchar *op_uuid,
+    WylPolicyGraphProvisioningPhase phase,
+    const WylFactGraphWinOperationEvidence *evidence)
+{
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+      &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (record->phase, ==, phase);
+  g_assert_true (record->has_windows_evidence);
+  /* Field-wise, not memcmp: the tuple has padding. */
+  g_assert_true (wyl_fact_graph_windows_operation_evidence_equal
+        (&record->windows_evidence, evidence));
+  wyl_policy_graph_provisioning_record_free (record);
+}
+
+static void
+assert_authority_lifecycle (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, WylPolicyGraphLifecycleState lifecycle)
+{
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==, lifecycle);
+  wyl_policy_graph_authority_record_free (authority);
+}
+
+/* Leave the policy store and fact root exactly as a crash at |state| would,
+ * then recover.  Every step is the coordinator's own primitive in the
+ * coordinator's own order (provisioning_drive): prepare reserves the
+ * authority and the RESERVED record together, stage_prepare creates the
+ * exact stage, the stage's tuple is persisted while the phase is still
+ * RESERVED, and only then does the phase advance.  Clearing the stage only
+ * closes the handle, which is what a crash does to it. */
+static void
+windows_recover_from_crash_state (const gchar *tag, WindowsCrashState state)
+{
+  const gchar *tenant_id = "tenant-crash-win";
+  const gchar *graph_id = "graph-crash-win";
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root (tag, &error);
+  g_assert_no_error (error);
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  seed_graph (wyl_policy_store_get_db (store), tenant_id, graph_id);
+
+  WylPolicyGraphProvisioningInput input = make_input (tenant_id, graph_id);
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result =
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+      &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_nonnull (record);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_RESERVED);
+  g_assert_false (record->has_windows_evidence);
+  const gchar *op_uuid = record->op_uuid;
+  WylPolicyGraphAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, tenant_id,
+      graph_id, &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpint (authority->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING);
+
+  WylFactGraphProvisioningStage stage = WYL_FACT_GRAPH_PROVISIONING_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_provisioning_stage_prepare (root, record,
+      authority, &stage), ==, WYRELOG_E_OK);
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage.stage, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_set_windows_evidence
+        (store, op_uuid, &evidence), ==, WYRELOG_E_OK);
+  WylPolicyGraphProvisioningPhase phase = WYL_POLICY_GRAPH_PROVISIONING_RESERVED;
+  if (state >= WINDOWS_CRASH_STAGED_WITH_STAGE) {
+    windows_transition (store, op_uuid, phase,
+        WYL_POLICY_GRAPH_PROVISIONING_STAGED);
+    phase = WYL_POLICY_GRAPH_PROVISIONING_STAGED;
+  }
+  if (state >= WINDOWS_CRASH_STAGED_PUBLISHED) {
+    g_assert_cmpint (wyl_fact_graph_stage_sync (&stage.stage), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence
+          (&stage.directory, &stage.stage, &evidence), ==, WYRELOG_E_OK);
+  }
+  if (state >= WINDOWS_CRASH_PUBLISHED) {
+    windows_transition (store, op_uuid, phase,
+        WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED);
+    phase = WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED;
+  }
+  if (state >= WINDOWS_CRASH_VERIFIED) {
+    /* Commit the identity the way the PUBLISHED step does, so that VERIFIED
+     * means what the coordinator means by it: recovery from VERIFIED never
+     * looks at the pair again. */
+    WylFactGraphProvisionedPair *pair = NULL;
+    WylFactStoreIdentityResult identity_result =
+        WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+    g_assert_cmpint
+      (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+          (&stage.directory, op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+          (pair, &stage.identity, WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+        &identity_result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+          (pair, &stage.identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+        &identity_result), ==, WYRELOG_E_OK);
+    wyl_fact_graph_provisioned_pair_free (pair);
+    windows_transition (store, op_uuid, phase,
+        WYL_POLICY_GRAPH_PROVISIONING_VERIFIED);
+    phase = WYL_POLICY_GRAPH_PROVISIONING_VERIFIED;
+  }
+  wyl_fact_graph_provisioning_stage_clear (&stage);
+
+  /* The crash state, as recovery will find it. */
+  g_autofree gchar *tenant_component = NULL;
+  g_autofree gchar *graph_component = NULL;
+  g_assert_cmpint (wyl_fact_graph_component_encode (tenant_id,
+      &tenant_component), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_component_encode (graph_id,
+      &graph_component), ==, WYRELOG_E_OK);
+  g_autofree gchar *final_path = g_build_filename (root, tenant_component,
+          graph_component, "facts.duckdb", NULL);
+  g_autofree gchar *stage_path = g_build_filename (root, tenant_component,
+          graph_component, record->stage_basename, NULL);
+  gboolean published = state >= WINDOWS_CRASH_STAGED_PUBLISHED;
+  g_assert_cmpint (g_file_test (final_path, G_FILE_TEST_EXISTS), ==, published);
+  g_assert_cmpint (g_file_test (stage_path, G_FILE_TEST_EXISTS), ==,
+      !published);
+  assert_windows_record (store, op_uuid, phase, &evidence);
+  assert_authority_lifecycle (store, tenant_id, graph_id,
+      WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING);
+
+  WylPolicyGraphProvisioningRecord *recovered = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (store, op_uuid, root,
+      &recovered), ==, WYRELOG_E_OK);
+  g_assert_nonnull (recovered);
+  g_assert_cmpint (recovered->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  /* The publishing rename keeps the file identity, so the tuple minted at
+   * stage creation is still the final's witness, whichever side of the
+   * rename the crash fell on. */
+  g_assert_true (recovered->has_windows_evidence);
+  g_assert_true (wyl_fact_graph_windows_operation_evidence_equal
+        (&recovered->windows_evidence, &evidence));
+  wyl_policy_graph_provisioning_record_free (recovered);
+  assert_retained_pair (root, tenant_id, graph_id, record->stage_basename);
+  assert_authority_active (store, tenant_id, graph_id);
+
+  /* The final is the provisioned pair under the recorded tuple and holds
+   * the exact identity: for the states that crashed before the PUBLISHED
+   * step this proves recovery initialized it, not the fixture. */
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_policy_store_open_fact_graph_directory (store, root,
+      tenant_id, graph_id, FALSE, &directory), ==, WYRELOG_E_OK);
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&directory, op_uuid, &evidence, &pair), ==, WYRELOG_E_OK);
+  const WylFactStoreIdentity identity = {
+    .tenant_id = tenant_id, .graph_id = graph_id, .store_uuid = store_uuid,
+    .format_version = authority->format_version,
+    .path_encoding_version = authority->path_encoding_version,
+  };
+  WylFactStoreIdentityResult identity_result =
+      WYL_FACT_STORE_IDENTITY_RESULT_NONE;
+  g_assert_cmpint (wyl_fact_store_open_identified_provisioned_pair_pinned
+        (pair, &identity, WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY,
+      &identity_result), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&directory);
+
+  /* Idempotent: replaying an ACTIVE operation is a no-op success. */
+  g_assert_cmpint (wyl_fact_graph_provisioning_recover (store, op_uuid, root,
+      &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovered->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  wyl_policy_graph_provisioning_record_free (recovered);
+
+  wyl_policy_graph_authority_record_free (authority);
+  wyl_policy_graph_provisioning_record_free (record);
+  remove_root (root);
+}
+
+static void
+test_windows_recover_reserved_with_stage (void)
+{
+  windows_recover_from_crash_state ("wyl-fact-provisioning-win-reserved-XXXXXX",
+      WINDOWS_CRASH_RESERVED_WITH_STAGE);
+}
+
+static void
+test_windows_recover_staged_with_stage (void)
+{
+  windows_recover_from_crash_state ("wyl-fact-provisioning-win-staged-XXXXXX",
+      WINDOWS_CRASH_STAGED_WITH_STAGE);
+}
+
+static void
+test_windows_recover_published (void)
+{
+  windows_recover_from_crash_state ("wyl-fact-provisioning-win-published-XXXXXX",
+      WINDOWS_CRASH_PUBLISHED);
+}
+
+static void
+test_windows_recover_verified (void)
+{
+  windows_recover_from_crash_state ("wyl-fact-provisioning-win-verified-XXXXXX",
+      WINDOWS_CRASH_VERIFIED);
+}
+#endif
+
 #ifndef G_OS_WIN32
 /* Locate the directory holding a graph's artifacts by finding the one that
  * contains the lock file, rather than reconstructing the layout here. */
@@ -1701,6 +1953,16 @@ main (int argc, char *argv[])
 #endif
   g_test_add_func ("/fact/provisioning-run/open-for-graph-serves-active-graph",
       test_open_for_graph_serves_active_graph);
+#ifdef G_OS_WIN32
+  g_test_add_func ("/fact/provisioning-run/windows-recover-reserved-with-stage",
+      test_windows_recover_reserved_with_stage);
+  g_test_add_func ("/fact/provisioning-run/windows-recover-staged-with-stage",
+      test_windows_recover_staged_with_stage);
+  g_test_add_func ("/fact/provisioning-run/windows-recover-published",
+      test_windows_recover_published);
+  g_test_add_func ("/fact/provisioning-run/windows-recover-verified",
+      test_windows_recover_verified);
+#endif
 #endif
   /* Last on purpose: a failed assertion aborts the binary, and this case is
    * the one whose Windows preconditions (two read-only bridge opens of one

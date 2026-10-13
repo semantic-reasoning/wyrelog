@@ -2561,9 +2561,10 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   # Linux asserts the retained hard-link pair; Darwin and Windows assert a
   # direct final bound to durable operation evidence.  The Windows row builds
   # and runs this suite only in the secure-bridge job, where the sibling
-  # fact-store-provisioned suite measured 35.8 s and 39.2 s (runs 38377408579
-  # and 38400846255); 60 s would leave this suite under 1.5x headroom, less
-  # once its Windows recovery cases land, so Windows gets 180 s.  The Windows
+  # fact-store-provisioned suite measured 35.8 s, 39.2 s and 39.8 s (runs
+  # 38377408579, 38400846255 and 38355808772); 60 s would leave this suite
+  # under 1.5x headroom even before its four Windows recovery cases, each a
+  # further provisioning, so Windows gets 180 s.  The Windows
   # timeout-boundary guard (tests/test-windows-ci-timeout-boundary.py) does
   # not cover this suite; a measured ceiling can be added there later.
   fact_provisioning_run_timeout = 60
