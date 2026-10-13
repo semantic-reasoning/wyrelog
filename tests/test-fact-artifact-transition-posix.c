@@ -1849,7 +1849,36 @@ static void
 test_provisioned_old_main_transition (void)
 {
 #ifdef __APPLE__
-  return;
+  const gchar *provisioning_uuid =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+  Fixture fixture;
+  fixture_init (&fixture, "u2b-provisioned-XXXXXX");
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 100);
+  make_conforming (&fixture, fixture.names.stage, 200);
+  g_autofree gchar *companion = g_strdup_printf ("provision-%s.sqlite",
+          provisioning_uuid);
+  g_assert_cmpint (linkat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+      fixture.directory.graph_fd, companion, 0), ==, 0);
+  g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
+  Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation observation = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  Identity main_id = real_identity (&fixture,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+  Identity stage_id = real_identity (&fixture, fixture.names.stage);
+  Request request = request_for (&observation, main_id, stage_id, FALSE);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture_provisioned
+        (provider, provisioning_uuid, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (observation.old_main_witness, ==, 0);
+  fixture_clear (&fixture);
+  g_test_skip ("provisioned restore is not yet ported to macOS");
 #else
   const gchar *provisioning_uuid =
       "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
