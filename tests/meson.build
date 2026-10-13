@@ -409,15 +409,13 @@ if get_option('enable_fact_store').allowed() and \
   # The Windows secure-bridge row names its suites explicitly and cannot run
   # the whole binary (its POSIX cases have never run there), so the Windows
   # reconstitution and backup-source cases get an invocation of their own.
+  # One -r prefix, not one -p per case: GLib (2.88 on the row) prints a
+  # late TAP plan after every -p path, and meson's TAP parser reports a
+  # second plan as an ERROR even when every case passed.
   if host_machine.system() == 'windows'
     test('fact-offline-restore-windows-reconstitution',
       test_offline_backup_source,
-      args : ['--tap',
-              '-p', '/fact-offline-backup-source/restore-dry-run-windows',
-              '-p', '/fact-offline-backup-source/restore-begin-windows',
-              '-p', '/fact-offline-backup-source/graph-source-windows',
-              '-p', '/fact-offline-backup-source/graph-source-windows-missing-evidence',
-              '-p', '/fact-offline-backup-source/graph-source-windows-evidence-drift'],
+      args : ['--tap', '-r', '/fact-offline-backup-source/windows'],
       protocol : 'tap',
       timeout : 180,
     )

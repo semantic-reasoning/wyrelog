@@ -24,9 +24,6 @@
 /fact-offline-backup-source/generation-linearization
 /fact-offline-backup-source/generation-multi-graph
 /fact-offline-backup-source/generation-publication
-/fact-offline-backup-source/graph-source-windows
-/fact-offline-backup-source/graph-source-windows-evidence-drift
-/fact-offline-backup-source/graph-source-windows-missing-evidence
 /fact-offline-backup-source/graph/alpha/missing-sibling-runtime
 /fact-offline-backup-source/graph/alpha/observe
 /fact-offline-backup-source/graph/alpha/record
@@ -126,12 +123,10 @@
 /fact-offline-backup-source/restore-begin-reject/tenant-none
 /fact-offline-backup-source/restore-begin-reject/tenant-sidecar
 /fact-offline-backup-source/restore-begin-reject/tenant-substituted-main
-/fact-offline-backup-source/restore-begin-windows
 /fact-offline-backup-source/restore-daemon-http-graph-lifecycle
 /fact-offline-backup-source/restore-daemon-http-lifecycle
 /fact-offline-backup-source/restore-daemon-http-stateful-refusal
 /fact-offline-backup-source/restore-dry-run-read-only
-/fact-offline-backup-source/restore-dry-run-windows
 /fact-offline-backup-source/restore-populated-graph-schema-transition
 /fact-offline-backup-source/restore-replacement
 /fact-offline-backup-source/restore-replacement-commit-response
@@ -386,3 +381,8 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/graph-source
+/fact-offline-backup-source/windows/graph-source-evidence-drift
+/fact-offline-backup-source/windows/graph-source-missing-evidence
+/fact-offline-backup-source/windows/restore-begin
+/fact-offline-backup-source/windows/restore-dry-run

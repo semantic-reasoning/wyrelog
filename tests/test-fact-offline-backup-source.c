@@ -14862,17 +14862,22 @@ main (int argc, char **argv)
       test_restore_dry_run_read_only);
   g_test_add_func ("/fact-offline-backup-source/restore-begin-authenticated",
       test_restore_begin_authenticated);
-  g_test_add_func ("/fact-offline-backup-source/restore-dry-run-windows",
+  /* The Windows cases live under one sub-suite so the Windows
+   * secure-bridge row can name them with a single -r prefix: GLib
+   * prints a TAP plan after every -p path, and meson's TAP parser
+   * rejects a run with more than one plan.  Each case skips off
+   * Windows. */
+  g_test_add_func ("/fact-offline-backup-source/windows/restore-dry-run",
       test_restore_dry_run_windows);
-  g_test_add_func ("/fact-offline-backup-source/restore-begin-windows",
+  g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
-  g_test_add_func ("/fact-offline-backup-source/graph-source-windows",
+  g_test_add_func ("/fact-offline-backup-source/windows/graph-source",
       test_graph_source_windows);
   g_test_add_func
-    ("/fact-offline-backup-source/graph-source-windows-missing-evidence",
+    ("/fact-offline-backup-source/windows/graph-source-missing-evidence",
       test_graph_source_windows_missing_evidence);
   g_test_add_func
-    ("/fact-offline-backup-source/graph-source-windows-evidence-drift",
+    ("/fact-offline-backup-source/windows/graph-source-evidence-drift",
       test_graph_source_windows_evidence_drift);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
