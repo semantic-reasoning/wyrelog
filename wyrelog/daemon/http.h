@@ -25,9 +25,15 @@ SoupServer *wyl_daemon_start_http_server (const WylDaemonOptions * opts,
 SoupServer *wyl_daemon_start_http_server_with_runtime
   (const WylDaemonOptions * opts, WylHandle * handle,
     WylDaemonRuntime * runtime, GError ** error);
+/* Resolve a client credential only; internal IDs never authenticate here. */
 WylSession *wyl_daemon_http_ref_session (SoupServer * server,
     const gchar * session_token);
+/* Internal lookup after authentication, also used by identity-based tests. */
+WylSession *wyl_daemon_http_ref_session_by_id (SoupServer * server,
+    const gchar * session_id);
 #ifdef WYL_TEST_DAEMON_HTTP
+gchar *wyl_daemon_http_new_session_token_for_test (SoupServer * server,
+    const gchar * session_id);
 typedef enum
 {
   WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED = 1,
@@ -362,11 +368,11 @@ gchar *wyl_daemon_http_dup_access_token_key_id (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_rotate_access_token_key_for_test
   (SoupServer * server);
 gboolean wyl_daemon_http_remove_session_for_test (SoupServer * server,
-    const gchar * session_token);
+    const gchar * session_id);
 gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
     const gchar * refresh_token);
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
-    const gchar * session_token);
+    const gchar * session_id);
 wyrelog_error_t wyl_daemon_http_issue_human_tokens_for_test
   (SoupServer * server, WylSession * session, const gchar * session_id,
     const gchar * subject, const gchar * tenant, gchar ** out_access,

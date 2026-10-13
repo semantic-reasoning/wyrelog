@@ -55,6 +55,14 @@
 #define CONTRACT_FUTURE_EXPIRES_AT_US G_GUINT64_CONSTANT (4102444800000000)
 #define CONTRACT_FUTURE_EXPIRES_AT_US_STR "4102444800000000"
 
+static gchar *
+http_session_identity (SoupServer *server, const gchar *token)
+{
+  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server, token);
+  g_assert_nonnull (session);
+  return wyl_session_dup_id_string (session);
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -2384,6 +2392,8 @@ check_human_refresh_replay_body_matches (WylHandle *handle,
   if (status != 200 || replayed == NULL)
     return 2935;
 
+  g_assert_null (strstr (minted, "session_token"));
+  g_assert_null (strstr (replayed, "session_token"));
   if (g_strcmp0 (minted, replayed) != 0) {
     /* One code cannot say which field drifted, and the exit status truncates
      * anyway, so print both bodies (#1062). */
@@ -2405,8 +2415,9 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
       "username=login-user&skip_mfa=true", &login_status, &login_body)
       != 0 || login_status != 200)
     return 2200;
-  g_autofree gchar *session_id = extract_json_string (login_body,
+  g_autofree gchar *session_secret = extract_json_string (login_body,
           "session_token");
+  g_autofree gchar *session_id = http_session_identity (server, session_secret);
   g_autofree gchar *predecessor = extract_json_string (login_body,
           "refresh_token");
   if (session_id == NULL || predecessor == NULL)
@@ -2757,7 +2768,8 @@ check_human_refresh_logout_ordering (SoupServer *server, const gchar *base_url)
         "username=login-user&skip_mfa=true", &status, &body) != 0
         || status != 200)
       return 2320 + (gint) i *10;
-    g_autofree gchar *session_id = extract_json_string (body, "session_token");
+    g_autofree gchar *session_secret = extract_json_string (body, "session_token");
+    g_autofree gchar *session_id = http_session_identity (server, session_secret);
     g_autofree gchar *predecessor = extract_json_string (body,
             "refresh_token");
     guint refresh_before = 0, access_before = 0;
@@ -2969,8 +2981,8 @@ check_human_refresh_fault_matrix (SoupServer *server, const gchar *base_url)
       return 2270 + (gint) i *10;
     g_autofree gchar *predecessor = extract_json_string (body,
             "refresh_token");
-    g_autofree gchar *session_id = extract_json_string (body,
-            "session_token");
+    g_autofree gchar *session_secret = extract_json_string (body, "session_token");
+    g_autofree gchar *session_id = http_session_identity (server, session_secret);
     gchar **access_ids_before =
         wyl_daemon_http_snapshot_session_access_ids_for_test (server,
             session_id);
@@ -3069,8 +3081,10 @@ check_human_refresh_failure_and_clock_boundaries (SoupServer *server,
   g_autofree gchar *body = NULL;
   if (send_raw_login (session, "POST", base_url,
       "username=login-user&skip_mfa=true", &status, &body) != 0
-      || status != 200)
+      || status != 200) {
+    g_printerr ("refresh boundary login status=%u body=%s\n", status, body);
     return 2212;
+  }
   g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
   if (predecessor == NULL)
     return 2213;
@@ -3196,7 +3210,7 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
       || access_after != access_before)
     return 1903;
 
-  g_autoptr (WylSession) human = wyl_daemon_http_ref_session (server,
+  g_autoptr (WylSession) human = wyl_daemon_http_ref_session_by_id (server,
           human_session_id);
   if (human == NULL)
     return 1904;
@@ -6128,8 +6142,11 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   g_autofree gchar *expected_state =
       g_strdup_printf ("\"principal_state_at_issue\":\"%s\"",
           principal_state);
+  g_autofree gchar *session_id = http_session_identity (server, session_token);
+  g_assert_cmpstr (session_id, !=, session_token);
+  g_assert_null (strstr (payload_text, session_token));
   g_autofree gchar *expected_session =
-      g_strdup_printf ("\"session_id\":\"%s\"", session_token);
+      g_strdup_printf ("\"session_id\":\"%s\"", session_id);
   const gchar *expected_tenant = "\"tenant\":\"__wr_default\"";
   if (strstr (payload_text, expected_sub) == NULL ||
       strstr (payload_text, expected_state) == NULL ||
@@ -6241,7 +6258,7 @@ seed_human_tokens_with_assurance (SoupServer *server, const gchar *session_id,
       wyl_daemon_http_seed_human_session_for_test (server, session_id,
           subject, tenant);
   g_autoptr (WylSession) session = seeded ?
-      wyl_daemon_http_ref_session (server, session_id) : NULL;
+      wyl_daemon_http_ref_session_by_id (server, session_id) : NULL;
   return session != NULL
          && wyl_daemon_http_issue_human_tokens_for_test (server, session,
              session_id, subject, tenant, out_access_token, out_refresh_token)
@@ -6537,6 +6554,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       extract_json_string (body, "session_token");
   if (authenticated_session_token == NULL)
     return 486;
+  g_autofree gchar *authenticated_session_token_id = http_session_identity (server, authenticated_session_token);
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe principal_skip_audit = {
     .subject_id = "login-user",
@@ -6553,7 +6571,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (principal_skip_audit.matches != 1)
     return 1815;
   AuditEventProbe session_skip_audit = {
-    .subject_id = authenticated_session_token,
+    .subject_id = authenticated_session_token_id,
     .action = "session_state",
     .resource_id = "active",
     .deny_origin = "idle",
@@ -6601,7 +6619,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return rc;
 
   rc = check_service_refresh_isolation (server, base_url,
-          authenticated_session_token);
+          authenticated_session_token_id);
   if (rc != 0)
     return rc;
 
@@ -6765,7 +6783,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 485;
   if (wyl_daemon_http_remove_session_for_test (server, "unknown-session"))
     return 481;
-  if (!wyl_daemon_http_remove_session_for_test (server, session_token))
+  g_autofree gchar *removed_id = http_session_identity (server, session_token);
+  if (!wyl_daemon_http_remove_session_for_test (server, removed_id))
     return 482;
   g_autoptr (WylSession) removed_session =
       wyl_daemon_http_ref_session (server, session_token);
@@ -6810,9 +6829,10 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       extract_json_string (body, "session_token");
   if (logout_session_token == NULL)
     return 491;
+  g_autofree gchar *logout_session_token_id = http_session_identity (server, logout_session_token);
   g_clear_pointer (&body, g_free);
   if (grant_policy_write_authority (handle, "logout-user",
-      logout_session_token) != WYRELOG_E_OK)
+      logout_session_token_id) != WYRELOG_E_OK)
     return 492;
   if (wyl_policy_store_upsert_permission (wyl_handle_get_policy_store (handle),
       "site.policy.read", "site policy read", "basic") != WYRELOG_E_OK)
@@ -6840,7 +6860,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (logged_out_session != NULL)
     return 496;
   SessionStateExpect closed_expect = {
-    .session_id = logout_session_token,
+    .session_id = logout_session_token_id,
     .state = "closed",
   };
   if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
@@ -6850,7 +6870,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 498;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe close_audit = {
-    .subject_id = logout_session_token,
+    .subject_id = logout_session_token_id,
     .action = "session_state",
     .resource_id = "closed",
     .deny_origin = "active",
@@ -6906,6 +6926,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       extract_json_string (body, "session_token");
   if (bearer_logout_session_token == NULL)
     return 503;
+  g_autofree gchar *bearer_logout_session_token_id = http_session_identity (server, bearer_logout_session_token);
   g_autofree gchar *bearer_logout_access_token =
       extract_json_string (body, "access_token");
   if (bearer_logout_access_token == NULL)
@@ -6916,7 +6937,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 524;
   g_clear_pointer (&body, g_free);
   if (grant_policy_write_authority (handle, "bearer-logout-user",
-      bearer_logout_session_token) != WYRELOG_E_OK)
+      bearer_logout_session_token_id) != WYRELOG_E_OK)
     return 505;
 
   rc = send_raw_logout_authorization (session, "POST", base_url, NULL,
@@ -6973,11 +6994,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
    * is the structural fix for the residual store-after-revoke
    * window the snapshot revoke alone leaves open.
    */
-  if (!wyl_daemon_http_session_is_revoked (server, bearer_logout_session_token))
+  if (!wyl_daemon_http_session_is_revoked (server, bearer_logout_session_token_id))
     return 526;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe bearer_close_audit = {
-    .subject_id = bearer_logout_session_token,
+    .subject_id = bearer_logout_session_token_id,
     .action = "session_state",
     .resource_id = "closed",
     .deny_origin = "active",
@@ -11726,8 +11747,11 @@ check_policy_permission_mutation_contract (SoupServer *server,
       "http-policy-admin", WYL_TENANT_DEFAULT, TRUE,
       &transition_mfa_access, &transition_mfa_refresh))
     return 2679;
+  g_autofree gchar *transition_mfa_token =
+      wyl_daemon_http_new_session_token_for_test (server, transition_mfa_session);
+  g_assert_nonnull (transition_mfa_token);
   gint arm_creator_rc = refuse_catalogue_permission_transition (session, handle,
-          base_url, transition_mfa_session, "tenant-a", 2261);
+          base_url, transition_mfa_token, "tenant-a", 2261);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
   g_autofree gchar *tenant_role_grant_query =
@@ -11805,7 +11829,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   arm_creator_rc = refuse_catalogue_permission_transition (session, handle, base_url,
-          transition_mfa_session, "tenant-revoke", 2265);
+          transition_mfa_token, "tenant-revoke", 2265);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
 
@@ -12498,7 +12522,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *transition_allowed_query =
       g_strdup_printf ("subject=state-target&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_token);
   rc = check_valid_policy_aliases (server, handle, session, base_url,
           "/policy/permissions/transition", transition_allowed_query, 2680);
   if (rc != 0)
@@ -12624,7 +12648,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *mfa_reset_query =
       g_strdup_printf ("subject=reset-target&perm=site.policy.read"
           "&scope=tenant-a&event=reset&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", mfa_reset_query, &status, &body);
   gboolean reset_target_armed = FALSE;
@@ -12729,7 +12753,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *svc_transition_query =
       g_strdup_printf ("subject=svc:transition-reject-762&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", svc_transition_query, &status, &body);
   if (rc != 0)
@@ -12744,7 +12768,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *client_state_transition_query =
       g_strdup_printf ("subject=client-state-target&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", client_state_transition_query,
           &status, &body);
@@ -13048,7 +13072,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
         g_strdup_printf ("subject=changed-state-target&perm=site.policy.read"
             "&scope=tenant-a&event=grant&session_token=%s"
             "&guard_timestamp=123&guard_loc_class=public&guard_risk=29",
-            transition_mfa_session);
+            transition_mfa_token);
     rc = send_raw_policy_mutation (session, "POST", base_url,
             "/policy/permissions/transition", transition_query, &status,
             &body);
@@ -13270,7 +13294,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     .session = NULL,
   };
   g_autoptr (WylSession) transition_mfa_live_session =
-      wyl_daemon_http_ref_session (server, transition_mfa_session);
+      wyl_daemon_http_ref_session (server, transition_mfa_token);
   revoke_probe.session = transition_mfa_live_session;
   if (revoke_probe.session == NULL)
     return 2697;
@@ -13285,7 +13309,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *revoked_transition_query =
       g_strdup_printf ("subject=race-target&perm=site.policy.read"
           "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
-          "&guard_loc_class=public&guard_risk=49", transition_mfa_session);
+          "&guard_loc_class=public&guard_risk=49", transition_mfa_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/policy/permissions/transition", revoked_transition_query,
           &status, &body);
@@ -14053,6 +14077,75 @@ enroll_audit_redaction_victim (WylHandle *handle, const gchar *subject)
   return rc == WYRELOG_E_OK ? 0 : 1;
 }
 
+typedef struct
+{
+  const gchar *secret;
+  const gchar *session_id;
+  guint session_rows;
+  guint decision_rows;
+} SessionSecretAuditProbe;
+
+static wyrelog_error_t
+session_secret_audit_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gpointer data)
+{
+  (void) created_at_us;
+  (void) decision;
+  SessionSecretAuditProbe *probe = data;
+  const gchar *fields[] = { id, subject_id, action, resource_id, deny_reason,
+                            deny_origin, request_id };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    if (fields[i] != NULL)
+      g_assert_null (strstr (fields[i], probe->secret));
+  if (g_strcmp0 (subject_id, probe->session_id) == 0
+      && g_strcmp0 (action, "session_state") == 0)
+    probe->session_rows++;
+  if (g_strcmp0 (resource_id, probe->session_id) == 0
+      && g_strcmp0 (action, "wr.audit.read") == 0)
+    probe->decision_rows++;
+  return WYRELOG_E_OK;
+}
+
+static void
+assert_session_secret_not_stored (WylHandle *handle, const gchar *secret,
+    const gchar *session_id, gboolean expect_decision)
+{
+  SessionSecretAuditProbe policy = { secret, session_id, 0, 0 };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), session_secret_audit_cb, &policy),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (policy.session_rows, >, 0);
+  if (expect_decision)
+    g_assert_cmpuint (policy.decision_rows, >, 0);
+  SessionSecretAuditProbe sink = { secret, session_id, 0, 0 };
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result rows = { 0 };
+  g_assert_cmpint (duckdb_query (conn,
+      "SELECT id, subject_id, action, resource_id, deny_reason, deny_origin, "
+      "request_id FROM audit_events", &rows), ==, DuckDBSuccess);
+  for (idx_t row = 0; row < duckdb_row_count (&rows); row++) {
+    gchar *fields[7];
+    for (idx_t col = 0; col < G_N_ELEMENTS (fields); col++)
+      fields[col] = duckdb_value_varchar (&rows, col, row);
+    session_secret_audit_cb (fields[0], 0, fields[1], fields[2], fields[3],
+        fields[4], fields[5], fields[6], WYL_DECISION_ALLOW, &sink);
+    for (guint col = 0; col < G_N_ELEMENTS (fields); col++)
+      duckdb_free (fields[col]);
+  }
+  duckdb_destroy_result (&rows);
+  g_assert_cmpuint (sink.session_rows, >, 0);
+  if (expect_decision)
+    g_assert_cmpuint (sink.decision_rows, >, 0);
+  SessionStateExpect credential = { .session_id = secret, .state = "active" };
+  g_assert_cmpint (wyl_policy_store_foreach_session_state
+        (wyl_handle_get_policy_store (handle), session_state_expect_cb,
+      &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (credential.matches, ==, 0);
+}
+
 static gint
 check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
     const gchar *base_url, const gchar *reader_token,
@@ -14081,6 +14174,22 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   g_autofree gchar *pending = extract_json_string (body, "session_token");
   if (victim == NULL || pending == NULL)
     return 12604;
+  g_autofree gchar *victim_id = http_session_identity (server, victim);
+  g_autofree gchar *pending_id = http_session_identity (server, pending);
+  g_assert_cmpstr (victim, !=, victim_id);
+  g_assert_cmpstr (pending, !=, pending_id);
+  g_assert_cmpstr (victim, !=, pending);
+  g_assert_cmpuint (strlen (victim), ==, 68);
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+          victim, -1);
+  const gchar *invalid_credentials[] = { victim_id, digest, pending_id };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid_credentials); i++) {
+    g_autofree gchar *query = g_strdup_printf ("session_token=%s"
+            "&guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+            invalid_credentials[i]);
+    g_assert_cmpint (send_raw_audit (http, base_url, query, &status, &body), ==, 0);
+    g_assert_cmpuint (status, ==, 401);
+  }
 
   guint64 step = (guint64) (g_get_real_time () / G_USEC_PER_SEC)
       / WYL_TOTP_STEP_SECONDS;
@@ -14093,6 +14202,32 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   if (send_raw_path_probe (http, "POST", base_url, "/auth/mfa/verify", NULL,
       verify_body, &status, &body) != 0 || status != 200)
     return 12606;
+
+  g_autofree gchar *victim_access = extract_json_string (body, "access_token");
+  g_assert_nonnull (victim_access);
+  /* /decide's legacy scope parameter also accepts a live client secret;
+   * it must translate before constructing either policy/audit resource. */
+  g_assert_cmpint (send_raw_decide_bearer (http, "POST", base_url,
+      "audit-leak-victim", "wr.audit.read", victim,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      victim_access, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpint (send_raw_decide_bearer (http, "POST", base_url,
+      "svc:secret-scope:worker", "wr.audit.read", victim,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      victim_access, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 403);
+  AuditEventProbe authority = {
+    .subject_id = "audit-leak-victim",
+    .action = "wr.service_principal.manage",
+    .resource_id = victim_id,
+  };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &authority),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (authority.matches, >, 0);
+  assert_session_secret_not_stored (handle, victim, victim_id, TRUE);
+  assert_session_secret_not_stored (handle, pending, pending_id, FALSE);
 
   /* Both are live: the verified session authenticates (and is refused only
    * for lacking the permission), the pending one is registered and becomes
@@ -14181,12 +14316,12 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
 
   /* Any column equal to a live session id, whatever wrote it. */
   g_autoptr (WylAuditEvent) probe = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (probe, victim);
+  wyl_audit_event_set_subject_id (probe, victim_id);
   wyl_audit_event_set_action (probe, "leak_probe");
-  wyl_audit_event_set_resource_id (probe, victim);
-  wyl_audit_event_set_deny_reason (probe, victim);
-  wyl_audit_event_set_deny_origin (probe, victim);
-  wyl_audit_event_set_request_id (probe, victim);
+  wyl_audit_event_set_resource_id (probe, victim_id);
+  wyl_audit_event_set_deny_reason (probe, victim_id);
+  wyl_audit_event_set_deny_origin (probe, victim_id);
+  wyl_audit_event_set_request_id (probe, victim_id);
   wyl_audit_event_set_decision (probe, WYL_DECISION_ALLOW);
   if (wyl_audit_emit (handle, probe) != WYRELOG_E_OK)
     return 12625;
@@ -14254,6 +14389,20 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   }
   if (!victim_fired || strstr (fired_after, victim) != NULL)
     return 12638;
+  /* A retired secret must not fall through as an arbitrary policy scope. */
+  g_assert_cmpint (send_raw_decide_bearer (http, "POST", base_url,
+      "http-audit-user", "wr.audit.read", victim,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      reader_token, &status, &body), ==, 0);
+  g_assert_cmpuint (status, ==, 400);
+  assert_session_secret_not_stored (handle, victim, victim_id, TRUE);
+  /* A replaced identity cannot inherit the previous object's credential. */
+  g_assert_true (wyl_daemon_http_seed_human_session_for_test (server,
+      pending_id, "audit-leak-pending", WYL_TENANT_DEFAULT));
+  g_autoptr (WylSession) stale = wyl_daemon_http_ref_session (server, pending);
+  g_assert_null (stale);
+  g_assert_true (wyl_daemon_http_remove_session_for_test (server, pending_id));
+  g_assert_null (wyl_daemon_http_ref_session_by_id (server, pending_id));
   return 0;
 }
 
@@ -18011,6 +18160,7 @@ check_service_principal_management_contract (void)
   g_autofree gchar *revoke_route_path = NULL;
   g_autofree gchar *rotate_route_path = NULL;
   g_autofree gchar *tenant_route_query = NULL;
+  g_autofree gchar *tenant_route_secret = NULL;
   wyl_service_principal_t tenant_route_principal = { 0 };
   wyl_service_principal_t principal_unrelated = { 0 };
 #endif
@@ -18860,8 +19010,11 @@ check_service_principal_management_contract (void)
   }
   /* Tenant lifecycle routes retain their session-token authorization
    * contract; do not inherit the Bearer-only management query above. */
+  tenant_route_secret =
+      wyl_daemon_http_new_session_token_for_test (http.server, session_token);
+  g_assert_nonnull (tenant_route_secret);
   tenant_route_query = g_strdup_printf ("name=tenant-route&session_token=%s&%s",
-          session_token, query);
+          tenant_route_secret, query);
   if (!actual_http_route_retirement_race (http.server, base_url,
       "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
       NULL, &tenant_route_tokens, "svc:tenant-route:worker",

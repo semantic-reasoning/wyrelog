@@ -148,7 +148,7 @@ seed_bearer_operator (SoupServer *server, WylHandle *handle,
   g_assert_true (wyl_daemon_http_seed_mfa_human_session_for_test (server,
       session_text, subject, WYL_TENANT_DEFAULT));
 
-  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
+  g_autoptr (WylSession) session = wyl_daemon_http_ref_session_by_id (server,
           session_text);
   g_assert_nonnull (session);
 

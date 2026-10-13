@@ -812,6 +812,13 @@ same. The distinction the client needs -- and previously could not make, since
 every one of these conditions returned a bare `401` with no header at all -- is
 between a credential worth refreshing and one that was never usable.
 
+`/auth/refresh` returns new access/refresh tokens but omits `session_token`,
+including on an idempotent retry. Retain the session token returned by login;
+MFA verification returns that same token. A client restored using only a refresh
+token can use bearer authentication but cannot recover the session secret.
+Internal session IDs in JWT claims or audit rows are never session credentials.
+See [the session identity contract](auth-session-restart-model.md#session-credentials-and-internal-identity).
+
 `/auth/refresh` takes the token in the request body:
 
 ```
@@ -1189,6 +1196,9 @@ again immediately. A human administrator holding
 service bearers remain self-subject only, and other cross-subject requests are
 denied. The legacy `session_token` query parameter carries the policy scope (the
 tenant), not the bearer token.
+A live human `wst_` session credential supplied as this scope is translated to
+its internal session ID before evaluation. The `wst_` prefix is reserved;
+unknown or logged-out credentials are rejected rather than recorded as scopes.
 
 ```
 # Fresh service token, no role yet: DENY. An admin can inspect this subject too.
@@ -1375,20 +1385,16 @@ recording secret material:
   JWT, `Authorization` body, session id, or `jti` is present in any audit row,
   log, error, CLI output, or recovery journal. This is proven end to end by
   `service-credential-leak-scan-e2e` (Linux packaged runtime).
-- **Human session ids are shown as handles.** That guarantee is about
-  service credentials. A human login's session id is also its
-  `session_token`, which `?session_token=` accepts on every guarded route,
-  and the stored audit rows do record it: as the subject of `session_state`
-  and `session_fired_delta_*` rows, and in any column of a row written for a
-  session-scoped request. `/audit/events` and `wyctl audit query` therefore
-  show `session#` followed by 16 hex digits in its place. A handle is stable
-  for the life of one daemon process, so a session's rows still correlate,
-  but it is not a credential and does not match as a filter value. The
-  subject of those two row kinds is always replaced; in every other column
-  only the id of a session still live when the log is read is, and the id of
-  a session that has ended, which no longer authenticates, appears as
-  stored. The raw ids remain in the on-disk policy and audit stores, which
-  the file permissions of those stores protect.
+- **Human session identities are not credentials.** Login returns a separate
+  random `wst_` session token, indexed in memory by its SHA-256 digest. Stored
+  session-state, delta, and decision audit rows use internal IDs; neither an ID
+  nor its token digest can authenticate. Existing hash-chained rows remain
+  unchanged. `/audit/events` and `wyctl audit query` retain read-time redaction:
+  subjects of `session_state` and `session_fired_delta_*` rows always appear as
+  `session#` plus 16 hex digits; other columns equal to a currently registered ID
+  are also masked. The handle stays stable within one daemon process. Ended
+  session IDs in other columns appear as stored. Historical stores can still
+  contain the former credentials and require their existing file protections.
 
 ## Datalog Product Flow
 

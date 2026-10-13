@@ -3744,7 +3744,7 @@ main (void)
   client_access_token = wyl_client_dup_access_token (local_client);
   if (g_strcmp0 (client_access_token, "access-relogin") != 0)
     return wyl_test_normalize_exit_status (206);
-  http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
+  http.body = "{\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
       "\"session_state\":\"active\",\"access_token\":\"access-refresh\","
       "\"refresh_token\":\"refresh-next\"}";
@@ -3779,6 +3779,17 @@ main (void)
   client_access_token = wyl_client_dup_access_token (local_client);
   if (g_strcmp0 (client_access_token, "access-refresh") != 0)
     return wyl_test_normalize_exit_status (212);
+
+  g_clear_pointer (&client_session_token, g_free);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  g_assert_cmpstr (client_session_token, ==, "session-relogin");
+  wyl_client_set_refresh_token (local_client, "other-session-refresh");
+  g_clear_pointer (&client_session_token, g_free);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  g_assert_null (client_session_token);
+  g_assert_cmpint (wyl_client_token_refresh (local_client), ==, WYRELOG_E_OK);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  g_assert_null (client_session_token);
 
   /* Redirects and otherwise-unmapped responses preserve their metadata before
    * the established IO mapping is applied. */
