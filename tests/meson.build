@@ -415,7 +415,9 @@ if get_option('enable_fact_store').allowed() and \
       args : ['--tap',
               '-p', '/fact-offline-backup-source/restore-dry-run-windows',
               '-p', '/fact-offline-backup-source/restore-begin-windows',
-              '-p', '/fact-offline-backup-source/graph-source-windows'],
+              '-p', '/fact-offline-backup-source/graph-source-windows',
+              '-p', '/fact-offline-backup-source/graph-source-windows-missing-evidence',
+              '-p', '/fact-offline-backup-source/graph-source-windows-evidence-drift'],
       protocol : 'tap',
       timeout : 180,
     )

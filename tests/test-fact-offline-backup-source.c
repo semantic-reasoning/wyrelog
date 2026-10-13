@@ -13946,6 +13946,107 @@ test_graph_source_windows (void)
 #endif
 }
 
+#ifdef G_OS_WIN32
+/* Bypass only the fixture's immutable-record guard so the backup source's
+ * read of the evidence contract is what refuses, as the restore reject
+ * cases do for Darwin's evidence. */
+static void
+windows_rewrite_graph_evidence (BackupFixture *fixture, const gchar *sql)
+{
+  sqlite3 *db = wyl_policy_store_get_db (fixture->policy);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_immutable;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;", NULL, NULL,
+      NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+}
+#endif
+
+/* A graph whose ACTIVE record carries no Windows evidence is not a source,
+ * in either form: the tenant backup refuses on the one graph it cannot
+ * prove, as the graph backup of that graph does. */
+static void
+test_graph_source_windows_missing_evidence (void)
+{
+#ifndef G_OS_WIN32
+  g_test_skip ("Windows backup source from operation evidence");
+#else
+  BackupFixture fixture = { 0 };
+  windows_sealed_fixture_init (&fixture, "wyl-graph-source-win-noev-XXXXXX");
+  windows_rewrite_graph_evidence (&fixture,
+      "UPDATE fact_graph_provisioning SET "
+      "windows_operation_evidence_version=NULL,"
+      "windows_graph_volume_serial=NULL,windows_graph_file_id=NULL,"
+      "windows_artifact_volume_serial=NULL,windows_artifact_file_id=NULL "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';");
+  /* The rewrite reads back as an ACTIVE record without a tuple, so the
+   * refusals below come from the backup source's evidence read and not
+   * from a load error. */
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture.policy, "tenant-a", "alpha", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  WylPolicyGraphProvisioningRecord *stripped = g_ptr_array_index (records, 0);
+  g_assert_cmpint (stripped->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_false (stripped->has_windows_evidence);
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease),
+      ==, WYRELOG_E_OK);
+  WylFactOfflineBackupSource *source = (gpointer) 1;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "alpha",
+      0, lease, &source), ==, WYRELOG_E_POLICY);
+  g_assert_null (source);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  source = (gpointer) 1;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture.policy,
+      fixture.root, fixture.runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (source);
+  fixture_clear (&fixture);
+#endif
+}
+
+/* After the source is open, the policy's word about which artifact the
+ * operation published moves while the opened pair stays untouched: the
+ * revalidation that guards every copy and the final generation refuses.
+ * The store writes the tuple once (set_windows_evidence updates only a
+ * RESERVED or STAGED record whose columns are still NULL), so this reaches
+ * the compare only by rewriting the row; it is the defense-in-depth half of
+ * the contract, the half that would otherwise never execute. */
+static void
+test_graph_source_windows_evidence_drift (void)
+{
+#ifndef G_OS_WIN32
+  g_test_skip ("Windows backup source from operation evidence");
+#else
+  BackupFixture fixture = { 0 };
+  windows_sealed_fixture_init (&fixture, "wyl-graph-source-win-drift-XXXXXX");
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "alpha",
+      0, lease, &source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_backup_source_revalidate (source), ==,
+      WYRELOG_E_OK);
+  windows_rewrite_graph_evidence (&fixture,
+      /* `||` yields TEXT even for two blobs; the CAST keeps the row inside
+       * its typeof/length CHECK so the loader still sees a 16-byte tuple. */
+      "UPDATE fact_graph_provisioning SET windows_artifact_file_id="
+      "CAST((CASE WHEN substr(windows_artifact_file_id,1,1)=X'FF' THEN X'00' "
+      "ELSE X'FF' END) || substr(windows_artifact_file_id,2) AS BLOB) "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';");
+  g_assert_cmpint (wyl_fact_offline_backup_source_revalidate (source), ==,
+      WYRELOG_E_POLICY);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  fixture_clear (&fixture);
+#endif
+}
+
 /* #1304: on Windows the dry-run reconstitutes each provisioned pair from the
  * operation evidence its ACTIVE record carries, so an authentic bundle
  * against untouched graphs is eligible, the observation leaves the policy
@@ -14764,6 +14865,12 @@ main (int argc, char **argv)
       test_restore_begin_windows);
   g_test_add_func ("/fact-offline-backup-source/graph-source-windows",
       test_graph_source_windows);
+  g_test_add_func
+    ("/fact-offline-backup-source/graph-source-windows-missing-evidence",
+      test_graph_source_windows_missing_evidence);
+  g_test_add_func
+    ("/fact-offline-backup-source/graph-source-windows-evidence-drift",
+      test_graph_source_windows_evidence_drift);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",

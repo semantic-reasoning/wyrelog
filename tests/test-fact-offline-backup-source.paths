@@ -25,6 +25,8 @@
 /fact-offline-backup-source/generation-multi-graph
 /fact-offline-backup-source/generation-publication
 /fact-offline-backup-source/graph-source-windows
+/fact-offline-backup-source/graph-source-windows-evidence-drift
+/fact-offline-backup-source/graph-source-windows-missing-evidence
 /fact-offline-backup-source/graph/alpha/missing-sibling-runtime
 /fact-offline-backup-source/graph/alpha/observe
 /fact-offline-backup-source/graph/alpha/record
