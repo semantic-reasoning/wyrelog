@@ -1431,10 +1431,7 @@ typedef enum
   WINDOWS_CRASH_RESERVED_WITH_STAGE,
   /* As above after the RESERVED->STAGED step. */
   WINDOWS_CRASH_STAGED_WITH_STAGE,
-  /* Published on disk, durable phase still STAGED (write-behind).  No case
-   * yet: recovery reaches ACTIVE from here but mints an orphan stage on the
-   * way, because stage_prepare creates the exact stage before it notices the
-   * final; the fix and the case land together. */
+  /* Published on disk, durable phase still STAGED (write-behind). */
   WINDOWS_CRASH_STAGED_PUBLISHED,
   /* Published and recorded; the store identity not yet initialized. */
   WINDOWS_CRASH_PUBLISHED,
@@ -1648,6 +1645,21 @@ test_windows_recover_staged_with_stage (void)
 {
   windows_recover_from_crash_state ("wyl-fact-provisioning-win-staged-XXXXXX",
       WINDOWS_CRASH_STAGED_WITH_STAGE);
+}
+
+/* Write-behind: the final is published and the durable phase still says
+ * STAGED, so the stage name is free again.  Recovery's stage_prepare used to
+ * mint a new empty stage there before noticing the final and then leave it
+ * behind when it answered E_POLICY, an orphan the Windows restore inventory
+ * fails closed on; it now probes the final first.  assert_retained_pair's
+ * stage-absent check after recovery is the one that fails without that
+ * probe. */
+static void
+test_windows_recover_staged_write_behind (void)
+{
+  windows_recover_from_crash_state
+    ("wyl-fact-provisioning-win-write-behind-XXXXXX",
+      WINDOWS_CRASH_STAGED_PUBLISHED);
 }
 
 static void
@@ -1958,6 +1970,9 @@ main (int argc, char *argv[])
       test_windows_recover_reserved_with_stage);
   g_test_add_func ("/fact/provisioning-run/windows-recover-staged-with-stage",
       test_windows_recover_staged_with_stage);
+  g_test_add_func
+    ("/fact/provisioning-run/windows-recover-staged-write-behind",
+      test_windows_recover_staged_write_behind);
   g_test_add_func ("/fact/provisioning-run/windows-recover-published",
       test_windows_recover_published);
   g_test_add_func ("/fact/provisioning-run/windows-recover-verified",
