@@ -1830,7 +1830,12 @@ if host_machine.system() != 'windows'
     c_args : fact_test_support_c_args,
     dependencies : [wyrelog_dep] + fact_test_support_deps,
   )
-  test('fact-artifact-transition-posix', test_fact_artifact_transition_posix)
+  # TAP for the same reason as fact-graph-locator: provisioned-old-main
+  # calls g_test_skip on macOS.
+  test('fact-artifact-transition-posix', test_fact_artifact_transition_posix,
+    args : ['--tap'],
+    protocol : 'tap',
+  )
 endif
 
 if host_machine.system() == 'windows'

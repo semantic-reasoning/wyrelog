@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "32de4e33c54903bcc493c93a5ea8b755845f020ad15433c296046d288c522a88",
+        "85447d1b55e3b4bf27eaf12aa01d7c7c78ed8407a729abe2f257df90feaa6137",
     "tests/test-fact-artifact-transition-windows.c":
         "e28928fc2a46782f2558da57eab95c8a9ae831fb53857d816544d65a2e54f9fb",
 }
@@ -227,6 +227,7 @@ POSIX_AUTHORITY_BODY_SHA256 = (
 
 TERMINATION_PROFILES = {
     "tests/test-fact-artifact-transition-posix.c": (
+        'g_test_skip ("provisioned restore is not yet ported to macOS")',
         "WYL_TEST_EXIT(77)",
         "WYL_TEST_EXIT(78)",
     ),
@@ -1155,7 +1156,8 @@ def require_meson_compiler_profile(
         "fact-artifact-transition-posix": (
             ("if host_machine.system() != 'windows'",),
             "test('fact-artifact-transition-posix', "
-            "test_fact_artifact_transition_posix)",
+            "test_fact_artifact_transition_posix, args : ['--tap'], "
+            "protocol : 'tap', )",
         ),
         "fact-artifact-transition-windows": (
             ("if host_machine.system() == 'windows'",),
@@ -3083,13 +3085,30 @@ def negative_mutations(root: pathlib.Path) -> list[tuple[str, dict[str, str]]]:
     ):
         remapped = replace_once(
             raw["tests/meson.build"],
-            f"test('{test_name}', {target})",
-            f"test('{test_name}', python3)",
+            f"test('{test_name}', {target}",
+            f"test('{test_name}', python3",
             f"Meson {test_name} remapping",
         )
         mutations.append(
             (f"Meson {test_name} remapping", {"tests/meson.build": remapped})
         )
+    tap_dropped = replace_once(
+        raw["tests/meson.build"],
+        "test('fact-artifact-transition-posix', "
+        "test_fact_artifact_transition_posix,\n"
+        "    args : ['--tap'],\n"
+        "    protocol : 'tap',\n"
+        "  )",
+        "test('fact-artifact-transition-posix', "
+        "test_fact_artifact_transition_posix)",
+        "Meson fact-artifact-transition-posix TAP dropped",
+    )
+    mutations.append(
+        (
+            "Meson fact-artifact-transition-posix TAP dropped",
+            {"tests/meson.build": tap_dropped},
+        )
+    )
     rebound_target = replace_once(
         raw["tests/meson.build"],
         "test('fact-artifact-transition-driver', "
