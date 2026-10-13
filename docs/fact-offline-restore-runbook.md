@@ -4,7 +4,7 @@ This guide covers daemon-managed, staged restore of a tenant's selected graph se
 
 ## Before starting
 
-Run the stateful restore on Linux. The restore publication and recovery paths depend on Linux filesystem primitives; a successful `dry-run` on another platform does not mean `begin`, `prepare`, `commit`, or `resume` is supported there.
+Run the stateful restore on Linux. macOS admits `begin` and a graph-scope `prepare` but cannot `commit`, and `resume` makes no progress there, so a macOS restore can only be aborted; see [the daemon API](offline-restore-daemon-api.md). The restore publication and recovery paths depend on Linux filesystem primitives; a successful `dry-run` on another platform does not mean `commit` or `resume` is supported there.
 
 Obtain the bundle manifest SHA-256 through a separately trusted channel, such as a signed backup receipt. Do not trust a digest copied from the bundle or restore journal. Put the bundle in the daemon-readable owner-only bundle directory, and use the exact same bundle and digest throughout this operation. Register every schema definition selected by the backup on the destination before sealing it; the backup manifest carries selected versions, not schema definitions. See [schema transition limits](fact-offline-restore-schema-transition.md).
 

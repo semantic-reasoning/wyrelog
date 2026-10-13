@@ -288,7 +288,7 @@ wyl_fact_offline_restore_prepare_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void) drain_timeout_us;
   (void) cancellable;
   return WYRELOG_E_POLICY;
@@ -304,6 +304,14 @@ wyl_fact_offline_restore_prepare_run
             operation_uuid, &journal);
   if (rc == WYRELOG_E_OK && journal.revision != expected_revision)
     rc = WYRELOG_E_BUSY;
+#ifdef __APPLE__
+  /* A tenant prepare is not yet ported to macOS (#1303).  Refuse here,
+   * before the preflight route that a staged tenant journal would take
+   * past the import dispatch and its own platform gate. */
+  if (rc == WYRELOG_E_OK
+      && journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
+    rc = WYRELOG_E_POLICY;
+#endif
   if (rc == WYRELOG_E_OK
       && (journal.version != WYL_FACT_OFFLINE_RESTORE_JOURNAL_VERSION
       || journal.confirmation != WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT
