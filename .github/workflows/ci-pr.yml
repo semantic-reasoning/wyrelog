@@ -329,13 +329,16 @@ jobs:
       # one place CI can see it.  Its artifact-observation race (#1348) went
       # unnoticed because no job ran it.  fact-offline-backup-source runs for
       # several minutes against a 900 s budget; the multiplier keeps a slow
-      # runner from turning that into a timeout.
+      # runner from turning that into a timeout.  The registration guard
+      # compares the binary's case list with a committed manifest on both
+      # runners, so a case lost on macOS fails here (#1391).
       - name: Test offline backup and restore with secure DuckDB
         run: |
           meson compile -C build-secure-duckdb -j 1 \
             test-fact-offline-backup-source \
             wyctl
           meson test -C build-secure-duckdb --no-rebuild \
+            fact-offline-backup-source-registrations \
             fact-offline-backup-source \
             fact-offline-restore-tenant-old-binding \
             fact-offline-restore-graph-coordinator \
