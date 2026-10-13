@@ -846,6 +846,14 @@ provisioning_drive (wyl_policy_store_t *store,
           if (rc == WYRELOG_E_OK)
             rc = wyl_fact_graph_stage_publish_with_evidence (&stage.directory,
                     &stage.stage, &evidence);
+          /* The publishing rename retires the stage and forgets its tuple
+           * (stage_mark_complete), but the PUBLISHED step proves the final
+           * against that tuple.  Hand it over the way the resume path does
+           * through provisioning_open_context; the record this call was given
+           * may predate the persist above, and the stage's copy is the one
+           * just published either way. */
+          if (rc == WYRELOG_E_OK)
+            stage.stage.operation_evidence = evidence;
 #else
           rc = wyl_fact_graph_stage_sync (&stage.stage);
           if (rc == WYRELOG_E_OK)
