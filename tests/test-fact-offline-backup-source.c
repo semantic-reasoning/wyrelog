@@ -5925,18 +5925,6 @@ test_graph_coordinator_invalid_input (void)
   g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
         (NULL, NULL, NULL, NULL, NULL, 0, NULL, &source), ==, WYRELOG_E_INVALID);
   g_assert_null (source);
-#ifdef G_OS_WIN32
-  BackupFixture fixture = { 0 };
-  fixture_init (&fixture, "wyl-graph-source-windows-XXXXXX");
-  g_autoptr (WylFactRootWriterLease) lease = NULL;
-  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
-        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "alpha",
-      0, lease, &source), ==, WYRELOG_E_POLICY);
-  g_assert_null (source);
-  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
-  fixture_clear (&fixture);
-#endif
 }
 
 static void
@@ -13840,14 +13828,12 @@ windows_remove_bundle (const gchar *bundle_root, DestinationCapture *capture)
   g_assert_cmpint (g_rmdir (bundle_root), ==, 0);
 }
 
-/* Two sealed graphs with closed admission and a backup of the tenant, as the
- * POSIX dry-run and begin cases build them.  Each graph was provisioned
- * through the real path, so its ACTIVE record carries the operation evidence
- * the Windows restore arm reconstitutes the pair from. */
+/* Two sealed graphs with closed admission, as the POSIX dry-run and begin
+ * cases build them.  Each graph was provisioned through the real path, so
+ * its ACTIVE record carries the operation evidence the Windows backup source
+ * opens the pair from and the Windows restore arm reconstitutes it from. */
 static void
-windows_restore_fixture_init (BackupFixture *fixture, const gchar *name,
-    DestinationCapture *capture, gchar **out_bundle_root,
-    WylFactOfflineBackupBundle **out_bundle)
+windows_sealed_fixture_init (BackupFixture *fixture, const gchar *name)
 {
   fixture_init (fixture, name);
   create_tenant (fixture);
@@ -13868,6 +13854,15 @@ windows_restore_fixture_init (BackupFixture *fixture, const gchar *name,
           (fixture->runtime, &key), ==, WYRELOG_E_OK);
     wyl_fact_graph_key_clear (&key);
   }
+}
+
+/* The sealed fixture plus a backup of the tenant, written as a bundle. */
+static void
+windows_restore_fixture_init (BackupFixture *fixture, const gchar *name,
+    DestinationCapture *capture, gchar **out_bundle_root,
+    WylFactOfflineBackupBundle **out_bundle)
+{
+  windows_sealed_fixture_init (fixture, name);
   g_autoptr (WylFactOfflineBackupSource) source = NULL;
   g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture->policy,
       fixture->root, fixture->runtime, "tenant-a", 0, &source), ==,
@@ -13898,7 +13893,58 @@ windows_release_runtime (BackupFixture *fixture)
   g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->runtime),
       ==, WYRELOG_E_OK);
 }
+
+static wyrelog_error_t
+windows_counting_sink (guint64 offset, const guint8 *bytes, gsize length,
+    gpointer data)
+{
+  guint64 *total = data;
+  g_assert_nonnull (bytes);
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (offset, ==, *total);
+  *total += length;
+  return WYRELOG_E_OK;
+}
 #endif
+
+/* #1304: a Windows backup source opens each sealed graph from the operation
+ * evidence its ACTIVE record persisted, through the same evidence-bound pair
+ * the restore arm reconstitutes, so the graph form a graph restore relies on
+ * is a source there too: one graph selected, every byte of its main copied
+ * in order, and the policy still agreeing afterwards. */
+static void
+test_graph_source_windows (void)
+{
+#ifndef G_OS_WIN32
+  g_test_skip ("Windows backup source from operation evidence");
+#else
+  BackupFixture fixture = { 0 };
+  windows_sealed_fixture_init (&fixture, "wyl-graph-source-win-XXXXXX");
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (fixture.root, &lease),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new_for_graph_with_lease
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "alpha",
+      0, lease, &source), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (wyl_fact_offline_backup_source_count (source), ==, 1);
+  WylFactOfflineBackupSourceArtifact artifact = { 0 };
+  g_assert_true (wyl_fact_offline_backup_source_get (source, 0, &artifact));
+  g_assert_cmpstr (artifact.graph_id, ==, "alpha");
+  g_assert_cmpuint (artifact.logical_bytes, >, 0);
+  guint64 total = 0;
+  guint64 copied = 0;
+  g_assert_cmpint (wyl_fact_offline_backup_source_copy_to_sink (source, 0,
+      windows_counting_sink, &total, &copied), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (copied, ==, artifact.logical_bytes);
+  g_assert_cmpuint (total, ==, artifact.logical_bytes);
+  g_assert_cmpint (wyl_fact_offline_backup_source_revalidate (source), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  fixture_clear (&fixture);
+#endif
+}
 
 /* #1304: on Windows the dry-run reconstitutes each provisioned pair from the
  * operation evidence its ACTIVE record carries, so an authentic bundle
@@ -14716,6 +14762,8 @@ main (int argc, char **argv)
       test_restore_dry_run_windows);
   g_test_add_func ("/fact-offline-backup-source/restore-begin-windows",
       test_restore_begin_windows);
+  g_test_add_func ("/fact-offline-backup-source/graph-source-windows",
+      test_graph_source_windows);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",

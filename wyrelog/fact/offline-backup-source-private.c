@@ -10,13 +10,17 @@
 #include "fact/root-writer-lease-private.h"
 #include "fact/store-identity-private.h"
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+
+#include "fact/graph-provisioned-pair-internal.h"
+#endif
+
 #define OFFLINE_BACKUP_COPY_CHUNK (64u * 1024u)
 
-#ifndef G_OS_WIN32
 G_GNUC_INTERNAL wyrelog_error_t
 wyl_fact_artifact_namespace_open_provisioned_pair_internal
   (WylFactGraphProvisionedPair *, WylFactArtifactNamespace **);
-#endif
 
 typedef struct
 {
@@ -30,6 +34,9 @@ typedef struct
   GPtrArray *schema_selections;
   gchar *provisioning_uuid;
   GBytes *provisioning_evidence;
+#ifdef G_OS_WIN32
+  WylFactGraphWinOperationEvidence provisioning_windows_evidence;
+#endif
   guint64 lifecycle_generation;
   guint64 reconciliation_generation;
   WylPolicyGraphErrorClass last_error_class;
@@ -285,13 +292,14 @@ inventory_is_main_only (const WylFactArtifactInventorySnapshot *snapshot,
   return TRUE;
 }
 
-#ifndef G_OS_WIN32
 static wyrelog_error_t
 find_active_operation (WylFactOfflineBackupSource *source,
     const WylPolicyGraphAuthorityRecord *authority, gchar **out_operation_uuid,
     GBytes **out_operation_evidence
 #ifdef __APPLE__
     , WylFactGraphDarwinOperationEvidence *out_evidence
+#elif defined(G_OS_WIN32)
+    , WylFactGraphWinOperationEvidence *out_evidence
 #endif
     )
 {
@@ -332,6 +340,13 @@ find_active_operation (WylFactOfflineBackupSource *source,
     else
       rc = wyl_fact_graph_darwin_evidence_decode (bytes, length,
               record->op_uuid, out_evidence);
+#elif defined(G_OS_WIN32)
+    /* Persisted before the publishing rename (#816); a record without it
+     * cannot say which artifact it published, so it is not a source. */
+    if (!record->has_windows_evidence)
+      rc = WYRELOG_E_POLICY;
+    else
+      *out_evidence = record->windows_evidence;
 #endif
   }
   if (rc == WYRELOG_E_OK && !found)
@@ -343,29 +358,26 @@ find_active_operation (WylFactOfflineBackupSource *source,
   g_clear_pointer (&records, g_ptr_array_unref);
   return rc;
 }
-#endif
 
 static wyrelog_error_t
 open_graph_source (WylFactOfflineBackupSource *source,
     WylFactGraphResolver *resolver, const gchar *fact_root,
     const WylPolicyGraphAuthorityRecord *record, OfflineBackupGraph *graph)
 {
-#ifndef G_OS_WIN32
   (void) resolver;
-#endif
   WylFactGraphLocator locator = { 0 };
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-#ifndef G_OS_WIN32
   WylFactGraphProvisionedPair *pair = NULL;
   g_autofree gchar *operation_uuid = NULL;
   g_autoptr (GBytes) operation_evidence = NULL;
 #ifdef __APPLE__
   WylFactGraphDarwinOperationEvidence evidence = { 0 };
-#endif
-#else
-  WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
-  g_autofree gchar *relative_dir = NULL;
-  g_autofree gchar *relative_main = NULL;
+#elif defined(G_OS_WIN32)
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  /* A borrowed view of the pair's held main, never cleared: the inventory's
+   * main slot must name the artifact the evidence names, at the size the
+   * held handle sees. */
+  WylFactGraphRegularFile main_view = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
 #endif
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactInventorySlotEvidence main_evidence = { 0 };
@@ -374,17 +386,22 @@ open_graph_source (WylFactOfflineBackupSource *source,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_open_fact_graph_directory (source->policy, fact_root,
             record->tenant_id, record->graph_id, FALSE, &directory);
-#ifndef G_OS_WIN32
   if (rc == WYRELOG_E_OK)
     rc = find_active_operation (source, record, &operation_uuid,
             &operation_evidence
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(G_OS_WIN32)
             , &evidence
 #endif
             );
   if (rc == WYRELOG_E_OK)
 #ifdef __APPLE__
     rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+          (&directory, operation_uuid, &evidence, &pair);
+#elif defined(G_OS_WIN32)
+    /* Windows adopts facts.duckdb only through the tuple its ACTIVE record
+     * persisted: a name is not provenance there, which is why the name-only
+     * namespace open stays refused on this platform. */
+    rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
           (&directory, operation_uuid, &evidence, &pair);
 #else
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
@@ -393,31 +410,26 @@ open_graph_source (WylFactOfflineBackupSource *source,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_open_provisioned_pair_internal (pair,
             &graph->namespace_);
-#else
-  if (rc == WYRELOG_E_OK) {
-    relative_dir = wyl_fact_graph_locator_relative_dir (&locator);
-    relative_main = relative_dir == NULL ? NULL :
-        g_strdup_printf ("%s/facts.duckdb", relative_dir);
-    if (relative_main == NULL)
-      rc = WYRELOG_E_NOMEM;
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_relative_regular (resolver,
-            relative_main, &main_file);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_namespace_open (&directory, &main_file,
-            &graph->namespace_);
-#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_acquire_reader_guard (graph->namespace_,
             &graph->reader_guard);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_namespace_inventory_snapshot (graph->namespace_,
             &snapshot);
+#ifdef G_OS_WIN32
+  if (rc == WYRELOG_E_OK) {
+    LARGE_INTEGER size = { 0 };
+    if (!GetFileSizeEx ((HANDLE) pair->held_final_handle, &size))
+      rc = WYRELOG_E_IO;
+    main_view.handle = pair->held_final_handle;
+    main_view.identity = pair->evidence.artifact_identity;
+    main_view.size_bytes = (guint64) size.QuadPart;
+  }
+#endif
   if (rc == WYRELOG_E_OK
       && !inventory_is_main_only (snapshot,
 #ifdef G_OS_WIN32
-      &main_file,
+      &main_view,
 #else
       NULL,
 #endif
@@ -446,18 +458,15 @@ open_graph_source (WylFactOfflineBackupSource *source,
     graph->logical_bytes = main_evidence.logical_bytes;
     graph->physical_bytes = main_evidence.allocated_bytes;
     graph->main_identity = main_evidence.identity;
-#ifndef G_OS_WIN32
     if (source->selected_graph_id != NULL) {
       graph->provisioning_uuid = g_steal_pointer (&operation_uuid);
       graph->provisioning_evidence = g_steal_pointer (&operation_evidence);
+#ifdef G_OS_WIN32
+      graph->provisioning_windows_evidence = evidence;
+#endif
     }
-#endif
   }
-#ifndef G_OS_WIN32
   wyl_fact_graph_provisioned_pair_free (pair);
-#else
-  wyl_fact_graph_regular_file_clear (&main_file);
-#endif
   wyl_fact_graph_directory_clear (&directory);
   wyl_fact_graph_locator_clear (&locator);
   return rc;
@@ -489,15 +498,16 @@ revalidate_policy (WylFactOfflineBackupSource *source)
         g_ptr_array_index (snapshot->graphs, i);
     if (!graph_record_equal (graph, current))
       rc = WYRELOG_E_BUSY;
-#ifndef G_OS_WIN32
     if (rc == WYRELOG_E_OK && source->selected_graph_id != NULL) {
       g_autofree gchar *uuid = NULL;
       g_autoptr (GBytes) evidence = NULL;
 #ifdef __APPLE__
       WylFactGraphDarwinOperationEvidence decoded = { 0 };
+#elif defined(G_OS_WIN32)
+      WylFactGraphWinOperationEvidence decoded = { 0 };
 #endif
       rc = find_active_operation (source, current->authority, &uuid, &evidence
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(G_OS_WIN32)
               , &decoded
 #endif
               );
@@ -505,10 +515,14 @@ revalidate_policy (WylFactOfflineBackupSource *source)
           && (g_strcmp0 (uuid, graph->provisioning_uuid) != 0
           || ((evidence == NULL) != (graph->provisioning_evidence == NULL))
           || (evidence != NULL
-          && !g_bytes_equal (evidence, graph->provisioning_evidence))))
+          && !g_bytes_equal (evidence, graph->provisioning_evidence))
+#ifdef G_OS_WIN32
+          || !wyl_fact_graph_windows_operation_evidence_equal (&decoded,
+          &graph->provisioning_windows_evidence)
+#endif
+          ))
         rc = WYRELOG_E_POLICY;
     }
-#endif
   }
   g_clear_pointer (&snapshot, wyl_policy_fact_backup_snapshot_free);
   return rc;
@@ -674,14 +688,8 @@ wyl_fact_offline_backup_source_new_for_graph_with_lease (wyl_policy_store_t *pol
       || graph_id == NULL || graph_id[0] == '\0'
       || root_lease == NULL || out_source == NULL)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  /* The Windows opening path does not bind provisioning authority. */
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   return offline_backup_source_new (policy, fact_root, runtime_manager,
              tenant_id, graph_id, drain_timeout_us, root_lease, out_source);
-#endif
 }
 
 const gchar *
