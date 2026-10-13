@@ -14214,25 +14214,28 @@ test_restore_begin_windows (void)
         WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
     g_assert_cmpuint (committed.graphs->len, ==, selected == NULL ? 2 : 1);
     for (guint i = 0; i < committed.graphs->len; i++) {
-      const WylFactOfflineRestoreTargetGraph *target =
+      /* The committed journal holds journal graphs, as the POSIX begin
+       * cases read them; reading one as the begin-time target type put
+       * schema_digest where expected_main_absent is. */
+      const WylFactOfflineRestoreJournalGraph *graph =
           g_ptr_array_index (committed.graphs, i);
-      g_assert_false (target->expected_main_absent);
+      g_assert_false (graph->expected_main_absent);
       /* The pinned main identity is the artifact identity the record's
        * operation evidence carries: volume serial as the domain, the 16-byte
        * file id as the object. */
       g_autoptr (GPtrArray) records = NULL;
       g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
-            (fixture.policy, "tenant-a", target->graph_id, &records), ==,
+            (fixture.policy, "tenant-a", graph->graph_id, &records), ==,
           WYRELOG_E_OK);
       g_assert_cmpuint (records->len, ==, 1);
       const WylPolicyGraphProvisioningRecord *record =
           g_ptr_array_index (records, 0);
       g_assert_true (record->has_windows_evidence);
-      g_assert_cmpuint (target->expected_main_identity.domain, ==,
+      g_assert_cmpuint (graph->expected_main_identity.domain, ==,
           record->windows_evidence.artifact_identity.volume_serial);
-      g_assert_cmpuint (target->expected_main_identity.object_width, ==,
+      g_assert_cmpuint (graph->expected_main_identity.object_width, ==,
           sizeof record->windows_evidence.artifact_identity.file_id);
-      g_assert_cmpint (memcmp (target->expected_main_identity.object_bytes,
+      g_assert_cmpint (memcmp (graph->expected_main_identity.object_bytes,
           record->windows_evidence.artifact_identity.file_id,
           sizeof record->windows_evidence.artifact_identity.file_id), ==, 0);
     }
