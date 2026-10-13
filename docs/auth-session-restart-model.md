@@ -20,6 +20,33 @@ This model intentionally does not persist refresh-token state. A restart
 cannot resurrect a logged-out session or revoked refresh token because no
 previous token state is reloaded.
 
+## Session Credentials and Internal Identity
+
+Human login returns an opaque `session_token`: `wst_` followed by 64 lowercase
+hexadecimal characters encoding 32 random bytes. It is independent of the
+internal UUID session ID. The daemon retains only a SHA-256 digest for credential
+lookup; JWT claims, session state, policy scopes, audit rows, and revocation
+markers use the internal ID. Neither that ID nor the digest authenticates as a
+session token. Service sessions do not have a human session credential.
+
+MFA verification returns the same session token. Refresh responses, including
+idempotent replays, omit `session_token`: they rotate access/refresh tokens and
+do not recover or replace the original secret. Clients must retain the secret
+from login if they need session-token authentication. The C client preserves it
+on ordinary refresh; replacing its refresh token explicitly clears the old
+session secret, so restoring only a refresh token yields bearer-only state.
+External clients that required `session_token` in refresh responses must adapt.
+Login and MFA responses still include it.
+
+The legacy `/decide` parameter named `session_token` also accepts policy scopes.
+A live `wst_` credential is translated to its internal ID before evaluation;
+an unresolved value with that reserved prefix is rejected, including a logged-out
+token. Other policy scope values retain their existing meaning.
+
+Existing hash-chained audit rows are not rewritten. Read-time ID redaction
+remains as defense in depth; a restart invalidates old credentials, including
+those that previously doubled as internal IDs.
+
 ## JWT Signing Key Custody
 
 Production JWT signing key material is rooted in the configured production

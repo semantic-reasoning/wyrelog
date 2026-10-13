@@ -313,8 +313,24 @@ check_happy_path (SoupServer *server, WylHandle *handle, const gchar *base_url)
   if (compute_current_code (proof) != 0)
     return 102;
 
+  g_autoptr (WylSession) identity =
+      wyl_daemon_http_ref_session (server, session_token);
+  g_assert_nonnull (identity);
+  g_autofree gchar *internal_id = wyl_session_dup_id_string (identity);
+  g_assert_cmpstr (internal_id, !=, session_token);
+  g_assert_true (g_str_has_prefix (session_token, "wst_"));
+  g_assert_cmpuint (strlen (session_token), ==, 68);
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+          session_token, -1);
   guint status = 0;
   g_autofree gchar *body = NULL;
+  const gchar *replays[] = { internal_id, digest };
+  for (guint i = 0; i < G_N_ELEMENTS (replays); i++) {
+    g_assert_cmpint (send_mfa_verify (session, base_url, replays[i], proof,
+        &status, &body), ==, 0);
+    g_assert_cmpuint (status, ==, 401);
+    g_clear_pointer (&body, g_free);
+  }
   if (send_mfa_verify (session, base_url, session_token, proof, &status,
       &body) != 0)
     return 103;

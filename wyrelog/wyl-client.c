@@ -73,6 +73,7 @@ struct _WylClientServiceCredentialOperationReconcileResult
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 
 static gboolean parse_login_response_json (const gchar * data, gsize size,
+    gboolean require_session_token,
     gchar ** out_session_token,
     gchar ** out_access_token, gchar ** out_refresh_token,
     gchar ** out_username, gchar ** out_tenant, gchar ** out_principal_state,
@@ -547,7 +548,7 @@ client_login_internal (WylClient *client, const gchar *username,
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *principal_state = NULL;
   g_autofree gchar *session_state = NULL;
-  if (!parse_login_response_json (body_data, body_size, &session_token,
+  if (!parse_login_response_json (body_data, body_size, TRUE, &session_token,
       &access_token, &refresh_token, &parsed_username, &tenant,
       &principal_state, &session_state)) {
     wyl_client_clear_login_state (client);
@@ -619,6 +620,8 @@ wyl_client_set_refresh_token (WylClient *client, const gchar *refresh_token)
   if (client == NULL || !WYL_IS_CLIENT (client) ||
       !credential_part_is_valid (refresh_token))
     return WYRELOG_E_INVALID;
+  if (g_strcmp0 (client->refresh_token, refresh_token) != 0)
+    g_clear_pointer (&client->session_token, g_free);
   g_free (client->refresh_token);
   client->refresh_token = g_strdup (refresh_token);
   return WYRELOG_E_OK;
@@ -722,11 +725,15 @@ wyl_client_token_refresh (WylClient *client)
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *principal_state = NULL;
   g_autofree gchar *session_state = NULL;
-  if (!parse_login_response_json (body_data, body_size, &session_token,
+  if (!parse_login_response_json (body_data, body_size, FALSE, &session_token,
       &access_token, &refresh_token, &parsed_username, &tenant,
       &principal_state, &session_state))
     return WYRELOG_E_IO;
 
+  /* A refresh response cannot recover the digest-only session credential.
+   * Ignore legacy response copies; preserve only the secret already held. */
+  g_clear_pointer (&session_token, g_free);
+  session_token = g_steal_pointer (&client->session_token);
   wyl_client_clear_login_state (client);
   client->session_token = g_steal_pointer (&session_token);
   client->access_token = g_steal_pointer (&access_token);
@@ -799,7 +806,7 @@ wyl_client_mfa_verify (WylClient *client, const gchar *otp)
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *principal_state = NULL;
   g_autofree gchar *session_state = NULL;
-  if (!parse_login_response_json (body_data, body_size, &session_token,
+  if (!parse_login_response_json (body_data, body_size, TRUE, &session_token,
       &access_token, &refresh_token, &username, &tenant, &principal_state,
       &session_state))
     return WYRELOG_E_IO;
@@ -5454,6 +5461,7 @@ wyl_client_decision_dup_deny_origin (const WylClientDecision *result)
 
 static gboolean
 parse_login_response_json (const gchar *data, gsize size,
+    gboolean require_session_token,
     gchar **out_session_token, gchar **out_access_token,
     gchar **out_refresh_token, gchar **out_username, gchar **out_tenant,
     gchar **out_principal_state, gchar **out_session_state)
@@ -5579,7 +5587,8 @@ parse_login_response_json (const gchar *data, gsize size,
   }
 
   json_skip_ws (&cursor);
-  if (!have_session_token || !have_username || !have_tenant ||
+  if ((require_session_token && !have_session_token)
+      || !have_username || !have_tenant ||
       !have_principal_state || !have_session_state ||
       cursor.pos != cursor.size) {
     g_clear_pointer (out_session_token, g_free);
