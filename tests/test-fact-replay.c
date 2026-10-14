@@ -6119,6 +6119,471 @@ test_commit_fact_mutation_update_is_atomic_to_readers (void)
   remove_tree (root);
 }
 
+/* #1393 fixture: a graph with two relations in one namespace, orders-rel
+ * (order_id, amount, expedited) and ship-rel (order_id, stage). */
+static wyl_policy_fact_relation_schema_options_t
+make_ship_schema (const gchar *tenant_id, const gchar *graph_id,
+    const wyl_policy_fact_relation_schema_column_t *columns, gsize n_columns)
+{
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (tenant_id,
+          graph_id, columns, n_columns);
+  schema.relation_name = "ship-rel";
+  return schema;
+}
+
+static void
+create_graph_with_two_relations (wyl_policy_store_t *store, const gchar *root,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
+      "tenant-owner", &created), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_graph_column_t order_columns[] = {
+    {"order_id", "symbol"},
+    {"amount", "int64"},
+    {"expedited", "bool"},
+  };
+  const wyl_policy_fact_graph_column_t ship_columns[] = {
+    {"order_id", "symbol"},
+    {"stage", "int64"},
+  };
+  const wyl_policy_fact_graph_relation_t graph_relations[] = {
+    {"orders-rel", order_columns, G_N_ELEMENTS (order_columns)},
+    {"ship-rel", ship_columns, G_N_ELEMENTS (ship_columns)},
+  };
+  const wyl_policy_fact_graph_create_options_t graph_opts = {
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .fact_root = root,
+    .schema_version = 1,
+    .owner_scope = tenant_id,
+    .relations = graph_relations,
+    .n_relations = G_N_ELEMENTS (graph_relations),
+  };
+  g_assert_cmpint (wyl_policy_store_create_fact_graph (store, &graph_opts,
+      NULL), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t order_schema_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema
+        (tenant_id, graph_id, order_schema_columns,
+          G_N_ELEMENTS (order_schema_columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
+      &order_schema), ==, WYRELOG_E_OK);
+  const wyl_policy_fact_relation_schema_column_t ship_schema_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"stage", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_ship_schema
+        (tenant_id, graph_id, ship_schema_columns,
+          G_N_ELEMENTS (ship_schema_columns));
+  g_assert_cmpint (wyl_policy_store_register_fact_relation_schema (store,
+      &ship_schema), ==, WYRELOG_E_OK);
+}
+
+/* Seed order-x at amount 1 in orders-rel and at stage 1 in ship-rel through
+ * the store, before the handle opens. */
+static void
+seed_order_x_in_both_relations (wyl_policy_store_t *policy,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          tenant_id, graph_id);
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  g_assert_cmpint (wyl_fact_store_open (fact_path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_store_create_schema (store), ==, WYRELOG_E_OK);
+
+  const wyl_policy_fact_relation_schema_column_t order_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema
+        (tenant_id, graph_id, order_columns, G_N_ELEMENTS (order_columns));
+  wyl_fact_value_t order_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-x"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 1},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  wyl_fact_row_t order_rows[] = { {order_values, 3} };
+  const wyl_fact_store_batch_t order_batch = {
+    .batch_id = "seed-orders",
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "test",
+    .idempotency_key = "seed-orders",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = order_rows,
+    .n_rows = G_N_ELEMENTS (order_rows),
+  };
+  gboolean inserted = FALSE;
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &order_schema,
+      &order_batch, &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+
+  const wyl_policy_fact_relation_schema_column_t ship_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"stage", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_ship_schema
+        (tenant_id, graph_id, ship_columns, G_N_ELEMENTS (ship_columns));
+  wyl_fact_value_t ship_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-x"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 1},
+  };
+  wyl_fact_row_t ship_rows[] = { {ship_values, 2} };
+  const wyl_fact_store_batch_t ship_batch = {
+    .batch_id = "seed-ship",
+    .tenant_id = tenant_id,
+    .graph_id = graph_id,
+    .namespace_id = "shop.ns",
+    .relation_name = "ship-rel",
+    .schema_version = 1,
+    .source = "test",
+    .idempotency_key = "seed-ship",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = ship_rows,
+    .n_rows = G_N_ELEMENTS (ship_rows),
+  };
+  g_assert_cmpint (wyl_fact_store_append_batch (store, &ship_schema,
+      &ship_batch, &inserted), ==, WYRELOG_E_OK);
+  g_assert_true (inserted);
+  /* The secure fact root admits only a store file it owns outright, so a
+   * store seeded outside the daemon is given the daemon's mode. */
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
+}
+
+/* Move order-x from |from| to |to| in both relations in one graph-wide
+ * update through the handle, as the daemon route does: amount in orders-rel
+ * and stage in ship-rel, each retracting the old value and asserting the
+ * new one. */
+static wyrelog_error_t
+commit_graph_flip (WylHandle *handle, wyl_policy_store_t *policy,
+    const wyl_policy_fact_graph_info_t *info, const gchar *update_id,
+    gint64 from, gint64 to)
+{
+  g_autofree gchar *storage_path = lookup_graph_storage_path (policy,
+          "tenant-a", "orders");
+  g_assert_nonnull (storage_path);
+  g_autofree gchar *fact_path = g_build_filename (storage_path,
+          "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  wyrelog_error_t rc = wyl_fact_store_open (fact_path, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const wyl_policy_fact_relation_schema_column_t order_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema
+        ("tenant-a", "orders", order_columns, G_N_ELEMENTS (order_columns));
+  const wyl_policy_fact_relation_schema_column_t ship_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"stage", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_ship_schema
+        ("tenant-a", "orders", ship_columns, G_N_ELEMENTS (ship_columns));
+  const gint64 amounts[2] = { from, to };
+  wyl_fact_value_t order_values[2][3];
+  wyl_fact_row_t order_rows[2];
+  wyl_fact_value_t ship_values[2][2];
+  wyl_fact_row_t ship_rows[2];
+  for (gsize i = 0; i < 2; i++) {
+    order_values[i][0] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-x"
+    };
+    order_values[i][1] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_INT64,.as.int64_value = amounts[i]
+    };
+    order_values[i][2] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE
+    };
+    order_rows[i] = (wyl_fact_row_t) {
+      order_values[i], 3
+    };
+    ship_values[i][0] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-x"
+    };
+    ship_values[i][1] = (wyl_fact_value_t) {
+      .type = WYL_FACT_VALUE_INT64,.as.int64_value = amounts[i]
+    };
+    ship_rows[i] = (wyl_fact_row_t) {
+      ship_values[i], 2
+    };
+  }
+  g_autofree gchar *order_batch_id = g_strdup_printf ("%s#orders-rel",
+          update_id);
+  g_autofree gchar *ship_batch_id = g_strdup_printf ("%s#ship-rel",
+          update_id);
+  const wyl_fact_store_batch_t order_batch = {
+    .batch_id = order_batch_id,
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop.ns",
+    .relation_name = "orders-rel",
+    .schema_version = 1,
+    .source = "test",
+    .request_id = update_id,
+    .idempotency_key = order_batch_id,
+    .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = order_rows,
+    .n_rows = 2,
+    .n_retract_rows = 1,
+  };
+  const wyl_fact_store_batch_t ship_batch = {
+    .batch_id = ship_batch_id,
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop.ns",
+    .relation_name = "ship-rel",
+    .schema_version = 1,
+    .source = "test",
+    .request_id = update_id,
+    .idempotency_key = ship_batch_id,
+    .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = ship_rows,
+    .n_rows = 2,
+    .n_retract_rows = 1,
+  };
+  const wyl_fact_store_update_part_t parts[2] = {
+    {&order_schema, &order_batch}, {&ship_schema, &ship_batch},
+  };
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  rc = wyl_handle_commit_fact_graph_update (handle, &store, parts, 2, info,
+          NULL, &inserted, &outcome);
+  if (rc == WYRELOG_E_OK
+      && (!inserted || outcome.mutation_class
+      != WYL_FACT_MUTATION_COMMITTED_READY
+      || outcome.delta.committed_row_delta != 4))
+    rc = WYRELOG_E_INTERNAL;
+  return rc;
+}
+
+/* What one snapshot of both relations shows for order-x: bit 0 for value 1
+ * and bit 1 for value 2, in each relation, with the row count of each. */
+typedef struct
+{
+  const gchar *orders_observed;
+  const gchar *ship_observed;
+  guint amounts;
+  guint stages;
+  guint order_rows;
+  guint ship_rows;
+  guint other_rows;
+} GraphFlipProbe;
+
+static void
+graph_flip_probe_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  GraphFlipProbe *probe = user_data;
+  (void) engine;
+  guint *bits = NULL;
+  if (g_strcmp0 (relation, probe->orders_observed) == 0) {
+    probe->order_rows++;
+    bits = &probe->amounts;
+  } else if (g_strcmp0 (relation, probe->ship_observed) == 0) {
+    probe->ship_rows++;
+    bits = &probe->stages;
+  } else {
+    probe->other_rows++;
+    return;
+  }
+  if (ncols < 2)
+    return;
+  if (row[1] == 1)
+    *bits |= 1u;
+  else if (row[1] == 2)
+    *bits |= 2u;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *policy;
+  const wyl_policy_fact_graph_info_t *info;
+  const gchar *orders_observed;
+  const gchar *ship_observed;
+  guint updates;
+  volatile gint done;
+  volatile gint writer_failures;
+  volatile gint snapshot_failures;
+  volatile gint torn;
+  volatile gint observations;
+} GraphRaceCtx;
+
+static gpointer
+graph_race_writer (gpointer data)
+{
+  GraphRaceCtx *ctx = data;
+  for (guint i = 0; i < ctx->updates; i++) {
+    const gint64 from = i % 2 == 0 ? 1 : 2;
+    g_autofree gchar *update_id = g_strdup_printf ("graph-flip-%u", i);
+    if (commit_graph_flip (ctx->handle, ctx->policy, ctx->info, update_id,
+        from, 3 - from) != WYRELOG_E_OK)
+      g_atomic_int_inc (&ctx->writer_failures);
+  }
+  g_atomic_int_set (&ctx->done, 1);
+  return NULL;
+}
+
+/* One snapshot covers both relations.  A whole state is order-x at one
+ * value in orders-rel and at the same value in ship-rel; anything else --
+ * a relation at neither value or at both, or the two relations at different
+ * values -- is a torn read. */
+static gpointer
+graph_race_reader (gpointer data)
+{
+  GraphRaceCtx *ctx = data;
+  const gchar *relations[2] = { ctx->orders_observed, ctx->ship_observed };
+  while (!g_atomic_int_get (&ctx->done)) {
+    GraphFlipProbe probe = {
+      .orders_observed = ctx->orders_observed,
+      .ship_observed = ctx->ship_observed,
+    };
+    if (wyl_handle_snapshot_fact_graph_relations (ctx->handle, "tenant-a",
+        "orders", relations, 2, graph_flip_probe_cb, &probe)
+        != WYRELOG_E_OK) {
+      g_atomic_int_inc (&ctx->snapshot_failures);
+      continue;
+    }
+    g_atomic_int_inc (&ctx->observations);
+    if ((probe.amounts != 1u && probe.amounts != 2u)
+        || probe.stages != probe.amounts || probe.order_rows != 1
+        || probe.ship_rows != 1 || probe.other_rows != 0)
+      g_atomic_int_inc (&ctx->torn);
+  }
+  return NULL;
+}
+
+/* #1393: a graph-wide update is atomic to readers across its relations.  A
+ * snapshot of both relations concurrent with updates that move order-x in
+ * orders-rel and in ship-rel together sees the two at the same value, never
+ * one moved and the other not, and never either relation at neither or at
+ * both values; afterwards both show only the last update's result.
+ *
+ * Each update is one store commit and one engine refresh, which is what the
+ * readers' snapshots are of.  Writing the two relations as two updates, each
+ * refreshed on its own, makes this test fail. */
+static void
+test_commit_fact_graph_update_is_atomic_to_readers (void)
+{
+  TEST ("a graph-wide update is atomic to concurrent readers");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+        ("wyl-fact-graph-update-race-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
+          NULL);
+  {
+    g_autoptr (wyl_policy_store_t) policy = NULL;
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+    create_graph_with_two_relations (policy, root, "tenant-a", "orders");
+    seed_order_x_in_both_relations (policy, "tenant-a", "orders");
+  }
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+  FullGraphInfoProbe target = { "tenant-a", "orders", { 0 }, FALSE };
+  g_assert_cmpint (wyl_policy_store_foreach_fact_graph (policy, "tenant-a",
+      capture_full_graph_info_cb, &target), ==, WYRELOG_E_OK);
+  g_assert_true (target.found);
+  g_autofree gchar *orders_relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "orders-rel");
+  g_autofree gchar *orders_observed = g_strdup_printf ("%s_observed",
+          orders_relation);
+  g_autofree gchar *ship_relation = wyl_fact_replay_wirelog_relation_name
+        ("shop.ns", "ship-rel");
+  g_autofree gchar *ship_observed = g_strdup_printf ("%s_observed",
+          ship_relation);
+
+  /* Publish the graph's engine before the race, as the daemon has long
+   * before any update arrives, and check the seed through it: a reader
+   * building the engine while the writer commits would contend for the
+   * store file, which tests the harness rather than the update.  (The
+   * single-relation test publishes it through its seed commit.) */
+  WylFactGraphRuntimeStatus published = { 0 };
+  g_assert_cmpint (wyl_handle_refresh_fact_graph (handle, &target.info,
+      &published), ==, WYRELOG_E_OK);
+  g_assert_true (published.queryable);
+  wyl_fact_graph_runtime_status_clear (&published);
+  const gchar *relations[2] = { orders_observed, ship_observed };
+  GraphFlipProbe seed = {
+    .orders_observed = orders_observed,
+    .ship_observed = ship_observed,
+  };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relations (handle,
+      "tenant-a", "orders", relations, 2, graph_flip_probe_cb, &seed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (seed.amounts, ==, 1u);
+  g_assert_cmpuint (seed.stages, ==, 1u);
+  g_assert_cmpuint (seed.order_rows, ==, 1);
+  g_assert_cmpuint (seed.ship_rows, ==, 1);
+  g_assert_cmpuint (seed.other_rows, ==, 0);
+
+  GraphRaceCtx ctx = {
+    .handle = handle,
+    .policy = policy,
+    .info = &target.info,
+    .orders_observed = orders_observed,
+    .ship_observed = ship_observed,
+    .updates = 40,
+  };
+  GThread *reader_a = g_thread_new ("graph-reader-a", graph_race_reader,
+          &ctx);
+  GThread *reader_b = g_thread_new ("graph-reader-b", graph_race_reader,
+          &ctx);
+  GThread *writer = g_thread_new ("graph-writer", graph_race_writer, &ctx);
+  g_thread_join (writer);
+  g_thread_join (reader_a);
+  g_thread_join (reader_b);
+
+  g_assert_cmpint (g_atomic_int_get (&ctx.writer_failures), ==, 0);
+  g_assert_cmpint (g_atomic_int_get (&ctx.snapshot_failures), ==, 0);
+  g_assert_cmpint (g_atomic_int_get (&ctx.observations), >, 0);
+  g_assert_cmpint (g_atomic_int_get (&ctx.torn), ==, 0);
+
+  /* 40 flips from value 1 end at value 1 in both relations, and only there. */
+  GraphFlipProbe last = {
+    .orders_observed = orders_observed,
+    .ship_observed = ship_observed,
+  };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relations (handle,
+      "tenant-a", "orders", relations, 2, graph_flip_probe_cb, &last), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (last.amounts, ==, 1u);
+  g_assert_cmpuint (last.stages, ==, 1u);
+  g_assert_cmpuint (last.order_rows, ==, 1);
+  g_assert_cmpuint (last.ship_rows, ==, 1);
+
+  clear_full_graph_info (&target.info);
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
 /* Issue #546: concurrent single-graph refreshes and queries on the same graph
  * stay race-free -- readers never see a partial generation.  Run under the
  * sanitizer builds this also exercises the runtime manager's generation swap
@@ -6748,6 +7213,8 @@ main (int argc, char **argv)
       test_handle_refresh_fact_graph_races_with_queries);
   g_test_add_func ("/fact-replay/update-atomic-to-readers",
       test_commit_fact_mutation_update_is_atomic_to_readers);
+  g_test_add_func ("/fact-replay/graph-update-atomic-to-readers",
+      test_commit_fact_graph_update_is_atomic_to_readers);
   g_test_add_func ("/fact-replay/tenant-admission-query-drain",
       test_tenant_admission_holds_query_snapshot_until_callback_returns);
   g_test_add_func ("/fact-replay/closed-graph-reports-sealed",
