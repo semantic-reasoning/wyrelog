@@ -1613,21 +1613,51 @@ wyctl --daemon-url "$BASE_URL" fact update \
 It prints the same receipt with `action=update`. Every retract row is applied
 before every assert row, whatever order the file lists them in, so a row on
 both sides is present afterwards. As with `fact retract`, retracting a row
-that is not there is recorded and removes nothing. One update changes one
-relation; changing rows of two relations is still two batches.
+that is not there is recorded and removes nothing.
 
-An update is charged for every row it records, retract and assert alike: the
-example costs two rows against the logical quota, as the `fact retract` and
-`fact put` it replaces would. An update the remaining quota cannot hold is
-refused whole, before anything is written, even if its asserts alone would
-fit. Re-running it with the same `--batch-id`, `--idempotency-key` and input
-answers `replay=true`; different rows under the same keys answer
-`409 fact_batch_conflict`. A sealed graph refuses an update as it refuses any
-other write.
+To change rows of several relations of one graph together, leave out
+`--relation` and `--schema-version`. Each input row then names its relation
+and that relation's schema version after the `op` column, before the
+relation's own columns, so relations with different column counts share one
+file and the file has no header:
 
-The route is `POST /facts/{tenant}/{graph}/{relation}:update`, with the query
-parameters of `:append` and a TSV body whose rows begin with the op field. An
-optional header line names that field `op`, followed by the column names.
+```sh
+printf 'retract,orders,1,o-1,43\nassert,orders,1,o-1,44\nretract,shipments,1,o-1,pending\nassert,shipments,1,o-1,shipped\n' >/tmp/order-ship-update.csv
+wyctl --daemon-url "$BASE_URL" fact update \
+  --tenant "$TENANT" --graph "$GRAPH" --namespace shop \
+  --batch-id order-ship-1 --idempotency-key order-ship-1 \
+  --format csv --input /tmp/order-ship-update.csv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+Every relation's rows commit together: a query sees all of them changed or
+none of them, and a failure leaves every relation as it was. Each relation's
+part is recorded as its own batch, named `<batch-id>#<relation>`, which is
+the name `fact forget` takes for it; the parts replay and conflict as one,
+so re-running the command with the same keys and input answers
+`replay=true`, while the same keys with any relation's rows changed, or a
+relation left out, answer `409 fact_batch_conflict`. One relation may appear
+at only one schema version in one update. The audit record names every
+relation the update touched.
+
+An update is charged for every row it records, retract and assert alike,
+in every relation it touches: the single-relation example costs two rows
+against the logical quota, as the `fact retract` and `fact put` it replaces
+would, and the two-relation example costs four. An update the remaining
+quota cannot hold is refused whole, before anything is written, even if its
+asserts alone would fit. Re-running it with the same `--batch-id`,
+`--idempotency-key` and input answers `replay=true`; different rows under
+the same keys answer `409 fact_batch_conflict`. A sealed graph refuses an
+update as it refuses any other write.
+
+The single-relation route is `POST /facts/{tenant}/{graph}/{relation}:update`,
+with the query parameters of `:append` and a TSV body whose rows begin with
+the op field. An optional header line names that field `op`, followed by the
+column names. The graph-wide route is `POST /facts/{tenant}/{graph}:update`,
+with the same query parameters but `schema_version` and a TSV body whose rows
+are `op`, relation, schema version and then the relation's columns, with no
+header.
 
 ### Data permissions
 
@@ -1640,7 +1670,7 @@ permissions: a service principal cannot hold them.
 | `wr.fact.read` | `fact verify` |
 | `wr.fact.append` | `fact put` (the `:append` route) |
 | `wr.fact.retract` | `fact retract` (the `:retract` route) |
-| `wr.fact.update` | `fact update` (the `:update` route), an atomic retract and assert |
+| `wr.fact.update` | `fact update` (the `:update` routes), an atomic retract and assert in one relation or across a graph's relations |
 | `wr.fact.forget` | `fact forget` (the `:forget` route), which erases a batch irreversibly |
 | `wr.fact.repair` | the `:repair` route for orphaned rows |
 | `wr.datalog.query` | `datalog query` (`POST /datalog/...`) over stored relations |
