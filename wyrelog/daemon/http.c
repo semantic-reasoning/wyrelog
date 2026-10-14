@@ -13806,6 +13806,20 @@ parse_fact_op_path (const gchar *path, gchar **out_tenant,
     return FALSE;
   const gchar *tail = path + strlen ("/facts/");
   g_auto (GStrv) parts = g_strsplit (tail, "/", 3);
+  if (g_strv_length (parts) == 2) {
+    /* The graph-level update (#1393): /facts/{tenant}/{graph}:update names
+     * no relation, because each row of its body names its own. */
+    if (!g_str_has_suffix (parts[1], ":update"))
+      return FALSE;
+    parts[1][strlen (parts[1]) - strlen (":update")] = '\0';
+    if (parts[0][0] == '\0' || parts[1][0] == '\0')
+      return FALSE;
+    *out_tenant = g_strdup (parts[0]);
+    *out_graph = g_strdup (parts[1]);
+    if (out_op != NULL)
+      *out_op = FACT_HTTP_OP_UPDATE;
+    return *out_tenant != NULL && *out_graph != NULL;
+  }
   if (g_strv_length (parts) != 3)
     return FALSE;
   fact_http_op_t op = FACT_HTTP_OP_APPEND;
@@ -14386,6 +14400,507 @@ set_fact_forget_json (SoupServerMessage *msg, gsize rows_purged,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+/* One relation's part of a graph-level update (#1393), built from the body
+ * rows that name the relation. */
+typedef struct
+{
+  gchar *relation;
+  guint32 schema_version;
+  gboolean relation_visible;
+  wyl_policy_fact_relation_schema_column_info_t *loaded;
+  gsize n_loaded;
+  wyl_policy_fact_relation_schema_column_t *schema_columns;
+  GArray *retract_rows;
+  GArray *assert_rows;
+  wyl_fact_row_t *rows;
+  gsize n_rows;
+  gsize n_retract_rows;
+  gchar *batch_id;
+  gchar *idempotency_key;
+} FactGraphUpdatePart;
+
+static void
+fact_graph_update_part_free (gpointer data)
+{
+  FactGraphUpdatePart *part = data;
+  if (part == NULL)
+    return;
+  g_free (part->relation);
+  if (part->loaded != NULL)
+    wyl_policy_fact_relation_schema_columns_free (part->loaded,
+        part->n_loaded);
+  schema_columns_clear (part->schema_columns, part->n_loaded);
+  fact_rows_clear_array (&part->retract_rows);
+  fact_rows_clear_array (&part->assert_rows);
+  fact_rows_clear (part->rows, part->n_rows);
+  g_free (part->batch_id);
+  g_free (part->idempotency_key);
+  g_free (part);
+}
+
+/* Parse a graph-level update body (#1393).  Every line is
+ *   op \t relation \t schema_version \t <the relation's columns>
+ * with op "retract" or "assert", and there is no header.  The rows of one
+ * relation, at the one version its rows name, are one part; the parts are
+ * in the order the relations first appear, and within a part every retract
+ * row precedes every assert row, each set in arrival order.  A relation's
+ * columns are its registered schema at that version, loaded through
+ * |policy|.
+ *
+ * Returns FALSE with *out_schema_missing clear for a malformed body and set
+ * for a relation, or a version of it, the graph does not have; any other
+ * failure is *out_rc. */
+static gboolean
+parse_fact_graph_update_tsv (wyl_policy_store_t *policy, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *body,
+    GPtrArray **out_parts, gboolean *out_schema_missing,
+    wyrelog_error_t *out_rc)
+{
+  *out_parts = NULL;
+  *out_schema_missing = FALSE;
+  *out_rc = WYRELOG_E_OK;
+  g_autoptr (GPtrArray) parts = g_ptr_array_new_with_free_func
+        (fact_graph_update_part_free);
+  g_auto (GStrv) lines = g_strsplit (body, "\n", -1);
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    if (lines[i][0] == '\0' && lines[i + 1] == NULL)
+      break;
+    tsv_strip_crlf (lines[i], lines[i + 1] != NULL);
+    if (lines[i][0] == '\0')
+      return FALSE;
+    /* The three leading fields first; the columns are split once the
+     * relation, and so their number, is known. */
+    g_auto (GStrv) head = g_strsplit (lines[i], "\t", 4);
+    if (g_strv_length (head) != 4)
+      return FALSE;
+    const gboolean retracts = g_strcmp0 (head[0], "retract") == 0;
+    if (!retracts && g_strcmp0 (head[0], "assert") != 0)
+      return FALSE;
+    if (!fact_http_customer_name_is_valid (head[1]))
+      return FALSE;
+    guint32 schema_version = 0;
+    if (!parse_uint32_query_param (head[2], &schema_version))
+      return FALSE;
+    FactGraphUpdatePart *part = NULL;
+    for (guint j = 0; j < parts->len; j++) {
+      FactGraphUpdatePart *candidate = g_ptr_array_index (parts, j);
+      if (g_strcmp0 (candidate->relation, head[1]) == 0) {
+        part = candidate;
+        break;
+      }
+    }
+    if (part == NULL) {
+      part = g_new0 (FactGraphUpdatePart, 1);
+      g_ptr_array_add (parts, part);
+      part->relation = g_strdup (head[1]);
+      part->schema_version = schema_version;
+      part->retract_rows = g_array_new (FALSE, TRUE, sizeof (wyl_fact_row_t));
+      part->assert_rows = g_array_new (FALSE, TRUE, sizeof (wyl_fact_row_t));
+      wyrelog_error_t rc = wyl_policy_store_load_fact_relation_schema_columns
+            (policy, tenant, graph, namespace_id, part->relation,
+              schema_version, &part->relation_visible, &part->loaded,
+              &part->n_loaded);
+      if (rc == WYRELOG_E_NOT_FOUND) {
+        *out_schema_missing = TRUE;
+        return FALSE;
+      }
+      if (rc != WYRELOG_E_OK) {
+        *out_rc = rc;
+        return FALSE;
+      }
+    } else if (part->schema_version != schema_version) {
+      /* One relation is at one version in one update. */
+      return FALSE;
+    }
+    g_auto (GStrv) fields = g_strsplit (head[3], "\t",
+            (gint) part->n_loaded + 1);
+    if (g_strv_length (fields) != part->n_loaded)
+      return FALSE;
+    wyl_fact_value_t *values = g_new0 (wyl_fact_value_t, part->n_loaded);
+    wyl_fact_row_t row = {
+      .values = values,
+      .n_values = part->n_loaded,
+    };
+    for (gsize j = 0; j < part->n_loaded; j++) {
+      if (!parse_fact_value (fields[j], &part->loaded[j], &values[j])) {
+        for (gsize k = 0; k < part->n_loaded; k++) {
+          if (values[k].type == WYL_FACT_VALUE_SYMBOL ||
+              values[k].type == WYL_FACT_VALUE_STRING)
+            g_free ((gchar *) values[k].as.text);
+        }
+        g_free (values);
+        return FALSE;
+      }
+    }
+    g_array_append_val (retracts ? part->retract_rows : part->assert_rows,
+        row);
+  }
+  if (parts->len == 0)
+    return FALSE;
+  for (guint j = 0; j < parts->len; j++) {
+    FactGraphUpdatePart *part = g_ptr_array_index (parts, j);
+    /* The rows move rather than copy: the arrays keep no ownership of them,
+     * so freeing them frees only their own buffers. */
+    part->n_retract_rows = part->retract_rows->len;
+    g_array_append_vals (part->retract_rows, part->assert_rows->data,
+        part->assert_rows->len);
+    g_array_set_size (part->assert_rows, 0);
+    part->n_rows = part->retract_rows->len;
+    part->rows = (wyl_fact_row_t *) g_array_free (g_steal_pointer
+              (&part->retract_rows), FALSE);
+  }
+  *out_parts = g_steal_pointer (&parts);
+  return TRUE;
+}
+
+/* The relations of a graph-level update, joined with ',', in part order:
+ * the audit record's resource names every relation the update touched. */
+static gchar *
+fact_graph_update_relations (GPtrArray *parts)
+{
+  g_autoptr (GString) joined = g_string_new (NULL);
+  for (guint i = 0; i < parts->len; i++) {
+    const FactGraphUpdatePart *part = g_ptr_array_index (parts, i);
+    if (i > 0)
+      g_string_append_c (joined, ',');
+    g_string_append (joined, part->relation);
+  }
+  return g_string_free (g_steal_pointer (&joined), FALSE);
+}
+
+/* The graph-level update's path from a found, unsealed graph to its answer
+ * (#1393): the body's parts are schema-checked, charged to the logical quota
+ * as one operation, committed through wyl_handle_commit_fact_graph_update
+ * and recorded as one fact_update audit event naming every relation.  The
+ * caller owns |graph_info| and clears it after this returns. */
+static void
+facts_graph_update_commit (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+    wyl_policy_store_t *policy, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactReplayAdmission *replay_admission, const gchar *auth_tenant,
+    const gchar *actor, const gchar *tenant, const gchar *graph,
+    const gchar *namespace_id, const gchar *batch_id,
+    const gchar *idempotency_key)
+{
+  const gchar *fail_code = "fact_update_failed";
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 1024 * 1024, &body)) {
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  g_autoptr (GPtrArray) parts = NULL;
+  gboolean schema_missing = FALSE;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (!parse_fact_graph_update_tsv (policy, tenant, graph, namespace_id, body,
+      &parts, &schema_missing, &rc)) {
+    if (schema_missing)
+      set_json_error (msg, 404, "fact_schema_not_found");
+    else if (rc != WYRELOG_E_OK)
+      set_json_error (msg, 500, fail_code);
+    else
+      set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+
+  /* Each part against its own relation's schema, and the parts the store
+   * commits: a part's batch is named for the update and the relation. */
+  g_autofree wyl_policy_fact_relation_schema_options_t *schemas =
+      g_new0 (wyl_policy_fact_relation_schema_options_t, parts->len);
+  g_autofree wyl_fact_store_batch_t *batches =
+      g_new0 (wyl_fact_store_batch_t, parts->len);
+  g_autofree wyl_fact_store_update_part_t *store_parts =
+      g_new0 (wyl_fact_store_update_part_t, parts->len);
+  for (guint i = 0; i < parts->len; i++) {
+    FactGraphUpdatePart *part = g_ptr_array_index (parts, i);
+    part->schema_columns = copy_schema_columns (part->loaded, part->n_loaded);
+    part->batch_id = g_strdup_printf ("%s#%s", batch_id, part->relation);
+    part->idempotency_key = g_strdup_printf ("%s#%s", idempotency_key,
+            part->relation);
+    schemas[i] = (wyl_policy_fact_relation_schema_options_t) {
+      .tenant_id = tenant,
+      .graph_id = graph,
+      .namespace_id = namespace_id,
+      .relation_name = part->relation,
+      .schema_version = part->schema_version,
+      .relation_visible = part->relation_visible,
+      .columns = part->schema_columns,
+      .n_columns = part->n_loaded,
+    };
+    const wyl_fact_batch_t validation_batch = {
+      .tenant_id = tenant,
+      .graph_id = graph,
+      .namespace_id = namespace_id,
+      .relation_name = part->relation,
+      .schema_version = part->schema_version,
+      .rows = part->rows,
+      .n_rows = part->n_rows,
+    };
+    rc = wyl_fact_schema_validate_batch (policy, &validation_batch, NULL);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 400, "invalid_fact_payload");
+      return;
+    }
+    batches[i] = (wyl_fact_store_batch_t) {
+      .batch_id = part->batch_id,
+      .tenant_id = tenant,
+      .graph_id = graph,
+      .namespace_id = namespace_id,
+      .relation_name = part->relation,
+      .schema_version = part->schema_version,
+      .source = "http",
+      .request_id = idempotency_key,
+      .idempotency_key = part->idempotency_key,
+      .op = WYL_FACT_STORE_OP_UPDATE,
+      .rows = part->rows,
+      .n_rows = part->n_rows,
+      .n_retract_rows = part->n_retract_rows,
+    };
+    store_parts[i] = (wyl_fact_store_update_part_t) {
+      .schema = &schemas[i],
+      .batch = &batches[i],
+    };
+  }
+
+  WylPolicyFactWriteRateAdmission rate_admission = { 0 };
+  rc = wyl_policy_store_admit_fact_write_rate (policy, auth_tenant,
+          &rate_admission);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_POLICY)
+      set_fact_write_rate_quota_exceeded_json (msg, &rate_admission);
+    else
+      set_json_error (msg, 500, "fact_quota_admission_failed");
+    return;
+  }
+
+  g_autoptr (wyl_fact_store_t) fact_store = NULL;
+  gboolean concurrent_open_quota_exceeded = FALSE;
+  rc = open_http_fact_store (ctx, policy, tenant, graph, &fact_store,
+          &concurrent_open_quota_exceeded);
+  if (concurrent_open_quota_exceeded) {
+    WylPolicyFactConcurrentOpenQuotaStatus quota_status = { 0 };
+    if (wyl_policy_store_get_fact_concurrent_open_quota (policy, tenant,
+        &quota_status) != WYRELOG_E_OK)
+      set_json_error (msg, 500, "fact_quota_status_failed");
+    else
+      set_concurrent_open_quota_exceeded_json (msg, &quota_status);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_POLICY ? 409 : 500,
+        rc == WYRELOG_E_POLICY ? "fact_batch_conflict" : fail_code);
+    return;
+  }
+  rc = wyl_fact_store_create_schema (fact_store);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, fail_code);
+    return;
+  }
+
+  /* One logical quota operation for the whole update: every row of every
+   * part, keyed by the update's own batch_id and the digest that identifies
+   * the update as a whole. */
+  const gchar *request_id = ensure_request_id_header (msg);
+  g_autofree gchar *payload_digest = wyl_fact_store_update_group_digest
+        (store_parts, parts->len);
+  guint64 requested_rows = 0;
+  guint64 requested_bytes = 0;
+  for (guint i = 0; payload_digest != NULL && i < parts->len; i++) {
+    guint64 part_bytes = 0;
+    if (wyl_fact_store_batch_logical_bytes (&schemas[i], &batches[i],
+        &part_bytes) != WYRELOG_E_OK
+        || requested_bytes > G_MAXUINT64 - part_bytes) {
+      g_clear_pointer (&payload_digest, g_free);
+      break;
+    }
+    requested_rows += batches[i].n_rows;
+    requested_bytes += part_bytes;
+  }
+  if (payload_digest == NULL) {
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  const WylPolicyFactLogicalQuotaOperation logical_quota_operation = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .batch_id = batch_id,
+    .request_id = idempotency_key,
+    .payload_digest = payload_digest,
+  };
+  WylPolicyFactLogicalOperationStatus logical_quota_status = { 0 };
+  rc = wyl_policy_store_reserve_fact_logical_quota (policy,
+          &logical_quota_operation, requested_rows, requested_bytes,
+          &logical_quota_status);
+  if (rc != WYRELOG_E_OK) {
+    if (rc == WYRELOG_E_POLICY)
+      set_fact_logical_quota_exceeded_json (msg);
+    else
+      set_json_error (msg, rc == WYRELOG_E_CONFLICT ? 409 : 500,
+          rc == WYRELOG_E_CONFLICT ? "fact_batch_conflict" :
+          "fact_quota_admission_failed");
+    return;
+  }
+  gboolean logical_quota_pending = logical_quota_status.state ==
+      WYL_POLICY_FACT_LOGICAL_OPERATION_PENDING;
+
+  gboolean inserted = FALSE;
+  wyl_fact_mutation_outcome_t outcome;
+  wyl_fact_mutation_outcome_init (&outcome);
+  rc = wyl_handle_commit_fact_graph_update (ctx->handle, &fact_store,
+          store_parts, parts->len, graph_info, replay_admission, &inserted,
+          &outcome);
+  g_clear_pointer (&fact_store, wyl_fact_store_close);
+  wyrelog_error_t logical_quota_settle_rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyFactLogicalOperationStatus settled = { 0 };
+    for (guint attempt = 0;
+        attempt <= WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_RETRIES; attempt++) {
+      logical_quota_settle_rc = wyl_policy_store_settle_fact_logical_quota
+            (policy, &logical_quota_operation,
+              (guint64) MAX (outcome.delta.committed_row_delta, 0),
+              outcome.delta.logical_byte_delta, &settled);
+      if (logical_quota_settle_rc != WYRELOG_E_BUSY
+          || attempt == WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_RETRIES)
+        break;
+      g_usleep (WYL_FACT_LOGICAL_QUOTA_SETTLE_BUSY_DELAY_US <<
+          MIN (attempt, 6u));
+    }
+  } else if (logical_quota_pending) {
+    WylPolicyFactLogicalOperationStatus cancelled = { 0 };
+    wyrelog_error_t cancel_rc = wyl_policy_store_cancel_fact_logical_quota
+          (policy, &logical_quota_operation, TRUE, &cancelled);
+    if (cancel_rc != WYRELOG_E_OK)
+      logical_quota_settle_rc = cancel_rc;
+  }
+  /* The audit result stays separate from the commit result, as on the
+   * single-relation path (#546). */
+  wyrelog_error_t audit_rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    g_autofree gchar *relations = fact_graph_update_relations (parts);
+    audit_rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
+            relations, batch_id, WYL_FACT_STORE_OP_UPDATE, inserted,
+            request_id);
+#ifdef WYL_HAS_AUDIT
+    mark_runtime_audit_degraded (ctx->runtime, audit_rc);
+#endif
+  }
+
+#ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
+  if (rc == WYRELOG_E_POLICY && outcome.delta.quota_exceeded) {
+    WylPolicyFactPhysicalQuotaStatus physical_status = { 0 };
+    if (wyl_policy_store_get_fact_physical_quota_status (policy, tenant,
+        &physical_status) != WYRELOG_E_OK)
+      set_json_error (msg, 500, "fact_quota_status_failed");
+    else
+      set_physical_quota_exceeded_json (msg, &physical_status);
+    return;
+  }
+#endif
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, "fact_batch_conflict");
+    return;
+  }
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, fail_code);
+    return;
+  }
+  if (logical_quota_settle_rc != WYRELOG_E_OK) {
+    set_fact_quota_reconciling_json (msg, batch_id, idempotency_key,
+        payload_digest, inserted, &outcome);
+    return;
+  }
+  if (audit_rc != WYRELOG_E_OK) {
+    set_fact_audit_failed_json (msg, batch_id, inserted, &outcome);
+    return;
+  }
+  set_fact_op_json (msg, batch_id, inserted, &outcome);
+}
+
+/* POST /facts/{tenant}/{graph}:update (#1393): one update across several
+ * relations of a graph.  The request is :update's -- the same query
+ * parameters but schema_version, which every body row carries for its own
+ * relation -- under wr.fact.update, through the same admission, write
+ * ownership and graph checks; facts_graph_update_commit does the rest. */
+static void
+facts_graph_update_handler (SoupServer *server, SoupServerMessage *msg,
+    const gchar *method, GHashTable *query, gpointer user_data,
+    const gchar *tenant, const gchar *graph)
+{
+  if (g_strcmp0 (method, "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  if (!query_tenant_matches (msg, query, tenant))
+    return;
+  const gchar *namespace_id = lookup_required_query_string (query, "namespace");
+  const gchar *batch_id = lookup_required_query_string (query, "batch_id");
+  const gchar *idempotency_key = lookup_required_query_string (query,
+          "idempotency_key");
+  if (!fact_http_customer_name_is_valid (namespace_id) || batch_id == NULL
+      || idempotency_key == NULL) {
+    set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+  const gchar *op_param =
+      query != NULL ? g_hash_table_lookup (query, "op") : NULL;
+  if (op_param != NULL && g_strcmp0 (op_param, "update") != 0) {
+    set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
+  g_auto (WylDaemonAuthContext) auth_context = { 0 };
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action_extended (server, msg, auth_query, ctx,
+      "wr.fact.update", tenant, "fact_auth_required", "invalid_fact_auth",
+      "fact_denied", "fact_auth_failed", &auth_context, &actor, NULL, NULL,
+      NULL, NULL))
+    return;
+
+  g_autoptr (WylFactReplayAdmission) replay_admission = NULL;
+  wyrelog_error_t rc = wyl_handle_fact_replay_admission_acquire
+        (ctx->handle, tenant, graph, NULL, &replay_admission);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_BUSY ? 503 : 500,
+        "fact_replay_admission_failed");
+    return;
+  }
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  write.parent_cancellable =
+      wyl_handle_fact_replay_admission_get_cancellable (replay_admission);
+  rc = wyl_daemon_policy_write_acquire (ctx, msg,
+          WYL_DAEMON_POLICY_WRITE_OWNER_FACT_PUBLICATION, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "fact_update_failed");
+    return;
+  }
+  GraphLookupCtx lookup = { 0 };
+  rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "fact_update_failed");
+    return;
+  }
+  if (!lookup.found) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (lookup.info.sealed) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "graph_sealed");
+    return;
+  }
+  wyl_daemon_policy_write_observe_cleanup_resource (&write,
+      WYL_DAEMON_POLICY_WRITE_OBSERVED_FACT_STORE);
+  facts_graph_update_commit (msg, ctx, write.store, &lookup.info,
+      replay_admission, auth_context.tenant, actor, tenant, graph,
+      namespace_id, batch_id, idempotency_key);
+  graph_lookup_clear (&lookup);
+}
+
 static void
 facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -14785,8 +15300,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   if (!parse_fact_op_path (path, &tenant, &graph, &relation, &op) ||
       !wyl_policy_store_tenant_id_is_valid (tenant) ||
       !fact_http_customer_name_is_valid (graph) ||
-      !fact_http_customer_name_is_valid (relation)) {
+      (relation != NULL && !fact_http_customer_name_is_valid (relation))) {
     set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+  if (relation == NULL) {
+    facts_graph_update_handler (server, msg, method, query, user_data, tenant,
+        graph);
     return;
   }
 
