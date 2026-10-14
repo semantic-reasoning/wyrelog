@@ -49,7 +49,7 @@ EXPECTED_RAW_MEMBER_FUNCTIONS = {
         "table_exists_unlocked": 1,
         "validate_projection_shape_unlocked": 2,
         "validate_store_scope_unlocked": 1,
-        "wyl_fact_store_append_batch_delta": 1,
+        "record_batch_rows_unlocked": 1,
         "fact_store_release_native": 2,
         "wyl_fact_store_connection_session_begin": 2,
         "wyl_fact_store_connection_session_get": 1,
@@ -119,7 +119,7 @@ EXPECTED_DUCKDB_CALL_FUNCTIONS = {
         "table_exists_unlocked": 10,
         "validate_projection_shape_unlocked": 22,
         "validate_schema_shape": 1,
-        "wyl_fact_store_append_batch_delta": 10,
+        "record_batch_rows_unlocked": 10,
         "fact_store_release_native": 2,
         "wyl_fact_store_ensure_projection": 1,
         "wyl_fact_store_has_durable_batches": 5,
@@ -176,6 +176,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS = {
     "wyl_fact_replay_refresh_graph_closed_with_artifact_lease",
     "wyl_fact_replay_validate_graph_with_artifact_lease",
     "wyl_fact_store_open_reservation_begin_observed",
+    "wyl_fact_store_update_graph_batches",
+    "wyl_fact_store_update_graph_batches_delta",
 }
 EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
     "wyrelog/fact/compound.c": {"materialize_arg_unlocked"},
@@ -222,6 +224,8 @@ EXPECTED_TRANSITIVE_RAW_WRAPPERS_BY_PATH = {
         "quarantine_forget_intent_unlocked",
         "wyl_fact_store_open_reservation_begin",
         "wyl_fact_store_open_reservation_begin_observed",
+        "wyl_fact_store_update_graph_batches",
+        "wyl_fact_store_update_graph_batches_delta",
     },
 }
 OLD_AUTHORITY = (
@@ -707,7 +711,7 @@ def validate(files: dict[str, str]) -> None:
                         f"connection session pointer forwarded to helper: {path}: {name}"
                     )
     expected_calls = {
-        "wyrelog/fact/store.c": (18, 4, 22),
+        "wyrelog/fact/store.c": (19, 4, 26),
         "wyrelog/fact/compound.c": (3, 3, 5),
         "wyrelog/fact/replay.c": (2, 0, 2),
         "wyrelog/fact/replay-store-private.c": (1, 1, 1),

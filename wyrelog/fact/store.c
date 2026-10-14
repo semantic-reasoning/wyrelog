@@ -2907,6 +2907,77 @@ fact_store_physical_quota_finish (wyl_fact_store_t *store,
 }
 #endif
 
+/* Record one batch inside the open batch transaction: its fact_batches row,
+ * its rows in the projection |table| (already ensured) and one event per
+ * row.  The batch's rows take the sequence numbers that follow the log's
+ * last, in order.  *out_logical_bytes is the cost the fact_batches row
+ * carries: one number for the durable row and the returned delta, so the two
+ * cannot drift apart (#1013). */
+static wyrelog_error_t
+record_batch_rows_unlocked (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, const gchar *table,
+    const gchar *content_hash, gint64 created_at_us,
+    gint64 *out_logical_bytes)
+{
+  guint64 logical_bytes_u64 = 0;
+  wyrelog_error_t rc = wyl_fact_store_batch_logical_bytes (schema, batch,
+          &logical_bytes_u64);
+  gint64 logical_bytes = (gint64) logical_bytes_u64;
+  gint64 first_seq = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = next_sequence_unlocked (store, &first_seq);
+  if (rc == WYRELOG_E_OK)
+    rc = insert_batch_unlocked (store, batch, content_hash, logical_bytes,
+            created_at_us);
+
+  duckdb_appender appender = NULL;
+  if (rc == WYRELOG_E_OK
+      && duckdb_appender_create (store->conn, NULL, table, &appender)
+      != DuckDBSuccess)
+    rc = WYRELOG_E_IO;
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < batch->n_rows; i++) {
+    gint64 seq = first_seq + (gint64) i;
+    if (duckdb_appender_begin_row (appender) != DuckDBSuccess) {
+      rc = WYRELOG_E_IO;
+      break;
+    }
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < schema->n_columns; j++)
+      rc = append_value (appender, &batch->rows[i].values[j]);
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, batch->tenant_id)
+          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, batch->graph_id)
+          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_int64 (appender, seq) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, batch->batch_id) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_int64 (appender, (gint64) i) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_bool (appender, !batch_row_retracts (batch, i))
+          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK
+        && duckdb_appender_end_row (appender) != DuckDBSuccess)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = insert_event_unlocked (store, batch, batch_row_retracts (batch, i),
+              seq, created_at_us);
+  }
+  if (appender != NULL
+      && duckdb_appender_destroy (&appender) != DuckDBSuccess
+      && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && out_logical_bytes != NULL)
+    *out_logical_bytes = logical_bytes;
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -2990,63 +3061,10 @@ wyl_fact_store_append_batch_delta (wyl_fact_store_t *store,
       && batch_fault == WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT)
     rc = WYRELOG_E_IO;
 #endif
-  gint64 first_seq = 0;
-  gint64 created_at_us = g_get_real_time ();
-  /* One number for the durable row and the returned delta, so the two cannot
-   * drift apart (#1013). */
-  guint64 logical_bytes_u64 = 0;
+  gint64 logical_bytes = 0;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_store_batch_logical_bytes (schema, batch,
-            &logical_bytes_u64);
-  gint64 logical_bytes = (gint64) logical_bytes_u64;
-  if (rc == WYRELOG_E_OK)
-    rc = next_sequence_unlocked (store, &first_seq);
-  if (rc == WYRELOG_E_OK)
-    rc = insert_batch_unlocked (store, batch, content_hash, logical_bytes,
-            created_at_us);
-
-  duckdb_appender appender = NULL;
-  if (rc == WYRELOG_E_OK
-      && duckdb_appender_create (store->conn, NULL, table, &appender)
-      != DuckDBSuccess)
-    rc = WYRELOG_E_IO;
-  for (gsize i = 0; rc == WYRELOG_E_OK && i < batch->n_rows; i++) {
-    gint64 seq = first_seq + (gint64) i;
-    if (duckdb_appender_begin_row (appender) != DuckDBSuccess) {
-      rc = WYRELOG_E_IO;
-      break;
-    }
-    for (gsize j = 0; rc == WYRELOG_E_OK && j < schema->n_columns; j++)
-      rc = append_value (appender, &batch->rows[i].values[j]);
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_varchar (appender, batch->tenant_id)
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_varchar (appender, batch->graph_id)
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_int64 (appender, seq) == DuckDBSuccess ?
-          WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_varchar (appender, batch->batch_id) == DuckDBSuccess ?
-          WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_int64 (appender, (gint64) i) == DuckDBSuccess ?
-          WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = duckdb_append_bool (appender, !batch_row_retracts (batch, i))
-          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK
-        && duckdb_appender_end_row (appender) != DuckDBSuccess)
-      rc = WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK)
-      rc = insert_event_unlocked (store, batch, batch_row_retracts (batch, i),
-              seq, created_at_us);
-  }
-  if (appender != NULL
-      && duckdb_appender_destroy (&appender) != DuckDBSuccess
-      && rc == WYRELOG_E_OK)
-    rc = WYRELOG_E_IO;
+    rc = record_batch_rows_unlocked (store, schema, batch, table, content_hash,
+            g_get_real_time (), &logical_bytes);
 #ifdef WYL_TEST_HANDLE_SEAMS
   if (rc == WYRELOG_E_OK
       && batch_fault == WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT)
@@ -3139,6 +3157,238 @@ wyl_fact_store_update_batch_delta (wyl_fact_store_t *store,
     return WYRELOG_E_INVALID;
   return wyl_fact_store_append_batch_delta (store, schema, batch, out_inserted,
              out_delta);
+}
+
+/* The checks over a graph-wide update's parts that need no store (#1393):
+ * every part a well-formed update batch of one tenant and graph, no two
+ * parts naming one relation, and no two sharing a batch_id or an
+ * idempotency_key.  Shape errors keep validate_batch_shape's codes; the
+ * cross-part rules are WYRELOG_E_INVALID. */
+static wyrelog_error_t
+validate_update_parts (const wyl_fact_store_update_part_t *parts,
+    gsize n_parts)
+{
+  if (parts == NULL || n_parts == 0)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < n_parts; i++) {
+    if (parts[i].schema == NULL || parts[i].batch == NULL
+        || parts[i].batch->op != WYL_FACT_STORE_OP_UPDATE)
+      return WYRELOG_E_INVALID;
+    wyrelog_error_t rc = validate_batch_shape (parts[i].schema,
+            parts[i].batch);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    const wyl_fact_store_batch_t *b = parts[i].batch;
+    for (gsize j = 0; j < i; j++) {
+      const wyl_fact_store_batch_t *a = parts[j].batch;
+      if (g_strcmp0 (a->tenant_id, b->tenant_id) != 0
+          || g_strcmp0 (a->graph_id, b->graph_id) != 0
+          || g_strcmp0 (a->batch_id, b->batch_id) == 0
+          || g_strcmp0 (a->idempotency_key, b->idempotency_key) == 0
+          || (g_strcmp0 (a->namespace_id, b->namespace_id) == 0
+          && g_strcmp0 (a->relation_name, b->relation_name) == 0))
+        return WYRELOG_E_INVALID;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
+gchar *
+wyl_fact_store_update_group_digest (const wyl_fact_store_update_part_t *parts,
+    gsize n_parts)
+{
+  if (validate_update_parts (parts, n_parts) != WYRELOG_E_OK)
+    return NULL;
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return NULL;
+  g_autofree gchar *count = g_strdup_printf ("%" G_GSIZE_FORMAT "\n",
+          n_parts);
+  g_checksum_update (checksum, (const guchar *) count, -1);
+  for (gsize i = 0; i < n_parts; i++) {
+    const wyl_fact_store_batch_t *batch = parts[i].batch;
+    g_autofree gchar *hash = wyl_fact_store_batch_content_hash (parts[i].schema,
+            batch);
+    if (hash == NULL)
+      return NULL;
+    g_autofree gchar *line = g_strdup_printf ("%s\n%s\n%u\n%s\n",
+            batch->namespace_id, batch->relation_name, batch->schema_version,
+            hash);
+    g_checksum_update (checksum, (const guchar *) line, -1);
+  }
+  return g_strdup (g_checksum_get_string (checksum));
+}
+
+/* The content hash a part is stored under: its own batch hash bound to the
+ * group digest, so that the stored fingerprint of every part changes when
+ * any part does.  A single-relation update of the same rows hashes to the
+ * part's own batch hash and therefore never matches a stored part. */
+static gchar *
+update_part_content_hash (const wyl_fact_store_update_part_t *part,
+    const gchar *group_digest)
+{
+  g_autofree gchar *own = wyl_fact_store_batch_content_hash (part->schema,
+          part->batch);
+  if (own == NULL)
+    return NULL;
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  if (checksum == NULL)
+    return NULL;
+  g_checksum_update (checksum, (const guchar *) own, -1);
+  g_checksum_update (checksum, (const guchar *) "\n", 1);
+  g_checksum_update (checksum, (const guchar *) group_digest, -1);
+  return g_strdup (g_checksum_get_string (checksum));
+}
+
+wyrelog_error_t
+wyl_fact_store_update_graph_batches (wyl_fact_store_t *store,
+    const wyl_fact_store_update_part_t *parts, gsize n_parts,
+    gboolean *out_inserted)
+{
+  return wyl_fact_store_update_graph_batches_delta (store, parts, n_parts,
+             out_inserted, NULL);
+}
+
+/* The graph-wide update runs the append path's steps once per part around
+ * one transaction: every part's projection is ensured and its rows checked
+ * before the session opens; under the session every part is matched against
+ * what is stored, so that all of them replay or none does; and the parts are
+ * then recorded in order inside one transaction, under the same lock, fault
+ * seams and physical admission as a single batch.  Physical admission is one
+ * reservation for the request the parts share. */
+wyrelog_error_t
+wyl_fact_store_update_graph_batches_delta (wyl_fact_store_t *store,
+    const wyl_fact_store_update_part_t *parts, gsize n_parts,
+    gboolean *out_inserted, wyl_fact_commit_delta_t *out_delta)
+{
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  wyl_fact_commit_delta_init (out_delta);
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_update_parts (parts, n_parts);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *group_digest = wyl_fact_store_update_group_digest (parts,
+          n_parts);
+  if (group_digest == NULL)
+    return WYRELOG_E_NOMEM;
+  g_auto (GStrv) tables = g_new0 (gchar *, n_parts + 1);
+  g_auto (GStrv) hashes = g_new0 (gchar *, n_parts + 1);
+  for (gsize i = 0; i < n_parts; i++) {
+    rc = wyl_fact_store_ensure_projection (store, parts[i].schema, &tables[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = validate_batch_compound_refs (store, parts[i].schema, parts[i].batch);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    hashes[i] = update_part_content_hash (&parts[i], group_digest);
+    if (hashes[i] == NULL)
+      return WYRELOG_E_NOMEM;
+  }
+  const wyl_fact_store_batch_t *first = parts[0].batch;
+
+  WylFactStoreConnectionSession session = { 0 };
+  rc = wyl_fact_store_connection_session_begin (store, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reject_audit_database_unlocked (store);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_store_scope_unlocked (store, first->tenant_id,
+            first->graph_id, FALSE);
+  gsize n_existing = 0;
+  gint64 stored_rows_total = 0;
+  gint64 stored_bytes_total = 0;
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < n_parts; i++) {
+    gboolean exists = FALSE;
+    gint64 stored_rows = 0;
+    gint64 stored_bytes = 0;
+    rc = existing_batch_matches_unlocked (store, parts[i].batch, hashes[i],
+            &exists, &stored_rows, &stored_bytes);
+    if (rc == WYRELOG_E_OK && exists) {
+      n_existing++;
+      stored_rows_total += stored_rows;
+      stored_bytes_total += stored_bytes;
+    }
+  }
+  if (rc == WYRELOG_E_OK && n_existing == n_parts) {
+    /* Every part is stored as offered: the whole update replays, reporting
+     * what it consumed (#1013). */
+    if (out_delta != NULL) {
+      out_delta->inserted = FALSE;
+      out_delta->committed_row_delta = stored_rows_total;
+      out_delta->logical_byte_delta = stored_bytes_total;
+    }
+    wyl_fact_store_connection_session_end (&session);
+    return WYRELOG_E_OK;
+  }
+  /* Otherwise no part is stored: a stored part's hash binds the whole
+   * member list, so a part whose identifiers are stored either matched above
+   * together with every other part or refused with WYRELOG_E_POLICY. */
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_store_connection_session_end (&session);
+    return rc;
+  }
+
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  WylFactPhysicalQuotaAdmission physical_admission = { 0 };
+  rc = fact_store_physical_quota_reserve (store, first, &physical_admission);
+  if (rc != WYRELOG_E_OK) {
+    if (out_delta != NULL)
+      out_delta->quota_exceeded = physical_admission.quota_exceeded;
+    g_clear_pointer (&physical_admission.reservation_evidence,
+        wyl_fact_artifact_physical_quota_evidence_free);
+    wyl_fact_store_connection_session_end (&session);
+    return rc;
+  }
+#endif
+
+  WylFactStoreTransaction transaction = { 0 };
+  rc = wyl_fact_store_transaction_begin (&session,
+          WYL_FACT_STORE_TRANSACTION_APPEND_CORE, &transaction);
+#ifdef WYL_TEST_HANDLE_SEAMS
+  WylFactStoreBatchFault batch_fault = take_batch_fault_unlocked (store);
+  if (rc == WYRELOG_E_OK
+      && batch_fault == WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT)
+    rc = WYRELOG_E_IO;
+#endif
+  const gint64 created_at_us = g_get_real_time ();
+  gint64 total_rows = 0;
+  gint64 total_bytes = 0;
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < n_parts; i++) {
+    gint64 logical_bytes = 0;
+    rc = record_batch_rows_unlocked (store, parts[i].schema, parts[i].batch,
+            tables[i], hashes[i], created_at_us, &logical_bytes);
+    if (rc == WYRELOG_E_OK) {
+      total_rows += (gint64) parts[i].batch->n_rows;
+      total_bytes += logical_bytes;
+    }
+  }
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (rc == WYRELOG_E_OK
+      && batch_fault == WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT)
+    rc = WYRELOG_E_IO;
+#endif
+  rc = wyl_fact_store_transaction_finish (&transaction, rc);
+  wyl_fact_store_connection_session_end (&session);
+#if defined(WYL_HAS_SECURE_DUCKDB_BRIDGE)
+  wyrelog_error_t physical_rc = fact_store_physical_quota_finish (store, first,
+          &physical_admission, rc == WYRELOG_E_OK);
+  if (rc == WYRELOG_E_OK && physical_rc != WYRELOG_E_OK)
+    rc = physical_rc;
+  g_clear_pointer (&physical_admission.reservation_evidence,
+      wyl_fact_artifact_physical_quota_evidence_free);
+#endif
+  if (rc == WYRELOG_E_OK) {
+    if (out_inserted != NULL)
+      *out_inserted = TRUE;
+    if (out_delta != NULL) {
+      out_delta->inserted = TRUE;
+      out_delta->committed_row_delta = total_rows;
+      out_delta->logical_byte_delta = total_bytes;
+    }
+  }
+  return rc;
 }
 
 /* Tier-2 retract-by-batch-id: SELECT trigger metadata + valid rows, then
