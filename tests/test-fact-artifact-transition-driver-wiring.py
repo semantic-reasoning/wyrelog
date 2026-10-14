@@ -318,6 +318,7 @@ def require_termination_profile(name: str, raw: str, code: str) -> None:
         raise AssertionError(f"successful termination profile drift: {name}")
 
 
+@functools.lru_cache(maxsize=64)
 def strip_c_comments_and_literals(text: str) -> str:
     """Blank comments and literals in phase-2-normalized C, preserving offsets."""
     output = list(text)
@@ -374,7 +375,8 @@ def strip_c_comments_and_literals(text: str) -> str:
     return "".join(output)
 
 
-def function_body_spans(code: str, symbol: str) -> list[tuple[int, int]]:
+@functools.lru_cache(maxsize=1024)
+def function_body_spans(code: str, symbol: str) -> tuple[tuple[int, int], ...]:
     """Return every syntactic function definition span for a symbol."""
     spans: list[tuple[int, int]] = []
     for match in re.finditer(rf"\b{re.escape(symbol)}\b", code):
@@ -405,9 +407,10 @@ def function_body_spans(code: str, symbol: str) -> list[tuple[int, int]]:
             if depth:
                 raise AssertionError(f"unterminated function definition: {symbol}")
             spans.append((body_start, position))
-    return spans
+    return tuple(spans)
 
 
+@functools.lru_cache(maxsize=4096)
 def has_definition_like_declarator(code: str, symbol: str) -> bool:
     """Recognize definitions with object- or function-like empty macro suffixes."""
     for match in re.finditer(rf"\b{re.escape(symbol)}\b", code):
@@ -837,6 +840,7 @@ def require_test_header_integrity(
         )
 
 
+@functools.lru_cache(maxsize=64)
 def meson_code_projection(text: str) -> str:
     """Blank Meson comments and strings while preserving source offsets."""
     output = list(text)
@@ -900,6 +904,7 @@ def meson_code_projection(text: str) -> str:
     return "".join(output)
 
 
+@functools.lru_cache(maxsize=64)
 def normalize_meson_translation(text: str) -> str:
     """Splice Meson normal-state line continuations without moving offsets."""
     return re.sub(r"\\(?:\r\n|\n)", lambda match: " " * len(match.group()), text)
