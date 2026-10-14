@@ -191,6 +191,11 @@ MUTATORS = {
     "wyl_fact_store_append_batch_delta", "wyl_fact_store_retract_batch_delta",
     "wyl_fact_store_update_batch_delta",
     "wyl_handle_commit_fact_mutation",
+    # The graph-wide update (#1393) has its own store entry points and its own
+    # handle entry point, confined the same way.
+    "wyl_fact_store_update_graph_batches",
+    "wyl_fact_store_update_graph_batches_delta",
+    "wyl_handle_commit_fact_graph_update",
     "wyl_perm_grant", "wyl_perm_revoke", "wyl_role_grant", "wyl_role_revoke",
     "wyl_handle_apply_permission_state_transition", "wyl_mfa_enrollment_commit",
     "wyl_engine_session_run_committed_publication",

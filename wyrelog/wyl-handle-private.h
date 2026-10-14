@@ -396,11 +396,28 @@ wyrelog_error_t wyl_handle_commit_fact_mutation (WylHandle * self,
     const wyl_policy_fact_graph_info_t * graph_info,
     WylFactReplayAdmission * admission, gboolean * out_inserted,
     wyl_fact_mutation_outcome_t * out_outcome);
+/* The graph-wide update's counterpart (#1393): commits |parts| through
+ * wyl_fact_store_update_graph_batches_delta, then refreshes the graph once,
+ * so readers see every relation move together.  Same ownership of |*store|
+ * and the same outcome contract as wyl_handle_commit_fact_mutation. */
+wyrelog_error_t wyl_handle_commit_fact_graph_update (WylHandle * self,
+    wyl_fact_store_t * *store,
+    const wyl_fact_store_update_part_t * parts, gsize n_parts,
+    const wyl_policy_fact_graph_info_t * graph_info,
+    WylFactReplayAdmission * admission, gboolean * out_inserted,
+    wyl_fact_mutation_outcome_t * out_outcome);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,
     gpointer user_data);
 wyrelog_error_t wyl_handle_snapshot_fact_graph_relation (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id, const gchar * relation,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data);
+/* The same over several relations of one graph, all read from one pinned
+ * engine snapshot, so what |cb| sees of the relations is one state of the
+ * graph (#1393).  |cb| receives each relation's name with its rows. */
+wyrelog_error_t wyl_handle_snapshot_fact_graph_relations (WylHandle * self,
+    const gchar * tenant_id, const gchar * graph_id,
+    const gchar * const *relations, gsize n_relations,
     wyl_fact_graph_tuple_cb cb, gpointer user_data);
 typedef wyrelog_error_t (*wyl_fact_graph_status_cb) (const
     wyl_fact_graph_status_t * status, gpointer user_data);

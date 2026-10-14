@@ -3295,6 +3295,59 @@ fact_graph_materialization_materialized_best_effort (WylHandle *self,
   wyl_handle_policy_store_unpin (self, policy);
 }
 
+/* The commit-then-refresh sequence shared by every fact mutation entry
+ * point.  |rc| and |delta| are what the store commit returned; the store
+ * handle has been consumed by the caller already. */
+static wyrelog_error_t
+finish_fact_mutation (WylHandle *self,
+    const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactReplayAdmission *admission, wyrelog_error_t rc,
+    const wyl_fact_commit_delta_t *delta,
+    wyl_fact_mutation_outcome_t *out_outcome)
+{
+  if (rc != WYRELOG_E_OK) {
+    if (delta->quota_exceeded)
+      wyl_fact_resource_recorder_record_quota_rejection
+        (self->fact_resource_recorder);
+    out_outcome->delta = *delta;
+    return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
+  }
+
+  /* The fact commit is durable now.  Marker persistence is deliberately
+   * decoupled from the mutation result; a failure leaves the fact committed
+   * and can be repaired by later observation/reconciliation. */
+  fact_graph_materialization_materialized_best_effort (self, graph_info);
+
+  /* Step 3: post-commit targeted refresh of this graph only.  A failure here
+   * is committed-but-degraded, never a commit failure. */
+  WylFactGraphRuntimeStatus status = { 0 };
+  wyrelog_error_t refresh_rc = admission == NULL
+      ? wyl_handle_refresh_fact_graph (self, graph_info, &status)
+      : wyl_handle_refresh_fact_graph_admitted (self, admission, graph_info,
+          &status);
+  out_outcome->delta = *delta;
+  out_outcome->engine_queryable = status.queryable;
+  out_outcome->engine_generation = status.engine_generation;
+  if (refresh_rc == WYRELOG_E_OK) {
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
+  } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
+    /* Refused by the barrier, not failed.  The runtime fills the status on an
+     * admission refusal and clears it on a shutdown or abandoned one, so a
+     * closed admission here is a positive signal rather than a leftover.
+     * Nothing durable needs repair, and naming a degradation class would
+     * invent a replay failure that did not happen. */
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
+    out_outcome->needs_runtime_reconcile = TRUE;
+  } else {
+    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
+    out_outcome->degraded_class = status.last_replay_class;
+    out_outcome->needs_runtime_reconcile = TRUE;
+    out_outcome->needs_durable_reconcile = TRUE;
+  }
+  wyl_fact_graph_runtime_status_clear (&status);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -3331,48 +3384,38 @@ wyl_handle_commit_fact_mutation (WylHandle *self, wyl_fact_store_t **store,
    * replacement engine reopens the same graph's store, so it must be closed
    * before the refresh rather than at the caller's scope exit. */
   g_clear_pointer (store, wyl_fact_store_close);
+  return finish_fact_mutation (self, graph_info, admission, rc, &delta,
+             out_outcome);
+}
 
-  if (rc != WYRELOG_E_OK) {
-    if (delta.quota_exceeded)
-      wyl_fact_resource_recorder_record_quota_rejection
-        (self->fact_resource_recorder);
-    out_outcome->delta = delta;
-    return rc;                  /* PRECOMMIT_FAILED: nothing durable. */
-  }
+wyrelog_error_t
+wyl_handle_commit_fact_graph_update (WylHandle *self,
+    wyl_fact_store_t **store, const wyl_fact_store_update_part_t *parts,
+    gsize n_parts, const wyl_policy_fact_graph_info_t *graph_info,
+    WylFactReplayAdmission *admission, gboolean *out_inserted,
+    wyl_fact_mutation_outcome_t *out_outcome)
+{
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  if (out_outcome != NULL)
+    wyl_fact_mutation_outcome_init (out_outcome);
 
-  /* The fact commit is durable now.  Marker persistence is deliberately
-   * decoupled from the mutation result; a failure leaves the fact committed
-   * and can be repaired by later observation/reconciliation. */
-  fact_graph_materialization_materialized_best_effort (self, graph_info);
+  if (self == NULL || !WYL_IS_HANDLE (self) || store == NULL || *store == NULL
+      || parts == NULL || n_parts == 0 || graph_info == NULL
+      || out_inserted == NULL || out_outcome == NULL)
+    return WYRELOG_E_INVALID;
 
-  /* Step 3: post-commit targeted refresh of this graph only.  A failure here
-   * is committed-but-degraded, never a commit failure. */
-  WylFactGraphRuntimeStatus status = { 0 };
-  wyrelog_error_t refresh_rc = admission == NULL
-      ? wyl_handle_refresh_fact_graph (self, graph_info, &status)
-      : wyl_handle_refresh_fact_graph_admitted (self, admission, graph_info,
-          &status);
-  out_outcome->delta = delta;
-  out_outcome->engine_queryable = status.queryable;
-  out_outcome->engine_generation = status.engine_generation;
-  if (refresh_rc == WYRELOG_E_OK) {
-    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_READY;
-  } else if (status.admission == WYL_FACT_GRAPH_ADMISSION_CLOSED) {
-    /* Refused by the barrier, not failed.  The runtime fills the status on an
-     * admission refusal and clears it on a shutdown or abandoned one, so a
-     * closed admission here is a positive signal rather than a leftover.
-     * Nothing durable needs repair, and naming a degradation class would
-     * invent a replay failure that did not happen. */
-    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_BARRIER;
-    out_outcome->needs_runtime_reconcile = TRUE;
-  } else {
-    out_outcome->mutation_class = WYL_FACT_MUTATION_COMMITTED_DEGRADED;
-    out_outcome->degraded_class = status.last_replay_class;
-    out_outcome->needs_runtime_reconcile = TRUE;
-    out_outcome->needs_durable_reconcile = TRUE;
-  }
-  wyl_fact_graph_runtime_status_clear (&status);
-  return WYRELOG_E_OK;
+  fact_graph_materialization_pending_best_effort (self, graph_info);
+
+  /* One store commit for every part, then one refresh: the refresh is what
+   * publishes the parts to readers, so they move together or not at all. */
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  wyrelog_error_t rc = wyl_fact_store_update_graph_batches_delta (*store,
+          parts, n_parts, out_inserted, &delta);
+  g_clear_pointer (store, wyl_fact_store_close);
+  return finish_fact_mutation (self, graph_info, admission, rc, &delta,
+             out_outcome);
 }
 
 wyrelog_error_t
@@ -3455,7 +3498,8 @@ wyl_handle_get_fact_tenant_admission_for_test (WylHandle *self,
 typedef struct
 {
   WylEngine *engine;
-  const gchar *relation;
+  const gchar *const *relations;
+  gsize n_relations;
   wyl_fact_graph_tuple_cb cb;
   gpointer user_data;
 } FactGraphSnapshotCtx;
@@ -3468,13 +3512,20 @@ fact_graph_snapshot_tuple_trampoline (const gchar *relation,
   ctx->cb (ctx->engine, relation, row, ncols, ctx->user_data);
 }
 
+/* Every relation is read from the one engine the snapshot pinned, so the
+ * rows the callback sees across relations are one state of the graph. */
 static wyrelog_error_t
 fact_graph_snapshot_use (WylEngine *engine, gpointer user_data)
 {
   FactGraphSnapshotCtx *ctx = user_data;
   ctx->engine = engine;
-  return wyl_engine_snapshot (engine, ctx->relation,
-             fact_graph_snapshot_tuple_trampoline, ctx);
+  for (gsize i = 0; i < ctx->n_relations; i++) {
+    wyrelog_error_t rc = wyl_engine_snapshot (engine, ctx->relations[i],
+            fact_graph_snapshot_tuple_trampoline, ctx);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -3482,11 +3533,26 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
     const gchar *tenant_id, const gchar *graph_id, const gchar *relation,
     wyl_fact_graph_tuple_cb cb, gpointer user_data)
 {
+  const gchar *const relations[1] = { relation };
+  return wyl_handle_snapshot_fact_graph_relations (self, tenant_id, graph_id,
+             relations, relation != NULL ? 1 : 0, cb, user_data);
+}
+
+wyrelog_error_t
+wyl_handle_snapshot_fact_graph_relations (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id,
+    const gchar *const *relations, gsize n_relations,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data)
+{
   if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
-      || graph_id == NULL || relation == NULL || cb == NULL
-      || self->fact_graph_runtime == NULL
+      || graph_id == NULL || relations == NULL || n_relations == 0
+      || cb == NULL || self->fact_graph_runtime == NULL
       || self->fact_tenant_admission == NULL)
     return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < n_relations; i++) {
+    if (relations[i] == NULL)
+      return WYRELOG_E_INVALID;
+  }
 
   /* Tenant admission spans the complete observable query, not just engine
    * lookup: a seal writer must wait until the caller's callback has finished
@@ -3519,7 +3585,8 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
     return rc;
   FactGraphSnapshotCtx ctx = {
     .engine = NULL,
-    .relation = relation,
+    .relations = relations,
+    .n_relations = n_relations,
     .cb = cb,
     .user_data = user_data,
   };
