@@ -5,6 +5,11 @@
 
 G_BEGIN_DECLS;
 
+/* Stable audit correlation only; never an authentication or policy identity. */
+gchar *wyl_audit_session_handle (const gchar *session_id);
+gboolean wyl_audit_is_session_handle (const gchar *value);
+gchar *wyl_audit_scope_handle (WylHandle *handle, const gchar *value);
+
 /*
  * Rehydrates an audit event from persisted wire/store fields. This is private
  * because callers should not mint arbitrary ids or timestamps for newly

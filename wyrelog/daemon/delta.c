@@ -60,7 +60,9 @@ emit_wirelog_effective_member_audit (WylEngineSession *session,
   wyl_audit_event_set_resource_id (ev, role);
   wyl_audit_event_set_deny_reason (ev,
       kind == WYL_DELTA_INSERT ? "insert" : "remove");
-  wyl_audit_event_set_deny_origin (ev, scope);
+  g_autofree gchar *audit_scope = wyl_audit_scope_handle (runtime->handle,
+          scope);
+  wyl_audit_event_set_deny_origin (ev, audit_scope);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   record_daemon_audit_result (runtime, persist_daemon_audit_event (runtime,
       ev));
@@ -86,7 +88,9 @@ emit_wirelog_fsm_fired_audit (WylEngineSession *session,
   g_autofree gchar *action = g_strdup_printf ("%s_delta_%s", relation,
           kind == WYL_DELTA_INSERT ? "insert" : "remove");
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, entity);
+  g_autofree gchar *audit_entity = g_strcmp0 (relation, "session_fired") == 0
+      ? wyl_audit_session_handle (entity) : g_strdup (entity);
+  wyl_audit_event_set_subject_id (ev, audit_entity);
   wyl_audit_event_set_action (ev, action);
   wyl_audit_event_set_resource_id (ev, to_state);
   wyl_audit_event_set_deny_reason (ev, event);
@@ -124,7 +128,9 @@ emit_wirelog_perm_state_fired_audit (WylEngineSession *session,
       "perm_state_fired_delta_remove");
   wyl_audit_event_set_resource_id (ev, perm);
   wyl_audit_event_set_deny_reason (ev, transition);
-  wyl_audit_event_set_deny_origin (ev, scope);
+  g_autofree gchar *audit_scope = wyl_audit_scope_handle (runtime->handle,
+          scope);
+  wyl_audit_event_set_deny_origin (ev, audit_scope);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   record_daemon_audit_result (runtime, persist_daemon_audit_event (runtime,
       ev));
@@ -176,7 +182,7 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
       "AND deny_origin = 'unverified' "
       "AND decision = 1), "
       "COUNT(*) FILTER (WHERE action = 'session_fired_delta_insert' "
-      "AND subject_id = 'wyrelogd-session' "
+      "AND subject_id = 'session#1cbaacb1e2be911f72f7c18b7e07ea921dd1a4705ac169fb6dd60c65516a6f93' "
       "AND resource_id = 'elevated' "
       "AND deny_reason = 'elevate_grant' "
       "AND deny_origin = 'active' "
@@ -188,7 +194,7 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
       "AND deny_origin = 'unverified' "
       "AND decision = 1), "
       "COUNT(*) FILTER (WHERE action = 'session_fired_delta_remove' "
-      "AND subject_id = 'wyrelogd-session' "
+      "AND subject_id = 'session#1cbaacb1e2be911f72f7c18b7e07ea921dd1a4705ac169fb6dd60c65516a6f93' "
       "AND resource_id = 'elevated' "
       "AND deny_reason = 'elevate_grant' "
       "AND deny_origin = 'active' "

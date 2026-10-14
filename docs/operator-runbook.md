@@ -1387,14 +1387,20 @@ recording secret material:
   `service-credential-leak-scan-e2e` (Linux packaged runtime).
 - **Human session identities are not credentials.** Login returns a separate
   random `wst_` session token, indexed in memory by its SHA-256 digest. Stored
-  session-state, delta, and decision audit rows use internal IDs; neither an ID
-  nor its token digest can authenticate. Existing hash-chained rows remain
-  unchanged. `/audit/events` and `wyctl audit query` retain read-time redaction:
-  subjects of `session_state` and `session_fired_delta_*` rows always appear as
-  `session#` plus 16 hex digits; other columns equal to a currently registered ID
-  are also masked. The handle stays stable within one daemon process. Ended
-  session IDs in other columns appear as stored. Historical stores can still
-  contain the former credentials and require their existing file protections.
+  session-state and session-delta subjects use deterministic `session#` handles
+  with 64 lowercase SHA-256 hex digits. Known session resources and permission
+  scopes use the same handle in audit rows; policy evaluation retains internal
+  IDs. Unrelated resources, including UUID-shaped resources, remain unchanged.
+  Session classification grants no authority and survives logout for delayed
+  removal events; persisted session lifecycle events restore classification on startup.
+  New handles pass through `/audit/events` and `wyctl audit query` unchanged.
+  Existing hash-chained rows remain unchanged: legacy structural session subjects
+  and columns equal to a live ID still receive process-local keyed read handles
+  with 16 hex digits. Ended legacy IDs in other columns appear as stored.
+  Historical stores can contain former credentials and require their existing
+  file protections. Neither an internal ID, token digest, nor audit handle can
+  authenticate.
+
 
 ## Datalog Product Flow
 

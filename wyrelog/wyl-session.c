@@ -803,7 +803,8 @@ new_session_state_audit (const gchar *session_id,
     const gchar *old_state, const gchar *new_state, const gchar *request_id)
 {
   WylAuditEvent *ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, session_id);
+  g_autofree gchar *audit_id = wyl_audit_session_handle (session_id);
+  wyl_audit_event_set_subject_id (ev, audit_id);
   wyl_audit_event_set_action (ev, "session_state");
   wyl_audit_event_set_resource_id (ev, new_state);
   wyl_audit_event_set_deny_origin (ev, old_state);
@@ -1267,6 +1268,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   session->tenant = g_strdup (tenant);
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  wyl_handle_note_audit_session (handle, session_id);
   if (username != NULL) {
     gboolean skip_mfa = req != NULL && wyl_login_req_get_skip_mfa (req);
     wyrelog_error_t rc;

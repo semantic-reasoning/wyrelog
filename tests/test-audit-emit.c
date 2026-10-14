@@ -2542,7 +2542,12 @@ check_session_transition_emits_audit_row (void)
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
   const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
   gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
-  if (g_strcmp0 (subject, session_id) != 0)
+  g_autofree gchar *audit_input = g_strconcat (
+    "wyrelog.audit.session.v1:", session_id, NULL);
+  g_autofree gchar *audit_digest = g_compute_checksum_for_string (
+    G_CHECKSUM_SHA256, audit_input, -1);
+  g_autofree gchar *audit_handle = g_strconcat ("session#", audit_digest, NULL);
+  if (g_strcmp0 (subject, audit_handle) != 0)
     rc = 66;
   else if (g_strcmp0 (action, "session_state") != 0)
     rc = 67;
@@ -2605,7 +2610,12 @@ check_login_session_state_emits_audit_row (void)
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
   const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
   gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
-  if (g_strcmp0 (subject, session_id) != 0)
+  g_autofree gchar *audit_input = g_strconcat (
+    "wyrelog.audit.session.v1:", session_id, NULL);
+  g_autofree gchar *audit_digest = g_compute_checksum_for_string (
+    G_CHECKSUM_SHA256, audit_input, -1);
+  g_autofree gchar *audit_handle = g_strconcat ("session#", audit_digest, NULL);
+  if (g_strcmp0 (subject, audit_handle) != 0)
     rc = 115;
   else if (g_strcmp0 (action, "session_state") != 0)
     rc = 116;

@@ -920,7 +920,9 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
       ? wyl_grant_req_get_actor_id (req)
       : wyl_grant_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_grant");
-  wyl_audit_event_set_resource_id (ev, wyl_grant_req_get_resource_id (req));
+  g_autofree gchar *audit_resource = wyl_audit_scope_handle (handle,
+          wyl_grant_req_get_resource_id (req));
+  wyl_audit_event_set_resource_id (ev, audit_resource);
   wyl_audit_event_set_deny_origin (ev, wyl_grant_req_get_action (req));
   wyl_audit_event_set_request_id (ev, wyl_grant_req_get_request_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
@@ -959,7 +961,9 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       ? wyl_revoke_req_get_actor_id (req)
       : wyl_revoke_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_revoke");
-  wyl_audit_event_set_resource_id (ev, wyl_revoke_req_get_resource_id (req));
+  g_autofree gchar *audit_resource = wyl_audit_scope_handle (handle,
+          wyl_revoke_req_get_resource_id (req));
+  wyl_audit_event_set_resource_id (ev, audit_resource);
   wyl_audit_event_set_deny_origin (ev, wyl_revoke_req_get_action (req));
   wyl_audit_event_set_request_id (ev, wyl_revoke_req_get_request_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
@@ -998,7 +1002,9 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
       ? wyl_role_grant_req_get_actor_id (req)
       : wyl_role_grant_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "role_grant");
-  wyl_audit_event_set_resource_id (ev, wyl_role_grant_req_get_scope (req));
+  g_autofree gchar *audit_resource = wyl_audit_scope_handle (handle,
+          wyl_role_grant_req_get_scope (req));
+  wyl_audit_event_set_resource_id (ev, audit_resource);
   wyl_audit_event_set_deny_origin (ev, wyl_role_grant_req_get_role_id (req));
   wyl_audit_event_set_request_id (ev, wyl_role_grant_req_get_request_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
@@ -1037,7 +1043,9 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
       ? wyl_role_revoke_req_get_actor_id (req)
       : wyl_role_revoke_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "role_revoke");
-  wyl_audit_event_set_resource_id (ev, wyl_role_revoke_req_get_scope (req));
+  g_autofree gchar *audit_resource = wyl_audit_scope_handle (handle,
+          wyl_role_revoke_req_get_scope (req));
+  wyl_audit_event_set_resource_id (ev, audit_resource);
   wyl_audit_event_set_deny_origin (ev, wyl_role_revoke_req_get_role_id (req));
   wyl_audit_event_set_request_id (ev, wyl_role_revoke_req_get_request_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);

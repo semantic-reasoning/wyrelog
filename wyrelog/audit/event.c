@@ -10,6 +10,37 @@
 #include "audit/conn-private.h"
 #endif
 
+gboolean
+wyl_audit_is_session_handle (const gchar *value)
+{
+  if (value == NULL || !g_str_has_prefix (value, "session#")
+      || strlen (value) != 72)
+    return FALSE;
+  for (const gchar *p = value + 8; *p != '\0'; p++)
+    if (!g_ascii_isdigit (*p) && (*p < 'a' || *p > 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+gchar *
+wyl_audit_session_handle (const gchar *session_id)
+{
+  if (session_id == NULL || wyl_audit_is_session_handle (session_id))
+    return g_strdup (session_id);
+  g_autofree gchar *input = g_strconcat ("wyrelog.audit.session.v1:",
+          session_id, NULL);
+  g_autofree gchar *digest = g_compute_checksum_for_string (
+    G_CHECKSUM_SHA256, input, -1);
+  return g_strconcat ("session#", digest, NULL);
+}
+
+gchar *
+wyl_audit_scope_handle (WylHandle *handle, const gchar *value)
+{
+  return wyl_handle_is_audit_session (handle, value)
+      ? wyl_audit_session_handle (value) : g_strdup (value);
+}
+
 struct _WylAuditEvent
 {
   GObject parent_instance;
@@ -254,9 +285,9 @@ wyl_audit_mirror_event (WylHandle *handle, const WylAuditEvent *event)
 
   gboolean inserted = FALSE;
   return wyl_audit_conn_insert_event_full (audit_conn, id_buf,
-      event->created_at_us, event->subject_id, event->action,
-      event->resource_id, event->deny_reason, event->deny_origin,
-      event->request_id, event->decision, &inserted);
+             event->created_at_us, event->subject_id, event->action,
+             event->resource_id, event->deny_reason, event->deny_origin,
+             event->request_id, event->decision, &inserted);
 #else
   (void) handle;
   (void) event;
@@ -279,31 +310,31 @@ wyl_audit_complete_authoritative_event (WylHandle *handle,
   wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
   if (audit_conn == NULL) {
     (void) wyl_policy_store_mark_audit_intention_committed
-        (wyl_handle_get_policy_store (handle), id);
+      (wyl_handle_get_policy_store (handle), id);
     return;
   }
 
   wyrelog_error_t rc = wyl_audit_conn_create_schema (audit_conn);
   if (rc != WYRELOG_E_OK) {
     (void) wyl_policy_store_mark_audit_intention_failed
-        (wyl_handle_get_policy_store (handle), id, "duckdb schema unavailable");
+      (wyl_handle_get_policy_store (handle), id, "duckdb schema unavailable");
     return;
   }
 
   gboolean inserted = FALSE;
   rc = wyl_audit_conn_insert_event_full (audit_conn, id,
-      event->created_at_us, event->subject_id, event->action,
-      event->resource_id, event->deny_reason, event->deny_origin,
-      event->request_id, event->decision, &inserted);
+          event->created_at_us, event->subject_id, event->action,
+          event->resource_id, event->deny_reason, event->deny_origin,
+          event->request_id, event->decision, &inserted);
   if (rc != WYRELOG_E_OK) {
     (void) wyl_policy_store_mark_audit_intention_failed
-        (wyl_handle_get_policy_store (handle), id, "duckdb append failed");
+      (wyl_handle_get_policy_store (handle), id, "duckdb append failed");
     return;
   }
 #endif
 
   (void) wyl_policy_store_mark_audit_intention_committed
-      (wyl_handle_get_policy_store (handle), id);
+    (wyl_handle_get_policy_store (handle), id);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -320,14 +351,14 @@ mutate_audit_publication (wyl_policy_store_t *store, gpointer data)
   const WylAuditEvent *event = ctx->event;
   gboolean inserted = FALSE;
   wyrelog_error_t rc = wyl_policy_store_record_audit_intention_full (store,
-      ctx->id, event->created_at_us, event->subject_id, event->action,
-      event->resource_id, event->deny_reason, event->deny_origin,
-      event->request_id, event->decision, &inserted);
+          ctx->id, event->created_at_us, event->subject_id, event->action,
+          event->resource_id, event->deny_reason, event->deny_origin,
+          event->request_id, event->decision, &inserted);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_audit_event_full (store, ctx->id,
-        event->created_at_us, event->subject_id, event->action,
-        event->resource_id, event->deny_reason, event->deny_origin,
-        event->request_id, event->decision, &inserted);
+            event->created_at_us, event->subject_id, event->action,
+            event->resource_id, event->deny_reason, event->deny_origin,
+            event->request_id, event->decision, &inserted);
   return rc;
 }
 
@@ -362,7 +393,7 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   };
   wyrelog_error_t rc =
       wyl_engine_session_run_committed_audit_publication (session,
-      mutate_audit_publication, &publication, &projection);
+          mutate_audit_publication, &publication, &projection);
   g_clear_pointer (&session, wyl_engine_session_release);
   if (rc != WYRELOG_E_OK)
     return rc;

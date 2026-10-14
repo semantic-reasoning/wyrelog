@@ -30,6 +30,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/audit/event-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-session-private.h"
@@ -6570,8 +6571,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 1814;
   if (principal_skip_audit.matches != 1)
     return 1815;
+  g_autofree gchar *session_skip_audit_handle = wyl_audit_session_handle (authenticated_session_token_id);
   AuditEventProbe session_skip_audit = {
-    .subject_id = authenticated_session_token_id,
+    .subject_id = session_skip_audit_handle,
     .action = "session_state",
     .resource_id = "active",
     .deny_origin = "idle",
@@ -6869,8 +6871,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (closed_expect.matches != 1)
     return 498;
 #ifdef WYL_HAS_AUDIT
+  g_autofree gchar *close_audit_handle = wyl_audit_session_handle (logout_session_token_id);
   AuditEventProbe close_audit = {
-    .subject_id = logout_session_token_id,
+    .subject_id = close_audit_handle,
     .action = "session_state",
     .resource_id = "closed",
     .deny_origin = "active",
@@ -6997,8 +7000,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (!wyl_daemon_http_session_is_revoked (server, bearer_logout_session_token_id))
     return 526;
 #ifdef WYL_HAS_AUDIT
+  g_autofree gchar *bearer_close_audit_handle = wyl_audit_session_handle (bearer_logout_session_token_id);
   AuditEventProbe bearer_close_audit = {
-    .subject_id = bearer_logout_session_token_id,
+    .subject_id = bearer_close_audit_handle,
     .action = "session_state",
     .resource_id = "closed",
     .deny_origin = "active",
@@ -13994,7 +13998,8 @@ static gboolean
 audit_value_is_session_handle (const gchar *value)
 {
   if (value == NULL || !g_str_has_prefix (value, "session#")
-      || strlen (value) != strlen ("session#") + 16)
+      || (strlen (value) != strlen ("session#") + 16
+      && !wyl_audit_is_session_handle (value)))
     return FALSE;
   for (const gchar *p = value + strlen ("session#"); *p != '\0'; p++)
     if (!g_ascii_isxdigit (*p) || g_ascii_isupper (*p))
@@ -14094,15 +14099,22 @@ session_secret_audit_cb (const gchar *id, gint64 created_at_us,
   (void) created_at_us;
   (void) decision;
   SessionSecretAuditProbe *probe = data;
+  /* These fixtures intentionally model pre-upgrade stored rows. */
+  if (g_strcmp0 (action, "leak_probe") == 0
+      || g_strcmp0 (request_id, "legacy-session-row") == 0)
+    return WYRELOG_E_OK;
+  g_autofree gchar *opaque = wyl_audit_session_handle (probe->session_id);
   const gchar *fields[] = { id, subject_id, action, resource_id, deny_reason,
                             deny_origin, request_id };
   for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
-    if (fields[i] != NULL)
+    if (fields[i] != NULL){
       g_assert_null (strstr (fields[i], probe->secret));
-  if (g_strcmp0 (subject_id, probe->session_id) == 0
+      g_assert_null (strstr (fields[i], probe->session_id));
+    }
+  if (g_strcmp0 (subject_id, opaque) == 0
       && g_strcmp0 (action, "session_state") == 0)
     probe->session_rows++;
-  if (g_strcmp0 (resource_id, probe->session_id) == 0
+  if (g_strcmp0 (resource_id, opaque) == 0
       && g_strcmp0 (action, "wr.audit.read") == 0)
     probe->decision_rows++;
   return WYRELOG_E_OK;
@@ -14217,10 +14229,11 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
       "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
       victim_access, &status, &body), ==, 0);
   g_assert_cmpuint (status, ==, 403);
+  g_autofree gchar *victim_audit_handle = wyl_audit_session_handle (victim_id);
   AuditEventProbe authority = {
     .subject_id = "audit-leak-victim",
     .action = "wr.service_principal.manage",
-    .resource_id = victim_id,
+    .resource_id = victim_audit_handle,
   };
   g_assert_cmpint (wyl_policy_store_foreach_audit_event
         (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &authority),
@@ -14347,6 +14360,18 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   if (audit_redaction_replay (http, base_url, probed) != 0)
     return 12630;
 
+  g_autoptr (WylAuditEvent) legacy = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (legacy, victim_id);
+  wyl_audit_event_set_action (legacy, "session_state");
+  wyl_audit_event_set_resource_id (legacy, "active");
+  wyl_audit_event_set_request_id (legacy, "legacy-session-row");
+  g_assert_cmpint (wyl_audit_emit (handle, legacy), ==, WYRELOG_E_OK);
+  g_autofree gchar *legacy_rows = NULL;
+  g_assert_cmpint (audit_redaction_query (http, base_url, reader_token,
+      "request_id(\"legacy-session-row\")", &legacy_rows), ==, 0);
+  g_assert_null (strstr (legacy_rows, victim_id));
+  g_assert_nonnull (strstr (legacy_rows, victim_handle));
+
   /* Once the victim logs out its id matches no registration, so only the
    * structural rule still hides it -- as it must during login, before the
    * registration exists.  The handle is the one shown while it was live. */
@@ -14368,9 +14393,10 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
   if (audit_redaction_query (http, base_url, reader_token, victim_filter,
       &after_logout) != 0)
     return 12634;
+  g_autofree gchar *stored_victim_handle = wyl_audit_session_handle (victim_id);
   g_autofree gchar *state_member = g_strdup_printf
         ("\"subject_id\":\"%s\",\"action\":\"session_state\"",
-          victim_handle);
+          stored_victim_handle);
   if (strstr (after_logout, state_member) == NULL
       || strstr (after_logout, victim) != NULL)
     return 12635;
@@ -14385,7 +14411,7 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
     if (!audit_value_is_session_handle (fired_after_subjects->pdata[s]))
       return 12637;
     victim_fired |= g_strcmp0 (fired_after_subjects->pdata[s],
-            victim_handle) == 0;
+            stored_victim_handle) == 0;
   }
   if (!victim_fired || strstr (fired_after, victim) != NULL)
     return 12638;

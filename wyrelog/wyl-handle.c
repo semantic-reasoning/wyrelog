@@ -19,6 +19,7 @@
 #include "wyl-permission-scope-private.h"
 #include "wyl-common-private.h"
 #include "policy/store-private.h"
+#include "audit/event-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/replay-private.h"
@@ -153,6 +154,8 @@ struct _WylHandle
    */
   GMutex sessions_lock;
   GHashTable *sessions_by_id;
+  /* Digest-only audit classification, retained until handle destruction. */
+  GHashTable *audit_session_handles;
   guint64 next_session_id;
 #ifdef WYL_HAS_BREAK_GLASS
   /*
@@ -1262,6 +1265,7 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->service_auth_authority,
       wyl_service_auth_authority_unref);
   g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
+  g_clear_pointer (&self->audit_session_handles, g_hash_table_unref);
   g_mutex_clear (&self->sessions_lock);
 #ifdef WYL_HAS_BREAK_GLASS
   g_mutex_clear (&self->break_glass_lock);
@@ -1325,6 +1329,8 @@ wyl_handle_init (WylHandle *self)
   g_mutex_init (&self->sessions_lock);
   self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
           g_free, wyl_session_registry_entry_free);
+  self->audit_session_handles = g_hash_table_new_full (g_str_hash,
+          g_str_equal, g_free, NULL);
   self->next_session_id = 1;
 #ifdef WYL_HAS_BREAK_GLASS
   g_mutex_init (&self->break_glass_lock);
@@ -1353,6 +1359,30 @@ wyl_handle_register_session (WylHandle *self, WylSession *session,
 
   *out_sid = sid;
   return WYRELOG_E_OK;
+}
+
+void
+wyl_handle_note_audit_session (WylHandle *self, const gchar *session_id)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  if (session_id == NULL || session_id[0] == '\0')
+    return;
+  gchar *key = wyl_audit_session_handle (session_id);
+  g_mutex_lock (&self->sessions_lock);
+  g_hash_table_add (self->audit_session_handles, key);
+  g_mutex_unlock (&self->sessions_lock);
+}
+
+gboolean
+wyl_handle_is_audit_session (WylHandle *self, const gchar *value)
+{
+  if (!WYL_IS_HANDLE (self) || value == NULL)
+    return FALSE;
+  g_autofree gchar *key = wyl_audit_session_handle (value);
+  g_mutex_lock (&self->sessions_lock);
+  gboolean known = g_hash_table_contains (self->audit_session_handles, key);
+  g_mutex_unlock (&self->sessions_lock);
+  return known;
 }
 
 WylSession *
@@ -4035,6 +4065,12 @@ preintern_policy_store_session_event_symbols (gint64 event_id,
 {
   WylHandle *self = user_data;
   (void) event_id;
+  /* Legacy state/event rows also contain named tenant scopes. Actual session
+   * identities are UUIDs with lifecycle history, not every effective scope.
+   * This pass finishes before any membership/permission delta loads. */
+  wyl_id_t identity;
+  if (wyl_id_parse (session_id, &identity) == WYRELOG_E_OK)
+    wyl_handle_note_audit_session (self, session_id);
 
   wyrelog_error_t rc = preintern_policy_store_symbol (self, session_id);
   if (rc != WYRELOG_E_OK)
