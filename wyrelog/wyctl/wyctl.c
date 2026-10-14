@@ -2865,7 +2865,10 @@ typedef enum
 /* fact put, retract and update share their options, input handling and
  * receipt; they differ in the route, the failure code and the name they
  * print.  An update's rows carry an op column first (#1344), which the CSV
- * conversion passes through like any other column. */
+ * conversion passes through like any other column.  An update without
+ * --relation is the graph-wide update (#1393): its rows carry op, relation
+ * and schema version before the relation's columns, and it goes to the
+ * graph's own :update route. */
 static int
 run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
     WyctlFactMutation mutation)
@@ -2882,10 +2885,11 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
     {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
     {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
      "NS"},
-    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
-     "REL"},
+    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation,
+     "Relation (fact update: omit for a graph-wide update whose rows name "
+     "their relation)", "REL"},
     {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
-     "Schema version", "N"},
+     "Schema version (with --relation)", "N"},
     {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id, "Batch id",
      "ID"},
     {"idempotency-key", 0, 0, G_OPTION_ARG_STRING, &opts.idempotency_key,
@@ -2929,16 +2933,25 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
       wyctl_resolve_string_option (opts.access_token_file,
           global_opts->settings, "access-token-file");
 
+  const gboolean graph_level = mutation == WYCTL_FACT_UPDATE
+      && (opts.relation == NULL || opts.relation[0] == '\0');
   if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
-      || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
-      opts.relation[0] == '\0' || opts.batch_id == NULL ||
-      opts.batch_id[0] == '\0' || opts.idempotency_key == NULL ||
-      opts.idempotency_key[0] == '\0') {
+      || opts.namespace_id[0] == '\0' || (!graph_level
+      && (opts.relation == NULL || opts.relation[0] == '\0'))
+      || opts.batch_id == NULL || opts.batch_id[0] == '\0'
+      || opts.idempotency_key == NULL || opts.idempotency_key[0] == '\0') {
     g_printerr ("wyctl: missing %s target option\n", action);
     return 2;
   }
   guint32 schema_version = 0;
-  if (!parse_positive_uint32 (opts.schema_version_arg, &schema_version)) {
+  if (graph_level) {
+    if (opts.schema_version_arg != NULL) {
+      g_printerr ("wyctl: a graph-wide fact update takes no "
+          "--schema-version; each input row names its relation's\n");
+      return 2;
+    }
+  } else if (!parse_positive_uint32 (opts.schema_version_arg,
+      &schema_version)) {
     g_printerr ("wyctl: invalid --schema-version\n");
     return 2;
   }
@@ -2986,8 +2999,13 @@ run_fact_mutation (const WyctlOptions *global_opts, gint argc, gchar **argv,
       WylClientFactAppendResult **) = mutation == WYCTL_FACT_RETRACT
       ? wyl_client_fact_retract_batch : mutation == WYCTL_FACT_UPDATE
       ? wyl_client_fact_update_batch : wyl_client_fact_put_batch;
-  wyrelog_error_t rc = send (client, tenant, graph, opts.namespace_id,
-          opts.relation, schema_version, opts.batch_id, opts.idempotency_key,
+  wyrelog_error_t rc = graph_level
+      ? wyl_client_fact_update_graph (client, tenant, graph, opts.namespace_id,
+          opts.batch_id, opts.idempotency_key, (const guint8 *) payload,
+          payload_size, guard_timestamp, opts.guard_loc_class, guard_risk,
+          &result)
+      : send (client, tenant, graph, opts.namespace_id, opts.relation,
+          schema_version, opts.batch_id, opts.idempotency_key,
           (const guint8 *) payload, payload_size, guard_timestamp,
           opts.guard_loc_class, guard_risk, &result);
   int exit_rc = fact_remote_exit (client, action, rc, fail_code);

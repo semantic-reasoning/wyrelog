@@ -1585,6 +1585,62 @@ main (void)
   assert_wyctl_stdout (fact_put_refund_argv,
       "action=put batch_id=refund-1 operation_id=refund-key-1 replay=false "
       "mutation_class=committed_ready effect=unknown\n");
+
+  /* #1393: a graph-wide update moves both relations in one commit.  The CSV
+   * rows carry op, relation and schema version first, so rows of relations
+   * with different column counts share one file.  Order o-9 appears in
+   * orders while refunds swaps o-1 for o-2; the reverse update then restores
+   * both, so the steps below see the relations as before. */
+  gchar *graph_update_input_path = NULL;
+  gint graph_update_fd = g_file_open_tmp ("wyctl-facts-graph-update-XXXXXX",
+          &graph_update_input_path, &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (graph_update_fd, >=, 0);
+  g_assert_true (g_close (graph_update_fd, NULL));
+  g_assert_true (g_file_set_contents (graph_update_input_path,
+      "assert,orders,1,o-9,9\nretract,refunds,1,o-1\nassert,refunds,1,o-2\n",
+      -1, &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *graph_update_input_path_autofree = graph_update_input_path;
+  gchar *fact_graph_update_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "update",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--batch-id", "g-1",
+    "--idempotency-key", "g-key-1",
+    "--format", "csv",
+    "--input", graph_update_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_graph_update_argv,
+      "action=update batch_id=g-1 operation_id=g-key-1 replay=false "
+      "mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout_contains (datalog_query_argv,
+      "\"rows\":[{\"O\":\"o-9\",\"A\":9}]");
+  if (check_fact_projection_batch_rows (handle, "g-1#orders", 1) != 0)
+    return wyl_test_normalize_exit_status (108);
+  assert_wyctl_stdout (fact_graph_update_argv,
+      "action=update batch_id=g-1 operation_id=g-key-1 replay=true "
+      "mutation_class=committed_ready effect=unknown\n");
+  g_assert_true (g_file_set_contents (graph_update_input_path,
+      "retract,orders,1,o-9,9\nretract,refunds,1,o-2\nassert,refunds,1,o-1\n",
+      -1, &input_error));
+  g_assert_no_error (input_error);
+  g_assert_cmpstr (fact_graph_update_argv[12], ==, "g-1");
+  g_assert_cmpstr (fact_graph_update_argv[14], ==, "g-key-1");
+  fact_graph_update_argv[12] = "g-2";
+  fact_graph_update_argv[14] = "g-key-2";
+  assert_wyctl_stdout (fact_graph_update_argv,
+      "action=update batch_id=g-2 operation_id=g-key-2 replay=false "
+      "mutation_class=committed_ready effect=unknown\n");
+  assert_wyctl_stdout_contains (datalog_query_argv, "\"rows\":[]");
   gchar *fact_forget_other_relation_argv[] = {
     (gchar *) WYL_TEST_WYCTL_PATH,
     "--daemon-url", (gchar *) base_url,

@@ -4448,6 +4448,135 @@ test_fact_mutation_times_out (void)
   assert_fact_mutation_unknown ("update", 0, NULL, 0);
 }
 
+/* Run `wyctl fact update` with |target| in place of the relation and
+ * schema-version options, against the fake daemon answering STATUS with
+ * BODY; the input rows carry op, relation and schema version first. */
+static void
+run_fact_graph_update_case (guint status, const gchar *body,
+    const gchar *const *target, gint *out_exit, gchar **out_stdout,
+    gchar **out_stderr, gchar **out_request)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autofree gchar *input_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-fact-graph-rows-XXXXXX.csv", &input_path,
+          &error);
+  g_assert_no_error (error);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (input_path,
+      "retract,r,1,1\nassert,s,2,2\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  g_autoptr (GCancellable) cancel = g_cancellable_new ();
+  PolicyMutationServer server = {
+    .listener = listener, .cancel = cancel, .status = status, .body = body,
+  };
+  GThread *thread = g_thread_new ("fact-graph-update",
+          policy_mutation_server_thread, &server);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  const gchar *const head[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", daemon_url, "--timeout-ms", "2000",
+    "fact", "update", "--tenant", "t", "--graph", "g", "--namespace", "ns",
+  };
+  const gchar *const tail[] = {
+    "--batch-id", "b1", "--idempotency-key", "k1", "--format", "csv",
+    "--input", input_path, "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (head); i++)
+    g_ptr_array_add (argv, (gpointer) head[i]);
+  for (gsize i = 0; target != NULL && target[i] != NULL; i++)
+    g_ptr_array_add (argv, (gpointer) target[i]);
+  for (gsize i = 0; i < G_N_ELEMENTS (tail); i++)
+    g_ptr_array_add (argv, (gpointer) tail[i]);
+  g_ptr_array_add (argv, NULL);
+  run_child ((gchar **) argv->pdata, out_stdout, out_stderr, out_exit);
+  stop_test_server (thread, cancel);
+  *out_request = server.request;
+  g_unlink (input_path);
+  g_unlink (token_path);
+}
+
+/* #1393: wyctl fact update without --relation is the graph-wide update.  It
+ * posts the rows, which name their own relation and schema version, to the
+ * graph's :update route with no relation or schema version in the query,
+ * and prints the same receipt.  --schema-version without --relation names
+ * nothing and is refused before any request. */
+static void
+test_fact_update_graph_posts_graph_route (void)
+{
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_autofree gchar *request = NULL;
+  run_fact_graph_update_case (200,
+      "{\"ok\":true,\"inserted\":true,\"batch_id\":\"b1\","
+      "\"committed\":true,\"mutation_class\":\"committed_ready\","
+      "\"queryable\":true,\"reconcile\":false}", NULL, &wait_status, &out,
+      &err, &request);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_cmpstr (err, ==, "");
+  g_assert_cmpstr (out, ==, "action=update batch_id=b1 operation_id=k1 "
+      "replay=false mutation_class=committed_ready effect=unknown\n");
+  g_assert_nonnull (request);
+  g_assert_true (g_str_has_prefix (request, "POST /facts/t/g:update?"));
+  g_assert_null (strstr (request, "schema_version="));
+  g_assert_null (strstr (request, "relation="));
+  g_assert_nonnull (strstr (request, "&namespace=ns&"));
+  g_assert_nonnull (strstr (request, "retract\tr\t1\t1\nassert\ts\t2\t2\n"));
+
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+  g_clear_pointer (&request, g_free);
+  static const gchar *const version_only[] = { "--schema-version", "1", NULL };
+  run_fact_graph_update_case (200, "{}", version_only, &wait_status, &out,
+      &err, &request);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: a graph-wide fact update takes no "
+      "--schema-version; each input row names its relation's\n");
+  g_assert_null (request);
+}
+
+/* fact put without --relation is still a missing target, not a graph-wide
+ * put. */
+static void
+test_fact_put_needs_relation (void)
+{
+  g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
+  g_autofree gchar *input_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-fact-rows-XXXXXX.csv", &input_path,
+          &error);
+  g_assert_no_error (error);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (input_path, "value\n1\n", -1, &error));
+  g_assert_no_error (error);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:9/",
+    "fact", "put", "--tenant", "t", "--graph", "g", "--namespace", "ns",
+    "--schema-version", "1", "--batch-id", "b1", "--idempotency-key", "k1",
+    "--format", "csv", "--input", input_path, "--access-token-file",
+    token_path, "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+    "--guard-risk", "29", NULL,
+  };
+  gint wait_status = 0;
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  run_child (argv, &out, &err, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_cmpstr (err, ==, "wyctl: missing fact put target option\n");
+  g_unlink (input_path);
+  g_unlink (token_path);
+}
+
 /* #1344: wyctl fact update posts to :update and prints the same receipt as
  * put and retract, naming its own action. */
 static void
@@ -6312,6 +6441,10 @@ main (int argc, char **argv)
       test_fact_mutation_times_out);
   g_test_add_func ("/wyctl/fact-update-posts-update-route",
       test_fact_update_posts_update_route);
+  g_test_add_func ("/wyctl/fact-update-graph-posts-graph-route",
+      test_fact_update_graph_posts_graph_route);
+  g_test_add_func ("/wyctl/fact-put-needs-relation",
+      test_fact_put_needs_relation);
   g_test_add_func ("/wyctl/graph-schema-quota-unknown-outcome",
       test_graph_schema_quota_unknown_outcome);
   g_test_add_func ("/wyctl/service-change-unknown-outcome",

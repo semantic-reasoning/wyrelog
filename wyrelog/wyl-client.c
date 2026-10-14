@@ -4012,6 +4012,9 @@ typedef enum
   WYL_CLIENT_FACT_MUTATION_APPEND,
   WYL_CLIENT_FACT_MUTATION_RETRACT,
   WYL_CLIENT_FACT_MUTATION_UPDATE,
+  /* The graph-wide update (#1393): no relation or schema version in the
+   * query, the graph's own :update route. */
+  WYL_CLIENT_FACT_MUTATION_UPDATE_GRAPH,
 } WylClientFactMutation;
 
 static wyrelog_error_t
@@ -4024,9 +4027,12 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
 {
   if (out_result != NULL)
     g_clear_pointer (out_result, wyl_client_fact_append_result_free);
+  const gboolean graph_level = mutation
+      == WYL_CLIENT_FACT_MUTATION_UPDATE_GRAPH;
   if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
-      namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
-      schema_version == 0 || batch_id == NULL || batch_id[0] == '\0' ||
+      namespace_id[0] == '\0' || (!graph_level && (relation == NULL
+      || relation[0] == '\0' || schema_version == 0))
+      || batch_id == NULL || batch_id[0] == '\0' ||
       idempotency_key == NULL || idempotency_key[0] == '\0' ||
       tsv_payload == NULL || tsv_len == 0)
     return WYRELOG_E_INVALID;
@@ -4045,8 +4051,8 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
   g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
   g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
           NULL, TRUE);
-  g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
-          TRUE);
+  g_autofree gchar *escaped_relation = graph_level ? NULL
+      : g_uri_escape_string (relation, NULL, TRUE);
   g_autofree gchar *escaped_batch = g_uri_escape_string (batch_id, NULL, TRUE);
   g_autofree gchar *escaped_key = g_uri_escape_string (idempotency_key, NULL,
           TRUE);
@@ -4059,16 +4065,22 @@ client_fact_mutate_batch (WylClient *client, const gchar *tenant,
       operation = "retract";
       break;
     case WYL_CLIENT_FACT_MUTATION_UPDATE:
+    case WYL_CLIENT_FACT_MUTATION_UPDATE_GRAPH:
       operation = "update";
       break;
     default:
       return WYRELOG_E_INVALID;
   }
-  g_autofree gchar *uri = g_strdup_printf
-        ("%s/facts/%s/%s/%s:%s?%s&namespace=%s&schema_version=%u"
-          "&batch_id=%s&idempotency_key=%s", base_url, escaped_tenant,
-          escaped_graph, escaped_relation, operation, guard_query,
-          escaped_namespace, schema_version, escaped_batch, escaped_key);
+  g_autofree gchar *uri = graph_level
+      ? g_strdup_printf ("%s/facts/%s/%s:%s?%s&namespace=%s&batch_id=%s"
+          "&idempotency_key=%s", base_url, escaped_tenant, escaped_graph,
+          operation, guard_query, escaped_namespace, escaped_batch,
+          escaped_key)
+      : g_strdup_printf ("%s/facts/%s/%s/%s:%s?%s&namespace=%s"
+          "&schema_version=%u&batch_id=%s&idempotency_key=%s", base_url,
+          escaped_tenant, escaped_graph, escaped_relation, operation,
+          guard_query, escaped_namespace, schema_version, escaped_batch,
+          escaped_key);
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
@@ -4187,6 +4199,19 @@ wyl_client_fact_update_batch (WylClient *client, const gchar *tenant,
              relation, schema_version, batch_id, idempotency_key, tsv_payload,
              tsv_len, guard_timestamp, guard_loc_class, guard_risk,
              WYL_CLIENT_FACT_MUTATION_UPDATE, out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_update_graph (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *batch_id,
+    const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactAppendResult **out_result)
+{
+  return client_fact_mutate_batch (client, tenant, graph, namespace_id, NULL,
+             0, batch_id, idempotency_key, tsv_payload, tsv_len,
+             guard_timestamp, guard_loc_class, guard_risk,
+             WYL_CLIENT_FACT_MUTATION_UPDATE_GRAPH, out_result);
 }
 
 wyrelog_error_t

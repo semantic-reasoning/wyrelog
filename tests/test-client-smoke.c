@@ -2109,6 +2109,32 @@ main (void)
       || g_strcmp0 (http.last_path, "/facts/__wr_default/orders/orders:update")
       != 0 || g_strcmp0 (http.last_body, (const gchar *) update_payload) != 0)
     return wyl_test_normalize_exit_status (299);
+  /* #1393: a graph-wide update posts its rows, which name their own
+   * relation and schema version, to the graph's :update route and reads the
+   * same receipt. */
+  g_clear_pointer (&mutation_result, wyl_client_fact_append_result_free);
+  http.body = "{\"ok\":true,\"inserted\":true,\"batch_id\":\"batch-3\","
+      "\"committed\":true,\"mutation_class\":\"committed_ready\","
+      "\"queryable\":true,\"reconcile\":false,"
+      "\"committed_row_delta\":4,\"logical_byte_delta\":4,"
+      "\"engine_generation\":9}";
+  const guint8 graph_payload[] =
+      "retract\torders\t1\t1\nassert\torders\t1\t2\n"
+      "retract\tship\t1\ta\nassert\tship\t1\tb\n";
+  if (wyl_client_fact_update_graph (management_client, "__wr_default",
+      "orders", "shop", "batch-3", "request-3", graph_payload,
+      sizeof graph_payload - 1, 123, "public", 49, &mutation_result)
+      != WYRELOG_E_OK
+      || !wyl_client_fact_append_result_get_inserted (mutation_result)
+      || g_strcmp0 (wyl_client_fact_append_result_get_batch_id
+        (mutation_result), "batch-3") != 0
+      || wyl_client_fact_append_result_get_committed_row_delta
+        (mutation_result) != 4)
+    return wyl_test_normalize_exit_status (300);
+  if (g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/facts/__wr_default/orders:update") != 0
+      || g_strcmp0 (http.last_body, (const gchar *) graph_payload) != 0)
+    return wyl_test_normalize_exit_status (301);
   http.status = 200;
 
   /*

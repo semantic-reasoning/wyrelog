@@ -45,6 +45,7 @@ import tempfile
 
 
 FACT_OPERATION_ROUTE = "/facts/{tenant}/{graph}/{relation}:{op}"
+FACT_GRAPH_OPERATION_ROUTE = "/facts/{tenant}/{graph}:{op}"
 RUNBOOK_SECTION = "## Routes Without a wyctl Command"
 UNSUPPORTED_HEADING = "### Unsupported by the daemon"
 
@@ -69,6 +70,7 @@ COVERAGE = {
     "/facts/{tenant}/{graph}/{relation}:append": ("fact", "put"),
     "/facts/{tenant}/{graph}/{relation}:retract": ("fact", "retract"),
     "/facts/{tenant}/{graph}/{relation}:update": ("fact", "update"),
+    "/facts/{tenant}/{graph}:update": ("fact", "update"),
     "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),
     "/datalog": ("datalog", "query"),
     "/auth/login": ("auth", "login"),
@@ -205,6 +207,9 @@ FACT_SUFFIX = re.compile(
     r'g_str_has_suffix\s*\(\s*parts\s*\[\s*2\s*\]\s*,\s*'
     r'":([A-Za-z_]+)"\s*\)')
 FACT_OP_ENUM = re.compile(r"typedef\s+enum\s*\{([^}]*)\}\s*fact_http_op_t\s*;")
+FACT_GRAPH_SUFFIX = re.compile(
+    r'g_str_has_suffix\s*\(\s*parts\s*\[\s*1\s*\]\s*,\s*'
+    r'":([A-Za-z_]+)"\s*\)')
 
 
 def fact_operations(http_source: str) -> list[str]:
@@ -227,6 +232,19 @@ def fact_operations(http_source: str) -> list[str]:
     return operations
 
 
+def fact_graph_operations(http_source: str) -> list[str]:
+    """The suffixes parse_fact_op_path accepts on a graph-level path, one
+    with no relation segment (#1393).  Each must also be a relation-level
+    operation, so a graph-level one cannot slip past fact_operations."""
+    body = function_body(http_source, "parse_fact_op_path")
+    operations = FACT_GRAPH_SUFFIX.findall(body)
+    unknown = set(operations) - set(fact_operations(http_source))
+    if unknown:
+        raise GateError("http.c: graph-level fact operations without a "
+                        f"relation-level counterpart: {sorted(unknown)}")
+    return operations
+
+
 def daemon_routes(root: Path) -> list[str]:
     routes, prefixes = load_route_registrations(root)
     http_source = (root / "wyrelog/daemon/http.c").read_text(encoding="utf-8")
@@ -238,6 +256,9 @@ def daemon_routes(root: Path) -> list[str]:
             expanded.extend(FACT_OPERATION_ROUTE.format(
                 tenant="{tenant}", graph="{graph}", relation="{relation}",
                 op=op) for op in fact_operations(http_source))
+            expanded.extend(FACT_GRAPH_OPERATION_ROUTE.format(
+                tenant="{tenant}", graph="{graph}", op=op)
+                for op in fact_graph_operations(http_source))
             expanded.extend(f"/facts/restore/{operation}" for operation in (
                 "dry-run", "begin", "prepare", "commit", "resume",
                 "abort", "status"))
