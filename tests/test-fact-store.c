@@ -145,6 +145,9 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
  *   3810-3837    check_fact_store_updates_atomically
  *   3850-3863    check_fact_store_update_commit_fault
  *   3870-3876    check_fact_store_update_validation
+ *   3880-3904    check_fact_store_updates_graph_atomically
+ *   3910-3923    check_fact_store_graph_update_commit_fault
+ *   3930-3940    check_fact_store_graph_update_validation
  */
 static gint
 check_legacy_identity_binding_is_atomic_and_recoverable (void)
@@ -6022,6 +6025,484 @@ check_fact_store_update_validation (void)
 }
 
 
+static void
+set_ship_row (wyl_fact_value_t *values, const gchar *k)
+{
+  values[0].type = WYL_FACT_VALUE_SYMBOL;
+  values[0].as.text = k;
+}
+
+static gboolean
+effective_ship_state (wyl_fact_store_t *store, const gchar *table,
+    gchar **out_state)
+{
+  g_autofree gchar *rows = g_strdup_printf (
+    "SELECT k AS s, k FROM ("
+    "  SELECT k, __wyl_valid, row_number() OVER ("
+    "    PARTITION BY k ORDER BY __wyl_seq DESC, __wyl_row_index DESC"
+    "  ) AS rn FROM %s) WHERE rn = 1 AND __wyl_valid", table);
+  return query_joined (store, rows, "k", out_state);
+}
+
+/* A graph-wide update (#1393) retracts and asserts rows of several relations
+ * of one graph in one commit.  Each relation's part is its own fact_batches
+ * row with op 'update', and the parts are bound to each other: the same
+ * parts again replay as one no-op that reports the original charge, while a
+ * change to any part, a part left out, or a part offered on its own as a
+ * single-relation update is a conflict that records nothing.  Rows take
+ * sequence numbers in part order, each part's retracts before its asserts. */
+static gint
+check_fact_store_updates_graph_atomically (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3880;
+  const wyl_policy_fact_relation_schema_column_t order_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_column_t ship_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema (
+    order_columns, G_N_ELEMENTS (order_columns));
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_schema (
+    ship_columns, G_N_ELEMENTS (ship_columns));
+  ship_schema.relation_name = "ship";
+  g_autofree gchar *order_table = NULL;
+  g_autofree gchar *ship_table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &order_schema, &order_table)
+      != WYRELOG_E_OK
+      || wyl_fact_store_ensure_projection (store, &ship_schema, &ship_table)
+      != WYRELOG_E_OK)
+    return 3881;
+
+  /* Seed: order a=1, b=2; ship a. */
+  wyl_fact_value_t seed_order_values[2][2] = { 0 };
+  set_order_row (seed_order_values[0], "a", 1);
+  set_order_row (seed_order_values[1], "b", 2);
+  wyl_fact_row_t seed_order_rows[2] = {
+    {seed_order_values[0], 2}, {seed_order_values[1], 2},
+  };
+  const wyl_fact_store_batch_t seed_order = {
+    .batch_id = "seed-order", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:order",
+    .idempotency_key = "seed:order", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_order_rows, .n_rows = 2,
+  };
+  wyl_fact_value_t seed_ship_values[1][1] = { 0 };
+  set_ship_row (seed_ship_values[0], "a");
+  wyl_fact_row_t seed_ship_rows[1] = { {seed_ship_values[0], 1} };
+  const wyl_fact_store_batch_t seed_ship = {
+    .batch_id = "seed-ship", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "ship", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:ship",
+    .idempotency_key = "seed:ship", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_ship_rows, .n_rows = 1,
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &order_schema, &seed_order,
+      &inserted) != WYRELOG_E_OK || !inserted)
+    return 3882;
+  if (wyl_fact_store_append_batch (store, &ship_schema, &seed_ship, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3883;
+
+  /* The update: order retracts a=1 and asserts a=10; ship retracts a and
+   * asserts c. */
+  wyl_fact_value_t order_values[2][2] = { 0 };
+  set_order_row (order_values[0], "a", 1);
+  set_order_row (order_values[1], "a", 10);
+  wyl_fact_row_t order_rows[2] = { {order_values[0], 2}, {order_values[1], 2} };
+  wyl_fact_store_batch_t order_part = {
+    .batch_id = "gu-1#order", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#order", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = order_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  wyl_fact_value_t ship_values[2][1] = { 0 };
+  set_ship_row (ship_values[0], "a");
+  set_ship_row (ship_values[1], "c");
+  wyl_fact_row_t ship_rows[2] = { {ship_values[0], 1}, {ship_values[1], 1} };
+  wyl_fact_store_batch_t ship_part = {
+    .batch_id = "gu-1#ship", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "ship", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#ship", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = ship_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  const wyl_fact_store_update_part_t parts[2] = {
+    {&order_schema, &order_part}, {&ship_schema, &ship_part},
+  };
+  guint64 order_bytes = 0;
+  guint64 ship_bytes = 0;
+  if (wyl_fact_store_batch_logical_bytes (&order_schema, &order_part,
+      &order_bytes) != WYRELOG_E_OK
+      || wyl_fact_store_batch_logical_bytes (&ship_schema, &ship_part,
+      &ship_bytes) != WYRELOG_E_OK || order_bytes == 0 || ship_bytes == 0)
+    return 3884;
+  const gint64 expected_bytes = (gint64) (order_bytes + ship_bytes);
+  wyl_fact_commit_delta_t delta;
+  wyl_fact_commit_delta_init (&delta);
+  inserted = FALSE;
+  if (wyl_fact_store_update_graph_batches_delta (store, parts, 2, &inserted,
+      &delta) != WYRELOG_E_OK)
+    return 3885;
+  /* Every row of every part is charged, as the separate batches would be. */
+  if (!inserted || !delta.inserted || delta.committed_row_delta != 4
+      || delta.logical_byte_delta != expected_bytes)
+    return 3886;
+
+  g_autofree gchar *order_state = NULL;
+  if (!effective_order_state (store, order_table, &order_state))
+    return 3887;
+  if (g_strcmp0 (order_state, "a=10,b=2") != 0)
+    return 3888;
+  g_autofree gchar *ship_state = NULL;
+  if (!effective_ship_state (store, ship_table, &ship_state))
+    return 3889;
+  if (g_strcmp0 (ship_state, "c") != 0)
+    return 3890;
+
+  /* Each part is its own batch row, both with op update. */
+  g_autofree gchar *batches = NULL;
+  if (!query_joined (store,
+      "SELECT batch_id || ':' || op || ':' || CAST(row_count AS VARCHAR) AS s, "
+      "batch_id FROM fact_batches WHERE batch_id LIKE 'gu-1%'", "batch_id",
+      &batches))
+    return 3891;
+  if (g_strcmp0 (batches, "gu-1#order:update:2,gu-1#ship:update:2") != 0)
+    return 3892;
+  /* The first part's rows take the lower sequence numbers, then the second
+   * part's; within a part the retract comes first, and each row carries its
+   * own op. */
+  g_autofree gchar *events = NULL;
+  if (!query_joined (store,
+      "SELECT batch_id || ':' || op AS s, seq FROM fact_event_log "
+      "WHERE batch_id LIKE 'gu-1%'", "seq", &events))
+    return 3893;
+  if (g_strcmp0 (events, "gu-1#order:retract,gu-1#order:assert,"
+      "gu-1#ship:retract,gu-1#ship:assert") != 0)
+    return 3894;
+  gint64 count = -1;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 7)
+    return 3895;
+
+  /* A replay is one no-op that reports the original charge. */
+  wyl_fact_commit_delta_init (&delta);
+  inserted = TRUE;
+  if (wyl_fact_store_update_graph_batches_delta (store, parts, 2, &inserted,
+      &delta) != WYRELOG_E_OK)
+    return 3896;
+  if (inserted || delta.inserted || delta.committed_row_delta != 4
+      || delta.logical_byte_delta != expected_bytes)
+    return 3897;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 7)
+    return 3898;
+
+  /* The same identifiers with one part's rows changed: a conflict. */
+  ship_values[1][0].as.text = "d";
+  if (wyl_fact_store_update_graph_batches_delta (store, parts, 2, &inserted,
+      NULL) != WYRELOG_E_POLICY)
+    return 3899;
+  ship_values[1][0].as.text = "c";
+  /* The same identifiers with a part left out: also a conflict, although
+   * the remaining part is byte-for-byte what was recorded for it. */
+  if (wyl_fact_store_update_graph_batches_delta (store, parts, 1, &inserted,
+      NULL) != WYRELOG_E_POLICY)
+    return 3900;
+  /* A part offered on its own as a single-relation update is not the update
+   * it was part of. */
+  if (wyl_fact_store_update_batch (store, &order_schema, &order_part,
+      &inserted) != WYRELOG_E_POLICY)
+    return 3901;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 4)
+    return 3902;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+      || count != 7)
+    return 3903;
+  /* A part is an update batch, so it is no trigger for retract-by-batch-id
+   * either. */
+  gint64 by_id_rows = -1;
+  if (wyl_fact_store_retract_by_batch_id (store, &order_schema, "gu-1#order",
+      "retract-gu-1", "unit-test", "gu:retract", "gu:retract", &inserted,
+      &by_id_rows) != WYRELOG_E_POLICY)
+    return 3904;
+  return 0;
+}
+
+/* A graph-wide update that fails at or just before its commit leaves nothing
+ * in any of its relations: not one relation's part without the other's, and
+ * not a part's retract rows without its assert rows.  Every relation reads
+ * exactly as before, also after the store is closed and reopened, and the
+ * aborted attempt has not claimed any part, so the update then applies
+ * once. */
+static gint
+check_fact_store_graph_update_commit_fault (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-graph-update-fault-XXXXXX",
+          NULL);
+  if (dir == NULL)
+    return 3910;
+  g_autofree gchar *path = g_build_filename (dir, "facts.duckdb", NULL);
+  const wyl_policy_fact_relation_schema_column_t order_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_column_t ship_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema (
+    order_columns, G_N_ELEMENTS (order_columns));
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_schema (
+    ship_columns, G_N_ELEMENTS (ship_columns));
+  ship_schema.relation_name = "ship";
+  g_autofree gchar *order_table =
+      wyl_fact_store_projection_table_name (&order_schema);
+  g_autofree gchar *ship_table =
+      wyl_fact_store_projection_table_name (&ship_schema);
+  if (order_table == NULL || ship_table == NULL)
+    return 3911;
+
+  wyl_fact_value_t seed_order_values[1][2] = { 0 };
+  set_order_row (seed_order_values[0], "a", 1);
+  wyl_fact_row_t seed_order_rows[1] = { {seed_order_values[0], 2} };
+  const wyl_fact_store_batch_t seed_order = {
+    .batch_id = "seed-order", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:order",
+    .idempotency_key = "seed:order", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_order_rows, .n_rows = 1,
+  };
+  wyl_fact_value_t seed_ship_values[1][1] = { 0 };
+  set_ship_row (seed_ship_values[0], "a");
+  wyl_fact_row_t seed_ship_rows[1] = { {seed_ship_values[0], 1} };
+  const wyl_fact_store_batch_t seed_ship = {
+    .batch_id = "seed-ship", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "ship", .schema_version = 1,
+    .source = "unit-test", .request_id = "seed:ship",
+    .idempotency_key = "seed:ship", .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = seed_ship_rows, .n_rows = 1,
+  };
+  wyl_fact_value_t order_values[2][2] = { 0 };
+  set_order_row (order_values[0], "a", 1);
+  set_order_row (order_values[1], "a", 2);
+  wyl_fact_row_t order_rows[2] = { {order_values[0], 2}, {order_values[1], 2} };
+  const wyl_fact_store_batch_t order_part = {
+    .batch_id = "gu-1#order", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#order", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = order_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  wyl_fact_value_t ship_values[2][1] = { 0 };
+  set_ship_row (ship_values[0], "a");
+  set_ship_row (ship_values[1], "b");
+  wyl_fact_row_t ship_rows[2] = { {ship_values[0], 1}, {ship_values[1], 1} };
+  const wyl_fact_store_batch_t ship_part = {
+    .batch_id = "gu-1#ship", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "ship", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#ship", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = ship_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  const wyl_fact_store_update_part_t parts[2] = {
+    {&order_schema, &order_part}, {&ship_schema, &ship_part},
+  };
+
+  {
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    gboolean inserted = FALSE;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &order_schema, NULL)
+        != WYRELOG_E_OK
+        || wyl_fact_store_ensure_projection (store, &ship_schema, NULL)
+        != WYRELOG_E_OK)
+      return 3912;
+    if (wyl_fact_store_append_batch (store, &order_schema, &seed_order,
+        &inserted) != WYRELOG_E_OK || !inserted
+        || wyl_fact_store_append_batch (store, &ship_schema, &seed_ship,
+        &inserted) != WYRELOG_E_OK || !inserted)
+      return 3913;
+  }
+
+  const WylFactStoreBatchFault faults[] = {
+    WYL_FACT_STORE_BATCH_FAULT_BEFORE_COMMIT,
+    WYL_FACT_STORE_BATCH_FAULT_AT_COMMIT,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    {
+      g_autoptr (wyl_fact_store_t) store = NULL;
+      if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+          || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+        return 3914;
+      wyl_fact_store_set_batch_fault_once_for_test (store, faults[i]);
+      gboolean inserted = TRUE;
+      wyl_fact_commit_delta_t delta;
+      wyl_fact_commit_delta_init (&delta);
+      if (wyl_fact_store_update_graph_batches_delta (store, parts, 2,
+          &inserted, &delta) == WYRELOG_E_OK)
+        return 3915;
+      if (inserted || delta.inserted || delta.committed_row_delta != 0)
+        return 3916;
+    }
+    /* Reopened, as after a restart. */
+    g_autoptr (wyl_fact_store_t) store = NULL;
+    if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+        || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+      return 3917;
+    g_autofree gchar *order_state = NULL;
+    g_autofree gchar *ship_state = NULL;
+    if (!effective_order_state (store, order_table, &order_state)
+        || g_strcmp0 (order_state, "a=1") != 0
+        || !effective_ship_state (store, ship_table, &ship_state)
+        || g_strcmp0 (ship_state, "a") != 0)
+      return 3918;
+    gint64 count = -1;
+    if (!count_i64 (store,
+        "SELECT COUNT(*) FROM fact_batches WHERE batch_id LIKE 'gu-1%';",
+        &count) || count != 0)
+      return 3919;
+    if (!count_i64 (store, "SELECT COUNT(*) FROM fact_event_log;", &count)
+        || count != 2)
+      return 3920;
+  }
+
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3921;
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3922;
+  g_autofree gchar *order_state = NULL;
+  g_autofree gchar *ship_state = NULL;
+  if (!effective_order_state (store, order_table, &order_state)
+      || g_strcmp0 (order_state, "a=2") != 0
+      || !effective_ship_state (store, ship_table, &ship_state)
+      || g_strcmp0 (ship_state, "b") != 0)
+    return 3923;
+  return 0;
+}
+
+/* The parts of a graph-wide update must each be an update batch of the same
+ * tenant and graph, name distinct relations, and carry distinct batch and
+ * idempotency identifiers; a part with a boundary past its rows is malformed
+ * as it is on its own.  Every refusal records nothing. */
+static gint
+check_fact_store_graph_update_validation (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK
+      || wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 3930;
+  const wyl_policy_fact_relation_schema_column_t order_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+    {"v", "int64", FALSE, TRUE},
+  };
+  const wyl_policy_fact_relation_schema_column_t ship_columns[] = {
+    {"k", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t order_schema = make_schema (
+    order_columns, G_N_ELEMENTS (order_columns));
+  wyl_policy_fact_relation_schema_options_t ship_schema = make_schema (
+    ship_columns, G_N_ELEMENTS (ship_columns));
+  ship_schema.relation_name = "ship";
+  wyl_fact_value_t order_values[2][2] = { 0 };
+  set_order_row (order_values[0], "a", 1);
+  set_order_row (order_values[1], "a", 2);
+  wyl_fact_row_t order_rows[2] = { {order_values[0], 2}, {order_values[1], 2} };
+  wyl_fact_store_batch_t order_part = {
+    .batch_id = "gu-1#order", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "order", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#order", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = order_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  wyl_fact_value_t ship_values[2][1] = { 0 };
+  set_ship_row (ship_values[0], "a");
+  set_ship_row (ship_values[1], "b");
+  wyl_fact_row_t ship_rows[2] = { {ship_values[0], 1}, {ship_values[1], 1} };
+  wyl_fact_store_batch_t ship_part = {
+    .batch_id = "gu-1#ship", .tenant_id = "tenant-a", .graph_id = "orders",
+    .namespace_id = "shop", .relation_name = "ship", .schema_version = 1,
+    .source = "unit-test", .request_id = "gu:1",
+    .idempotency_key = "gu:1#ship", .op = WYL_FACT_STORE_OP_UPDATE,
+    .rows = ship_rows, .n_rows = 2, .n_retract_rows = 1,
+  };
+  wyl_fact_store_update_part_t parts[2] = {
+    {&order_schema, &order_part}, {&ship_schema, &ship_part},
+  };
+  gboolean inserted = FALSE;
+
+  /* No parts. */
+  if (wyl_fact_store_update_graph_batches (store, parts, 0, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3931;
+  /* A part that is not an update. */
+  order_part.op = WYL_FACT_STORE_OP_ASSERT;
+  order_part.n_retract_rows = 0;
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3932;
+  order_part.op = WYL_FACT_STORE_OP_UPDATE;
+  order_part.n_retract_rows = 1;
+  /* Two parts naming one relation. */
+  parts[1].schema = &order_schema;
+  parts[1].batch = &order_part;
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3933;
+  parts[1].schema = &ship_schema;
+  parts[1].batch = &ship_part;
+  /* Parts of different graphs. */
+  ship_schema.graph_id = "other";
+  ship_part.graph_id = "other";
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3934;
+  ship_schema.graph_id = "orders";
+  ship_part.graph_id = "orders";
+  /* Parts sharing a batch id, or an idempotency key. */
+  ship_part.batch_id = "gu-1#order";
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3935;
+  ship_part.batch_id = "gu-1#ship";
+  ship_part.idempotency_key = "gu:1#order";
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3936;
+  ship_part.idempotency_key = "gu:1#ship";
+  /* A boundary past a part's rows. */
+  ship_part.n_retract_rows = 3;
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_INVALID)
+    return 3937;
+  ship_part.n_retract_rows = 1;
+  gint64 count = -1;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 0)
+    return 3938;
+  /* Positive control: the same parts, restored, apply. */
+  if (wyl_fact_store_update_graph_batches (store, parts, 2, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 3939;
+  if (!count_i64 (store, "SELECT COUNT(*) FROM fact_batches;", &count)
+      || count != 2)
+    return 3940;
+  return 0;
+}
+
+
 /* Issue #546: append/retract report committed resource deltas; an idempotent
  * no-op reports the zero delta. */
 static gint
@@ -7046,6 +7527,15 @@ main (void)
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_fact_store_update_validation ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_updates_graph_atomically ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_graph_update_commit_fault ();
+  if (rc != 0)
+    return wyl_test_normalize_exit_status (rc);
+  rc = check_fact_store_graph_update_validation ();
   if (rc != 0)
     return wyl_test_normalize_exit_status (rc);
   rc = check_projection_batch_count_validates_scope ();

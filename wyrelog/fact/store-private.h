@@ -205,6 +205,40 @@ wyrelog_error_t wyl_fact_store_update_batch_delta (wyl_fact_store_t * store,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted,
     wyl_fact_commit_delta_t * out_delta);
 
+/* One relation's part of a graph-wide update (#1393): the relation's schema
+ * and an update batch of it. */
+typedef struct
+{
+  const wyl_policy_fact_relation_schema_options_t *schema;
+  const wyl_fact_store_batch_t *batch;
+} wyl_fact_store_update_part_t;
+
+/* Graph-wide update (#1393): retract and assert rows of several relations of
+ * one graph in one commit.  Every part must be an update batch
+ * (WYL_FACT_STORE_OP_UPDATE) of the same tenant and graph as the others,
+ * name a relation no other part names, and carry its own batch_id and
+ * idempotency_key; anything else is WYRELOG_E_INVALID and records nothing.
+ * Each part becomes its own fact_batches row, but the parts are bound to
+ * each other through the stored content hash: the same parts again are one
+ * replay that reports the original charge, while a change to any part, a
+ * part left out, or a part offered on its own as a single-relation update
+ * conflicts with WYRELOG_E_POLICY.  Rows take sequence numbers in part
+ * order, each part's retract rows before its assert rows, and the delta
+ * charges every row of every part. */
+wyrelog_error_t wyl_fact_store_update_graph_batches (wyl_fact_store_t * store,
+    const wyl_fact_store_update_part_t * parts, gsize n_parts,
+    gboolean * out_inserted);
+wyrelog_error_t wyl_fact_store_update_graph_batches_delta (wyl_fact_store_t *
+    store, const wyl_fact_store_update_part_t * parts, gsize n_parts,
+    gboolean * out_inserted, wyl_fact_commit_delta_t * out_delta);
+/* The digest that identifies a graph-wide update as a whole: hex SHA-256 over
+ * every part's relation identity and content hash, in part order.  It plays
+ * the role the content hash plays for one batch, for example as the payload
+ * digest a quota reservation is keyed by.  NULL for parts that are not a
+ * valid update. */
+gchar *wyl_fact_store_update_group_digest (const wyl_fact_store_update_part_t
+    * parts, gsize n_parts);
+
 #ifdef WYL_TEST_HANDLE_SEAMS
 /* Fault the batch transaction of the next append/retract (issue #546), so a
  * test can prove that a mutation which fails at or just before its DuckDB
