@@ -1028,6 +1028,24 @@ wyrelog_error_t wyl_client_fact_update_batch (WylClient * client,
     gint64 guard_timestamp,
     const gchar * guard_loc_class,
     gint64 guard_risk, WylClientFactAppendResult ** out_result);
+/* Retracts and asserts rows of several relations of one graph in one commit
+ * (#1393).  Each row of |tsv_payload| carries an op field, "retract" or
+ * "assert", then the relation and its schema version, then that relation's
+ * columns; there is no header.  The daemon applies each relation's retract
+ * rows before its assert rows and commits every relation together, so a
+ * reader sees all of the update or none of it.  The result uses the append
+ * result shape and names |batch_id|; inserted is FALSE for a replay. */
+wyrelog_error_t wyl_client_fact_update_graph (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * batch_id,
+    const gchar * idempotency_key,
+    const guint8 * tsv_payload,
+    gsize tsv_len,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientFactAppendResult ** out_result);
 wyrelog_error_t wyl_client_datalog_query_json (WylClient * client,
     const gchar * tenant,
     const gchar * graph,
