@@ -3,10 +3,12 @@
 #include <string.h>
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <duckdb.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
+#include "wyrelog/audit/event-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "daemon/delta.h"
@@ -443,9 +445,234 @@ check_delta_readiness_fails_on_malformed_audit_projection (void)
   return 0;
 }
 
+
+typedef struct
+{
+  const gchar *raw;
+  const gchar *handle;
+  guint paths;
+} SessionAuditPaths;
+
+static wyrelog_error_t
+check_session_audit_row (const gchar *id, gint64 created_at_us,
+    const gchar *subject, const gchar *action, const gchar *resource,
+    const gchar *reason, const gchar *origin, const gchar *request_id,
+    wyl_decision_t decision, gpointer data)
+{
+  (void) created_at_us;
+  (void) decision;
+  SessionAuditPaths *probe = data;
+  const gchar *values[] = { id, subject, action, resource, reason, origin,
+                            request_id };
+  for (guint i = 0; i < G_N_ELEMENTS (values); i++)
+    if (values[i] != NULL)
+      g_assert_null (strstr (values[i], probe->raw));
+  if (g_strcmp0 (action, "session_state") == 0) {
+    g_assert_cmpstr (subject, ==, probe->handle);
+    probe->paths |= 1;
+  } else if (g_strcmp0 (action, "session_fired_delta_insert") == 0) {
+    g_assert_cmpstr (subject, ==, probe->handle);
+    probe->paths |= 2;
+  } else if (g_strcmp0 (action, "session_fired_delta_remove") == 0) {
+    g_assert_cmpstr (subject, ==, probe->handle);
+    probe->paths |= 4;
+  } else if (g_strcmp0 (action, "perm_state_fired_delta_insert") == 0) {
+    g_assert_cmpstr (origin, ==, probe->handle);
+    probe->paths |= 8;
+  } else if (g_strcmp0 (action, "perm_state_fired_delta_remove") == 0) {
+    g_assert_cmpstr (origin, ==, probe->handle);
+    probe->paths |= 16;
+  } else if (g_strcmp0 (action, "effective_member_delta") == 0) {
+    g_assert_cmpstr (origin, ==, probe->handle);
+    probe->paths |= g_strcmp0 (reason, "insert") == 0 ? 32 : 64;
+  } else if (g_strcmp0 (action, "audit.handle.read") == 0) {
+    g_assert_cmpstr (resource, ==, probe->handle);
+    probe->paths |= 128;
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+check_session_audit_handles (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-handle-user");
+  g_autoptr (WylSession) session = NULL;
+  g_assert_cmpint (wyl_session_login (handle, login, &session), ==, WYRELOG_E_OK);
+  g_autofree gchar *raw = wyl_session_dup_id_string (session);
+  g_autofree gchar *opaque = wyl_audit_session_handle (raw);
+  WylDaemonRuntime runtime = { .handle = handle };
+  g_assert_cmpint (wyl_daemon_start_delta_callbacks (handle, &runtime), ==,
+      WYRELOG_E_OK);
+
+  gint64 fired[5] = { 987654 };
+  const gchar *fields[] = { raw, "elevate_grant", "active", "elevated" };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++)
+    g_assert_cmpint (intern_symbol (handle, fields[i], &fired[i + 1]), ==,
+        WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "session_event", fired,
+      5), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_remove (handle, "session_event", fired,
+      5), ==, WYRELOG_E_OK);
+
+  gint64 permission[7];
+  g_assert_cmpint (intern_perm_event7 (handle, 987655, "audit-handle-user",
+      "audit.handle.read", raw, "grant", "dormant", "armed", permission),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "perm_state_event",
+      permission, 7), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_remove (handle, "perm_state_event",
+      permission, 7), ==, WYRELOG_E_OK);
+  gint64 membership[3];
+  g_assert_cmpint (intern3 (handle, "audit-handle-user", "wr.viewer", raw,
+      membership), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "member_of", membership,
+      3), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_remove (handle, "member_of", membership,
+      3), ==, WYRELOG_E_OK);
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "audit-handle-user");
+  wyl_grant_req_set_action (grant, "wr.stream.read");
+  wyl_grant_req_set_resource_id (grant, raw);
+  g_assert_cmpint (wyl_perm_grant (handle, grant), ==, WYRELOG_E_OK);
+  g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
+  wyl_revoke_req_set_subject_id (revoke, "audit-handle-user");
+  wyl_revoke_req_set_action (revoke, "wr.stream.read");
+  wyl_revoke_req_set_resource_id (revoke, raw);
+  g_assert_cmpint (wyl_perm_revoke (handle, revoke), ==, WYRELOG_E_OK);
+  g_autoptr (wyl_role_grant_req_t) role_grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (role_grant, "audit-handle-user");
+  wyl_role_grant_req_set_role_id (role_grant, "wr.viewer");
+  wyl_role_grant_req_set_scope (role_grant, raw);
+  g_assert_cmpint (wyl_role_grant (handle, role_grant), ==, WYRELOG_E_OK);
+  g_autoptr (wyl_role_revoke_req_t) role_revoke = wyl_role_revoke_req_new ();
+  wyl_role_revoke_req_set_subject_id (role_revoke, "audit-handle-user");
+  wyl_role_revoke_req_set_role_id (role_revoke, "wr.viewer");
+  wyl_role_revoke_req_set_scope (role_revoke, raw);
+  g_assert_cmpint (wyl_role_revoke (handle, role_revoke), ==, WYRELOG_E_OK);
+
+  /* Classification survives logout and is not an authentication registry. */
+  g_assert_cmpint (wyl_session_logout (handle, wyl_session_get_id (session)),
+      ==, WYRELOG_E_OK);
+  g_assert_true (wyl_handle_is_audit_session (handle, raw));
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, "audit-handle-user");
+  wyl_decide_req_set_action (req, "audit.handle.read");
+  wyl_decide_req_set_resource_id (req, raw);
+  g_assert_cmpint (wyl_decide (handle, req, resp), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (wyl_decide_req_get_resource_id (req), ==, raw);
+  g_assert_cmpint (wyl_decide_resp_get_decision (resp), ==, WYL_DECISION_DENY);
+
+  SessionAuditPaths probe = { raw, opaque, 0 };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (
+        wyl_handle_get_policy_store (handle), check_session_audit_row, &probe),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.paths, ==, 255);
+  /* Unredacted serializer reads the persisted DuckDB rows. Each path must
+   * exist there too, and no text column may contain the raw identity. */
+  g_autofree gchar *json = NULL;
+  g_assert_cmpint (wyl_audit_conn_query_events_json (
+        wyl_handle_get_audit_conn (handle), NULL, &json), ==, WYRELOG_E_OK);
+  g_assert_null (strstr (json, raw));
+  g_assert_nonnull (strstr (json, opaque));
+  const gchar *actions[] = { "session_state", "session_fired_delta_insert",
+                             "session_fired_delta_remove", "perm_state_fired_delta_insert",
+                             "perm_state_fired_delta_remove", "effective_member_delta",
+                             "audit.handle.read", "permission_grant", "permission_revoke",
+                             "role_grant", "role_revoke" };
+  for (guint i = 0; i < G_N_ELEMENTS (actions); i++)
+    g_assert_nonnull (strstr (json, actions[i]));
+  g_assert_nonnull (strstr (json, "\"deny_reason\":\"insert\""));
+  g_assert_nonnull (strstr (json, "\"deny_reason\":\"remove\""));
+  g_assert_cmpuint (runtime.audit_errors, ==, 0);
+  g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle, NULL, NULL),
+      ==, WYRELOG_E_OK);
+}
+
+static void
+check_reopened_session_scope_audit (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-audit-handles-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *policy = g_build_filename (dir, "policy.db", NULL);
+  g_autofree gchar *audit = g_build_filename (dir, "audit.db", NULL);
+  g_autofree gchar *key = g_build_filename (dir, "policy.key", NULL);
+  guint8 key_bytes[32] = { 0x42 };
+  g_assert_true (g_file_set_contents (key, (const gchar *) key_bytes,
+      sizeof key_bytes, NULL));
+  g_autofree gchar *key_spec = g_strdup_printf ("file:%s", key);
+  WylHandleOpenOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy,
+    .audit_store_path = audit,
+    .policy_keyprovider_path = key_spec,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-restart-user");
+  g_autoptr (WylSession) session = NULL;
+  g_assert_cmpint (wyl_session_login (handle, login, &session), ==, WYRELOG_E_OK);
+  g_autofree gchar *raw = wyl_session_dup_id_string (session);
+  g_autofree gchar *opaque = wyl_audit_session_handle (raw);
+  const gchar *ordinary_scope = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
+  g_assert_cmpint (wyl_policy_store_set_session_state (
+        wyl_handle_get_policy_store (handle), ordinary_scope, "active"), ==,
+      WYRELOG_E_OK);
+  g_clear_object (&session);
+  g_clear_object (&handle);
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_true (wyl_handle_is_audit_session (handle, raw));
+  g_assert_false (wyl_handle_is_audit_session (handle, ordinary_scope));
+  g_autofree gchar *plain = wyl_audit_scope_handle (handle, ordinary_scope);
+  g_assert_cmpstr (plain, ==, ordinary_scope);
+  WylDaemonRuntime runtime = { .handle = handle };
+  g_assert_cmpint (wyl_daemon_start_delta_callbacks (handle, &runtime), ==,
+      WYRELOG_E_OK);
+  gint64 permission[7];
+  g_assert_cmpint (intern_perm_event7 (handle, 987656, "audit-restart-user",
+      "audit.handle.read", raw, "grant", "dormant", "armed", permission),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_insert (handle, "perm_state_event",
+      permission, 7), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_engine_remove (handle, "perm_state_event",
+      permission, 7), ==, WYRELOG_E_OK);
+  SessionAuditPaths probe = { raw, opaque, 0 };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event (
+        wyl_handle_get_policy_store (handle), check_session_audit_row, &probe),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.paths & 25, ==, 25);
+  g_autofree gchar *json = NULL;
+  g_assert_cmpint (wyl_audit_conn_query_events_json (
+        wyl_handle_get_audit_conn (handle), NULL, &json), ==, WYRELOG_E_OK);
+  g_assert_null (strstr (json, raw));
+  g_assert_nonnull (strstr (json, opaque));
+  g_assert_nonnull (strstr (json, "perm_state_fired_delta_insert"));
+  g_assert_nonnull (strstr (json, "perm_state_fired_delta_remove"));
+  g_assert_cmpint (wyl_handle_engine_set_delta_callback (handle, NULL, NULL),
+      ==, WYRELOG_E_OK);
+  g_clear_object (&handle);
+  g_autoptr (GDir) files = g_dir_open (dir, 0, NULL);
+  const gchar *name;
+  while ((name = g_dir_read_name (files)) != NULL) {
+    g_autofree gchar *path = g_build_filename (dir, name, NULL);
+    g_assert_cmpint (g_unlink (path), ==, 0);
+  }
+  g_clear_pointer (&files, g_dir_close);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
 int
 main (void)
 {
+  check_session_audit_handles ();
+  check_reopened_session_scope_audit ();
   gint rc;
 
   if ((rc = check_delta_callback_records_runtime_projection_failure ()) != 0)

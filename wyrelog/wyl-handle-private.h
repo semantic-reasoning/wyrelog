@@ -24,6 +24,11 @@
 
 G_BEGIN_DECLS;
 
+/* Audit-only identity classification. Retained through retirement; grants no
+ * authority. These helpers never acquire an engine or policy-store lock. */
+void wyl_handle_note_audit_session (WylHandle *self, const gchar *session_id);
+gboolean wyl_handle_is_audit_session (WylHandle *self, const gchar *value);
+
 typedef struct
 {
   const gchar *template_dir;

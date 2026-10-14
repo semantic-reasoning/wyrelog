@@ -188,6 +188,7 @@ wyrelog/audit/conn-duckdb-config-test-seams-private.h
 wyrelog/audit/conn-private.h
 wyrelog/audit/conn.c
 wyrelog/audit/event-private.h
+wyrelog/audit/event.c
 wyrelog/audit/iter-private.h
 wyrelog/audit/iter.c
 wyrelog/auth/jwt-private.h

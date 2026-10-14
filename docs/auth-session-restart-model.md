@@ -25,7 +25,7 @@ previous token state is reloaded.
 Human login returns an opaque `session_token`: `wst_` followed by 64 lowercase
 hexadecimal characters encoding 32 random bytes. It is independent of the
 internal UUID session ID. The daemon retains only a SHA-256 digest for credential
-lookup; JWT claims, session state, policy scopes, audit rows, and revocation
+lookup; JWT claims, session state, policy scopes, and revocation
 markers use the internal ID. Neither that ID nor the digest authenticates as a
 session token. Service sessions do not have a human session credential.
 
@@ -43,9 +43,24 @@ A live `wst_` credential is translated to its internal ID before evaluation;
 an unresolved value with that reserved prefix is rejected, including a logged-out
 token. Other policy scope values retain their existing meaning.
 
-Existing hash-chained audit rows are not rewritten. Read-time ID redaction
-remains as defense in depth; a restart invalidates old credentials, including
-those that previously doubled as internal IDs.
+New session-related audit fields store `session#` followed by 64 lowercase hex
+characters: SHA-256 of `wyrelog.audit.session.v1:` followed by the internal ID.
+This deterministic correlation handle is not a credential or a policy scope.
+Session-state and session-event subjects always use it; decision resources and
+permission/membership scopes use it only for known session identities. Other
+resources, including unrelated UUIDs, retain their original representation.
+
+A handle-local digest set classifies identities before session publication and
+retains them through logout for delayed removal events. This set grants no
+access and does not track liveness. Startup rebuilds it from persisted
+session lifecycle events before loading policy facts; it does not classify ordinary tenant
+scopes. HTTP service sessions register their identity before publication.
+
+Existing hash-chained audit rows are not rewritten. Legacy read-time structural
+and live-ID redaction remains in place, using process-local keyed handles with
+16 hex digits. Newly stored 64-digit handles pass through unchanged. A restart
+invalidates old credentials, including those that once doubled as internal IDs;
+historical files still require their existing protections.
 
 ## JWT Signing Key Custody
 

@@ -6,6 +6,7 @@
 #include "access/break-glass-private.h"
 #include "access/decision-private.h"
 #include "policy/store-private.h"
+#include "audit/event-private.h"
 #include "wyl-decide-private.h"
 #include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
@@ -582,7 +583,9 @@ emit_decide_audit (WylHandle *handle, const wyl_decide_req_t *req,
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
-  wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
+  g_autofree gchar *audit_resource = wyl_audit_scope_handle (handle,
+          wyl_decide_req_get_resource_id (req));
+  wyl_audit_event_set_resource_id (ev, audit_resource);
   wyl_audit_event_set_deny_reason (ev, wyl_decide_resp_get_deny_reason (resp));
   wyl_audit_event_set_deny_origin (ev, wyl_decide_resp_get_deny_origin (resp));
   wyl_audit_event_set_request_id (ev, wyl_decide_req_get_request_id (req));

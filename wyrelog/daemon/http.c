@@ -2887,6 +2887,7 @@ wyl_daemon_http_seed_service_session_for_test (SoupServer *server,
             &reservation, &changed);
   if (rc != WYRELOG_E_OK)
     return rc;
+  wyl_handle_note_audit_session (ctx->handle, session_id);
   g_mutex_lock (&ctx->lock);
   g_hash_table_replace (ctx->sessions_by_id, g_strdup (session_id),
       g_object_ref (session));
@@ -3142,6 +3143,7 @@ wyl_daemon_http_replace_session_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL || session_id == NULL || session == NULL)
     return FALSE;
+  wyl_handle_note_audit_session (ctx->handle, session_id);
   g_mutex_lock (&ctx->lock);
   g_hash_table_replace (ctx->sessions_by_id, g_strdup (session_id),
       g_object_ref (session));
@@ -3779,6 +3781,7 @@ wyl_daemon_http_context_store_session (WylDaemonHttpContext *ctx,
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (digest == NULL || session_id == NULL)
     return FALSE;
+  wyl_handle_note_audit_session (ctx->handle, session_id);
   g_mutex_lock (&ctx->lock);
   WylSession *by_id = g_hash_table_lookup (ctx->sessions_by_id, session_id);
   WylSession *by_digest = g_hash_table_lookup (ctx->sessions_by_digest, digest);
@@ -4979,6 +4982,7 @@ service_live_publication_insert (WylDaemonHttpContext *ctx,
       || g_hash_table_contains (ctx->access_tokens_by_jti, view->jti)))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
+    wyl_handle_note_audit_session (ctx->handle, view->session_id);
     *out_published_session = candidate->session_value;
 #ifdef WYL_TEST_DAEMON_HTTP
     ctx->last_service_publication_session = candidate->session_value;
@@ -5978,6 +5982,7 @@ wyl_daemon_http_seed_refresh_for_test (SoupServer *server,
   if (successor_access != NULL && successor_refresh != NULL)
     state->successor = wyl_human_refresh_result_new_take
           (g_strdup (successor_access), g_strdup (successor_refresh));
+  wyl_handle_note_audit_session (ctx->handle, session_id);
   g_mutex_lock (&ctx->lock);
   state->epoch = human_refresh_next_nonzero (&ctx->next_refresh_epoch);
   g_hash_table_replace (ctx->sessions_by_id, g_strdup (session_id),
@@ -10352,7 +10357,7 @@ audit_session_redact (const gchar *column, const gchar *row_action,
       && (g_strcmp0 (row_action, "session_state") == 0
       || g_str_has_prefix (row_action != NULL ? row_action : "",
       "session_fired_delta_"));
-  if (structural || live)
+  if ((structural || live) && !wyl_audit_is_session_handle (value))
     *out_replacement = audit_session_handle (redactor->ctx, value);
   return WYRELOG_E_OK;
 }
@@ -15727,7 +15732,8 @@ policy_permission_transition_handler (SoupServer *server,
   wyl_audit_event_set_action (audit_event, audit_action);
   wyl_audit_event_set_resource_id (audit_event, perm);
   wyl_audit_event_set_deny_reason (audit_event, event);
-  wyl_audit_event_set_deny_origin (audit_event, scope);
+  g_autofree gchar *audit_scope = wyl_audit_scope_handle (ctx->handle, scope);
+  wyl_audit_event_set_deny_origin (audit_event, audit_scope);
   wyl_audit_event_set_request_id (audit_event, ensure_request_id_header (msg));
   wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
 

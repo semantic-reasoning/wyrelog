@@ -6,6 +6,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
+#include "wyrelog/audit/event-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/policy/store-private.h"
 
@@ -637,12 +638,18 @@ check_skip_mfa_login_projects_authority_state (void)
     return 62;
   if (count != 1)
     return 63;
+  g_assert_true (policy_count_rows_params (store,
+      "SELECT COUNT(*) FROM audit_events WHERE subject_id = ?;",
+      session_param, G_N_ELEMENTS (session_param), &count));
+  g_assert_cmpint (count, ==, 0);
+  g_autofree gchar *session_audit_handle = wyl_audit_session_handle (session_id);
+  const gchar *audit_session_param[] = { session_audit_handle };
   if (!policy_count_rows_params (store,
       "SELECT COUNT(*) FROM audit_events "
       "WHERE subject_id = ? AND action = 'session_state' "
       "AND resource_id = 'active' AND deny_origin = 'idle' "
       "AND decision = 1;",
-      session_param, G_N_ELEMENTS (session_param), &count))
+      audit_session_param, G_N_ELEMENTS (audit_session_param), &count))
     return 64;
   if (count != 1)
     return 65;

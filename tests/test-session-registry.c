@@ -4,6 +4,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/audit/event-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -194,9 +195,41 @@ check_logout_tombstones_registry_entry (void)
   return 0;
 }
 
+
+static void
+check_audit_classification_is_not_authority (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (WylHandle) other = NULL;
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &other), ==, WYRELOG_E_OK);
+  const gchar *unknown = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
+  g_autofree gchar *ordinary = wyl_audit_scope_handle (handle, unknown);
+  g_assert_cmpstr (ordinary, ==, unknown);
+  g_autoptr (WylSession) session = login_one (handle, "audit-registry");
+  g_assert_nonnull (session);
+  g_autofree gchar *raw = wyl_session_dup_id_string (session);
+  g_assert_true (wyl_handle_is_audit_session (handle, raw));
+  g_assert_false (wyl_handle_is_audit_session (other, raw));
+  g_autofree gchar *opaque = wyl_audit_scope_handle (handle, raw);
+  g_assert_true (wyl_audit_is_session_handle (opaque));
+  g_assert_cmpstr (opaque, !=, raw);
+  g_autofree gchar *again = wyl_audit_session_handle (opaque);
+  g_assert_cmpstr (again, ==, opaque);
+  g_assert_false (wyl_audit_is_session_handle ("session#bad"));
+  g_assert_null (wyl_audit_scope_handle (handle, NULL));
+  wyl_session_id_t sid = wyl_session_get_id (session);
+  g_assert_cmpint (wyl_session_logout (handle, sid), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_handle_is_audit_session (handle, raw));
+  g_assert_null (wyl_handle_lookup_session_by_id (handle, sid));
+  g_autofree gchar *after = wyl_audit_scope_handle (handle, raw);
+  g_assert_cmpstr (after, ==, opaque);
+}
+
 int
 main (void)
 {
+  check_audit_classification_is_not_authority ();
   gint rc;
 
   if ((rc = check_login_assigns_nonzero_sid ()) != 0)
