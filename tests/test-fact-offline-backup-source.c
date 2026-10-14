@@ -1607,145 +1607,6 @@ test_restore_begin_authenticated (void)
         alpha_before);
     assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
         zeta_before);
-#ifdef __APPLE__
-    /* macOS admits begin, graph-scope prepare and abort (#1303).  A tenant
-     * prepare still refuses before any effect, whether the journal is
-     * begun or already staged, and each refusal leaves the journal and the
-     * graph namespaces untouched.  Abort then recovers the tenant journal
-     * and releases it, so an operator is never left with a claim that
-     * nothing can clear. */
-    if (selected == NULL) {
-      g_autoptr (GBytes) begun_journal = NULL;
-      g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
-              operation);
-      g_autofree gchar *alpha_stage = graph_file_path (&fixture, "alpha",
-              stage_name);
-      g_autofree gchar *zeta_stage = graph_file_path (&fixture, "zeta",
-              stage_name);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-            (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
-      g_assert_cmpuint (committed.revision, ==, 1);
-      const guint begun_graphs = committed.graphs->len;
-      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
-          &begun_journal), ==, WYRELOG_E_OK);
-      wyl_fact_offline_restore_journal_clear (&committed);
-      WylFactReplaySchedulerConfig refused_config;
-      wyl_fact_replay_scheduler_config_defaults (&refused_config);
-      g_autoptr (WylFactReplayScheduler) refused_scheduler = NULL;
-      g_assert_cmpint (wyl_fact_replay_scheduler_new (&refused_config, NULL,
-          &refused_scheduler), ==, WYRELOG_E_OK);
-      g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
-          fixture.root, fixture.runtime, refused_scheduler, bundle, operation,
-          1, 0, NULL, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
-          1);
-      /* Commit is barred by the bind step that precedes admission. */
-      g_assert_cmpint (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          "alpha", 1, 0, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          begun_journal, 1);
-      g_assert_cmpint
-        (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
-            (fixture.policy, fixture.root, fixture.runtime, operation, 1, 0,
-          &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          begun_journal, 1);
-      g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_admit_run
-            (fixture.policy, fixture.root, fixture.runtime,
-          refused_scheduler, bundle, operation, 1, 0, NULL, &committed),
-          ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation, begun_journal,
-          1);
-      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
-          alpha_before);
-      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
-          zeta_before);
-      /* A staged tenant journal takes the preflight route past the import
-       * dispatch, so the refusal must not depend on the import gate.  Stage
-       * both graphs and pin that prepare still refuses with the staged
-       * journal byte-identical. */
-      guint64 refused_revision = 1;
-      g_autoptr (GBytes) refused_journal = g_bytes_ref (begun_journal);
-      guint64 expected_aborted_revision = 2;
-      /* The gate tests only the journal scope and precedes every schema
-       * check, so the plain pass covers the staged route for both
-       * variants. */
-      if (!schema_transition) {
-        g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
-              (fixture.policy, fixture.root, fixture.runtime, "tenant-a",
-            capture.manifest, operation, 1, 0, &committed), ==, WYRELOG_E_OK);
-        g_assert_cmpuint (committed.revision, ==, 3);
-        g_assert_cmpuint (committed.graphs->len, ==, begun_graphs);
-        refused_revision = committed.revision;
-        g_clear_pointer (&refused_journal, g_bytes_unref);
-        g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
-            &refused_journal), ==, WYRELOG_E_OK);
-        wyl_fact_offline_restore_journal_clear (&committed);
-        g_assert_true (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
-        g_assert_true (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
-        g_assert_cmpint (wyl_fact_offline_restore_prepare_run (fixture.policy,
-            fixture.root, fixture.runtime, refused_scheduler, bundle, operation,
-            refused_revision, 0, NULL, &committed), ==, WYRELOG_E_POLICY);
-        g_assert_null (committed.operation_uuid);
-        assert_restore_journal_unchanged (fixture.policy, operation,
-            refused_journal, refused_revision);
-        /* Rollback decides once, then begins and completes the retire of
-         * each staged graph. */
-        expected_aborted_revision = refused_revision + 1 + 2 * begun_graphs;
-      }
-      /* One rollback decision abandons every unstaged graph at once, so an
-       * unstaged tenant journal settles at revision 2. */
-      g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
-            (fixture.policy, fixture.root, fixture.runtime, operation, 0,
-          &committed), ==, WYRELOG_E_OK);
-      g_assert_cmpuint (committed.revision, ==, expected_aborted_revision);
-      g_assert_cmpint (committed.decision, ==,
-          WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
-          ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
-      g_assert_cmpuint (committed.graphs->len, ==, begun_graphs);
-      for (guint i = 0; i < committed.graphs->len; i++) {
-        WylFactOfflineRestoreJournalGraph *graph =
-            g_ptr_array_index (committed.graphs, i);
-        g_assert_cmpint (graph->transition_state, ==,
-            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
-      }
-      const guint64 aborted_revision = committed.revision;
-      wyl_fact_offline_restore_journal_clear (&committed);
-      g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          aborted_revision, 0), ==, WYRELOG_E_OK);
-      assert_restore_operation_aborted (fixture.policy, operation,
-          begun_graphs);
-      g_assert_false (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
-      g_assert_false (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
-      assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
-          alpha_before);
-      assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
-          zeta_before);
-      if (schema_transition) {
-        WylPolicyRelationActivationRecord *active = NULL;
-        g_assert_cmpint (wyl_policy_store_read_relation_activation
-              (fixture.policy, "tenant-a", "alpha", "backup", "items",
-            &active), ==, WYRELOG_E_OK);
-        g_assert_true (active->has_active_schema_version);
-        g_assert_cmpuint (active->active_schema_version, ==, 2);
-        wyl_policy_relation_activation_record_free (active);
-      }
-      g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (refused_scheduler),
-          ==, WYRELOG_E_OK);
-      g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
-      remove_tree (bundle_root);
-      destination_capture_clear (&capture);
-      fixture_clear (&fixture);
-      continue;
-    }
-#endif
     WylFactReplaySchedulerConfig config;
     wyl_fact_replay_scheduler_config_defaults (&config);
     g_autoptr (WylFactReplayScheduler) scheduler = NULL;
@@ -1784,6 +1645,19 @@ test_restore_begin_authenticated (void)
         "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
         NULL, NULL, NULL), ==, SQLITE_OK);
     guint64 prepare_revision = 1;
+#ifdef __APPLE__
+    /* The plain tenant pass stages both graphs first, so prepare takes the
+     * preflight route that skips the import dispatch; the schema pass keeps
+     * the partial import below. */
+    if (selected == NULL && !schema_transition) {
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_stages_run
+            (fixture.policy, fixture.root, fixture.runtime, "tenant-a",
+          capture.manifest, operation, 1, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, 3);
+      prepare_revision = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+    } else
+#endif
     if (selected == NULL) {
       PreparePartialInput partial = { .bundle = bundle };
       const WylFactOfflineRestoreTenantInput callbacks = {
@@ -1804,9 +1678,10 @@ test_restore_begin_authenticated (void)
     else {
       /* Stage the graph through the import step first, so the prepare that
        * follows takes the bound-stage route: the restart decision a crash
-       * between import and preflight leaves behind.  The import dispatch
-       * inside prepare itself is covered on macOS by the daemon case
-       * restore-daemon-http-stateful-refusal. */
+       * between import and preflight leaves behind.  The graph import
+       * dispatch inside prepare itself is covered on macOS by the daemon
+       * case restore-daemon-http-stateful-refusal, and the tenant dispatch
+       * by the schema pass of this case. */
       WylFactOfflineBackupGraphView view = { 0 };
       g_assert_cmpint (wyl_fact_offline_backup_bundle_graph_view (bundle,
           selected, &view), ==, WYRELOG_E_OK);
@@ -1855,11 +1730,10 @@ test_restore_begin_authenticated (void)
     g_assert_cmpuint (committed.revision, ==, prepared_revision);
     wyl_fact_offline_restore_journal_clear (&committed);
 #ifdef __APPLE__
-    /* macOS stops at the prepared graph journal (#1303): bind and commit
-     * admission refuse with the journal byte-identical, and abort retires
-     * the stage and releases the claim, leaving both namespaces exactly as
-     * they were before begin. */
-    g_assert_nonnull (selected);
+    /* macOS stops at the prepared journal of either scope (#1303): bind and
+     * commit admission refuse with the journal byte-identical, and abort
+     * retires every stage and releases the claim, leaving both namespaces
+     * exactly as they were before begin. */
     {
       g_autoptr (GBytes) prepared_journal = NULL;
       g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
@@ -1870,55 +1744,115 @@ test_restore_begin_authenticated (void)
       wyl_fact_offline_restore_journal_clear (&committed);
       g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
               operation);
-      g_autofree gchar *stage = graph_file_path (&fixture, selected,
-              stage_name);
-      g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
-      g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          selected, prepared_revision, 0, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          prepared_journal, prepared_revision);
-      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
-            (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
-          operation, prepared_revision, 0, NULL, &committed), ==,
-          WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          prepared_journal, prepared_revision);
-      /* Rollback decides once, then begins and completes the retire of the
-       * one staged graph. */
-      g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
-            (fixture.policy, fixture.root, fixture.runtime, operation, 0,
-          &committed), ==, WYRELOG_E_OK);
-      g_assert_cmpuint (committed.revision, ==, prepared_revision + 3);
-      g_assert_cmpint (committed.decision, ==,
-          WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
-      g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
-          ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
-      g_assert_cmpuint (committed.graphs->len, ==, 1);
-      g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
-          g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
-          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
-      const guint64 aborted_revision = committed.revision;
-      wyl_fact_offline_restore_journal_clear (&committed);
-      g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
-      g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          aborted_revision, 0), ==, WYRELOG_E_OK);
-      assert_restore_operation_aborted (fixture.policy, operation, 1);
+      if (selected == NULL) {
+        g_autofree gchar *alpha_stage = graph_file_path (&fixture, "alpha",
+                stage_name);
+        g_autofree gchar *zeta_stage = graph_file_path (&fixture, "zeta",
+                stage_name);
+        g_assert_true (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
+        g_assert_true (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+        g_assert_cmpint
+          (wyl_fact_offline_restore_tenant_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            "alpha", prepared_revision, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            prepared_journal, prepared_revision);
+        g_assert_cmpint
+          (wyl_fact_offline_restore_tenant_bind_all_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            prepared_revision, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            prepared_journal, prepared_revision);
+        g_assert_cmpint (wyl_fact_offline_restore_tenant_commit_admit_run
+              (fixture.policy, fixture.root, fixture.runtime, scheduler,
+            bundle, operation, prepared_revision, 0, NULL, &committed), ==,
+            WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            prepared_journal, prepared_revision);
+        /* Rollback decides once, then begins and completes the retire of
+         * each of the two staged graphs. */
+        g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+              (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+            &committed), ==, WYRELOG_E_OK);
+        g_assert_cmpuint (committed.graphs->len, ==, 2);
+        g_assert_cmpuint (committed.revision, ==,
+            prepared_revision + 1 + 2 * committed.graphs->len);
+        g_assert_cmpint (committed.decision, ==,
+            WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+        g_assert_cmpint (wyl_fact_offline_restore_journal_recovery
+              (&committed), ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+        for (guint i = 0; i < committed.graphs->len; i++) {
+          WylFactOfflineRestoreJournalGraph *graph =
+              g_ptr_array_index (committed.graphs, i);
+          g_assert_cmpint (graph->transition_state, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+        }
+        const guint64 aborted_revision = committed.revision;
+        wyl_fact_offline_restore_journal_clear (&committed);
+        g_assert_false (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
+        g_assert_false (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+        g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            aborted_revision, 0), ==, WYRELOG_E_OK);
+        assert_restore_operation_aborted (fixture.policy, operation, 2);
+      } else {
+        g_autofree gchar *stage = graph_file_path (&fixture, selected,
+                stage_name);
+        g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+        g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            selected, prepared_revision, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            prepared_journal, prepared_revision);
+        g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+              (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+            operation, prepared_revision, 0, NULL, &committed), ==,
+            WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            prepared_journal, prepared_revision);
+        /* Rollback decides once, then begins and completes the retire of the
+         * one staged graph. */
+        g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+              (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+            &committed), ==, WYRELOG_E_OK);
+        g_assert_cmpuint (committed.revision, ==, prepared_revision + 3);
+        g_assert_cmpint (committed.decision, ==,
+            WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+        g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+            ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+        g_assert_cmpuint (committed.graphs->len, ==, 1);
+        g_assert_cmpint (((WylFactOfflineRestoreJournalGraph *)
+            g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+        const guint64 aborted_revision = committed.revision;
+        wyl_fact_offline_restore_journal_clear (&committed);
+        g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+        g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            aborted_revision, 0), ==, WYRELOG_E_OK);
+        assert_restore_operation_aborted (fixture.policy, operation, 1);
+      }
       assert_dry_run_graph_namespace_unchanged (&fixture, "alpha",
           alpha_before);
       assert_dry_run_graph_namespace_unchanged (&fixture, "zeta",
           zeta_before);
       if (schema_transition) {
-        WylPolicyRelationActivationRecord *active = NULL;
-        g_assert_cmpint (wyl_policy_store_read_relation_activation
-              (fixture.policy, "tenant-a", "alpha", "backup", "items",
-            &active), ==, WYRELOG_E_OK);
-        g_assert_true (active->has_active_schema_version);
-        g_assert_cmpuint (active->active_schema_version, ==, 2);
-        wyl_policy_relation_activation_record_free (active);
+        const gchar *activated[] = { "alpha", "zeta" };
+        const guint activated_graphs = selected == NULL ? 2 : 1;
+        for (guint i = 0; i < activated_graphs; i++) {
+          WylPolicyRelationActivationRecord *active = NULL;
+          g_assert_cmpint (wyl_policy_store_read_relation_activation
+                (fixture.policy, "tenant-a", activated[i], "backup", "items",
+              &active), ==, WYRELOG_E_OK);
+          g_assert_true (active->has_active_schema_version);
+          g_assert_cmpuint (active->active_schema_version, ==, 2);
+          wyl_policy_relation_activation_record_free (active);
+        }
       }
     }
     g_assert_cmpint (wyl_fact_replay_scheduler_shutdown (scheduler), ==,
@@ -4531,6 +4465,121 @@ test_restore_daemon_http_stateful_refusal (void)
   g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
   assert_restore_operation_aborted (policy, operation, 1);
   g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+
+  /* A tenant restore follows the same macOS matrix (#1303): begin and
+   * prepare are admitted, prepare stages both graphs and records their
+   * preflight at revision 5, commit and resume refuse with the journal
+   * byte-identical, and abort retires both stages. */
+  const gchar *tenant_operation = "01890c10-2e3f-7000-8000-000000000032";
+  body = restore_http_request_body (bundle_root, digest, tenant_operation, 0,
+          TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "begin", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 1);
+  g_assert_nonnull (strstr (response, "\"state\":\"preparing\""));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body (bundle_root, digest, tenant_operation, 1,
+          FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "prepare", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 5);
+  g_assert_nonnull (strstr (response, "\"state\":\"prepared\""));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load (policy,
+      tenant_operation, &journal), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, 5);
+  g_assert_cmpuint (journal.graphs->len, ==, 2);
+  for (guint i = 0; i < journal.graphs->len; i++)
+    g_assert_true (((WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (journal.graphs, i))->replay_preflighted);
+  g_autoptr (GBytes) tenant_prepared_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &tenant_prepared_journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  g_autofree gchar *tenant_stage_name = g_strdup_printf ("restore-%s.duckdb",
+          tenant_operation);
+  g_autofree gchar *alpha_stage = graph_file_path (&f.fixture, "alpha",
+          tenant_stage_name);
+  g_autofree gchar *zeta_stage = graph_file_path (&f.fixture, "zeta",
+          tenant_stage_name);
+  g_assert_true (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+  body = restore_http_request_body (bundle_root, digest, tenant_operation, 5,
+          FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "prepare", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 5);
+  g_assert_nonnull (strstr (response, "\"state\":\"prepared\""));
+  assert_restore_journal_unchanged (policy, tenant_operation,
+      tenant_prepared_journal, 5);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body (bundle_root, digest, tenant_operation, 5,
+          TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "commit", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 403);
+  g_assert_nonnull (strstr (response, "restore_refused"));
+  assert_restore_journal_unchanged (policy, tenant_operation,
+      tenant_prepared_journal, 5);
+  g_assert_true (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  /* Tenant resume is refused outright on macOS, unlike the graph no-op. */
+  body = restore_http_request_body ("", "", tenant_operation, 5, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "resume", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 403);
+  g_assert_nonnull (strstr (response, "restore_refused"));
+  assert_restore_journal_unchanged (policy, tenant_operation,
+      tenant_prepared_journal, 5);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body ("", "", tenant_operation, 5, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "abort", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
+  /* Rollback decides once, then begins and completes the retire of each
+   * of the two staged graphs. */
+  g_assert_cmpuint (restore_http_revision (response), ==, 5 + 1 + 2 * 2);
+  assert_restore_operation_aborted (policy, tenant_operation, 2);
+  g_assert_false (g_file_test (alpha_stage, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (zeta_stage, G_FILE_TEST_EXISTS));
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
+  assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+
+  /* An unstaged tenant journal is abortable straight after begin: one
+   * rollback decision abandons both graphs. */
+  const gchar *unstaged_operation = "01890c10-2e3f-7000-8000-000000000033";
+  body = restore_http_request_body (bundle_root, digest, unstaged_operation,
+          0, TRUE);
+  g_assert_true (restore_http_post (session, base_url, token, "begin", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_cmpuint (restore_http_revision (response), ==, 1);
+  g_assert_nonnull (strstr (response, "\"state\":\"preparing\""));
+  g_clear_pointer (&body, g_free);
+  g_clear_pointer (&response, g_free);
+  body = restore_http_request_body ("", "", unstaged_operation, 1, FALSE);
+  g_assert_true (restore_http_post (session, base_url, token, "abort", body,
+      &status, &response));
+  g_assert_cmpuint (status, ==, 200);
+  g_assert_nonnull (strstr (response, "\"state\":\"aborted\""));
+  g_assert_cmpuint (restore_http_revision (response), ==, 2);
+  assert_restore_operation_aborted (policy, unstaged_operation, 2);
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "alpha", alpha_before);
   assert_dry_run_graph_namespace_unchanged (&f.fixture, "zeta", zeta_before);
 
@@ -11261,8 +11310,8 @@ test_tenant_provisioned_binding_rejects (gconstpointer data)
 static void
 test_tenant_external_import (gconstpointer data)
 {
-#ifndef __linux__
-  g_test_skip ("offline restore is Linux-only");
+#if !defined(__linux__) && !defined(__APPLE__)
+  g_test_skip ("offline tenant import requires Linux or macOS");
   return;
 #endif
   const gchar *mode = data;
@@ -11343,6 +11392,78 @@ test_tenant_external_import (gconstpointer data)
         (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
       f.capture.manifest, session_operation, 1, 0, &callbacks, &test_input,
       &f.committed), ==, WYRELOG_E_BUSY);
+#ifdef __APPLE__
+  /* The bound graph is re-verified from its ACTIVE provisioning record, and
+   * Darwin reconstitutes that pair only from the ADR 0006 evidence.  Missing
+   * or malformed evidence refuses before any write: the journal stays
+   * byte-identical and the unbound graph gains no stage. */
+  {
+    sqlite3 *db = wyl_policy_store_get_db (f.fixture.policy);
+    g_autoptr (GBytes) partial_journal = session_journal_bytes (&f);
+    g_autofree gchar *unbound_stage = session_stage_path (&f, "zeta");
+    /* Bypass only the fixture's immutable-record guards so the read side of
+     * the evidence contract is what refuses, and reinstate them afterwards
+     * because the resume mode reopens the store, which verifies them. */
+    const gchar *guards[] = { "fact_graph_provisioning_immutable",
+                              "fact_graph_provisioning_update_guard" };
+    gchar *guard_sql[G_N_ELEMENTS (guards)] = { NULL };
+    for (guint i = 0; i < G_N_ELEMENTS (guards); i++) {
+      gchar *query = sqlite3_mprintf
+            ("SELECT sql FROM sqlite_master WHERE name='%q';", guards[i]);
+      sqlite3_stmt *guard = NULL;
+      g_assert_cmpint (sqlite3_prepare_v2 (db, query, -1, &guard, NULL), ==,
+          SQLITE_OK);
+      sqlite3_free (query);
+      g_assert_cmpint (sqlite3_step (guard), ==, SQLITE_ROW);
+      guard_sql[i] = g_strdup ((const gchar *) sqlite3_column_text (guard,
+              0));
+      sqlite3_finalize (guard);
+      query = sqlite3_mprintf ("DROP TRIGGER \"%w\";", guards[i]);
+      g_assert_cmpint (sqlite3_exec (db, query, NULL, NULL, NULL), ==,
+          SQLITE_OK);
+      sqlite3_free (query);
+    }
+    g_assert_cmpint (sqlite3_exec (db,
+        "CREATE TEMP TABLE evidence_keep AS "
+        "SELECT darwin_operation_evidence AS evidence "
+        "FROM fact_graph_provisioning "
+        "WHERE tenant_id='tenant-a' AND graph_id='alpha';", NULL, NULL,
+        NULL), ==, SQLITE_OK);
+    const gchar *mutations[] = {
+      "UPDATE fact_graph_provisioning SET darwin_operation_evidence=NULL "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+      "UPDATE fact_graph_provisioning SET darwin_operation_evidence="
+      "zeroblob(length(darwin_operation_evidence)) "
+      "WHERE tenant_id='tenant-a' AND graph_id='alpha';",
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (mutations); i++) {
+      g_assert_cmpint (sqlite3_exec (db, mutations[i], NULL, NULL, NULL),
+          ==, SQLITE_OK);
+      g_assert_cmpint (sqlite3_changes (db), ==, 1);
+      g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run
+            (f.fixture.policy, f.fixture.root, f.fixture.runtime, "tenant-a",
+          f.capture.manifest, session_operation, partial.revision, 0,
+          &callbacks, &test_input, &f.committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (f.committed.graphs);
+      assert_restore_journal_unchanged (f.fixture.policy, session_operation,
+          partial_journal, partial.revision);
+      g_assert_false (g_file_test (unbound_stage, G_FILE_TEST_EXISTS));
+      g_assert_cmpint (sqlite3_exec (db,
+          "UPDATE fact_graph_provisioning SET darwin_operation_evidence="
+          "(SELECT evidence FROM evidence_keep) "
+          "WHERE tenant_id='tenant-a' AND graph_id='alpha';", NULL, NULL,
+          NULL), ==, SQLITE_OK);
+      g_assert_cmpint (sqlite3_changes (db), ==, 1);
+    }
+    g_assert_cmpint (sqlite3_exec (db, "DROP TABLE evidence_keep;", NULL,
+        NULL, NULL), ==, SQLITE_OK);
+    for (guint i = 0; i < G_N_ELEMENTS (guards); i++) {
+      g_assert_cmpint (sqlite3_exec (db, guard_sql[i], NULL, NULL, NULL), ==,
+          SQLITE_OK);
+      g_free (guard_sql[i]);
+    }
+  }
+#endif
   g_autofree gchar *foreign = graph_file_path (&f.fixture, "alpha", "foreign");
   g_assert_true (g_file_set_contents (foreign, "foreign", -1, NULL));
   g_assert_cmpint (wyl_fact_offline_restore_tenant_import_run

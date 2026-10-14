@@ -107,16 +107,17 @@ command retains that tuple. Replay `begin` only with the same UUID, scope,
 destination, bundle, and digest. A status result of `PREPARING` means the BEGIN
 was recorded and the next step is `prepare`.
 
-On macOS the daemon admits `dry-run`, `begin`, `status`, `abort --confirm`,
-and `prepare` for a graph restore. A tenant `prepare` and every `commit`
-return `403 restore_refused` and leave the journal unchanged until the
-remaining #1303 work lands. `resume` is refused the same way for a tenant
-restore and reports the unchanged `preparing` or `prepared` state for a graph
-restore. After a macOS tenant `begin` or graph `prepare` the only forward
-action is therefore `abort --confirm`, which retires any staged artifact,
-records an `aborted` receipt, and releases the claim. The next-command hints
-the CLI prints after a `PREPARING` or `PREPARED` result are platform-agnostic;
-on macOS the tenant `prepare` and every `commit` they suggest are refused.
+On macOS the daemon admits `dry-run`, `begin`, `status`, `prepare` for a
+tenant or graph restore, and `abort --confirm`. Every `commit` returns
+`403 restore_refused` and leaves the journal unchanged until the remaining
+#1303 work lands. `resume` is refused the same way for a tenant restore and
+reports the unchanged `preparing` or `prepared` state for a graph restore.
+After a successful macOS `prepare`, with the journal in the `prepared`
+state, the only forward action is therefore `abort --confirm`, which retires
+any staged artifact, records an `aborted` receipt, and releases the claim.
+The next-command hints the CLI prints after a `PREPARING` or `PREPARED`
+result are platform-agnostic; on macOS every `commit` they suggest is
+refused.
 
 The CLI emits one JSON object or one text line. JSON keys are stable and
 ordered: `operation`, `outcome`, `scope`, `tenant_id`, `graph_id`,

@@ -3,6 +3,9 @@
 
 #include <string.h>
 
+#ifdef __APPLE__
+#include "fact/graph-locator-darwin-private.h"
+#endif
 #include "fact/offline-backup-manifest-private.h"
 #include "fact/offline-restore-journal-stage-private.h"
 #include "fact/offline-restore-journal-store-private.h"
@@ -592,7 +595,7 @@ wyl_fact_offline_restore_graph_import_run
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 static gboolean
 tenant_import_journal_is_staging (const WylFactOfflineRestoreJournal *journal)
 {
@@ -763,10 +766,34 @@ tenant_import_verify_bound (wyl_policy_store_t *policy,
       g_ptr_array_index (provisioning, 0))->phase !=
       WYL_POLICY_GRAPH_PROVISIONING_ACTIVE))
     rc = WYRELOG_E_POLICY;
+#ifdef __APPLE__
+  /* Darwin reconstitutes the provisioned pair only from durable ADR 0006
+   * evidence; the name-only form fails closed there.  Missing or malformed
+   * evidence is a refusal, never a fallback. */
+  if (rc == WYRELOG_E_OK) {
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (provisioning, 0);
+    WylFactGraphDarwinOperationEvidence evidence = { 0 };
+    gsize length = 0;
+    const guint8 *bytes = record->darwin_operation_evidence == NULL
+        ? NULL : g_bytes_get_data (record->darwin_operation_evidence,
+            &length);
+    if (bytes == NULL
+        || length != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = wyl_fact_graph_darwin_evidence_decode (bytes, length,
+              record->op_uuid, &evidence);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
+            (&directory, record->op_uuid, &evidence, &pair);
+  }
+#else
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_provisioned_pair_exact (&directory,
             ((WylPolicyGraphProvisioningRecord *)
             g_ptr_array_index (provisioning, 0))->op_uuid, &pair);
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_restore_inventory (&resolver, &directory,
             lease, pair, journal->operation_uuid,
@@ -848,7 +875,7 @@ wyl_fact_offline_restore_tenant_import_run
       || input->read_at == NULL || input->revalidate == NULL
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
   (void) drain_timeout_us;
   (void) input_data;
   return WYRELOG_E_POLICY;
