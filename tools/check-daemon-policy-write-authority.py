@@ -37,6 +37,7 @@ FUNCTIONS = (
     "wyl_daemon_http_context_rotate_access_token_key",
     "tenant_mutation_handler",
     "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
+    "facts_graph_update_handler", "facts_graph_update_commit",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler", "direct_permission_mutation_handler",
     "policy_permission_transition_handler", "role_membership_mutation_handler",
@@ -145,7 +146,7 @@ ALLOW_ACQUIRE = {
     "tenant_mutation_handler", "tenant_recovery_attempt_before_authorization",
     "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
     "schema_register_handler", "rule_pack_register_handler",
-    "facts_route_handler",
+    "facts_route_handler", "facts_graph_update_handler",
     "direct_permission_mutation_handler", "policy_permission_transition_handler",
     "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
     "wyl_daemon_http_policy_write_for_test",
@@ -158,6 +159,9 @@ ALLOW_ACQUIRE = {
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
     "mutate_tenant_lifecycle_publication", "tenant_recovery_repair_with_write",
     "tenant_create_resolve_failed_publication",
+    # The graph-level update's commit step (#1393) runs under the write its
+    # handler acquired and holds the policy store it was handed.
+    "facts_graph_update_commit",
 }
 PROTECTED_HANDLERS = {
     "tenant_mutation_handler", "graph_create_handler", "facts_quota_handler",

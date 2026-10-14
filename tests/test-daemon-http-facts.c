@@ -1540,29 +1540,23 @@ check_rule_pack_http_contract (WylHandle *handle, SoupSession *session,
  * route only; every other route refuses it with fact_denied.  The graph does
  * not exist, so a request that is authorized fails later and changes
  * nothing. */
-/* Read the upd graph's store, opened read-only: the first column of every
- * row |sql| returns, in its order, joined with ','.  |sql| may name the kv
+/* Read a graph's store, opened read-only: the first column of every row
+ * |sql| returns, in its order, joined with ','.  |sql| may name |schema|'s
  * projection as %s.  The rows are joined here because the secure-bridge
  * build's DuckDB has no core_functions extension, so no string_agg. */
 static gchar *
-update_store_rows (const gchar *root, const gchar *sql_format)
+graph_store_rows (const gchar *root, const gchar *graph_id,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *sql_format)
 {
   WylFactGraphLocator locator = { 0 };
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator,
-      WYL_TENANT_DEFAULT, "upd"), ==, WYRELOG_E_OK);
+      WYL_TENANT_DEFAULT, graph_id), ==, WYRELOG_E_OK);
   g_autofree gchar *path = wyl_fact_graph_locator_descriptive_path (root,
           &locator);
   wyl_fact_graph_locator_clear (&locator);
   g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
-  const wyl_policy_fact_relation_schema_column_t columns[] = {
-    { "k", "string", FALSE, TRUE }, { "v", "string", FALSE, TRUE }
-  };
-  const wyl_policy_fact_relation_schema_options_t schema = {
-    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "upd",
-    .namespace_id = "shop", .relation_name = "kv", .schema_version = 1,
-    .columns = columns, .n_columns = 2, .relation_visible = TRUE,
-  };
-  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
   g_autofree gchar *sql = g_strdup_printf (sql_format, table);
   duckdb_config config = NULL;
   duckdb_database db = NULL;
@@ -1589,6 +1583,21 @@ update_store_rows (const gchar *root, const gchar *sql_format)
   duckdb_close (&db);
   duckdb_destroy_config (&config);
   return g_string_free (joined, FALSE);
+}
+
+/* The upd graph's store; |sql| may name the kv projection as %s. */
+static gchar *
+update_store_rows (const gchar *root, const gchar *sql_format)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    { "k", "string", FALSE, TRUE }, { "v", "string", FALSE, TRUE }
+  };
+  const wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "upd",
+    .namespace_id = "shop", .relation_name = "kv", .schema_version = 1,
+    .columns = columns, .n_columns = 2, .relation_visible = TRUE,
+  };
+  return graph_store_rows (root, "upd", &schema, sql_format);
 }
 
 /* The kv relation as replay folds it: each (k, v) whose last row is valid,
@@ -1758,6 +1767,276 @@ check_fact_update_route (WylHandle *handle, SoupSession *session,
       WYL_TENANT_DEFAULT, &restore), ==, WYRELOG_E_OK);
 }
 
+/* The gupd graph's two relations: kv (k, v) and st (k, s), both of
+ * strings, in namespace shop. */
+static const wyl_policy_fact_relation_schema_column_t gupd_kv_columns[] = {
+  { "k", "string", FALSE, TRUE }, { "v", "string", FALSE, TRUE }
+};
+static const wyl_policy_fact_relation_schema_column_t gupd_st_columns[] = {
+  { "k", "string", FALSE, TRUE }, { "s", "string", FALSE, TRUE }
+};
+static const wyl_policy_fact_relation_schema_options_t gupd_kv_schema = {
+  .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "gupd",
+  .namespace_id = "shop", .relation_name = "kv", .schema_version = 1,
+  .columns = gupd_kv_columns, .n_columns = 2, .relation_visible = TRUE,
+};
+static const wyl_policy_fact_relation_schema_options_t gupd_st_schema = {
+  .tenant_id = WYL_TENANT_DEFAULT, .graph_id = "gupd",
+  .namespace_id = "shop", .relation_name = "st", .schema_version = 1,
+  .columns = gupd_st_columns, .n_columns = 2, .relation_visible = TRUE,
+};
+
+/* A relation of gupd as replay folds it: each row whose last event is
+ * valid, rendered "k=<second column>,..." sorted. */
+static void
+graph_update_check_state (const gchar *root,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *expected)
+{
+  g_autofree gchar *sql = g_strdup_printf (
+    "SELECT k || '=' || %s FROM (SELECT k, %s, __wyl_valid, row_number() "
+    "OVER (PARTITION BY k, %s ORDER BY __wyl_seq DESC, "
+    "__wyl_row_index DESC) AS rn FROM %%s) WHERE rn = 1 AND __wyl_valid "
+    "ORDER BY k, %s;", schema->columns[1].column_name,
+    schema->columns[1].column_name, schema->columns[1].column_name,
+    schema->columns[1].column_name);
+  g_autofree gchar *state = graph_store_rows (root, "gupd", schema, sql);
+  g_assert_cmpstr (state, ==, expected);
+}
+
+static void
+graph_update_check_batches (const gchar *root, const gchar *expected)
+{
+  g_autofree gchar *batches = graph_store_rows (root, "gupd",
+          &gupd_kv_schema,
+          "SELECT batch_id || ':' || op || ':' || CAST(row_count AS VARCHAR) "
+          "FROM fact_batches ORDER BY batch_id;");
+  g_assert_cmpstr (batches, ==, expected);
+}
+
+static gchar *
+gupd_relation_query (const gchar *batch_id)
+{
+  return g_strdup_printf ("tenant=%s&namespace=shop&schema_version=1&"
+             "batch_id=%s&idempotency_key=%s&%s", WYL_TENANT_DEFAULT, batch_id,
+             batch_id, FACT_GUARD);
+}
+
+/* The graph-level update names no relation and no schema version in its
+ * query: every row of the body carries its own. */
+static gchar *
+gupd_graph_query (const gchar *batch_id)
+{
+  return g_strdup_printf ("tenant=%s&namespace=shop&batch_id=%s&"
+             "idempotency_key=%s&%s", WYL_TENANT_DEFAULT, batch_id, batch_id,
+             FACT_GUARD);
+}
+
+#ifdef WYL_HAS_AUDIT
+static guint
+count_graph_update_audit (WylHandle *handle, const gchar *batch_id)
+{
+  LifecycleAuditProbe probe = {
+    .subject_id = "facts-admin",
+    .action = "fact_update",
+    .resource_id = WYL_TENANT_DEFAULT "/gupd/shop/kv,st",
+    .deny_reason = batch_id,
+    .require_allow = TRUE,
+  };
+  g_assert_cmpint (wyl_policy_store_foreach_audit_event
+        (wyl_handle_get_policy_store (handle), lifecycle_audit_probe_cb,
+      &probe), ==, WYRELOG_E_OK);
+  return probe.matches;
+}
+#endif
+
+/* #1393: POST /facts/{tenant}/{graph}:update retracts and asserts rows of
+ * several relations of one graph in one commit.  Each body row carries its
+ * op, its relation and that relation's schema version before the relation's
+ * columns; there is no header.  The rows of each relation are one part,
+ * recorded as its own batch named <batch_id>#<relation>, and the parts
+ * commit together: a replay is one no-op, a change to any relation's rows or
+ * a relation left out is one conflict, and the audit record names every
+ * relation.  The logical quota is charged for every row of every relation
+ * before the commit. */
+static void
+check_fact_graph_update_route (WylHandle *handle, SoupSession *session,
+    const gchar *base_url, const gchar *token, const gchar *root)
+{
+  const gchar *create = "tenant=__wr_default&graph=gupd&" FACT_GUARD;
+  tsv_post (session, base_url, token, "/graphs/create", create, "", 0,
+      200, "\"created\":true");
+  const gchar *kv_schema_query = "tenant=__wr_default&graph=gupd&"
+      "namespace=shop&relation=kv&schema_version=1&" FACT_GUARD;
+  const gchar *kv_schema = "k\tstring\tfalse\ttrue\nv\tstring\tfalse\ttrue\n";
+  tsv_post (session, base_url, token, "/facts/schema/register",
+      kv_schema_query, kv_schema, strlen (kv_schema), 200, "\"ok\":true");
+  const gchar *st_schema_query = "tenant=__wr_default&graph=gupd&"
+      "namespace=shop&relation=st&schema_version=1&" FACT_GUARD;
+  const gchar *st_schema = "k\tstring\tfalse\ttrue\ns\tstring\tfalse\ttrue\n";
+  tsv_post (session, base_url, token, "/facts/schema/register",
+      st_schema_query, st_schema, strlen (st_schema), 200, "\"ok\":true");
+  const gchar *update = "/facts/__wr_default/gupd:update";
+  g_autofree gchar *seed_kv_query = gupd_relation_query ("seed-kv");
+  const gchar *seed_kv = "k\tv\na\t1\nb\t2\n";
+  tsv_post (session, base_url, token, "/facts/__wr_default/gupd/kv:append",
+      seed_kv_query, seed_kv, strlen (seed_kv), 200, "\"inserted\":true");
+  g_autofree gchar *seed_st_query = gupd_relation_query ("seed-st");
+  const gchar *seed_st = "k\ts\na\tx\n";
+  tsv_post (session, base_url, token, "/facts/__wr_default/gupd/st:append",
+      seed_st_query, seed_st, strlen (seed_st), 200, "\"inserted\":true");
+
+  /* Rows of the two relations interleaved, the assert of kv first: each
+   * relation's retracts are still ordered before its asserts. */
+  g_autofree gchar *u1_query = gupd_graph_query ("g1");
+  const gchar *u1 = "assert\tkv\t1\ta\t10\nretract\tkv\t1\ta\t1\n"
+      "retract\tst\t1\ta\tx\nassert\tst\t1\ta\ty\n";
+  tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
+      200, "\"batch_id\":\"g1\",\"committed\":true");
+  tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
+      200, "\"committed_row_delta\":4");
+  graph_update_check_state (root, &gupd_kv_schema, "a=10,b=2");
+  graph_update_check_state (root, &gupd_st_schema, "a=y");
+  graph_update_check_batches (root,
+      "g1#kv:update:2,g1#st:update:2,seed-kv:assert:2,seed-st:assert:1");
+  g_autofree gchar *events = graph_store_rows (root, "gupd", &gupd_kv_schema,
+          "SELECT batch_id || ':' || op FROM fact_event_log "
+          "WHERE batch_id LIKE 'g1%%' ORDER BY seq;");
+  g_assert_cmpstr (events, ==,
+      "g1#kv:retract,g1#kv:assert,g1#st:retract,g1#st:assert");
+
+  /* The second post above was a replay: one no-op, not two. */
+  tsv_post (session, base_url, token, update, u1_query, u1, strlen (u1),
+      200, "\"inserted\":false");
+#ifdef WYL_HAS_AUDIT
+  /* One record per request that reached the commit, naming both relations:
+   * the original and its two replays. */
+  g_assert_cmpuint (count_graph_update_audit (handle, "g1"), ==, 3);
+#endif
+  /* The same keys with one relation's rows changed, or with a relation left
+   * out, are conflicts that record nothing. */
+  const gchar *u1_changed = "retract\tkv\t1\ta\t1\nassert\tkv\t1\ta\t10\n"
+      "retract\tst\t1\ta\tx\nassert\tst\t1\ta\tz\n";
+  tsv_post (session, base_url, token, update, u1_query, u1_changed,
+      strlen (u1_changed), 409, "fact_batch_conflict");
+  const gchar *u1_short = "retract\tkv\t1\ta\t1\nassert\tkv\t1\ta\t10\n";
+  tsv_post (session, base_url, token, update, u1_query, u1_short,
+      strlen (u1_short), 409, "fact_batch_conflict");
+  /* A part's own name replayed as a single-relation update is not it
+   * (the '#' of the name travels URL-escaped). */
+  g_autofree gchar *part_query = gupd_relation_query ("g1%23kv");
+  tsv_post (session, base_url, token, "/facts/__wr_default/gupd/kv:update",
+      part_query, "retract\ta\t1\nassert\ta\t10\n",
+      strlen ("retract\ta\t1\nassert\ta\t10\n"), 409, "fact_batch_conflict");
+  graph_update_check_batches (root,
+      "g1#kv:update:2,g1#st:update:2,seed-kv:assert:2,seed-st:assert:1");
+#ifdef WYL_HAS_AUDIT
+  g_assert_cmpuint (count_graph_update_audit (handle, "g1"), ==, 3);
+#endif
+
+  /* One relation is a graph-level update too. */
+  g_autofree gchar *u2_query = gupd_graph_query ("g2");
+  const gchar *u2 = "retract\tkv\t1\tb\t2\nassert\tkv\t1\tb\t3\n";
+  tsv_post (session, base_url, token, update, u2_query, u2, strlen (u2),
+      200, "\"committed_row_delta\":2");
+  graph_update_check_state (root, &gupd_kv_schema, "a=10,b=3");
+  graph_update_check_state (root, &gupd_st_schema, "a=y");
+
+  g_autofree gchar *bad_query = gupd_graph_query ("g-bad");
+  const gchar *bad_bodies[] = {
+    "upsert\tkv\t1\ta\t1\n",      /* an op that is neither */
+    "kv\t1\ta\t1\n",              /* no op field */
+    "assert\tkv\ta\t1\n",         /* no schema version */
+    "assert\tkv\t0\ta\t1\n",      /* a schema version that is not one */
+    "assert\tkv\t1\ta\n",         /* a row too short for kv */
+    "assert\tkv\t1\ta\t1\t2\n",   /* a row too long for kv */
+    "assert\tkv\t1\ta\t1\nassert\tkv\t2\tb\t2\n", /* kv at two versions */
+    "op\trelation\tschema_version\tk\tv\nassert\tkv\t1\ta\t1\n", /* a header */
+    "assert\tkv\t1\ta\t1\n\nassert\tst\t1\ta\tz\n", /* a blank line */
+    "",                           /* nothing */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_bodies); i++)
+    tsv_post (session, base_url, token, update, bad_query, bad_bodies[i],
+        strlen (bad_bodies[i]), 400, "invalid_fact_payload");
+  /* A relation, or a version of it, that the graph does not have. */
+  const gchar *no_relation = "assert\tnope\t1\ta\t1\n";
+  tsv_post (session, base_url, token, update, bad_query, no_relation,
+      strlen (no_relation), 404, "fact_schema_not_found");
+  const gchar *no_version = "assert\tkv\t1\ta\t1\nassert\tst\t7\ta\tz\n";
+  tsv_post (session, base_url, token, update, bad_query, no_version,
+      strlen (no_version), 404, "fact_schema_not_found");
+  /* The query names the operation as :update does, or not at all. */
+  g_autofree gchar *op_query = g_strdup_printf ("%s&op=assert", bad_query);
+  tsv_post (session, base_url, token, update, op_query, u2, strlen (u2),
+      400, "invalid_fact_request");
+  g_autofree gchar *no_namespace = g_strdup_printf ("tenant=%s&batch_id=g-bad&"
+          "idempotency_key=g-bad&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  tsv_post (session, base_url, token, update, no_namespace, u2, strlen (u2),
+      400, "invalid_fact_request");
+  graph_update_check_batches (root,
+      "g1#kv:update:2,g1#st:update:2,g2#kv:update:2,seed-kv:assert:2,"
+      "seed-st:assert:1");
+
+  /* Leave room for three more rows: four across two relations are refused
+   * whole, although each relation's part alone would fit. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylPolicyFactLogicalQuotaStatus before = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &before), ==, WYRELOG_E_OK);
+  const WylPolicyFactLogicalQuotaConfig tight = {
+    .has_limit = TRUE,
+    .logical_row_limit = before.committed_rows + before.pending_rows + 3,
+    .logical_byte_limit = G_MAXINT64,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &tight), ==, WYRELOG_E_OK);
+  g_autofree gchar *quota_query = gupd_graph_query ("g-quota");
+  const gchar *over = "retract\tkv\t1\ta\t10\nassert\tkv\t1\ta\t11\n"
+      "retract\tst\t1\ta\ty\nassert\tst\t1\ta\tz\n";
+  tsv_post (session, base_url, token, update, quota_query, over,
+      strlen (over), 429, "fact_quota_exceeded");
+  graph_update_check_state (root, &gupd_kv_schema, "a=10,b=3");
+  graph_update_check_state (root, &gupd_st_schema, "a=y");
+  WylPolicyFactLogicalQuotaStatus after = { 0 };
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.committed_rows, ==, before.committed_rows);
+  g_assert_cmpuint (after.pending_rows, ==, before.pending_rows);
+  /* Positive control: the same update within the budget applies, and the
+   * budget then holds exactly it. */
+  const WylPolicyFactLogicalQuotaConfig roomy = {
+    .has_limit = TRUE,
+    .logical_row_limit = before.committed_rows + before.pending_rows + 4,
+    .logical_byte_limit = G_MAXINT64,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &roomy), ==, WYRELOG_E_OK);
+  tsv_post (session, base_url, token, update, quota_query, over,
+      strlen (over), 200, "\"inserted\":true");
+  graph_update_check_state (root, &gupd_kv_schema, "a=11,b=3");
+  graph_update_check_state (root, &gupd_st_schema, "a=z");
+  g_assert_cmpint (wyl_policy_store_get_fact_logical_quota_status (store,
+      WYL_TENANT_DEFAULT, &after), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (after.committed_rows, ==, before.committed_rows + 4);
+  const WylPolicyFactLogicalQuotaConfig restore = {
+    .has_limit = before.has_limit,
+    .logical_row_limit = before.logical_row_limit,
+    .logical_byte_limit = before.logical_byte_limit,
+  };
+  g_assert_cmpint (wyl_policy_store_set_fact_logical_quota (store,
+      WYL_TENANT_DEFAULT, &restore), ==, WYRELOG_E_OK);
+
+  /* A sealed graph refuses the graph-level update as it refuses any write. */
+  g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=gupd&%s",
+          WYL_TENANT_DEFAULT, FACT_GUARD);
+  tsv_post (session, base_url, token, "/graphs/seal", seal_query, "", 0,
+      200, "\"sealed\":true");
+  g_autofree gchar *sealed_query = gupd_graph_query ("g-sealed");
+  tsv_post (session, base_url, token, update, sealed_query, u2, strlen (u2),
+      409, "graph_sealed");
+}
+
+
 static gint
 check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
     const gchar *base_url)
@@ -1771,6 +2050,7 @@ check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
     {"wr.fact.append", "POST", "/facts/__wr_default/op-perms/rows:append"},
     {"wr.fact.retract", "POST", "/facts/__wr_default/op-perms/rows:retract"},
     {"wr.fact.update", "POST", "/facts/__wr_default/op-perms/rows:update"},
+    {"wr.fact.update", "POST", "/facts/__wr_default/op-perms:update"},
     {"wr.fact.forget", "DELETE", "/facts/__wr_default/op-perms/rows:forget"},
     {"wr.fact.repair", "POST", "/facts/__wr_default/op-perms/rows:repair"},
   };
@@ -1806,8 +2086,10 @@ check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
       const gchar *body = g_str_has_suffix (routes[r].route, ":append")
           || g_str_has_suffix (routes[r].route, ":retract")
           ? "order_id\tamount\no-1\t42\n"
-          : g_str_has_suffix (routes[r].route, ":update")
+          : g_str_has_suffix (routes[r].route, "/rows:update")
           ? "op\torder_id\tamount\nassert\to-1\t42\n"
+          : g_str_has_suffix (routes[r].route, ":update")
+          ? "assert\trows\t1\to-1\t42\n"
           : "{\"batch_id\":\"op-perms\",\"operator\":\"admin\","
           "\"reason\":\"permission probe\"}";
       guint status = 0;
@@ -4050,6 +4332,8 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   if (rc != 0)
     return rc;
   check_fact_update_route (handle, session, base_url, admin_token, fact_root);
+  check_fact_graph_update_route (handle, session, base_url, admin_token,
+      fact_root);
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *seal_query = g_strdup_printf ("tenant=%s&graph=orders&%s",
