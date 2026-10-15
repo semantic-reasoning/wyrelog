@@ -1876,29 +1876,60 @@ routes.
 ### Repairing rows left by an old wrong-relation forget
 
 An older forget implementation could remove a batch and its events while
-leaving rows in the batch's actual relation projection. With a bearer granted
-`wr.fact.read`, call `GET /facts/verify?tenant=<tenant>&graph=<graph>` with the
-normal guard context. The response includes
-`orphan_repair_candidate_batches` and `orphan_repair_candidate_rows` across
-registered relation schemas. These are conservative repair candidates, not a
-count of every orphan: a candidate must have no batch or event row, exactly one
-completed zero-purge forget intent targeting another projection, and exactly
-one matching forget audit record. Ambiguous history is excluded.
+leaving rows in the batch's actual relation projection. `wyctl fact verify`
+reports such rows as repair candidates alongside its verdict; the caller
+needs `wr.fact.read` in the tenant:
+
+```sh
+wyctl --daemon-url "$BASE_URL" fact verify \
+  --tenant "$TENANT" --graph "$GRAPH" --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `tenant=<tenant> graph=<graph> verified=true
+orphan_repair_candidate_batches=<n> orphan_repair_candidate_rows=<n>`,
+counted across registered relation schemas. These are conservative repair
+candidates, not a count of every orphan: a candidate must have no batch or
+event row, exactly one completed zero-purge forget intent targeting another
+projection, and exactly one matching forget audit record. Ambiguous history
+is excluded.
 
 For each affected batch whose actual relation, namespace, and schema version
-are known, use an MFA-assured bearer granted `wr.fact.repair` and send
-`POST /facts/<tenant>/<graph>/<actual-relation>:repair` with query parameters
-`tenant`, `namespace=<actual-namespace>`, `schema_version=<actual-version>`,
-and the normal guard context. The JSON body contains `batch_id`, `operator`,
-and `reason`, as for forget. The graph must be unsealed. The daemon rechecks
-the evidence under its write lease, deletes only that batch's rows from the
-actual projection, and commits a `fact_orphan_repair_audit` record with the
-original forget operation ID, authenticated actor, request ID, reason, and row
-count in the same transaction. A missing, ambiguous, or already repaired
-candidate returns HTTP 404; a sealed graph returns 409. Verify again after
-repair. A refresh failure after the durable repair is reported as a committed
-degraded mutation, so the runtime may need reconciliation even when the rows
-are gone.
+are known, `wyctl fact repair` erases that batch's rows from the actual
+projection. It cannot be undone, so like `fact forget` it requires `--confirm`
+and a `--tenant` and `--graph` typed on the command line; the configured
+default tenant and graph are never its target. The caller needs an
+MFA-assured bearer granted `wr.fact.repair` in the tenant.
+
+```sh
+wyctl --daemon-url "$BASE_URL" --timeout-ms 30000 fact repair \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --batch-id orders-7 --operator ops-oncall --reason 'wrong-relation forget' \
+  --confirm --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+It prints `action=repair batch_id=orders-7 rows_purged=3
+mutation_class=committed_ready reconcile=false`. The command drives
+`POST /facts/<tenant>/<graph>/<actual-relation>:repair`. The graph must be
+unsealed. The daemon rechecks the evidence under its write lease, deletes only
+that batch's rows from the actual projection, and commits a
+`fact_orphan_repair_audit` record with the original forget operation ID,
+authenticated actor, request ID, reason, and row count in the same
+transaction. Verify again after repair.
+
+- Exit 4 with `graph_sealed`: the graph is sealed and nothing was erased.
+- Exit 5 with `fact_orphan_repair_candidate_not_found`: the batch is not a
+  repair candidate, is already repaired, or its history is ambiguous.
+- Exit 5 with `fact_orphan_repair_audit_failed`: the rows **were** erased but
+  the audit record was not written. wyctl prints `purged=true audit=failed`
+  and `do not retry`; record the repair by hand from that output.
+- No response, an unreadable answer, or any other 5xx: the outcome is
+  unknown. Re-run the same command; a `fact_orphan_repair_candidate_not_found`
+  then means the rows are already repaired.
+- `reconcile=true`: the repair is durable but the refresh after it failed, so
+  the runtime may need reconciliation even though the rows are gone.
 
 A sealed graph refuses all three: append, retract and forget each return `409`
 `graph_sealed`. Sealing a graph is irreversible -- there is no graph unseal
@@ -2795,9 +2826,6 @@ python3 tools/check-wyctl-route-coverage.py . --list
 
 These routes are reached only over HTTP:
 
-- `/facts/{tenant}/{graph}/{relation}:repair`: repairs rows left by an old
-  wrong-relation forget (see "Repairing rows left by an old wrong-relation
-  forget"). There is no `wyctl` command for it yet (#1280).
 - `/profile/events`: event forwarding from the service profile to the system
   profile. It is traffic between the two daemons, not an operator action.
 - `/service-management-authority/arm`: arms the service-management authority
