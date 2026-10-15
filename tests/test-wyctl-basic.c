@@ -5421,8 +5421,9 @@ test_fact_verify (void)
   };
   g_auto (FactForgetRun) run = { 0 };
   run_fake_daemon_case (200, "{\"ok\":true,\"verified\":true,"
-      "\"tenant_id\":\"t\",\"graph_id\":\"orders\"}", NULL, args, FALSE,
-      &run);
+      "\"tenant_id\":\"t\",\"graph_id\":\"orders\","
+      "\"orphan_repair_candidate_batches\":0,"
+      "\"orphan_repair_candidate_rows\":0}", NULL, args, FALSE, &run);
   assert_fact_forget_exit (&run, 0);
   g_assert_cmpstr (run.out, ==, "tenant=t graph=orders verified=true\n");
   g_assert_cmpstr (run.err, ==, "");
