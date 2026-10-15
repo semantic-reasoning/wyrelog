@@ -833,6 +833,73 @@ wyl_fact_artifact_transition_posix_capture_provisioned
   *out_observation = observation;
   return WYRELOG_E_OK;
 }
+#ifdef __APPLE__
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (out_observation != NULL)
+    *out_observation = (WylFactArtifactMainTransitionObservation) { 0 };
+  if (out_snapshot == NULL || out_observation == NULL || provider == NULL
+      || provisioning_uuid == NULL || evidence == NULL || request == NULL
+      || request->operation_uuid == NULL || request->expected_main_absent
+      || (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      && slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK))
+    return WYRELOG_E_INVALID;
+  if (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN)
+    return WYRELOG_E_POLICY;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+        ((WylFactGraphDirectory *) provider->directory, provisioning_uuid,
+          evidence, request->operation_uuid, &request->expected_main_identity,
+          slot, &witness);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  WylFactArtifactMainTransitionObservation observation = { 0 };
+  /* The Darwin main is an ordinary one-link regular file, so the inventory
+   * sees it without an old-pair exception. */
+  if (rc == WYRELOG_E_OK)
+    rc = capture_internal (provider, lifecycle, NULL, &snapshot,
+            &observation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+            provider->directory);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  if (!old->present || old->reparse || old->link_count != 1
+      || old->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&old->identity,
+      &request->expected_main_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->directory_identity, &observation.directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->lease_identity, &observation.lease_identity))
+    return WYRELOG_E_POLICY;
+  /* old_main_witness stays NONE: the model licenses a second link through
+   * that marker, and a Darwin main has none.  The proof is out of band. */
+  *out_snapshot = g_steal_pointer (&snapshot);
+  *out_observation = observation;
+  return WYRELOG_E_OK;
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* mutation executor                                                  */

@@ -463,6 +463,24 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_revalidate
     const WylFactGraphDirectory *directory);
 void wyl_fact_graph_provisioned_restore_witness_free
   (WylFactGraphProvisionedRestoreWitness *witness);
+#ifdef __APPLE__
+/* The Darwin READY_MAIN witness.  A provisioned macOS main has one link
+ * under the canonical name, so the proof is the ADR 0006 evidence recorded
+ * at provisioning, compared on a held descriptor of `facts.duckdb` together
+ * with the journal-pinned dev/ino, mode 0600, the caller's uid and the
+ * absence of the legacy stage name.  Only READY_MAIN is proved: the
+ * rollback name would expose the evidenced object under a different name,
+ * which the ADR forbids, so RETAINED_ROLLBACK is refused here until the
+ * commit and resume port (#1303 U5) decides that slot under the same rule.
+ * The same caller obligations as the name-only opener apply. */
+wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+  (WylFactGraphDirectory *directory, const gchar *provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *expected_evidence,
+    const gchar *restore_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    WylFactGraphProvisionedRestoreSlot slot,
+    WylFactGraphProvisionedRestoreWitness **out_witness);
+#endif
 /* Post-publication read-only proof. The old ACTIVE companion and rollback
  * still bind the old inode; the replacement companion and new main bind a
  * distinct inode. Callers must authenticate both UUIDs against one durable

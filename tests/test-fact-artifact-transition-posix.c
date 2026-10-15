@@ -1849,17 +1849,23 @@ static void
 test_provisioned_old_main_transition (void)
 {
 #ifdef __APPLE__
+  /* The Darwin main is an ADR 0006 final: one link under the canonical name,
+   * proved by the evidence captured at provisioning.  The capture half of
+   * the provisioned transition is ported (#1303 U3); execute_provisioned and
+   * everything after it stay refused until U5, hence the skip at the end. */
   const gchar *provisioning_uuid =
       "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
   Fixture fixture;
   fixture_init (&fixture, "u2b-provisioned-XXXXXX");
-  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 100);
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_create_darwin_provisioned_final
+        (&fixture.directory, provisioning_uuid, &evidence, &final), ==,
+      WYRELOG_E_OK);
+  for (gsize written = 0; written < 100; written++)
+    g_assert_cmpint (write (final.fd, "x", 1), ==, 1);
+  wyl_fact_graph_regular_file_clear (&final);
   make_conforming (&fixture, fixture.names.stage, 200);
-  g_autofree gchar *companion = g_strdup_printf ("provision-%s.sqlite",
-          provisioning_uuid);
-  g_assert_cmpint (linkat (fixture.directory.graph_fd,
-      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
-      fixture.directory.graph_fd, companion, 0), ==, 0);
   g_autoptr (WylFactArtifactTransitionPosix) provider = open_provider (&fixture);
   Lifecycle lifecycle = { .sealed = TRUE, .main_binding_live = FALSE };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
@@ -1871,12 +1877,72 @@ test_provisioned_old_main_transition (void)
   Identity stage_id = real_identity (&fixture, fixture.names.stage);
   Request request = request_for (&observation, main_id, stage_id, FALSE);
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  /* The name-only capture never proves a Darwin main. */
   g_assert_cmpint (wyl_fact_artifact_transition_posix_capture_provisioned
         (provider, provisioning_uuid, &request,
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
       &snapshot, &observation), ==, WYRELOG_E_POLICY);
   g_assert_null (snapshot);
   g_assert_cmpint (observation.old_main_witness, ==, 0);
+  /* Evidence proves READY_MAIN.  The marker stays NONE because the Darwin
+   * main has one link; the proof lives in the provider, not the model. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_assert_nonnull (snapshot);
+  g_assert_cmpint (observation.old_main_witness, ==, MT (OLD_WITNESS_NONE));
+  g_assert_cmpuint (observation.entries[SLOT_MAIN].link_count, ==, 1);
+  Result result = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) transition = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_nonnull (transition);
+  g_assert_cmpint (result.state, ==, MT (STATE_READY));
+  g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  /* An unconverged sidecar is refused by the model on the same capture. */
+  make_conforming (&fixture, "facts.duckdb.wal", 10);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_POLICY);
+  g_assert_null (transition);
+  g_assert_cmpint (result.refusal, ==, MT (REFUSAL_SIDECAR_UNCONVERGED));
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "facts.duckdb.wal",
+      0), ==, 0);
+  /* Wrong evidence, a second link, and the rollback slot (decided by #1303
+   * U5 under the ADR 0006 name rule) each refuse. */
+  WylFactGraphDarwinOperationEvidence flipped = evidence;
+  flipped.bytes[55] ^= 0x01u;
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &flipped, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (linkat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+      fixture.directory.graph_fd, "extra", 0), ==, 0);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "extra", 0), ==, 0);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
   fixture_clear (&fixture);
   g_test_skip ("provisioned restore is not yet ported to macOS");
 #else

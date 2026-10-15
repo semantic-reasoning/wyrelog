@@ -783,12 +783,15 @@ static const gchar darwin_restore_uuid[] =
 static const gchar darwin_replacement_uuid[] =
     "01890f47-3c4b-7cc2-b8c4-dc0c0c070547";
 
-/* macOS has no native evidence for a provisioned restore yet, so each
- * restore witness, shape and companion-link entry point must refuse before
- * it reads or changes the graph.  The fixture holds a provisioned pair that
- * Linux would accept as READY_MAIN, so a refusal here is the platform's.
- * Once provisioned restore is ported to macOS these refusals fail, and the
- * Darwin branches below should give way to the Linux bodies. */
+/* The fixture holds a Linux-shaped provisioned pair that Linux would accept
+ * as READY_MAIN.  On macOS the name-only witness opener refuses it for
+ * good: a Darwin main is proved by ADR 0006 evidence through
+ * wyl_fact_graph_provisioned_restore_witness_open_with_evidence, which
+ * test-fact-graph-locator-macos covers (#1303 U3).  The RETAINED_ROLLBACK
+ * witness, the dual witness and the post-publish shapes wait for the commit
+ * and resume port (#1303 U5), which decides the rollback slot under the ADR
+ * 0006 name rule; their refusals below fail when that lands and should give
+ * way to the Linux bodies or to a Darwin decision. */
 typedef struct
 {
   gchar *root;
@@ -1325,7 +1328,8 @@ test_posix_provisioned_restore_witness (void)
       WYRELOG_E_POLICY);
   g_assert_null (witness);
   darwin_restore_fixture_clear (&f);
-  g_test_skip ("provisioned restore is not yet ported to macOS");
+  g_test_skip ("the evidence witness is covered by fact-graph-locator-macos; "
+      "RETAINED_ROLLBACK waits for #1303 U5");
 #else
   const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   g_autofree gchar *root = make_root ();

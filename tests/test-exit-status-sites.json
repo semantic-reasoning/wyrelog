@@ -120,14 +120,14 @@
   },
   {
     "path": "tests/test-fact-artifact-transition-posix.c",
-    "line": 2985,
+    "line": 3051,
     "api": "_exit",
     "expression": "77",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-fact-artifact-transition-posix.c",
-    "line": 2986,
+    "line": 3052,
     "api": "_exit",
     "expression": "78",
     "platform": "posix-normalized-wrapper"
