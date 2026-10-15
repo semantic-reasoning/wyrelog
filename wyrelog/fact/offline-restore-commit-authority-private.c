@@ -668,6 +668,8 @@ tenant_bind_effect (GBytes *canonical_journal,
   return WYRELOG_E_OK;
 }
 
+#endif
+#if defined(__linux__) || defined(__APPLE__)
 typedef struct
 {
   WylFactRootWriterLease *lease;
@@ -679,6 +681,10 @@ typedef struct
   GBytes *expected_journal;
   const gchar *operation_uuid;
   const gchar *graph_id;
+#ifdef __APPLE__
+  const gchar *darwin_provisioning_uuid;
+  const WylFactGraphDarwinOperationEvidence *darwin_evidence;
+#endif
 } GraphProvisioningBindEffect;
 
 #ifdef WYL_TEST_HANDLE_SEAMS
@@ -769,11 +775,26 @@ graph_bind_prove_effect (GBytes *canonical_journal,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) ready_snapshot = NULL;
   WylFactArtifactMainTransitionObservation ready = { 0 };
+#ifdef __APPLE__
+  /* The pre-transaction read may be stale only if the ACTIVE row changed
+   * before the authority looked, which a retry re-reads: BUSY, like the
+   * journal mismatch above.  A journal already bound to another operation
+   * is a POLICY refusal inside the authority, not a retry. */
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (old_uuid, context->darwin_provisioning_uuid) != 0)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+          (context->provider, old_uuid, context->darwin_evidence, &request,
+            WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
+            &ready_snapshot, &ready);
+#else
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_transition_posix_capture_provisioned
           (context->provider, old_uuid, &request,
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
             &ready_snapshot, &ready);
+#endif
   const WylFactArtifactMainTransitionEntryEvidence *stage =
       &ready.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
   if (rc == WYRELOG_E_OK
@@ -819,10 +840,6 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
       || expected_revision == 0 || expected_revision >= G_MAXINT64
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   WylFactRootWriterLease *lease = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
@@ -873,6 +890,40 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
       || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
       || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE))
     rc = WYRELOG_E_POLICY;
+#ifdef __APPLE__
+  /* The Darwin witness needs the ACTIVE provisioning evidence, which the
+   * bind authority does not hand to the effect.  Read the single ACTIVE row
+   * before the transaction, as tenant bind does: evidence is written once,
+   * while the row is still reserved, and never changes afterwards, so the
+   * effect only has to check that the authority named the same operation. */
+  g_autoptr (GPtrArray) provisioning = NULL;
+  g_autofree gchar *darwin_provisioning_uuid = NULL;
+  WylFactGraphDarwinOperationEvidence darwin_evidence = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_provisioning_list_for_graph (policy,
+            journal.tenant_id, graph_id, &provisioning);
+  if (rc == WYRELOG_E_OK && provisioning->len != 1)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    const WylPolicyGraphProvisioningRecord *row =
+        g_ptr_array_index (provisioning, 0);
+    gsize evidence_length = 0;
+    gconstpointer evidence_bytes = row->darwin_operation_evidence == NULL
+      ? NULL : g_bytes_get_data (row->darwin_operation_evidence,
+            &evidence_length);
+    if (row->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+        || g_strcmp0 (row->store_uuid, graph->store_uuid) != 0
+        || evidence_bytes == NULL
+        || evidence_length
+        != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = wyl_fact_graph_darwin_evidence_decode (evidence_bytes,
+              evidence_length, row->op_uuid, &darwin_evidence);
+    if (rc == WYRELOG_E_OK)
+      darwin_provisioning_uuid = g_strdup (row->op_uuid);
+  }
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -902,6 +953,10 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
       .directory = &directory, .provider = provider,
       .expected_journal = encoded, .operation_uuid = operation_uuid,
       .graph_id = graph_id,
+#ifdef __APPLE__
+      .darwin_provisioning_uuid = darwin_provisioning_uuid,
+      .darwin_evidence = &darwin_evidence,
+#endif
     };
     WylPolicyOfflineRestoreStoreResult result =
         WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
@@ -927,8 +982,9 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
   wyl_fact_graph_resolver_clear(&resolver);
   g_clear_pointer(&lease, wyl_fact_root_writer_lease_release);
   return rc;
-#endif
 }
+#endif
+#ifdef __linux__
 
 wyrelog_error_t wyl_fact_offline_restore_graph_commit_published_prove_terminal(
   wyl_policy_store_t *policy, const gchar *fact_root,
@@ -1953,7 +2009,7 @@ tenant_publish_effect (GBytes *canonical_journal,
   }
   return WYRELOG_E_OK;
 }
-#else
+#elif !defined(__APPLE__)
 wyrelog_error_t
 wyl_fact_offline_restore_graph_bind_provisioned_old_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
