@@ -204,6 +204,23 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_capture_provisioned
     const WylFactArtifactTransitionPosixLifecycle *lifecycle,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation);
+#ifdef __APPLE__
+/* The Darwin form of the capture above, proved by ADR 0006 evidence instead
+ * of a companion link; READY_MAIN only.  The observation's old_main_witness
+ * stays NONE, because the marker licenses a two-link entry and a Darwin
+ * main has one, so no later step may read the marker as proof that the
+ * witness ran: the proof is the successful return of this call. */
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionPosixLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation);
+#endif
 
 /*
  * Executes one authorized mutation operation against the held graph directory.

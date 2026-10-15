@@ -679,6 +679,296 @@ test_descriptor_stability_and_replacement (void)
   fixture_clear (&fixture);
 }
 
+/* ------------------------------------------------------------------ */
+/* provisioned restore witness (#1303 U3)                             */
+/* ------------------------------------------------------------------ */
+
+static const gchar witness_restore_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+static const gchar witness_other_operation_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070548";
+
+/* One ADR 0006 final per graph directory: the canonical name only, one
+ * link, and the evidence captured from the held descriptors.  The old main
+ * identity is the dev/ino the restore journal would pin. */
+typedef struct
+{
+  gchar *root;
+  WylFactGraphResolver resolver;
+  WylFactGraphLocator locator;
+  WylFactGraphDirectory graph;
+  WylFactGraphDarwinOperationEvidence evidence;
+  WylFactArtifactInventoryIdentity old_main;
+  gchar *legacy_stage;
+} WitnessFixture;
+
+static void
+witness_fixture_init (WitnessFixture *fixture, const gchar *graph_id,
+    const gchar *provisioning_uuid)
+{
+  memset (fixture, 0, sizeof *fixture);
+  fixture->root = make_resolver_root ("wyl-macos-restore-witness-XXXXXX");
+  fixture->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  fixture->graph = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (fixture->root,
+      &fixture->resolver), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&fixture->locator,
+      "tenant-restore", graph_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&fixture->resolver,
+      &fixture->locator, TRUE, &fixture->graph), ==, WYRELOG_E_OK);
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_create_darwin_provisioned_final
+        (&fixture->graph, provisioning_uuid, &fixture->evidence, &final), ==,
+      WYRELOG_E_OK);
+  g_assert_true (write_exact (final.fd, "provisioned", 11));
+  struct stat status;
+  g_assert_cmpint (fstat (final.fd, &status), ==, 0);
+  fixture->old_main = (WylFactArtifactInventoryIdentity) {
+    .domain = (guint64) status.st_dev, .object = (guint64) status.st_ino,
+  };
+  wyl_fact_graph_regular_file_clear (&final);
+  fixture->legacy_stage = g_strdup_printf ("provision-%s.sqlite",
+          provisioning_uuid);
+}
+
+static void
+witness_fixture_clear (WitnessFixture *fixture)
+{
+  wyl_fact_graph_directory_clear (&fixture->graph);
+  wyl_fact_graph_locator_clear (&fixture->locator);
+  wyl_fact_graph_resolver_clear (&fixture->resolver);
+  remove_tree (fixture->root);
+  g_clear_pointer (&fixture->root, g_free);
+  g_clear_pointer (&fixture->legacy_stage, g_free);
+}
+
+static wyrelog_error_t
+witness_open (WitnessFixture *fixture,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactInventoryIdentity *old_main,
+    WylFactGraphProvisionedRestoreSlot slot,
+    WylFactGraphProvisionedRestoreWitness **out_witness)
+{
+  return wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+           (&fixture->graph, operation_uuid, evidence, witness_restore_uuid,
+             old_main, slot, out_witness);
+}
+
+static void
+assert_witness_open_refused (WitnessFixture *fixture,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactInventoryIdentity *old_main,
+    WylFactGraphProvisionedRestoreSlot slot, wyrelog_error_t expected)
+{
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (witness_open (fixture, evidence, old_main, slot,
+      &witness), ==, expected);
+  g_assert_null (witness);
+}
+
+static WylFactGraphProvisionedRestoreWitness *
+witness_open_ready (WitnessFixture *fixture)
+{
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (witness_open (fixture, &fixture->evidence,
+      &fixture->old_main, WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN,
+      &witness), ==, WYRELOG_E_OK);
+  g_assert_nonnull (witness);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &fixture->graph), ==, WYRELOG_E_OK);
+  return witness;
+}
+
+static void
+witness_create_extra_file (WitnessFixture *fixture, const gchar *name,
+    mode_t mode)
+{
+  gint fd = openat (fixture->graph.graph_fd, name,
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, mode);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (write_exact (fd, "other", 5));
+  g_assert_cmpint (close (fd), ==, 0);
+}
+
+static void
+test_provisioned_restore_witness_evidence (void)
+{
+  WitnessFixture f;
+  witness_fixture_init (&f, "graph-restore", operation_uuid);
+  const guint8 *artifact_id = f.evidence.bytes + 48;
+  guint64 evidenced_object = 0;
+  for (gsize i = 0; i < 8; i++)
+    evidenced_object = (evidenced_object << 8) | artifact_id[i];
+  /* The journal pins st_ino; the evidence pins ATTR_CMN_FILEID.  APFS reports
+   * the same number through both, which is what lets one witness satisfy
+   * both the Linux-shaped identity pin and the Darwin evidence. */
+  g_assert_cmpuint (evidenced_object, ==, f.old_main.object);
+
+  /* The name-only opener never proves a Darwin main. */
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_open (&f.graph,
+      operation_uuid, witness_restore_uuid, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &witness), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (witness);
+
+  /* Only READY_MAIN is proved on Darwin.  RETAINED_ROLLBACK would accept a
+   * different name exposing the evidenced object, which ADR 0006 forbids;
+   * the commit and resume port (#1303 U5) decides that slot, and it is
+   * refused until then.  DUAL_COMPANION is never a single-witness slot. */
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+      WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION, WYRELOG_E_INVALID);
+  assert_witness_open_refused (&f, NULL, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_INVALID);
+
+  /* Positive: open, revalidate twice, free. */
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* Evidence that does not describe this object. */
+  WylFactGraphDarwinOperationEvidence flipped = f.evidence;
+  flipped.bytes[55] ^= 0x01u;
+  assert_witness_open_refused (&f, &flipped, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  WitnessFixture foreign_operation;
+  witness_fixture_init (&foreign_operation, "graph-foreign-operation",
+      witness_other_operation_uuid);
+  assert_witness_open_refused (&f, &foreign_operation.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  witness_fixture_clear (&foreign_operation);
+  WitnessFixture foreign_graph;
+  witness_fixture_init (&foreign_graph, "graph-foreign", operation_uuid);
+  assert_witness_open_refused (&f, &foreign_graph.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  /* A witness revalidated against another graph directory is refused. */
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &foreign_graph.graph), ==, WYRELOG_E_POLICY);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+  witness_fixture_clear (&foreign_graph);
+
+  /* An identity pin that does not match the evidenced object. */
+  WylFactArtifactInventoryIdentity shifted = f.old_main;
+  shifted.object += 1;
+  assert_witness_open_refused (&f, &f.evidence, &shifted,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+
+  /* Hard link: a second name on the object fails both open and revalidate. */
+  g_assert_cmpint (linkat (f.graph.graph_fd, "facts.duckdb", f.graph.graph_fd,
+      "extra", 0), ==, 0);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "extra", 0), ==, 0);
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (linkat (f.graph.graph_fd, "facts.duckdb", f.graph.graph_fd,
+      "extra", 0), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "extra", 0), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* The legacy provisioning stage name must stay absent on Darwin. */
+  witness_create_extra_file (&f, f.legacy_stage, 0600);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, f.legacy_stage, 0), ==, 0);
+  witness = witness_open_ready (&f);
+  witness_create_extra_file (&f, f.legacy_stage, 0600);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, f.legacy_stage, 0), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* Mode: 0644 is refused at open and after open.  An owner mismatch is not
+   * testable without privileges; the same check covers it. */
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* Substitution: a new object under the canonical name is refused at open,
+   * whichever identity the caller pins, and after open; a rename-away with
+   * no replacement reports the absence rather than a policy breach. */
+  g_assert_cmpint (renameat (f.graph.graph_fd, "facts.duckdb",
+      f.graph.graph_fd, "parked"), ==, 0);
+  witness_create_extra_file (&f, "facts.duckdb", 0600);
+  struct stat substitute;
+  g_assert_cmpint (fstatat (f.graph.graph_fd, "facts.duckdb", &substitute,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  WylFactArtifactInventoryIdentity substitute_identity = {
+    .domain = (guint64) substitute.st_dev,
+    .object = (guint64) substitute.st_ino,
+  };
+  assert_witness_open_refused (&f, &f.evidence, &substitute_identity,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "parked", f.graph.graph_fd,
+      "facts.duckdb"), ==, 0);
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "facts.duckdb",
+      f.graph.graph_fd, "parked"), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_NOT_FOUND);
+  witness_create_extra_file (&f, "facts.duckdb", 0600);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "parked", f.graph.graph_fd,
+      "facts.duckdb"), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* Symlink under the canonical name. */
+  g_assert_cmpint (renameat (f.graph.graph_fd, "facts.duckdb",
+      f.graph.graph_fd, "parked"), ==, 0);
+  g_assert_cmpint (symlinkat ("parked", f.graph.graph_fd, "facts.duckdb"),
+      ==, 0);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "parked", f.graph.graph_fd,
+      "facts.duckdb"), ==, 0);
+  witness = witness_open_ready (&f);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "facts.duckdb",
+      f.graph.graph_fd, "parked"), ==, 0);
+  g_assert_cmpint (symlinkat ("parked", f.graph.graph_fd, "facts.duckdb"),
+      ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (renameat (f.graph.graph_fd, "parked", f.graph.graph_fd,
+      "facts.duckdb"), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &f.graph), ==, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  witness_fixture_clear (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -694,5 +984,8 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/direct-final-preexisting-entries",
     test_direct_final_preexisting_entries);
+  g_test_add_func (
+    "/fact/macos-object-identity/provisioned-restore-witness",
+    test_provisioned_restore_witness_evidence);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
