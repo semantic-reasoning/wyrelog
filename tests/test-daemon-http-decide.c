@@ -24270,6 +24270,7 @@ check_tenant_ownership_contract (void)
   g_assert_cmpstr (record->owner_subject_id, ==, "human-principal-admin");
   g_assert_null (record->sealed_by_capacity);
   wyl_policy_tenant_authority_record_free (record);
+#ifdef WYL_HAS_AUDIT
   /* An unavailable administrator decision audit is an operational failure,
    * not evidence that this dual-role caller should fall back to ownership.
    * Fail only the authorization audit so a mistaken fallback could still
@@ -24293,6 +24294,7 @@ check_tenant_ownership_contract (void)
   g_assert_cmpint (sqlite3_exec (audit_fault_db,
       "DROP TRIGGER fail_tenant_authorization_audit;", NULL, NULL, NULL),
       ==, SQLITE_OK);
+#endif
   tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
   g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &record), ==, WYRELOG_E_OK);
   g_assert_cmpstr (record->sealed_by_capacity, ==, "system_admin");
