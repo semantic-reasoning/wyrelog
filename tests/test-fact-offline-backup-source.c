@@ -1730,10 +1730,13 @@ test_restore_begin_authenticated (void)
     g_assert_cmpuint (committed.revision, ==, prepared_revision);
     wyl_fact_offline_restore_journal_clear (&committed);
 #ifdef __APPLE__
-    /* macOS stops at the prepared journal of either scope (#1303): bind and
-     * commit admission refuse with the journal byte-identical, and abort
-     * retires every stage and releases the claim, leaving both namespaces
-     * exactly as they were before begin. */
+    /* macOS (#1303): a tenant journal stops at prepared, because tenant bind
+     * and commit admission refuse with the journal byte-identical.  A graph
+     * journal binds to its provisioned main through the ADR 0006 evidence
+     * witness (U3) and then stops, because commit admission refuses with the
+     * bound journal byte-identical until the commit steps are ported (U5).
+     * In both scopes abort retires every stage and releases the claim,
+     * leaving both namespaces exactly as they were before begin. */
     {
       g_autoptr (GBytes) prepared_journal = NULL;
       g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
@@ -1802,25 +1805,91 @@ test_restore_begin_authenticated (void)
         g_autofree gchar *stage = graph_file_path (&fixture, selected,
                 stage_name);
         g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+        /* The ACTIVE provisioning row whose evidence the bind must prove. */
+        g_autoptr (GPtrArray) provisioning = NULL;
+        g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+              (fixture.policy, "tenant-a", selected, &provisioning), ==,
+            WYRELOG_E_OK);
+        g_assert_cmpuint (provisioning->len, ==, 1);
+        const WylPolicyGraphProvisioningRecord *active_row =
+            g_ptr_array_index (provisioning, 0);
+        g_assert_cmpint (active_row->phase, ==,
+            WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+        g_assert_nonnull (active_row->darwin_operation_evidence);
+        g_autofree gchar *active_uuid = g_strdup (active_row->op_uuid);
+        /* A second link on the main is not the provisioned shape: the bind
+         * refuses with the journal byte-identical.  The link lives outside
+         * the graph directory so the inventory sees no stray entry and only
+         * the witness's link count can refuse. */
+        g_autofree gchar *main_path = graph_file_path (&fixture, selected,
+                "facts.duckdb");
+        g_autofree gchar *extra_path = g_build_filename (fixture.root,
+                "second-link", NULL);
+        g_assert_cmpint (link (main_path, extra_path), ==, 0);
         g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
               (fixture.policy, fixture.root, fixture.runtime, operation,
             selected, prepared_revision, 0, &committed), ==, WYRELOG_E_POLICY);
         g_assert_null (committed.operation_uuid);
         assert_restore_journal_unchanged (fixture.policy, operation,
             prepared_journal, prepared_revision);
+        g_assert_cmpint (g_unlink (extra_path), ==, 0);
+#ifdef WYL_TEST_HANDLE_SEAMS
+        /* A lost commit response: the bind is durable but reported as IO,
+         * and the store is terminal afterwards, so reopen it. */
+        wyl_policy_store_offline_restore_fail_once (fixture.policy,
+            WYL_POLICY_OFFLINE_RESTORE_FAIL_COMMIT_RESPONSE);
+        g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            selected, prepared_revision, 0, &committed), ==, WYRELOG_E_IO);
+        g_assert_null (committed.operation_uuid);
+        g_clear_pointer (&fixture.policy, wyl_policy_store_close);
+        g_autofree gchar *policy_path = g_build_filename (fixture.root,
+                "policy.db", NULL);
+        g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy),
+            ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_policy_store_create_schema (fixture.policy), ==,
+            WYRELOG_E_OK);
+        g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+              (fixture.policy, operation, &committed), ==, WYRELOG_E_OK);
+        g_assert_cmpint (committed.version, ==,
+            WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+        g_assert_cmpuint (committed.revision, ==, prepared_revision + 1);
+        wyl_fact_offline_restore_journal_clear (&committed);
+#endif
+        /* Bind with the prepared revision.  With the handle seams compiled
+         * in this is the replay of the durable bound journal: the witness
+         * re-proves the main and the authority returns the exact v2 at
+         * prepared + 1; without them it is the first apply. */
+        g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            selected, prepared_revision, 0, &committed), ==, WYRELOG_E_OK);
+        g_assert_cmpint (committed.version, ==,
+            WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+        g_assert_cmpuint (committed.revision, ==, prepared_revision + 1);
+        g_assert_cmpuint (committed.graphs->len, ==, 1);
+        g_assert_cmpstr (((WylFactOfflineRestoreJournalGraph *)
+            g_ptr_array_index (committed.graphs, 0))->old_provisioning_uuid,
+            ==, active_uuid);
+        g_autoptr (GBytes) bound_journal = NULL;
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+            &bound_journal), ==, WYRELOG_E_OK);
+        wyl_fact_offline_restore_journal_clear (&committed);
+        /* Commit admission refuses the bound journal byte-identical: the
+         * commit steps are not ported, so the decision never becomes COMMIT
+         * and abort stays open. */
         g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
               (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
-            operation, prepared_revision, 0, NULL, &committed), ==,
+            operation, prepared_revision + 1, 0, NULL, &committed), ==,
             WYRELOG_E_POLICY);
         g_assert_null (committed.operation_uuid);
         assert_restore_journal_unchanged (fixture.policy, operation,
-            prepared_journal, prepared_revision);
+            bound_journal, prepared_revision + 1);
         /* Rollback decides once, then begins and completes the retire of the
-         * one staged graph. */
+         * one staged graph, from the bound revision. */
         g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
               (fixture.policy, fixture.root, fixture.runtime, operation, 0,
             &committed), ==, WYRELOG_E_OK);
-        g_assert_cmpuint (committed.revision, ==, prepared_revision + 3);
+        g_assert_cmpuint (committed.revision, ==, prepared_revision + 4);
         g_assert_cmpint (committed.decision, ==,
             WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
         g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
@@ -4429,8 +4498,8 @@ test_restore_daemon_http_stateful_refusal (void)
   g_clear_pointer (&body, g_free);
   g_clear_pointer (&response, g_free);
 
-  /* COMMIT is still barred by the bind step with the prepared journal and
-   * the namespaces untouched. */
+  /* COMMIT is barred on macOS before the bind step, so the prepared journal
+   * and the namespaces stay untouched (#1303 U5 ports the commit steps). */
   body = restore_http_request_body_for_scope ("graph", "tenant-a", "alpha",
           bundle_root, digest, operation, 3, TRUE);
   g_assert_true (restore_http_post (session, base_url, token, "commit", body,

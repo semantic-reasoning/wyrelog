@@ -438,6 +438,15 @@ wyl_fact_offline_restore_tenant_commit_admit_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
+#ifdef __APPLE__
+  /* The commit steps after admission are Linux-only (#1303 U5).  Refuse
+   * here so a bound macOS journal never reaches decision COMMIT, where
+   * abort would be barred and resume would have no step to run.  The body
+   * below is intentionally unreachable on Darwin until then. */
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#endif
   wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate (bundle);
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   if (rc == WYRELOG_E_OK)
@@ -511,6 +520,15 @@ wyl_fact_offline_restore_graph_commit_admit_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
+#ifdef __APPLE__
+  /* The commit steps after admission are Linux-only (#1303 U5).  Refuse
+   * here so a bound macOS journal never reaches decision COMMIT, where
+   * abort would be barred and resume would have no step to run.  The body
+   * below is intentionally unreachable on Darwin until then. */
+  (void) drain_timeout_us;
+  (void) cancellable;
+  return WYRELOG_E_POLICY;
+#endif
   wyrelog_error_t rc = wyl_fact_offline_backup_bundle_revalidate (bundle);
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   if (rc == WYRELOG_E_OK)

@@ -227,6 +227,25 @@ test('platform-skip-guard-self', python3,
   env : python_strict_encoding_env,
   timeout : 120,
 )
+darwin_restore_bind_wiring_checker = files(
+  'test-darwin-restore-bind-wiring.py',
+)
+test('darwin-restore-bind-wiring', python3,
+  args : [
+    darwin_restore_bind_wiring_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
+test('darwin-restore-bind-wiring-self', python3,
+  args : [
+    darwin_restore_bind_wiring_checker,
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
 
 posix_errno_capability_pair_checker = files(
   'test-posix-errno-capability-pair.py',

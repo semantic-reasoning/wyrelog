@@ -196,3 +196,20 @@ locator-private capture/comparison, coordinator recovery, and secure bridge
 integration before #921 can restore macOS provisioning runtime tests. Linux
 retains its same-inode `nlink == 2` pair, and Windows retains its existing
 operation-bound volume/file evidence unchanged.
+
+## Restore witness
+
+A restore proves the old provisioned main before it binds a journal to it.
+Linux proves that object through its second name, the provisioning companion
+at link count two. On macOS the final has one link under the canonical name,
+so the restore witness holds a descriptor on `facts.duckdb` opened through
+the validated graph chain and, on every revalidation, compares the
+descriptor-derived evidence with the provisioning evidence together with the
+journal-pinned device and inode, mode, owner, link count one and the absence
+of the legacy stage name. Only the canonical name is witnessed. The rollback
+name would expose the evidenced object under a different name, which the
+comparison protocol above forbids, so a `RETAINED_ROLLBACK` witness is refused
+on macOS until the commit and resume port decides that slot under the same
+rule. The transition model is not told that the witness ran: a one-link main
+is its ordinary shape, and the proof is the successful witness call in the
+restore path, which must therefore use the evidence form of the capture.

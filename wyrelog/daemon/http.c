@@ -15430,6 +15430,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
               30 * G_USEC_PER_SEC, write.cancellable, &journal);
     }
     if (rc == WYRELOG_E_OK && commit) {
+#ifdef __APPLE__
+      /* A refused commit must leave the journal unchanged (403).  The
+       * library can bind a prepared macOS graph restore, but admission
+       * refuses until the commit steps are ported (#1303 U5), so refuse
+       * before binding rather than return 403 with a bound journal. */
+      rc = WYRELOG_E_POLICY;
+#else
       wyl_fact_offline_restore_journal_clear (&journal);
       rc = graph_scope
           ? wyl_fact_offline_restore_graph_bind_provisioned_old_run
@@ -15451,6 +15458,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
                 bound_revision, 30 * G_USEC_PER_SEC, write.cancellable,
                 &journal);
       }
+#endif
     }
     if (rc == WYRELOG_E_OK && resume) {
       if (!graph_scope) {
