@@ -208,6 +208,26 @@ test('feature-test-macro-platform-guard-self', python3,
   timeout : 120,
 )
 
+platform_skip_guard_checker = files(
+  'test-platform-skip-guard.py',
+)
+test('platform-skip-guard', python3,
+  args : [
+    platform_skip_guard_checker,
+    meson.project_source_root(),
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
+test('platform-skip-guard-self', python3,
+  args : [
+    platform_skip_guard_checker,
+    '--self-test',
+  ],
+  env : python_strict_encoding_env,
+  timeout : 120,
+)
+
 posix_errno_capability_pair_checker = files(
   'test-posix-errno-capability-pair.py',
 )

@@ -757,6 +757,7 @@ test_restore_stage_rejects_duckdb_sidecars (void)
 {
 #ifdef G_OS_WIN32
   /* Restore-stage readers are intentionally unsupported on Windows today. */
+  g_test_skip ("restore-stage readers are not yet ported to Windows");
   return;
 #else
   static const gchar *const suffixes[] = {
