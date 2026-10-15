@@ -193,6 +193,10 @@ typedef struct
   gchar *tenant_id;
   gchar *graph_id;
   gboolean verified;
+  /* Conservative candidates for wyl_client_fact_repair_batch (#1280): rows
+   * an old wrong-relation forget left in their relation's projection. */
+  guint64 orphan_repair_candidate_batches;
+  guint64 orphan_repair_candidate_rows;
 } WylClientFactGraphVerification;
 
 typedef struct
@@ -763,7 +767,9 @@ wyrelog_error_t wyl_client_fact_replay_resources (WylClient * client,
     WylClientFactReplayResources * out_resources, gsize result_size);
 /* Performs the daemon's non-mutating exact graph path/identity/schema
  * verification. The client must carry credentials bound to tenant. The
- * result is owned by the caller and must be cleared after use. */
+ * result is owned by the caller and must be cleared after use.  A verified
+ * answer also carries the orphan-repair candidate counts; an answer without
+ * them is WYRELOG_E_IO, not a verdict with zero candidates. */
 wyrelog_error_t wyl_client_fact_graph_verify (WylClient * client,
     const gchar * tenant, const gchar * graph, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
@@ -888,6 +894,20 @@ void wyl_client_fact_forget_result_clear (WylClientFactForgetResult * result);
  * fields are freed on entry; it is owned by the caller and must be cleared
  * after use. */
 wyrelog_error_t wyl_client_fact_forget_batch (WylClient * client,
+    const gchar * tenant, const gchar * graph, const gchar * namespace_id,
+    const gchar * relation, guint32 schema_version, const gchar * batch_id,
+    const gchar * operator_id, const gchar * reason, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientFactForgetResult * out_result);
+/* Erases the rows an old wrong-relation forget left in batch_id's actual
+ * relation projection (#1280), through the relation's :repair route.  The
+ * arguments, their validation, the receipt and the ownership of out_result
+ * are those of wyl_client_fact_forget_batch; the relation, namespace and
+ * schema version name the rows' actual projection.  A batch that is not a
+ * repair candidate, or is already repaired, is WYRELOG_E_NOT_FOUND.  When
+ * the daemon erased the rows but could not record the audit event, returns
+ * WYRELOG_E_IO with purged TRUE and audit_recorded FALSE. */
+wyrelog_error_t wyl_client_fact_repair_batch (WylClient * client,
     const gchar * tenant, const gchar * graph, const gchar * namespace_id,
     const gchar * relation, guint32 schema_version, const gchar * batch_id,
     const gchar * operator_id, const gchar * reason, gint64 guard_timestamp,

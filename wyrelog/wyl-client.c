@@ -3286,14 +3286,22 @@ wyl_client_fact_graph_verify (WylClient *client, const gchar *tenant,
         (data, size, "tenant_id");
   g_autofree gchar *response_graph = parse_simple_json_string_member
         (data, size, "graph_id");
+  guint64 orphan_batches = 0;
+  guint64 orphan_rows = 0;
   if (!parse_simple_json_bool_member (data, size, "ok", &ok)
       || !parse_simple_json_bool_member (data, size, "verified", &verified)
       || !ok || !verified || g_strcmp0 (response_tenant, tenant) != 0
-      || g_strcmp0 (response_graph, graph) != 0)
+      || g_strcmp0 (response_graph, graph) != 0
+      || !parse_simple_json_uint64_member (data, size,
+      "orphan_repair_candidate_batches", &orphan_batches)
+      || !parse_simple_json_uint64_member (data, size,
+      "orphan_repair_candidate_rows", &orphan_rows))
     return WYRELOG_E_IO;
   out_verification->tenant_id = g_steal_pointer (&response_tenant);
   out_verification->graph_id = g_steal_pointer (&response_graph);
   out_verification->verified = verified;
+  out_verification->orphan_repair_candidate_batches = orphan_batches;
+  out_verification->orphan_repair_candidate_rows = orphan_rows;
   return WYRELOG_E_OK;
 }
 
@@ -3647,12 +3655,17 @@ client_forget_field_is_valid (const gchar *value)
 
 #define WYL_CLIENT_FACT_FORGET_MAX_BODY 4096
 
-wyrelog_error_t
-wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
+/* Forget and repair share one request and one receipt: a JSON body naming
+ * the batch, the operator and the reason, sent with METHOD to the
+ * relation's OP_SUFFIX route, and the forget outcome in the answer.  Only
+ * the code the daemon gives a post-erase audit failure differs. */
+static wyrelog_error_t
+client_fact_erase_batch (WylClient *client, const gchar *tenant,
     const gchar *graph, const gchar *namespace_id, const gchar *relation,
     guint32 schema_version, const gchar *batch_id, const gchar *operator_id,
     const gchar *reason, gint64 guard_timestamp, const gchar *guard_loc_class,
-    gint64 guard_risk, WylClientFactForgetResult *out_result)
+    gint64 guard_risk, const gchar *op_suffix, const gchar *method,
+    const gchar *audit_failed_code, WylClientFactForgetResult *out_result)
 {
   if (out_result == NULL)
     return WYRELOG_E_INVALID;
@@ -3694,10 +3707,10 @@ wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
   g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
           NULL, TRUE);
   g_autofree gchar *uri = g_strdup_printf
-        ("%s/facts/%s/%s/%s:forget?%s&namespace=%s&schema_version=%u",
-          base_url, escaped_tenant, escaped_graph, escaped_relation,
+        ("%s/facts/%s/%s/%s%s?%s&namespace=%s&schema_version=%u",
+          base_url, escaped_tenant, escaped_graph, escaped_relation, op_suffix,
           guard_query, escaped_namespace, schema_version);
-  g_autoptr (SoupMessage) message = soup_message_new ("DELETE", uri);
+  g_autoptr (SoupMessage) message = soup_message_new (method, uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
   client_fact_attach_auth (message, access_token);
@@ -3750,7 +3763,7 @@ wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
   /* The rows are gone even though no audit event was recorded; report it so
    * the caller does not retry an erasure that already happened. */
   if (status == 500 && g_strcmp0 (client->last_error_code,
-      "fact_forget_audit_failed") == 0) {
+      audit_failed_code) == 0) {
     gboolean purged = FALSE;
     if (parse_simple_json_bool_member (data, size, "purged", &purged)
         && purged && parse_simple_json_uint64_member (data, size,
@@ -3775,6 +3788,32 @@ wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
   if (status == 503)
     return WYRELOG_E_BUSY;
   return WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_client_fact_forget_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id, const gchar *operator_id,
+    const gchar *reason, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactForgetResult *out_result)
+{
+  return client_fact_erase_batch (client, tenant, graph, namespace_id,
+             relation, schema_version, batch_id, operator_id, reason,
+             guard_timestamp, guard_loc_class, guard_risk, ":forget", "DELETE",
+             "fact_forget_audit_failed", out_result);
+}
+
+wyrelog_error_t
+wyl_client_fact_repair_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id, const gchar *operator_id,
+    const gchar *reason, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, WylClientFactForgetResult *out_result)
+{
+  return client_fact_erase_batch (client, tenant, graph, namespace_id,
+             relation, schema_version, batch_id, operator_id, reason,
+             guard_timestamp, guard_loc_class, guard_risk, ":repair", "POST",
+             "fact_orphan_repair_audit_failed", out_result);
 }
 
 wyrelog_error_t

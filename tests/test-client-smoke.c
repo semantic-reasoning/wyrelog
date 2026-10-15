@@ -1265,11 +1265,17 @@ main (void)
   http.oversized_chunked_response = FALSE;
 
   WylClientFactGraphVerification verification = { 0 };
+  /* #1280: the verdict carries the orphan-repair candidate counts, and a
+   * body without them is unreadable rather than a verdict with zero. */
   http.body = "{\"ok\":true,\"verified\":true,"
-      "\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\"}";
+      "\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\","
+      "\"orphan_repair_candidate_batches\":2,"
+      "\"orphan_repair_candidate_rows\":5}";
   if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",
       123, "public", 49, &verification) != WYRELOG_E_OK
       || !verification.verified
+      || verification.orphan_repair_candidate_batches != 2
+      || verification.orphan_repair_candidate_rows != 5
       || g_strcmp0 (verification.tenant_id, "__wr_default") != 0
       || g_strcmp0 (verification.graph_id, "orders") != 0
       || g_strcmp0 (http.last_method, "GET") != 0
@@ -1278,6 +1284,13 @@ main (void)
       || g_strcmp0 (http.last_authorization, "Bearer management-access") != 0)
     return wyl_test_normalize_exit_status (289);
   wyl_client_fact_graph_verification_clear (&verification);
+  http.body = "{\"ok\":true,\"verified\":true,"
+      "\"tenant_id\":\"__wr_default\",\"graph_id\":\"orders\"}";
+  if (wyl_client_fact_graph_verify (management_client, "__wr_default", "orders",
+      123, "public", 49, &verification) != WYRELOG_E_IO
+      || verification.verified || verification.tenant_id != NULL
+      || verification.orphan_repair_candidate_batches != 0)
+    return wyl_test_normalize_exit_status (4149);
   WylClientFactRestoreRequest restore_request = {
     .scope = WYL_CLIENT_FACT_RESTORE_SCOPE_TENANT,
     .tenant_id = "__wr_default",
@@ -1481,6 +1494,58 @@ main (void)
       || !client_last_response_is (management_client, 404,
       "fact_batch_not_found"))
     return wyl_test_normalize_exit_status (4106);
+
+  /* #1280: repair of rows an old wrong-relation forget left behind takes
+   * the forget body to the relation's :repair route by POST, and reads the
+   * forget receipt; its audit failure names its own code. */
+  http.status = 0;
+  http.body = "{\"ok\":true,\"rows_purged\":1,\"committed\":true,"
+      "\"mutation_class\":\"committed_ready\",\"queryable\":true,"
+      "\"reconcile\":false,\"engine_generation\":8}";
+  g_auto (WylClientFactForgetResult) repair = { 0 };
+  if (wyl_client_fact_repair_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "orphan-1", "repair-admin",
+      "repair old defect", 123, "public", 49, &repair) != WYRELOG_E_OK
+      || repair.rows_purged != 1 || !repair.purged || !repair.audit_recorded
+      || g_strcmp0 (repair.mutation_class, "committed_ready") != 0
+      || repair.engine_generation != 8
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path,
+      "/facts/__wr_default/orders/orders:repair") != 0
+      || g_strcmp0 (http.last_namespace, "shop") != 0
+      || g_strcmp0 (http.last_schema_version, "1") != 0
+      || g_strcmp0 (http.last_content_type, "application/json") != 0
+      || g_strcmp0 (http.last_body, "{\"batch_id\":\"orphan-1\","
+      "\"operator\":\"repair-admin\",\"reason\":\"repair old defect\"}")
+      != 0)
+    return wyl_test_normalize_exit_status (4150);
+  wyl_client_fact_forget_result_clear (&repair);
+  guint repair_requests = http.request_count;
+  if (wyl_client_fact_repair_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "orphan-1", "ops", "line\nbreak", 123,
+      "public", 49, &repair) != WYRELOG_E_INVALID || repair.purged
+      || http.request_count != repair_requests)
+    return wyl_test_normalize_exit_status (4151);
+  http.status = 500;
+  http.body = "{\"ok\":false,\"error\":\"fact_orphan_repair_audit_failed\","
+      "\"purged\":true,\"rows_purged\":1,"
+      "\"mutation_class\":\"committed_ready\"}";
+  if (wyl_client_fact_repair_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "orphan-1", "ops", "repair", 123,
+      "public", 49, &repair) != WYRELOG_E_IO
+      || !repair.purged || repair.audit_recorded || repair.rows_purged != 1
+      || !client_last_response_is (management_client, 500,
+      "fact_orphan_repair_audit_failed"))
+    return wyl_test_normalize_exit_status (4152);
+  wyl_client_fact_forget_result_clear (&repair);
+  http.status = 404;
+  http.body = "{\"error\":\"fact_orphan_repair_candidate_not_found\"}";
+  if (wyl_client_fact_repair_batch (management_client, "__wr_default",
+      "orders", "shop", "orders", 1, "orphan-1", "ops", "repair", 123,
+      "public", 49, &repair) != WYRELOG_E_NOT_FOUND || repair.purged
+      || !client_last_response_is (management_client, 404,
+      "fact_orphan_repair_candidate_not_found"))
+    return wyl_test_normalize_exit_status (4153);
 
   /* #1331: the fact paths kept any "error" string the daemon sent, and
    * wyctl printed it.  A code is now held to the strict parser's rules:
