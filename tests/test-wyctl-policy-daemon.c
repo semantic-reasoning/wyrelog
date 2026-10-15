@@ -1950,6 +1950,8 @@ main (void)
   g_assert_cmpint (wyl_client_mfa_verify (admin_client, tenant_otp), ==, WYRELOG_E_OK);
   g_autofree gchar *tenant_access = wyl_client_dup_access_token (admin_client);
   g_assert_true (g_file_set_contents (token_path, tenant_access, -1, NULL));
+  /* Replacing the file can reset its mode under the runner's umask. */
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
   /* #1238: the tenant lifecycle through wyctl.  It needs no fact store, so
    * it runs in every build.  wyctl-t1 is used by nothing else here. */
   gchar *tenant_create_argv[] = {
