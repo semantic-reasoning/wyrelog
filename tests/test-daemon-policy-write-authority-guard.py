@@ -3,7 +3,9 @@
 """Negative fixtures for the production daemon WRITE conformance guard."""
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -11,6 +13,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
@@ -69,20 +72,48 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
     (build_root / "compile_commands.json").write_text(json.dumps([entry]), encoding="utf-8")
     return build_root
 
+def run_guard_in_process(argv):
+    """Run the imported guard on ARGV the way its command line would.
+
+    The guard's own entry point maps the exception classes it expects to an
+    "error:" line and exit status 1, and any other exception ends the
+    interpreter with a traceback and the same status.  Mirror both so a
+    fixture's verdict is the one a subprocess would have returned, while
+    the lexer and owner-fault-matrix caches survive from one fixture to the
+    next (#1413)."""
+    stdout, stderr = io.StringIO(), io.StringIO()
+    returncode = 0
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            invoke.module.main(argv)
+        except (invoke.module.GuardError, OSError, ValueError,
+                json.JSONDecodeError) as e:
+            stderr.write(f"error: {e}\n")
+            returncode = 1
+        except SystemExit as e:
+            returncode = e.code if isinstance(e.code, int) else 1
+        except Exception:
+            stderr.write(traceback.format_exc())
+            returncode = 1
+    return subprocess.CompletedProcess(argv, returncode, stdout.getvalue(),
+        stderr.getvalue())
+
 def invoke(guard, root, compiler_id, compiler, defines=(), build_root=None,
-           extra=(), raw_only=False, print_candidate=False):
+           extra=(), raw_only=False, print_candidate=False, in_process=True):
     if build_root is None:
         build_root = synthetic_db(root, invoke.real_root, invoke.real_build_root,
             compiler_id, compiler, defines, extra, invoke.real_compiler_id)
-    command = [sys.executable, guard, str(root)]
+    argv = [str(root)]
     if raw_only:
-        command.append("--raw-only")
+        argv.append("--raw-only")
     else:
-        command += ["--build-root", str(build_root), "--compiler-id",
+        argv += ["--build-root", str(build_root), "--compiler-id",
             compiler_id]
     if print_candidate:
-        command.append("--print-candidate")
-    return subprocess.run(command,
+        argv.append("--print-candidate")
+    if in_process:
+        return run_guard_in_process(argv)
+    return subprocess.run([sys.executable, guard] + argv,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True)
 
@@ -166,6 +197,7 @@ def main():
     guard_spec.loader.exec_module(guard_module)
     synthetic_db.windows_split = guard_module.split_windows
     synthetic_db.is_daemon_http_output = guard_module.is_daemon_http_output
+    invoke.module = guard_module
     invoke.real_root = Path(ns.root).resolve()
     invoke.real_build_root = Path(ns.build_root).resolve()
     invoke.real_compiler_id = ns.compiler_id
@@ -177,8 +209,13 @@ def main():
         "facts_route_handler", 1)
     test_configure_acquire = acquire_statement(source,
         "wyl_daemon_http_configure_tenant_for_test")
+    # The production fixture goes through the real command line, so the
+    # argument parsing and exit-status path that meson's gate runs stays
+    # covered; the raw-only and missing-entry runs below do the same for
+    # the other arm and for a rejection.  Every fixture after that runs the
+    # guard in this process.
     if invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
-              build_root=ns.build_root).returncode:
+              build_root=ns.build_root, in_process=False).returncode:
         raise SystemExit("production fixture rejected")
     for enabled in (False, True):
         result = invoke(ns.guard, ns.root, ns.compiler_id, compiler, ns.define,
@@ -698,6 +735,19 @@ def main():
             if invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
                       ns.define, raw_only=name not in preprocessed_fixtures).returncode == 0:
                 raise SystemExit(f"guard accepted negative fixture: {name}")
+        # The in-process runner stands in for the command line on every
+        # fixture above, so its verdict and diagnostic for a rejection must
+        # be the ones the command line gives.
+        target.write_text(fixtures["legacy-mutex"], encoding="utf-8")
+        direct = invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
+            ns.define, raw_only=True, in_process=False)
+        cached = invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
+            ns.define, raw_only=True)
+        if direct.returncode == 0 or (direct.returncode, direct.stderr) != (
+                cached.returncode, cached.stderr):
+            raise SystemExit("in-process guard verdict differs from the "
+                f"command line: {direct.returncode} {direct.stderr.strip()!r}"
+                f" vs {cached.returncode} {cached.stderr.strip()!r}")
         target.write_text(source + "\nvoid macro_helper(void) { LOCKED "
             "(NULL, NULL, NULL, NULL, NULL); }\n", encoding="utf-8")
         define_flag = "/DLOCKED=tenant_create_handler" if ns.compiler_id in ("clang-cl", "msvc") else "-DLOCKED=tenant_create_handler"
