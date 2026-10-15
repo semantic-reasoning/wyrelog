@@ -1931,6 +1931,25 @@ main (void)
   g_unlink (input_path);
 #endif
 
+  g_assert_cmpint (wyl_client_logout (admin_client), ==, WYRELOG_E_OK);
+  static const guint8 tenant_seed[WYL_TOTP_SEED_BYTES] = { 0x13, 0x39, 0x42 };
+  WylTotpEnrollment tenant_enrollment = { 0 };
+  tenant_enrollment.subject_id = g_strdup ("wyctl-policy-admin");
+  memcpy (tenant_enrollment.secret, tenant_seed, sizeof tenant_seed);
+  tenant_enrollment.last_verified_step = G_MININT64;
+  tenant_enrollment.enrolled_at = 1700000000;
+  g_assert_cmpint (wyl_policy_store_totp_enrollment_insert (store, &tenant_enrollment), ==, WYRELOG_E_OK);
+  wyl_totp_enrollment_clear (&tenant_enrollment);
+  wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
+  guint tenant_code = 0;
+  g_assert_cmpint (wyl_totp_code_at_step (tenant_seed, sizeof tenant_seed,
+      (guint64) (g_get_real_time () / G_USEC_PER_SEC) / WYL_TOTP_STEP_SECONDS,
+      &tenant_code, NULL), ==, WYRELOG_E_OK);
+  g_autofree gchar *tenant_otp = g_strdup_printf ("%06u", tenant_code);
+  g_assert_cmpint (wyl_client_login (admin_client, "wyctl-policy-admin", NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_client_mfa_verify (admin_client, tenant_otp), ==, WYRELOG_E_OK);
+  g_autofree gchar *tenant_access = wyl_client_dup_access_token (admin_client);
+  g_assert_true (g_file_set_contents (token_path, tenant_access, -1, NULL));
   /* #1238: the tenant lifecycle through wyctl.  It needs no fact store, so
    * it runs in every build.  wyctl-t1 is used by nothing else here. */
   gchar *tenant_create_argv[] = {
@@ -1992,16 +2011,35 @@ main (void)
   assert_wyctl_failed (tenant_create_invalid_argv, 3,
       "wyctl: tenant create failed: invalid_tenant_request\n");
   assert_wyctl_stdout_contains (tenant_list_argv,
-      "tenant=wyctl-t1 sealed=false\n");
+      "tenant=wyctl-t1 owner=wyctl-policy-admin sealed=false sealed_by_capacity=none\n");
   assert_wyctl_rejected (tenant_seal_unconfirmed_argv,
       "wyctl: tenant seal closes the whole tenant; pass --confirm\n");
   assert_wyctl_stdout_contains (tenant_seal_argv,
       "tenant=wyctl-t1 changed=true request_id=");
   assert_wyctl_stdout_contains (tenant_list_argv,
-      "tenant=wyctl-t1 sealed=true\n");
+      "tenant=wyctl-t1 owner=wyctl-policy-admin sealed=true sealed_by_capacity=system_admin\n");
   assert_wyctl_stdout (tenant_unseal_argv, "tenant=wyctl-t1 changed=true\n");
+  gchar *tenant_show_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH, "--daemon-url", (gchar *) base_url,
+    "tenant", "show", "--name", "wyctl-t1", "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted", "--guard-risk", "29", NULL,
+  };
+  assert_wyctl_stdout (tenant_show_argv,
+      "tenant=wyctl-t1 owner=wyctl-policy-admin sealed=false sealed_by_capacity=none\n");
+  gchar transfer_request[WYL_CLIENT_REQUEST_ID_BUF];
+  g_assert_cmpint (wyl_client_request_id_new (transfer_request, sizeof transfer_request), ==, WYRELOG_E_OK);
+  gchar *tenant_transfer_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH, "--daemon-url", (gchar *) base_url,
+    "tenant", "transfer-owner", "--name", "wyctl-t1", "--to", "new-owner",
+    "--request-id", transfer_request, "--access-token-file", token_path,
+    "--guard-timestamp", "123", "--guard-loc-class", "trusted", "--guard-risk", "29", NULL,
+  };
+  assert_wyctl_stdout_contains (tenant_transfer_argv, "tenant=wyctl-t1 changed=true request_id=");
+  assert_wyctl_stdout_contains (tenant_transfer_argv, "tenant=wyctl-t1 changed=true request_id=");
+  assert_wyctl_stdout (tenant_show_argv,
+      "tenant=wyctl-t1 owner=new-owner sealed=false sealed_by_capacity=none\n");
   assert_wyctl_stdout_contains (tenant_list_argv,
-      "tenant=wyctl-t1 sealed=false\n");
+      "tenant=wyctl-t1 owner=new-owner sealed=false sealed_by_capacity=none\n");
 
   /* #1238: the unauthenticated profile report. */
   gchar *profile_status_argv[] = {

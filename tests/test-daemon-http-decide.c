@@ -1138,17 +1138,17 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 41;
-  const guint expected_exact = 37;
+  const guint expected_total = 43;
+  const guint expected_exact = 39;
 #elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 40;
-  const guint expected_exact = 36;
+  const guint expected_total = 42;
+  const guint expected_exact = 38;
 #elif defined(WYL_HAS_AUDIT)
-  const guint expected_total = 37;
-  const guint expected_exact = 33;
+  const guint expected_total = 39;
+  const guint expected_exact = 35;
 #else
-  const guint expected_total = 36;
-  const guint expected_exact = 32;
+  const guint expected_total = 38;
+  const guint expected_exact = 34;
 #endif
   if (total != expected_total || prefixes != 4 || raw_singletons != 0
       || exact_singletons != expected_exact
@@ -1221,6 +1221,12 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
 #endif
     gint rc = check_exact_route_shape (server, base_url, exact_paths[i],
             canonical_method_status, 2281 + (gint) i * 13);
+    if (rc != 0)
+      return rc;
+  }
+  const gchar *ownership_paths[] = { "/tenants/show", "/tenants/transfer-owner" };
+  for (gsize i = 0; i < G_N_ELEMENTS (ownership_paths); i++) {
+    gint rc = check_exact_route_shape (server, base_url, ownership_paths[i], 405, 33000 + (gint) i * 13);
     if (rc != 0)
       return rc;
   }
@@ -9818,6 +9824,12 @@ policy_lifecycle_audit_count (WylHandle *handle, const gchar *subject,
     .check_decision = TRUE,
     .decision = WYL_DECISION_ALLOW,
   };
+  if (g_strcmp0 (action, "tenant_seal") == 0)
+    probe.deny_origin = "system_admin";
+  if (g_strcmp0 (action, "tenant_unseal") == 0) {
+    probe.deny_reason = "system_admin";
+    probe.deny_origin = "system_admin";
+  }
   if (wyl_policy_store_foreach_audit_event
         (wyl_handle_get_policy_store (handle), audit_event_probe_cb, &probe)
       != WYRELOG_E_OK)
@@ -11062,10 +11074,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 164;
   if (g_strcmp0 (client_tenant, "__wr_default") != 0)
     return 165;
-  /* Tenant management has historically accepted an active human session
-   * created through the explicitly enabled skip-MFA login path.  Keep this
-   * fixture visibly non-MFA so the WRITE-lease reauthorization cannot silently
-   * strengthen the front-door contract. */
+  /* Keep the ordinary session non-MFA; mutations requiring assurance
+   * below use the separate MFA fixture. */
   g_autoptr (WylSession) management_session =
       wyl_daemon_http_ref_session (server, session_token);
   if (management_session == NULL
@@ -11866,7 +11876,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *revoked_tenant_seal_query = g_strdup_printf
         ("name=tenant-revoke&tenant=%s&session_token=%s&guard_timestamp=123"
           "&guard_loc_class=public&guard_risk=49", WYL_TENANT_DEFAULT,
-          session_token);
+          transition_mfa_token);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
           "/tenants/seal", revoked_tenant_seal_query,
           "{\"version\":\"1\",\"request_id\":"
@@ -11905,7 +11915,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *tenant_seal_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, session_token);
+          WYL_TENANT_DEFAULT, transition_mfa_token);
   static const gchar *tenant_seal_body =
       "{\"version\":\"1\",\"request_id\":" "\"000000000000000000000000222\"}";
   static const gchar *const tenant_seal_aliases[] = {
@@ -12015,7 +12025,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *wrong_recovery_tenant_query =
       g_strdup_printf ("name=tenant-wrong&tenant=%s&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          WYL_TENANT_DEFAULT, session_token);
+          WYL_TENANT_DEFAULT, transition_mfa_token);
   rc = send_raw_policy_mutation (session, "POST", base_url,
           "/tenants/create", wrong_recovery_tenant_query, &status, &body);
   if (rc != 0)
@@ -12223,7 +12233,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_autofree gchar *implicit_tenant_seal_query =
       g_strdup_printf ("name=tenant-a&session_token=%s"
           "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
-          session_token);
+          transition_mfa_token);
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
           "/tenants/seal", implicit_tenant_seal_query,
           "{\"version\":\"1\",\"request_id\":"
@@ -24157,6 +24167,156 @@ check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
  * the timeout. Variant-irrelevant static helpers stay defined in this file;
  * the build silences the resulting -Wunused-function warnings.
  */
+static void
+tenant_ownership_request (ServiceDenialEnv *env, const gchar *token,
+    const gchar *action, const gchar *target, const gchar *request,
+    guint expected_status)
+{
+  gchar minted[WYL_REQUEST_ID_STRING_BUF];
+  if (request == NULL) {
+    g_assert_cmpint (wyl_request_id_new (minted, sizeof minted), ==, WYRELOG_E_OK);
+    request = minted;
+  }
+  g_autofree gchar *query = g_strdup_printf (
+    "tenant=__wr_default&name=owner-1339&to=%s&request_id=%s&guard_timestamp=123&guard_loc_class=public&guard_risk=99",
+    target != NULL ? target : "unused", request);
+  g_autofree gchar *path = g_strdup_printf ("/tenants/%s", action);
+  g_autofree gchar *json = g_strdup_printf ("{\"version\":\"1\",\"request_id\":\"%s\"}", request);
+  g_autofree gchar *body = NULL;
+  guint status = 0;
+  g_assert_cmpint (send_raw_service_principal_bearer (env->session,
+      g_str_equal (action, "show") ? "GET" : "POST", env->base_url, path,
+      query, token, g_str_equal (action, "seal") ? json : NULL, &status, &body), ==, 0);
+  if (status != expected_status)
+    g_printerr ("tenant ownership %s: status=%u body=%s\n", action, status, body);
+  g_assert_cmpuint (status, ==, expected_status);
+}
+
+static wyrelog_error_t
+tenant_ownership_close_before_write (WylHandle *handle, const gchar *actor,
+    const gchar *action, const gchar *session_id, const gchar *target,
+    gpointer data)
+{
+  (void) actor;
+  (void) target;
+  PermissionTransitionMfaRevocationProbe *probe = data;
+  g_assert_cmpstr (action, ==, "wr.tenant.manage");
+  probe->calls++;
+  wyrelog_error_t rc = wyl_session_close (handle, probe->session);
+  if (rc == WYRELOG_E_OK)
+    wyl_daemon_http_revoke_human_session_for_test (probe->server, session_id);
+  return rc;
+}
+
+static void
+check_tenant_ownership_contract (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "owner-1339",
+      "human-principal-admin", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "owner-1339", "active"), ==, WYRELOG_E_OK);
+  gchar bob_id[WYL_ID_STRING_BUF], other_id[WYL_ID_STRING_BUF], nonmfa_id[WYL_ID_STRING_BUF];
+  wyl_id_t generated = WYL_ID_NIL;
+  g_assert_cmpint (wyl_id_new (&generated), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&generated, bob_id, sizeof bob_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&generated), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&generated, other_id, sizeof other_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&generated), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&generated, nonmfa_id, sizeof nonmfa_id), ==, WYRELOG_E_OK);
+  g_autofree gchar *bob = NULL, *bob_refresh = NULL;
+  g_autofree gchar *other = NULL, *other_refresh = NULL;
+  g_autofree gchar *nonmfa = NULL, *nonmfa_refresh = NULL;
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store, "owner-bob", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_principal_state (store, "owner-other", "authenticated"), ==, WYRELOG_E_OK);
+  g_assert_true (seed_human_tokens_with_assurance (env.http.server, bob_id,
+      "owner-bob", WYL_TENANT_DEFAULT, TRUE, &bob, &bob_refresh));
+  g_assert_true (seed_human_tokens_with_assurance (env.http.server, other_id,
+      "owner-other", WYL_TENANT_DEFAULT, TRUE, &other, &other_refresh));
+  g_assert_true (seed_human_tokens_with_assurance (env.http.server, nonmfa_id,
+      "human-principal-admin", WYL_TENANT_DEFAULT, FALSE, &nonmfa, &nonmfa_refresh));
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "owner-other", "wr.system_admin", "owner-1339"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "show", NULL, NULL, 200);
+  tenant_ownership_request (&env, other, "transfer-owner", "owner-bob", NULL, 403);
+  tenant_ownership_request (&env, nonmfa, "transfer-owner", "owner-bob", NULL, 403);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "svc:bad", NULL, 400);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "wr.system", NULL, 400);
+  tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->sealed_by_capacity, ==, "owner");
+  wyl_policy_tenant_authority_record_free (record);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "owner-bob", request, 200);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "owner-bob", request, 200);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "owner-other", request, 409);
+  tenant_ownership_request (&env, other, "transfer-owner", "owner-bob", request, 409);
+  tenant_ownership_request (&env, env.access_token, "unseal", NULL, NULL, 403);
+  tenant_ownership_request (&env, bob, "unseal", NULL, NULL, 200);
+  tenant_ownership_request (&env, bob, "transfer-owner", "owner-bob", NULL, 200);
+  g_assert_cmpint (grant_tenant_manage_authority (env.handle, "human-principal-admin"), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
+  tenant_ownership_request (&env, bob, "seal", NULL, NULL, 200);
+  tenant_ownership_request (&env, bob, "unseal", NULL, NULL, 403);
+  tenant_ownership_request (&env, env.access_token, "unseal", NULL, NULL, 200);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "human-principal-admin", NULL, 200);
+  /* Replaying the former owner's first transfer must not transfer it again. */
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "owner-bob", request, 200);
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->owner_subject_id, ==, "human-principal-admin");
+  g_assert_null (record->sealed_by_capacity);
+  wyl_policy_tenant_authority_record_free (record);
+  /* An unavailable administrator decision audit is an operational failure,
+   * not evidence that this dual-role caller should fall back to ownership.
+   * Fail only the authorization audit so a mistaken fallback could still
+   * commit a lifecycle audit and downgrade the seal to owner capacity. */
+  sqlite3 *audit_fault_db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_exec (audit_fault_db,
+      "CREATE TEMP TRIGGER fail_tenant_authorization_audit "
+      "BEFORE INSERT ON audit_events WHEN NEW.action='wr.tenant.manage' "
+      "BEGIN SELECT RAISE(FAIL,'authorization audit unavailable'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 403);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner",
+      "owner-bob", NULL, 403);
+  tenant_ownership_request (&env, env.access_token, "unseal", NULL, NULL, 403);
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store,
+      "owner-1339", &record), ==, WYRELOG_E_OK);
+  g_assert_false (record->sealed_compatibility);
+  g_assert_null (record->sealed_by_capacity);
+  g_assert_cmpstr (record->owner_subject_id, ==, "human-principal-admin");
+  wyl_policy_tenant_authority_record_free (record);
+  g_assert_cmpint (sqlite3_exec (audit_fault_db,
+      "DROP TRIGGER fail_tenant_authorization_audit;", NULL, NULL, NULL),
+      ==, SQLITE_OK);
+  tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->sealed_by_capacity, ==, "system_admin");
+  wyl_policy_tenant_authority_record_free (record);
+  gboolean membership = FALSE;
+  g_assert_cmpint (wyl_policy_store_role_membership_exists (store, "owner-other", "wr.system_admin", "owner-1339", &membership), ==, WYRELOG_E_OK);
+  g_assert_true (membership);
+  /* Logout at the decisive WRITE-lease check leaves ownership and seal
+   * state unchanged, even for an actor with both authority capacities. */
+  g_autoptr (WylSession) live = wyl_daemon_http_ref_session_by_id (env.http.server, env.session_token);
+  PermissionTransitionMfaRevocationProbe probe = {
+    .server = env.http.server, .session = live,
+  };
+  wyl_daemon_http_set_management_reauthorization_checkpoint_for_test
+    (env.http.server, tenant_ownership_close_before_write, &probe);
+  tenant_ownership_request (&env, env.access_token, "transfer-owner", "owner-bob", NULL, 403);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->owner_subject_id, ==, "human-principal-admin");
+  g_assert_cmpstr (record->sealed_by_capacity, ==, "system_admin");
+  wyl_policy_tenant_authority_record_free (record);
+  service_denial_env_clear (&env);
+}
+
 #if defined(WYL_TEST_VARIANT_REFRESH)
 /*
  * #1030: a client that treats the access token as opaque -- the correct
@@ -25236,6 +25396,7 @@ default_variant_checks (void)
 int
 main (void)
 {
+  check_tenant_ownership_contract ();
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);

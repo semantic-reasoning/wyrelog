@@ -338,6 +338,12 @@ insert_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id,
           owned ? "'tenant-owner'," : "", sealed ? 1 : 0, tenant_id,
           graph_id, tenant_id, sealed ? 1 : 0);
   exec_ok (db, sql);
+  if (sealed && scalar_int64 (db,
+      "SELECT count(*) FROM pragma_table_info('tenants') WHERE name='sealed_by_capacity'") == 1) {
+    g_autofree gchar *capacity_sql = g_strdup_printf (
+      "UPDATE tenants SET sealed_by_capacity='system_admin' WHERE tenant_id='%s';", tenant_id);
+    exec_ok (db, capacity_sql);
+  }
 }
 
 static WylPolicyFactReconcileArtifactEvidence

@@ -52,6 +52,8 @@ REQUIRED = {
     "wyl_client_tenant_clear",
     "wyl_client_tenant_list_clear",
     "wyl_client_tenant_list",
+    "wyl_client_tenant_show",
+    "wyl_client_tenant_transfer_owner",
     "wyl_client_tenant_create",
     "wyl_client_tenant_unseal",
     "wyl_client_tenant_seal",

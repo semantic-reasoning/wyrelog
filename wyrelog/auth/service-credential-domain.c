@@ -208,7 +208,7 @@ verify_service_retirement_audit (WylEngineVerification *verification,
   rc = wyl_engine_verification_verify_audit_event (verification,
           retirement->audit_id, retirement->created_at_us, TRUE,
           publication->actor_subject_id, "tenant_seal", publication->tenant_id,
-          NULL, NULL, publication->request_id);
+          NULL, retirement->acting_capacity[0] ? retirement->acting_capacity : NULL, publication->request_id);
   if (rc != WYRELOG_E_OK)
     return rc;
   const gchar *relations[] = {
@@ -235,6 +235,13 @@ verify_service_retirement_audit (WylEngineVerification *verification,
     "audit_event_deny_origin",
   };
   for (guint i = 0; i < G_N_ELEMENTS (optional_relations); i++) {
+    if (i == 1 && retirement->acting_capacity[0]) {
+      const gchar *row[] = { retirement->audit_id, retirement->acting_capacity };
+      rc = verify_engine_keyed_row (verification, optional_relations[i], row, 2);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      continue;
+    }
     gboolean absent = FALSE;
     rc = wyl_engine_verification_has_no_keyed_row (verification,
             optional_relations[i], event[0], &absent);
@@ -440,6 +447,7 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
       .tenant_sealed_generation = proof.tenant_sealed_generation,
       .audit_id = proof.audit_id,
       .audit_created_at_us = proof.created_at_us,
+      .acting_capacity = proof.acting_capacity[0] ? proof.acting_capacity : NULL,
       .invalidation_completed = TRUE,
     };
     if (proof_rc == WYRELOG_E_OK)
@@ -801,9 +809,9 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !receipt_found) {
     mutation.authority_write_attempted = TRUE;
-    rc = wyl_policy_store_seal_tenant_keyed_core (mutation.transaction,
+    rc = wyl_policy_store_seal_tenant_keyed_capacity_core (mutation.transaction,
             mutation.store, tenant_id, actor_subject_id, request_id,
-            receipt_version, &stored_retirement, stored_tenant);
+            receipt_version, runtime->acting_capacity != NULL ? *runtime->acting_capacity : NULL, &stored_retirement, stored_tenant);
   }
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
       && stored_retirement.disposition ==

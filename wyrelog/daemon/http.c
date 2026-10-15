@@ -8523,33 +8523,38 @@ authorize_guarded_session_action_extended (SoupServer *server,
     return FALSE;
   }
 
-  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
-  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
-  wyl_decide_req_set_subject_id (req, auth.actor);
-  wyl_decide_req_set_action (req, action);
-  wyl_decide_req_set_resource_id (req,
-      resource != NULL ? resource : auth.session_id);
-  wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
-  wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
-  /* #740 WALL 1: pass the validated service-bearer signal; FALSE for
-   * human/session-token bearers so nothing is asserted for them. */
-  wyl_decide_req_set_service_bearer_authenticated (req,
-      auth.service_authenticated);
+  /* NULL action authenticates and validates guard input for ownership paths;
+   * their authority is checked inside WRITE. */
+  if (action != NULL) {
+    g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+    g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+    wyl_decide_req_set_subject_id (req, auth.actor);
+    wyl_decide_req_set_action (req, action);
+    wyl_decide_req_set_resource_id (req,
+        resource != NULL ? resource : auth.session_id);
+    wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
+    wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+    /* #740 WALL 1: pass the validated service-bearer signal; FALSE for
+     * human/session-token bearers so nothing is asserted for them. */
+    wyl_decide_req_set_service_bearer_authenticated (req,
+        auth.service_authenticated);
 
-  /* No retained lease reaches this owner: only the decision path asks the
-   * resolver to keep one.  Back to the public entry, as on main. */
-  wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
-  if (rc == WYRELOG_E_INVALID) {
-    set_json_error (msg, 400, invalid_code);
-    return FALSE;
-  }
-  if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 500, failed_code);
-    return FALSE;
-  }
-  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
-    set_json_error (msg, 403, denied_code);
-    return FALSE;
+    /* No retained lease reaches this owner: only the decision path asks the
+     * resolver to keep one.  Back to the public entry, as on main. */
+    wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
+    if (rc == WYRELOG_E_INVALID) {
+      set_json_error (msg, 400, invalid_code);
+      return FALSE;
+    }
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, failed_code);
+      return FALSE;
+    }
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
+      set_json_error (msg, 403, denied_code);
+      return FALSE;
+    }
+
   }
 
   g_autoptr (WylSession) session = out_session != NULL ?
@@ -8614,6 +8619,10 @@ typedef struct
   gint64 guard_timestamp;
   const gchar *guard_loc_class;
   gint64 guard_risk;
+  const gchar *owner_tenant;
+  gboolean ownership_replay;
+  gboolean unsealing;
+  const gchar *acting_capacity;
 } WylManagementReauthorization;
 
 static gboolean
@@ -8735,6 +8744,35 @@ management_reauthorize_inside_write (gpointer data,
       authorization->guard_loc_class, authorization->guard_risk);
   wyl_decide_req_set_request_id (req, authorization->decision_request_id);
   rc = wyl_decide (authorization->handle, req, resp);
+  if (rc == WYRELOG_E_OK && authorization->owner_tenant != NULL) {
+    /* wyl_decide reports audit failure as an OK call with a fail-closed
+     * denial. It does not establish that SYSTEM authority was absent:
+     * falling back here could downgrade a dual-role seal to owner capacity. */
+    if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+        "audit_unavailable") == 0)
+      return WYRELOG_E_AUTH;
+    if (!wyl_decide_req_guard_is_satisfied (req))
+      return WYRELOG_E_AUTH;
+    if (wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW) {
+      authorization->acting_capacity = "system_admin";
+      return WYRELOG_E_OK;
+    }
+    authorization->acting_capacity = "owner";
+    /* Transfer's transaction checks its exact receipt before current owner. */
+    if (authorization->ownership_replay)
+      return WYRELOG_E_OK;
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    rc = wyl_policy_store_read_tenant_authority (
+      wyl_handle_get_policy_store (authorization->handle),
+      authorization->owner_tenant, &record);
+    if (rc == WYRELOG_E_OK && (g_strcmp0 (record->owner_subject_id,
+        authorization->actor) != 0 || (authorization->unsealing
+        && record->sealed_compatibility
+        && g_strcmp0 (record->sealed_by_capacity, "owner") != 0)))
+      rc = WYRELOG_E_AUTH;
+    wyl_policy_tenant_authority_record_free (record);
+    return rc;
+  }
   if (rc == WYRELOG_E_OK
       && wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     rc = WYRELOG_E_AUTH;
@@ -10499,19 +10537,31 @@ typedef struct
 {
   GString *json;
   gboolean first;
+  wyl_policy_store_t *store;
 } TenantListJsonCtx;
 
 static wyrelog_error_t
 append_tenant_json (const gchar *tenant_id, gboolean sealed, gpointer user_data)
 {
   TenantListJsonCtx *ctx = user_data;
+  (void) sealed;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (ctx->store, tenant_id, &record);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (!ctx->first)
     g_string_append_c (ctx->json, ',');
   ctx->first = FALSE;
   g_string_append (ctx->json, "{\"tenant\":");
   append_json_string (ctx->json, tenant_id);
-  g_string_append_printf (ctx->json, ",\"sealed\":%s}",
-      sealed ? "true" : "false");
+  g_string_append_printf (ctx->json, ",\"sealed\":%s",
+      record->sealed_compatibility ? "true" : "false");
+  g_string_append (ctx->json, ",\"owner\":");
+  append_json_string (ctx->json, record->owner_subject_id);
+  g_string_append (ctx->json, ",");
+  append_json_nullable_string (ctx->json, "sealed_by_capacity", record->sealed_by_capacity);
+  g_string_append_c (ctx->json, '}');
+  wyl_policy_tenant_authority_record_free (record);
   return WYRELOG_E_OK;
 }
 
@@ -10553,6 +10603,7 @@ typedef struct
 {
   const gchar *tenant;
   const gchar *creator_subject;
+  WylManagementReauthorization *authorization;
   gboolean create;
   gboolean *changed;
   gboolean expected_active;
@@ -10572,6 +10623,28 @@ static wyrelog_error_t
 mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
 {
   TenantLifecyclePublication *publication = data;
+  if (!publication->create && publication->authorization != NULL) {
+    wyrelog_error_t auth_rc = management_session_matches_live (
+      publication->authorization->session, publication->authorization->session_id,
+      publication->creator_subject, WYL_TENANT_DEFAULT, TRUE) ? WYRELOG_E_OK : WYRELOG_E_AUTH;
+    if (auth_rc != WYRELOG_E_OK)
+      return auth_rc;
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    auth_rc = wyl_policy_store_read_tenant_authority (store, publication->tenant, &record);
+    if (auth_rc != WYRELOG_E_OK)
+      return auth_rc;
+    if (g_strcmp0 (publication->authorization->acting_capacity, "system_admin") != 0
+        && (g_strcmp0 (record->owner_subject_id, publication->creator_subject) != 0
+        || (record->sealed_compatibility && g_strcmp0 (record->sealed_by_capacity, "owner") != 0))) {
+      wyl_policy_tenant_authority_record_free (record);
+      return WYRELOG_E_AUTH;
+    }
+    wyl_audit_event_set_deny_reason ((WylAuditEvent *) publication->audit_event,
+        publication->authorization->acting_capacity);
+    wyl_audit_event_set_deny_origin ((WylAuditEvent *) publication->audit_event,
+        record->sealed_by_capacity);
+    wyl_policy_tenant_authority_record_free (record);
+  }
   wyrelog_error_t rc = publication->create ?
       wyl_policy_store_create_tenant (store, publication->tenant,
           publication->creator_subject, publication->changed) :
@@ -10868,6 +10941,15 @@ verify_active_tenant_publication (WylEngineVerification *verification,
     "audit_event_deny_origin",
   };
   for (guint i = 0; i < G_N_ELEMENTS (optional_audit_relations); i++) {
+    const gchar *value = i == 0 ? wyl_audit_event_get_deny_reason (publication->audit_event)
+        : wyl_audit_event_get_deny_origin (publication->audit_event);
+    if (value != NULL) {
+      const gchar *row[] = { publication->audit_id, value };
+      rc = verify_tenant_lifecycle_keyed_row (verification, optional_audit_relations[i], row, 2, TRUE);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      continue;
+    }
     gboolean absent = FALSE;
     rc = wyl_engine_verification_has_no_keyed_row (verification,
             optional_audit_relations[i], event_row[0], &absent);
@@ -11058,6 +11140,7 @@ tenant_seal_recovery_descriptor_new (WylHandle *handle,
   descriptor->audit_created_at_us = recovery->audit_created_at_us;
   descriptor->audit_subject = g_strdup (recovery->actor_subject_id);
   descriptor->audit_action = g_strdup ("tenant_seal");
+  descriptor->audit_deny_origin = g_strdup (recovery->acting_capacity);
   descriptor->audit_resource = g_strdup (recovery->tenant_id);
   descriptor->audit_request_id = g_strdup (recovery->request_id);
   descriptor->audit_decision = WYL_DECISION_ALLOW;
@@ -11647,6 +11730,8 @@ tenant_recovery_repair_with_write (WylDaemonHttpContext *ctx,
         || proof.tenant_sealed_generation !=
         descriptor->recorded_sealed_generation
         || g_strcmp0 (proof.audit_id, descriptor->audit_id) != 0
+        || g_strcmp0 (proof.acting_capacity[0] ? proof.acting_capacity : NULL,
+        descriptor->audit_deny_origin) != 0
         || proof.created_at_us != descriptor->audit_created_at_us
         || !descriptor->invalidation_completed))
       proof_rc = WYRELOG_E_POLICY;
@@ -11812,6 +11897,7 @@ tenant_list_handler (SoupServer *server, SoupServerMessage *msg,
   TenantListJsonCtx json_ctx = {
     .json = body,
     .first = TRUE,
+    .store = wyl_handle_get_policy_store (ctx->handle),
   };
   wyrelog_error_t rc = wyl_policy_store_foreach_tenant
         (wyl_handle_get_policy_store (ctx->handle), append_tenant_json,
@@ -11897,9 +11983,9 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   gint64 guard_timestamp = 0;
   g_autofree gchar *guard_loc_class = NULL;
   gint64 guard_risk = 0;
-  if (sealing) {
+  if (!creating) {
     if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
-        "wr.tenant.manage", WYL_TENANT_DEFAULT, "tenant_auth_required",
+        NULL, WYL_TENANT_DEFAULT, "tenant_auth_required",
         "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed",
         &auth, &actor, &session, &guard_timestamp, &guard_loc_class,
         &guard_risk))
@@ -11916,24 +12002,26 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   g_autofree gchar *lifecycle_audit_id = NULL;
   g_autofree gchar *lifecycle_audit_action = NULL;
   g_auto (WylDaemonPolicyWrite) write = { 0 };
+  decision_request_id = ensure_request_id_header (msg);
+  WylManagementReauthorization reauthorization = {
+    .ctx = ctx,
+    .handle = ctx->handle,
+    .session = session,
+    .session_id = auth.session_id,
+    .actor = actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
+    .action = "wr.tenant.manage",
+    .resource_id = WYL_TENANT_DEFAULT,
+    .target_tenant = NULL,
+    .decision_request_id = decision_request_id,
+    .require_mfa = TRUE,
+    .owner_tenant = tenant,
+    .unsealing = !sealing,
+    .guard_timestamp = guard_timestamp,
+    .guard_loc_class = guard_loc_class,
+    .guard_risk = guard_risk,
+  };
   if (sealing) {
-    decision_request_id = ensure_request_id_header (msg);
-    WylManagementReauthorization reauthorization = {
-      .ctx = ctx,
-      .handle = ctx->handle,
-      .session = session,
-      .session_id = auth.session_id,
-      .actor = actor,
-      .expected_session_tenant = WYL_TENANT_DEFAULT,
-      .action = "wr.tenant.manage",
-      .resource_id = WYL_TENANT_DEFAULT,
-      .target_tenant = NULL,
-      .decision_request_id = decision_request_id,
-      .require_mfa = FALSE,
-      .guard_timestamp = guard_timestamp,
-      .guard_loc_class = guard_loc_class,
-      .guard_risk = guard_risk,
-    };
     wyl_service_credential_mutation_authorization_t authorization = {
       .authorize = management_reauthorize_inside_write,
       .data = &reauthorization,
@@ -11963,6 +12051,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .test_verify_opposite_state = test_verify_opposite_state,
 #endif
       .authorization = &authorization,
+      .acting_capacity = &reauthorization.acting_capacity,
       .data = &recovery_latch,
     };
     rc = wyl_tenant_seal_keyed_with_runtime (ctx->handle, tenant, actor,
@@ -11972,6 +12061,8 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   } else {
     rc = wyl_daemon_policy_write_acquire (ctx, msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
+    if (rc == WYRELOG_E_OK && !creating)
+      rc = management_reauthorize_inside_write (&reauthorization, actor);
     gboolean tenant_exists = FALSE;
     if (rc == WYRELOG_E_OK && creating)
       rc = wyl_policy_store_tenant_exists (write.store, tenant, &tenant_exists);
@@ -12002,6 +12093,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     TenantLifecyclePublication publication = {
       .tenant = tenant,
       .creator_subject = actor,
+      .authorization = creating ? NULL : &reauthorization,
       .create = creating,
       .changed = &changed,
       .audit_event = lifecycle_audit,
@@ -12132,6 +12224,10 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
         "tenant_mutation_unavailable");
     return;
   }
+  if (rc == WYRELOG_E_AUTH) {
+    set_json_error (msg, 403, sealing ? "tenant_seal_denied" : "tenant_unseal_denied");
+    return;
+  }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "tenant_mutation_failed");
     return;
@@ -12139,6 +12235,224 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   set_tenant_mutation_json (msg, ctx, tenant, changed,
       sealing ? retirement_values[1] : NULL, decision_request_id);
+}
+
+static gboolean
+tenant_actor_authenticate (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar *tenant,
+    WylDaemonAuthContext *auth, gchar **actor, WylSession **session,
+    gchar **loc, WylManagementReauthorization *authorization)
+{
+  gint64 timestamp = 0, risk = 0;
+  if (!authorize_guarded_session_action_extended (server, msg, query, ctx,
+      NULL, WYL_TENANT_DEFAULT, "tenant_auth_required", "invalid_tenant_auth",
+      "tenant_denied", "tenant_auth_failed", auth, actor, session, &timestamp,
+      loc, &risk))
+    return FALSE;
+  *authorization = (WylManagementReauthorization) {
+    .ctx = ctx, .handle = ctx->handle, .session = *session,
+    .session_id = auth->session_id, .actor = *actor,
+    .expected_session_tenant = WYL_TENANT_DEFAULT,
+    .action = "wr.tenant.manage", .resource_id = WYL_TENANT_DEFAULT,
+    .require_mfa = TRUE, .guard_timestamp = timestamp,
+    .guard_loc_class = *loc, .guard_risk = risk,
+    .decision_request_id = ensure_request_id_header (msg), .owner_tenant = tenant,
+  };
+  if (!management_session_matches_live (*session, auth->session_id, *actor,
+      WYL_TENANT_DEFAULT, TRUE)) {
+    set_json_error (msg, 403, "tenant_mfa_required");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static void
+tenant_show_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = lookup_required_query_string (query, "name");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400, "invalid_tenant_request");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!tenant_actor_authenticate (server, msg, query, ctx, tenant, &auth,
+      &actor, &session, &loc, &authorization))
+    return;
+  wyrelog_error_t rc = management_reauthorize_inside_write (&authorization, actor);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : rc == WYRELOG_E_AUTH ? 403 : 500,
+        rc == WYRELOG_E_NOT_FOUND ? "unknown_tenant" : rc == WYRELOG_E_AUTH ? "tenant_denied" : "tenant_query_failed");
+    return;
+  }
+  g_autoptr (GString) body = g_string_new ("{\"tenants\":[");
+  TenantListJsonCtx json = { .json = body, .first = TRUE,
+                             .store = wyl_handle_get_policy_store (ctx->handle) };
+  rc = append_tenant_json (tenant, FALSE, &json);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
+        rc == WYRELOG_E_NOT_FOUND ? "unknown_tenant" : "tenant_query_failed");
+    return;
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+typedef struct
+{
+  WylManagementReauthorization *authorization;
+  const gchar *tenant;
+  const gchar *target;
+  const gchar *request_id;
+  gboolean changed;
+  WylAuditEvent *audit;
+} TenantTransferPublication;
+
+static wyrelog_error_t
+mutate_tenant_transfer (wyl_policy_store_t *store, gpointer data)
+{
+  TenantTransferPublication *publication = data;
+  WylManagementReauthorization *authorization = publication->authorization;
+  wyrelog_error_t rc = management_session_matches_live (authorization->session,
+          authorization->session_id, authorization->actor, WYL_TENANT_DEFAULT, TRUE)
+      ? WYRELOG_E_OK : WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_transfer_tenant_owner (store, publication->tenant,
+            authorization->actor, publication->target, publication->request_id,
+            g_strcmp0 (authorization->acting_capacity, "system_admin") == 0,
+            &publication->changed);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_tenant_transfer_audit (store, publication->request_id, &publication->audit);
+  return rc;
+}
+
+static wyrelog_error_t
+verify_tenant_transfer (WylEngineVerification *verification, gpointer data)
+{
+  TenantTransferPublication *publication = data;
+  WylAuditEvent *event = publication->audit;
+  if (event == NULL)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+  return wyl_engine_verification_verify_audit_event (verification, id,
+             wyl_audit_event_get_created_at_us (event), TRUE,
+             wyl_audit_event_get_subject_id (event), "tenant_transfer_owner",
+             publication->tenant, wyl_audit_event_get_deny_reason (event),
+             publication->target, publication->request_id);
+}
+
+static void
+tenant_transfer_owner_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = lookup_required_query_string (query, "name");
+  const gchar *target = lookup_required_query_string (query, "to");
+  const gchar *request_id = lookup_required_query_string (query, "request_id");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) || !wyl_request_id_is_canonical (request_id)) {
+    set_json_error (msg, 400, "invalid_tenant_request");
+    return;
+  }
+  if (g_str_equal (tenant, WYL_TENANT_DEFAULT)) {
+    set_json_error (msg, 403, "tenant_builtin_immutable");
+    return;
+  }
+  if (!wyl_policy_tenant_owner_is_valid (tenant, target)) {
+    set_json_error (msg, 400, "invalid_tenant_owner");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!tenant_actor_authenticate (server, msg, query, ctx, tenant, &auth,
+      &actor, &session, &loc, &authorization))
+    return;
+  authorization.ownership_replay = TRUE;
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, msg,
+          WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
+  if (rc == WYRELOG_E_OK) {
+    g_mutex_lock (&ctx->lock);
+    gboolean recovery_pending = ctx->tenant_recovery != NULL;
+    g_mutex_unlock (&ctx->lock);
+    if (recovery_pending)
+      rc = WYRELOG_E_BUSY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = management_reauthorize_inside_write (&authorization, actor);
+  TenantTransferPublication publication = { .authorization = &authorization,
+                                            .tenant = tenant, .target = target, .request_id = request_id };
+  if (rc == WYRELOG_E_OK) {
+    g_autoptr (WylEngineSession) engine = wyl_engine_session_acquire (ctx->handle);
+    if (engine == NULL)
+      rc = WYRELOG_E_BUSY;
+    else {
+      wyl_daemon_policy_write_observe_cleanup_resource (&write,
+          WYL_DAEMON_POLICY_WRITE_OBSERVED_ENGINE);
+      WylCommittedPublicationStage stage;
+      rc = wyl_engine_session_run_committed_publication (engine,
+              mutate_tenant_transfer, &publication, verify_tenant_transfer,
+              &publication, NULL, NULL, &stage);
+      /* A COMMIT error may have applied the transaction. Only a durable
+       * receipt matching the event produced here can prove that outcome. */
+      gboolean committed = stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED;
+      if (rc != WYRELOG_E_OK && stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS) {
+        g_autoptr (WylAuditEvent) durable = NULL;
+        if (wyl_policy_store_read_tenant_transfer_audit (write.store,
+            request_id, &durable) == WYRELOG_E_OK && publication.audit != NULL) {
+          g_autofree gchar *durable_id = wyl_audit_event_dup_id_string (durable);
+          g_autofree gchar *expected_id = wyl_audit_event_dup_id_string (publication.audit);
+          committed = g_strcmp0 (durable_id, expected_id) == 0;
+        }
+      }
+      if (rc != WYRELOG_E_OK && committed) {
+        guint64 generation = 0;
+        wyrelog_error_t repair = wyl_handle_policy_store_capture_generation (ctx->handle, write.store, &generation);
+        if (repair == WYRELOG_E_OK)
+          repair = wyl_engine_session_repair_committed_publication (engine, write.lease,
+                  write.store, generation, verify_tenant_transfer, &publication);
+        if (repair == WYRELOG_E_OK)
+          rc = WYRELOG_E_OK;
+      }
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    wyl_audit_complete_authoritative_event (ctx->handle, publication.audit);
+  g_clear_object (&publication.audit);
+  if (write.state == WYL_DAEMON_POLICY_WRITE_ACTIVE)
+    rc = wyl_daemon_policy_write_record_primary (&write, rc);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_AUTH ? 403 : rc == WYRELOG_E_CONFLICT ? 409 : rc == WYRELOG_E_NOT_FOUND ? 404 : rc == WYRELOG_E_BUSY ? 503 : 500,
+        rc == WYRELOG_E_AUTH ? "tenant_transfer_denied" : rc == WYRELOG_E_CONFLICT ? "tenant_transfer_conflict" : rc == WYRELOG_E_NOT_FOUND ? "unknown_tenant" : "tenant_transfer_failed");
+    return;
+  }
+  if (!wyl_daemon_policy_write_prepare_success_response (msg))
+    return;
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"owner\":");
+  append_json_string (body, target);
+  g_string_append_printf (body, ",\"changed\":%s}", publication.changed ? "true" : "false");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
 }
 
 static void
@@ -19973,6 +20287,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants",
       tenant_list_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/tenants/show",
+      tenant_show_handler, ctx, NULL);
+  wyl_daemon_http_add_exact_handler (server, "/tenants/transfer-owner",
+      tenant_transfer_owner_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants/create",
       tenant_create_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/tenants/seal",

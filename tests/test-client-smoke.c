@@ -1928,8 +1928,8 @@ main (void)
 
   /* #1238: tenant management as the __wr_default session. */
   g_auto (WylClientTenantList) tenants = { 0 };
-  http.body = "{\"tenants\":[{\"tenant\":\"__wr_default\",\"sealed\":false},"
-      "{\"tenant\":\"acme\",\"sealed\":true}]}";
+  http.body = "{\"tenants\":[{\"tenant\":\"__wr_default\",\"owner\":\"wr.system\",\"sealed_by_capacity\":null,\"sealed\":false},"
+      "{\"tenant\":\"acme\",\"owner\":\"alice\",\"sealed_by_capacity\":\"owner\",\"sealed\":true}]}";
   if (wyl_client_tenant_list (management_client, 123, "public", 49,
       &tenants) != WYRELOG_E_OK || tenants.len != 2
       || g_strcmp0 (tenants.items[1].tenant_id, "acme") != 0
@@ -1987,6 +1987,19 @@ main (void)
       || !client_last_response_is (management_client, 503,
       "tenant_mutation_unavailable"))
     return wyl_test_normalize_exit_status (4127);
+  http.status = 0;
+  http.body = "{\"tenants\":[{\"tenant\":\"acme\",\"owner\":\"alice\",\"sealed\":true,\"sealed_by_capacity\":\"owner\"}]}";
+  g_auto (WylClientTenant) shown = { 0 };
+  g_assert_cmpint (wyl_client_tenant_show (management_client, "acme", 123, "public", 49, &shown), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (shown.owner, ==, "alice");
+  g_assert_cmpstr (shown.sealed_by_capacity, ==, "owner");
+  g_assert_cmpstr (http.last_path, ==, "/tenants/show");
+  g_assert_cmpstr (http.last_method, ==, "GET");
+  http.body = "{\"ok\":true,\"tenant\":\"acme\",\"owner\":\"bob\",\"changed\":true}";
+  g_assert_cmpint (wyl_client_tenant_transfer_owner (management_client, "acme", "bob", request_id, 123, "public", 49, &tenant_changed), ==, WYRELOG_E_OK);
+  g_assert_true (tenant_changed);
+  g_assert_cmpstr (http.last_path, ==, "/tenants/transfer-owner");
+  g_assert_cmpint (wyl_client_tenant_transfer_owner (management_client, "acme", "other", request_id, 123, "public", 49, &tenant_changed), ==, WYRELOG_E_IO);
   http.status = 0;
 
   /* #1096: the schema-count quota client must keep its typed contract

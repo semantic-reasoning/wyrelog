@@ -47,7 +47,7 @@ DOMAIN_FUNCTIONS = {
     ),
     "wyl_tenant_seal_keyed_with_runtime": (
         "wyl_policy_store_seal_tenant_keyed_precheck_core",
-        "wyl_policy_store_seal_tenant_keyed_core",
+        "wyl_policy_store_seal_tenant_keyed_capacity_core",
         "wyl_service_auth_selector_init_tenant",
     ),
     "wyl_service_credential_revoke_keyed_with_runtime": (

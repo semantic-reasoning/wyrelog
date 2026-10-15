@@ -5183,6 +5183,91 @@ interrupt_tenant_create_bundle_readback (gpointer data)
   return 1;
 }
 
+typedef struct
+{
+  WylAuditEvent *audit;
+  gboolean changed;
+} OwnershipPublicationProbe;
+
+static wyrelog_error_t
+mutate_ownership_publication_probe (wyl_policy_store_t *store, gpointer data)
+{
+  OwnershipPublicationProbe *probe = data;
+  g_clear_object (&probe->audit);
+  wyrelog_error_t rc = wyl_policy_store_transfer_tenant_owner (store,
+          "transfer-commit", "alice", "bob", "000000000000000000000001339",
+          FALSE, &probe->changed);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_read_tenant_transfer_audit (store,
+            "000000000000000000000001339", &probe->audit);
+  return rc;
+}
+
+static wyrelog_error_t
+verify_ownership_publication_probe (WylEngineVerification *verification,
+    gpointer data)
+{
+  OwnershipPublicationProbe *probe = data;
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (probe->audit);
+  return wyl_engine_verification_verify_audit_event (verification, id,
+             wyl_audit_event_get_created_at_us (probe->audit), TRUE, "alice",
+             "tenant_transfer_owner", "transfer-commit", "alice", "bob",
+             "000000000000000000000001339");
+}
+
+static void
+check_ownership_publication_commit_outcomes (void)
+{
+  const WylCommittedPublicationFault faults[] = {
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT,
+    WYL_COMMITTED_PUBLICATION_FAULT_COMMIT_APPLIED_ERROR,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, "transfer-commit", "alice", &created), ==, WYRELOG_E_OK);
+    WylServiceAuthWriteLease *lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write (
+          wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease), ==, WYRELOG_E_OK);
+    wyl_handle_set_committed_publication_fault_once_for_test (handle, faults[i]);
+    g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+    OwnershipPublicationProbe probe = { 0 };
+    WylCommittedPublicationStage stage;
+    g_assert_cmpint (wyl_engine_session_run_committed_publication (session,
+        mutate_ownership_publication_probe, &probe, verify_ownership_publication_probe,
+        &probe, NULL, NULL, &stage), ==, WYRELOG_E_IO);
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "transfer-commit", &record), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (record->owner_subject_id, ==, i == 0 ? "alice" : "bob");
+    wyl_policy_tenant_authority_record_free (record);
+    g_autoptr (WylAuditEvent) durable = NULL;
+    wyrelog_error_t receipt_rc = wyl_policy_store_read_tenant_transfer_audit (store,
+            "000000000000000000000001339", &durable);
+    if (i == 0) {
+      g_assert_cmpint (receipt_rc, ==, WYRELOG_E_NOT_FOUND);
+      g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED);
+    } else {
+      g_assert_cmpint (receipt_rc, ==, WYRELOG_E_OK);
+      g_assert_cmpint (stage, ==, WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS);
+      guint64 generation = 0;
+      g_assert_cmpint (wyl_handle_policy_store_capture_generation (handle, store, &generation), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_engine_session_repair_committed_publication (session,
+          lease, store, generation, verify_ownership_publication_probe, &probe), ==, WYRELOG_E_OK);
+    }
+    /* Both clean rollback and committed ambiguity can be retried exactly. */
+    g_assert_cmpint (wyl_engine_session_run_committed_publication (session,
+        mutate_ownership_publication_probe, &probe, verify_ownership_publication_probe,
+        &probe, NULL, NULL, &stage), ==, WYRELOG_E_OK);
+    g_assert_true (probe.changed);
+    g_clear_object (&probe.audit);
+    g_clear_pointer (&session, wyl_engine_session_release);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==, WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+  }
+}
+
 static gint
 check_committed_publication_fault_stages_and_bundle_classifier (void)
 {
@@ -7803,6 +7888,7 @@ main (int argc, char **argv)
   if (crash_policy != NULL || crash_marker != NULL)
     return wyl_test_normalize_exit_status (crash_policy != NULL && crash_marker != NULL ?
                run_committed_crash_child (crash_policy, crash_marker) : 921);
+  check_ownership_publication_commit_outcomes ();
   test_program_path = argc > 0 ? argv[0] : NULL;
   gint rc;
 

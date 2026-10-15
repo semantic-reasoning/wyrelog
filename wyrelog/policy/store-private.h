@@ -476,6 +476,7 @@ typedef struct
   guint64 reconciliation_generation;
   gboolean sealed_compatibility;
   gchar *owner_subject_id;
+  gchar *sealed_by_capacity;
 } WylPolicyTenantAuthorityRecord;
 
 typedef struct
@@ -1113,6 +1114,7 @@ typedef struct
   gint64 event_id;
   gchar audit_id[WYL_ID_STRING_BUF];
   gint64 created_at_us;
+  gchar acting_capacity[16];
 } WylPolicyServiceRetirementOutcome;
 
 #define WYL_SERVICE_RETIREMENT_FINGERPRINT_BYTES 32u
@@ -1131,6 +1133,7 @@ typedef struct
   guint64 tenant_sealed_generation;
   gchar audit_id[WYL_ID_STRING_BUF];
   gint64 created_at_us;
+  gchar acting_capacity[16];
 } WylPolicyTenantSealReceiptProof;
 
 wyrelog_error_t wyl_policy_store_read_exact_tenant_seal_receipt_proof
@@ -2475,6 +2478,13 @@ gboolean wyl_policy_store_tenant_owner_assignment_applied
 wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
     const gchar * tenant_id, const gchar * owner_subject_id,
     gboolean * out_created);
+typedef struct _WylAuditEvent WylAuditEvent;
+wyrelog_error_t wyl_policy_store_read_tenant_transfer_audit (wyl_policy_store_t *store,
+    const gchar *request_id, WylAuditEvent **out_event);
+/* Requires caller-owned policy transaction and authority WRITE lease. */
+wyrelog_error_t wyl_policy_store_transfer_tenant_owner (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, const gchar *target,
+    const gchar *request_id, gboolean system_admin, gboolean *changed);
 /* Compatibility/test setup mutator. Production tenant sealing must use the
  * keyed authority core below; non-test callers use this only to unseal. */
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
@@ -2482,6 +2492,12 @@ wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_set_tenant_sealed_full
   (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
     gboolean * out_changed);
+wyrelog_error_t wyl_policy_store_seal_tenant_keyed_capacity_core
+  (WylServiceAuthorityTransaction *transaction, wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *actor_subject_id, const gchar *request_id,
+    guint32 receipt_version, const gchar *acting_capacity,
+    WylPolicyServiceRetirementOutcome *retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_core
   (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,

@@ -968,6 +968,8 @@ wyl_client_tenant_clear (WylClientTenant *value)
   if (value == NULL)
     return;
   g_clear_pointer (&value->tenant_id, g_free);
+  g_clear_pointer (&value->owner, g_free);
+  g_clear_pointer (&value->sealed_by_capacity, g_free);
   memset (value, 0, sizeof *value);
 }
 
@@ -986,7 +988,7 @@ static gboolean
 parse_tenant_object (JsonCursor *cursor, WylClientTenant *out)
 {
   gchar *key = NULL;
-  gboolean seen_tenant = FALSE, seen_sealed = FALSE;
+  gboolean seen_tenant = FALSE, seen_sealed = FALSE, seen_owner = FALSE, seen_capacity = FALSE;
   if (!take (cursor, '{'))
     return FALSE;
   while (TRUE) {
@@ -1002,6 +1004,16 @@ parse_tenant_object (JsonCursor *cursor, WylClientTenant *out)
       if (seen_sealed || !parse_bool (cursor, &out->sealed))
         goto invalid;
       seen_sealed = TRUE;
+    } else if (g_strcmp0 (key, "owner") == 0) {
+      if (seen_owner || !parse_string (cursor, &out->owner) || !string_is_plain_token (out->owner))
+        goto invalid;
+      seen_owner = TRUE;
+    } else if (g_strcmp0 (key, "sealed_by_capacity") == 0) {
+      if (seen_capacity)
+        goto invalid;
+      seen_capacity = TRUE;
+      if (!parse_nullable_string (cursor, &out->sealed_by_capacity))
+        goto invalid;
     } else {
       goto invalid;
     }
@@ -1011,7 +1023,10 @@ parse_tenant_object (JsonCursor *cursor, WylClientTenant *out)
       goto invalid;
   }
   g_free (key);
-  if (!seen_tenant || !seen_sealed)
+  if (!seen_tenant || !seen_sealed || !seen_owner || !seen_capacity
+      || (out->sealed ? (g_strcmp0 (out->sealed_by_capacity, "owner") != 0
+      && g_strcmp0 (out->sealed_by_capacity, "system_admin") != 0)
+      : out->sealed_by_capacity != NULL))
     goto invalid_no_key;
   return TRUE;
 invalid:

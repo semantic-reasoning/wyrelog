@@ -57,6 +57,7 @@
 #include "fact/graph-locator-private.h"
 #include "fact/root-writer-lease-private.h"
 #include "fact/publication-lock-event-private.h"
+#include "audit/event-private.h"
 #include "fact/offline-restore-journal-private.h"
 #include "fact/rule-pack-private.h"
 
@@ -10450,6 +10451,12 @@ static const WylGraphAuthorityColumn graph_authority_columns[] = {
     "9223372036854775807)"
   },
   {
+    "tenants", "sealed_by_capacity", "TEXT", FALSE, NULL,
+    "CHECK(sealed_by_capacity IN ('owner','system_admin'))",
+    "ALTER TABLE tenants ADD COLUMN sealed_by_capacity TEXT "
+    "CHECK(sealed_by_capacity IN ('owner','system_admin'))"
+  },
+  {
     "tenants", "owner_subject_id", "TEXT", TRUE, "''", NULL,
     "ALTER TABLE tenants ADD COLUMN owner_subject_id TEXT NOT NULL "
     "DEFAULT ''"
@@ -11440,8 +11447,8 @@ static const gchar tenant_authority_insert_guard_sql[] =
 /* #1338: the owner invariant, kept out of the versioned lifecycle guards
  * so neither ladder has to carry the other's history.  It mirrors
  * wyl_policy_tenant_owner_is_valid: the built-in tenant is owned by the
- * system and nothing else is.  The only owner change allowed is the
- * predecessor-store backfill from the empty migration default. */
+ * system and nothing else is. Owner changes require a pending transfer
+ * event, apart from predecessor-store backfill of an empty owner. */
 #define TENANT_OWNER_VALID_SQL(row)                                          \
   "(typeof(" row ".owner_subject_id)='text' AND "                           \
   "length(" row ".owner_subject_id) BETWEEN 1 AND 128 AND "                 \
@@ -11459,13 +11466,60 @@ static const gchar tenant_owner_insert_guard_sql[] =
     "SELECT CASE WHEN NOT " TENANT_OWNER_VALID_SQL ("NEW")
     " THEN RAISE(ABORT,'invalid tenant owner') END; END";
 
-static const gchar tenant_owner_update_guard_sql[] =
+static const gchar tenant_owner_update_guard_pre_transfer_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_owner_update_guard "
     "BEFORE UPDATE ON tenants "
     "WHEN NEW.owner_subject_id IS NOT OLD.owner_subject_id BEGIN "
     "SELECT CASE WHEN NOT (OLD.owner_subject_id='' AND "
     TENANT_OWNER_VALID_SQL ("NEW")
     ") THEN RAISE(ABORT,'tenant owner is immutable') END; END";
+
+static const gchar tenant_owner_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_owner_update_guard "
+    "BEFORE UPDATE ON tenants "
+    "WHEN NEW.owner_subject_id IS NOT OLD.owner_subject_id BEGIN "
+    "SELECT CASE WHEN NOT (" TENANT_OWNER_VALID_SQL ("NEW")
+    " AND (OLD.owner_subject_id='' OR (OLD.tenant_id<>'__wr_default' AND "
+    "EXISTS(SELECT 1 FROM tenant_ownership_events e WHERE "
+    "e.tenant_id=OLD.tenant_id AND e.previous_owner=OLD.owner_subject_id "
+    "AND e.new_owner=NEW.owner_subject_id AND e.applied=0)))) "
+    "THEN RAISE(ABORT,'invalid tenant ownership transfer') END; END";
+
+static const gchar tenant_ownership_events_sql[] =
+    "CREATE TABLE IF NOT EXISTS tenant_ownership_events ("
+    "request_id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,"
+    "actor TEXT NOT NULL,previous_owner TEXT NOT NULL,new_owner TEXT NOT NULL,"
+    "changed INTEGER NOT NULL CHECK(changed IN (0,1)),"
+    "applied INTEGER NOT NULL DEFAULT 0 CHECK(applied IN (0,1)),"
+    "audit_id TEXT NOT NULL UNIQUE,created_at_us INTEGER NOT NULL)";
+
+static const gchar tenant_ownership_immutable_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_ownership_immutable "
+    "BEFORE UPDATE ON tenant_ownership_events WHEN OLD.applied=1 OR "
+    "NEW.applied<>1 OR NEW.request_id IS NOT OLD.request_id OR "
+    "NEW.tenant_id IS NOT OLD.tenant_id OR NEW.actor IS NOT OLD.actor OR "
+    "NEW.previous_owner IS NOT OLD.previous_owner OR NEW.new_owner IS NOT OLD.new_owner OR "
+    "NEW.changed IS NOT OLD.changed OR NEW.audit_id IS NOT OLD.audit_id OR "
+    "NEW.created_at_us IS NOT OLD.created_at_us BEGIN "
+    "SELECT RAISE(ABORT,'immutable tenant ownership event'); END";
+static const gchar tenant_ownership_delete_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_ownership_delete_guard "
+    "BEFORE DELETE ON tenant_ownership_events BEGIN "
+    "SELECT RAISE(ABORT,'immutable tenant ownership event'); END";
+static const gchar tenant_capacity_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_capacity_update_guard "
+    "BEFORE UPDATE OF sealed_by_capacity ON tenants WHEN "
+    "(NEW.sealed=1 AND NEW.sealed_by_capacity IS NULL) OR "
+    "(NEW.sealed=0 AND NEW.sealed_by_capacity IS NOT NULL) BEGIN "
+    "SELECT RAISE(ABORT,'invalid tenant seal capacity'); END";
+
+/* Compatibility writers default to administrator capacity; the production
+ * seal core replaces it with the authorized capacity in the same transaction. */
+static const gchar tenant_capacity_transition_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_capacity_transition "
+    "AFTER UPDATE OF sealed ON tenants WHEN NEW.sealed<>OLD.sealed BEGIN "
+    "UPDATE tenants SET sealed_by_capacity=CASE WHEN NEW.sealed=1 "
+    "THEN 'system_admin' ELSE NULL END WHERE tenant_id=NEW.tenant_id; END";
 
 static const gchar tenant_authority_update_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_authority_update_guard "
@@ -14201,6 +14255,11 @@ validate_graph_authority_schema (sqlite3 *db)
      tenant_authority_insert_guard_sql},
     {"trigger", "tenant_authority_update_guard",
      tenant_authority_update_guard_sql},
+    {"table", "tenant_ownership_events", tenant_ownership_events_sql},
+    {"trigger", "tenant_capacity_transition", tenant_capacity_transition_sql},
+    {"trigger", "tenant_capacity_update_guard", tenant_capacity_update_guard_sql},
+    {"trigger", "tenant_ownership_immutable", tenant_ownership_immutable_sql},
+    {"trigger", "tenant_ownership_delete_guard", tenant_ownership_delete_guard_sql},
     {"trigger", "tenant_owner_insert_guard", tenant_owner_insert_guard_sql},
     {"trigger", "tenant_owner_update_guard", tenant_owner_update_guard_sql},
     {"trigger", "fact_graph_authority_insert_guard",
@@ -14517,6 +14576,7 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
   sqlite3 *db = store->db;
   wyrelog_error_t rc = WYRELOG_E_OK;
   gboolean added_tenant_sealed_generation = FALSE;
+  gboolean added_tenant_capacity = FALSE;
   for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
     rc = graph_authority_column_status (db,
@@ -14529,6 +14589,8 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
       if ((rc = exec_sql (db,
           graph_authority_columns[i].alter_sql)) != WYRELOG_E_OK)
         return rc;
+      if (g_str_equal (graph_authority_columns[i].column, "sealed_by_capacity"))
+        added_tenant_capacity = TRUE;
       if (g_str_equal (graph_authority_columns[i].table, "tenants")
           && g_str_equal (graph_authority_columns[i].column,
           "sealed_generation"))
@@ -14540,13 +14602,23 @@ migrate_graph_authority_schema_mutations (wyl_policy_store_t *store)
       "UPDATE tenants SET sealed_generation=1 WHERE sealed=1")) !=
       WYRELOG_E_OK)
     return rc;
+  if (added_tenant_capacity && (rc = exec_sql (db,
+      "UPDATE tenants SET sealed_by_capacity='system_admin' WHERE sealed=1")) != WYRELOG_E_OK)
+    return rc;
   /* Not only after adding the column: a store laid down from the shipped
    * schema template carries the column but none of the guards, so any row
    * still holding the migration default is resolved the same way. */
   if ((rc = backfill_tenant_owners (store)) != WYRELOG_E_OK)
     return rc;
   if ((rc = exec_sql (db, tenant_owner_insert_guard_sql)) != WYRELOG_E_OK
-      || (rc = exec_sql (db, tenant_owner_update_guard_sql)) != WYRELOG_E_OK)
+      || (rc = exec_sql (db, tenant_ownership_events_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_capacity_transition_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_capacity_update_guard_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_ownership_immutable_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_ownership_delete_guard_sql)) != WYRELOG_E_OK
+      || (rc = migrate_tenant_authority_guard (db, "tenant_owner_update_guard",
+      tenant_owner_update_guard_pre_transfer_sql, tenant_owner_update_guard_sql,
+      "DROP TRIGGER tenant_owner_update_guard;")) != WYRELOG_E_OK)
     return rc;
   for (gsize i = 0; i < G_N_ELEMENTS (fact_reconcile_evidence_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
@@ -14829,7 +14901,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       /* #1338: the tenant's owner.  The empty default exists only so the
        * column can be added to a populated predecessor store; the owner
        * guards refuse it on every insert and update. */
-      "  owner_subject_id TEXT NOT NULL DEFAULT ''"
+      "  owner_subject_id TEXT NOT NULL DEFAULT '',"
+      "  sealed_by_capacity TEXT CHECK(sealed_by_capacity IN ('owner','system_admin'))"
       ");"
       "CREATE TABLE IF NOT EXISTS roles ("
       "  role_id TEXT PRIMARY KEY,"
@@ -16064,7 +16137,7 @@ wyl_policy_store_set_tenant_sealed_full (wyl_policy_store_t *store,
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   static const gchar *sql =
-      "UPDATE tenants SET sealed=?,"
+      "UPDATE tenants SET sealed=?,sealed_by_capacity=CASE WHEN ?1=1 THEN 'system_admin' ELSE NULL END,"
       "sealed_generation=sealed_generation+1,updated_at=unixepoch() "
       "WHERE tenant_id=? AND sealed<>? "
       "AND sealed_generation<9223372036854775807;";
@@ -20431,6 +20504,7 @@ wyl_policy_tenant_authority_record_free (WylPolicyTenantAuthorityRecord *record)
     return;
   g_free (record->tenant_id);
   g_free (record->owner_subject_id);
+  g_free (record->sealed_by_capacity);
   g_free (record);
 }
 
@@ -21041,9 +21115,11 @@ tenant_authority_record_from_row (sqlite3_stmt *stmt,
   const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 0);
   const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 2);
   const gchar *owner = (const gchar *) sqlite3_column_text (stmt, 5);
+  const gchar *capacity = (const gchar *) sqlite3_column_text (stmt, 6);
   WylPolicyTenantLifecycleState state;
   if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
       || !wyl_policy_tenant_owner_is_valid (tenant_id, owner)
+      || (sealed ? (g_strcmp0 (capacity, "owner") != 0 && g_strcmp0 (capacity, "system_admin") != 0) : capacity != NULL)
       || lifecycle_generation < 0 || reconciliation_generation < 0
       || (sealed != 0 && sealed != 1)
       || !tenant_lifecycle_state_parse (state_name, &state)
@@ -21060,6 +21136,7 @@ tenant_authority_record_from_row (sqlite3_stmt *stmt,
   record->reconciliation_generation = (guint64) reconciliation_generation;
   record->sealed_compatibility = sealed != 0;
   record->owner_subject_id = g_strdup (owner);
+  record->sealed_by_capacity = g_strdup ((const gchar *) sqlite3_column_text (stmt, 6));
   *out_record = record;
   return WYRELOG_E_OK;
 }
@@ -21148,7 +21225,7 @@ graph_authority_record_from_row (sqlite3_stmt *stmt,
 
 #define TENANT_AUTHORITY_SELECT_COLUMNS                                      \
   "tenant_id,sealed,lifecycle_state,lifecycle_generation,"                  \
-  "reconciliation_generation,owner_subject_id"
+  "reconciliation_generation,owner_subject_id,sealed_by_capacity"
 #define GRAPH_AUTHORITY_SELECT_COLUMNS                                       \
   "tenant_id,graph_id,sealed,lifecycle_state,store_uuid,format_version,"    \
   "path_encoding_version,lifecycle_generation,reconciliation_generation,"  \
@@ -26240,6 +26317,7 @@ typedef struct
   gint64 event_id;
   gchar audit_id[WYL_ID_STRING_BUF];
   gint64 created_at_us;
+  gchar acting_capacity[16];
 } ServiceRetirementReceipt;
 
 static wyrelog_error_t service_domain_validate_mutation
@@ -26401,12 +26479,12 @@ service_retirement_text_column_equals (sqlite3_stmt *stmt, int column,
 
 static wyrelog_error_t
 service_retirement_validate_audit (wyl_policy_store_t *store,
-    const ServiceRetirementReceipt *receipt)
+    ServiceRetirementReceipt *receipt)
 {
   static const gchar *sql =
       "SELECT e.created_at_us,e.subject_id,e.action,e.resource_id,"
       "e.request_id,e.decision,i.created_at_us,i.subject_id,i.action,"
-      "i.resource_id,i.request_id,i.decision FROM audit_events e"
+      "i.resource_id,i.request_id,i.decision,e.deny_origin,i.deny_origin FROM audit_events e"
       " JOIN audit_intentions i ON i.audit_id=e.id WHERE e.id=?;";
   sqlite3_stmt *stmt = NULL;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
@@ -26431,6 +26509,15 @@ service_retirement_validate_audit (wyl_policy_store_t *store,
         receipt->request_id)
         || sqlite3_column_int (stmt, base + 5) != WYL_DECISION_ALLOW)
       rc = WYRELOG_E_INTERNAL;
+  }
+  if (rc == WYRELOG_E_OK && receipt->operation == WYL_POLICY_SERVICE_RETIREMENT_TENANT_SEAL) {
+    const gchar *capacity = (const gchar *) sqlite3_column_text (stmt, 12);
+    const gchar *intention_capacity = (const gchar *) sqlite3_column_text (stmt, 13);
+    if (g_strcmp0 (capacity, intention_capacity) != 0
+        || (capacity != NULL && !g_str_equal (capacity, "owner") && !g_str_equal (capacity, "system_admin")))
+      rc = WYRELOG_E_INTERNAL;
+    else if (capacity != NULL)
+      g_strlcpy (receipt->acting_capacity, capacity, sizeof receipt->acting_capacity);
   }
   if (rc == WYRELOG_E_OK) {
     step = sqlite3_step (stmt);
@@ -26647,6 +26734,7 @@ service_retirement_outcome_from_receipt (const ServiceRetirementReceipt
   out->operation = receipt->operation;
   out->transitioned_now =
       disposition == WYL_POLICY_SERVICE_RETIREMENT_FRESH_TRANSITION;
+  g_strlcpy (out->acting_capacity, receipt->acting_capacity, sizeof out->acting_capacity);
   out->recorded_transitioned = receipt->transitioned;
   out->replayed = disposition == WYL_POLICY_SERVICE_RETIREMENT_EXACT_REPLAY;
   out->receipt_version = receipt->receipt_version;
@@ -26944,11 +27032,11 @@ service_retirement_namespace_collision (wyl_policy_store_t *store,
       " UNION ALL SELECT 1 FROM service_credential_handoff_retirement_receipts"
       " WHERE original_request_id=?"
       " UNION ALL SELECT 1 FROM service_credential_handoff_dispositions"
-      " WHERE original_request_id=? LIMIT 1;";
+      " WHERE original_request_id=? UNION ALL SELECT 1 FROM tenant_ownership_events WHERE request_id=? LIMIT 1;";
   sqlite3_stmt *stmt = NULL;
   *out_found = FALSE;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
-  for (int i = 1; rc == WYRELOG_E_OK && i <= 8; i++)
+  for (int i = 1; rc == WYRELOG_E_OK && i <= 9; i++)
     rc = bind_text (stmt, i, request_id);
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
@@ -27167,6 +27255,7 @@ wyl_policy_store_read_exact_tenant_seal_receipt_proof
       || !receipt.transitioned || !current.sealed))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
+    g_strlcpy (out_proof->acting_capacity, receipt.acting_capacity, sizeof out_proof->acting_capacity);
     out_proof->receipt_version = receipt.receipt_version;
     g_strlcpy (out_proof->request_id, receipt.request_id,
         sizeof out_proof->request_id);
@@ -27280,7 +27369,7 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
 static wyrelog_error_t
 service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *actor_subject_id,
-    const gchar *request_id, guint32 receipt_version,
+    const gchar *request_id, guint32 receipt_version, const gchar *acting_capacity,
     WylPolicyServiceRetirementOutcome *retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
@@ -27379,6 +27468,17 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
         rc = service_retirement_read_tenant_state (store, tenant_id, &current);
     }
   }
+  if (rc == WYRELOG_E_OK && transitioned && acting_capacity != NULL) {
+    sqlite3_stmt *capacity_stmt = NULL;
+    rc = prepare_stmt (store->db, "UPDATE tenants SET sealed_by_capacity=? WHERE tenant_id=?", &capacity_stmt);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (capacity_stmt, 1, acting_capacity);
+    if (rc == WYRELOG_E_OK)
+      rc = bind_text (capacity_stmt, 2, tenant_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (capacity_stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (capacity_stmt);
+  }
   if (rc == WYRELOG_E_OK && !found
       && (!current.sealed || current.sealed_generation == 0))
     rc = WYRELOG_E_INTERNAL;
@@ -27389,9 +27489,16 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
     now_us = g_get_real_time ();
     rc = service_domain_new_audit_id (audit_id);
   }
-  if (rc == WYRELOG_E_OK && !found)
-    rc = service_domain_append_audit (store, audit_id, now_us,
-            actor_subject_id, "tenant_seal", tenant_id, request_id);
+  if (rc == WYRELOG_E_OK && !found) {
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id, now_us,
+            actor_subject_id, "tenant_seal", tenant_id, NULL, acting_capacity,
+            request_id, WYL_DECISION_ALLOW, &inserted);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_record_audit_intention_full (store, audit_id, now_us,
+              actor_subject_id, "tenant_seal", tenant_id, NULL, acting_capacity,
+              request_id, WYL_DECISION_ALLOW, &inserted);
+  }
   ServiceRetirementReceipt receipt = { 0 };
   if (rc == WYRELOG_E_OK && !found) {
     g_strlcpy (receipt.request_id, request_id, sizeof receipt.request_id);
@@ -27411,6 +27518,8 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
     receipt.has_tenant_sealed_generation = TRUE;
     g_strlcpy (receipt.audit_id, audit_id, sizeof receipt.audit_id);
     receipt.created_at_us = now_us;
+    if (acting_capacity != NULL)
+      g_strlcpy (receipt.acting_capacity, acting_capacity, sizeof receipt.acting_capacity);
     rc = service_retirement_receipt_insert (store, &receipt);
   }
   if (rc == WYRELOG_E_OK && !found) {
@@ -27434,11 +27543,158 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_seal_tenant_keyed_core
+wyl_policy_store_read_tenant_transfer_audit (wyl_policy_store_t *store,
+    const gchar *request_id, WylAuditEvent **out_event)
+{
+  if (store == NULL || out_event == NULL)
+    return WYRELOG_E_INVALID;
+  *out_event = NULL;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT audit_id,created_at_us,actor,tenant_id,previous_owner,new_owner "
+          "FROM tenant_ownership_events WHERE request_id=? AND applied=1", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = wyl_audit_event_new_from_fields ((const gchar *) sqlite3_column_text (stmt, 0),
+            sqlite3_column_int64 (stmt, 1), (const gchar *) sqlite3_column_text (stmt, 2),
+            "tenant_transfer_owner", (const gchar *) sqlite3_column_text (stmt, 3),
+            (const gchar *) sqlite3_column_text (stmt, 4),
+            (const gchar *) sqlite3_column_text (stmt, 5), request_id, WYL_DECISION_ALLOW, out_event);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* Caller holds the authority WRITE lease and an active policy transaction.
+ * Receipt lookup precedes current ownership: a former owner may retry its
+ * own committed request, but can never apply it again. */
+wyrelog_error_t
+wyl_policy_store_transfer_tenant_owner (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, const gchar *target,
+    const gchar *request_id, gboolean system_admin, gboolean *changed)
+{
+  if (changed != NULL)
+    *changed = FALSE;
+  if (store == NULL || store->db == NULL || changed == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant)
+      || !wyl_policy_tenant_owner_is_valid (tenant, target)
+      || !wyl_policy_service_actor_subject_is_valid (actor)
+      || !wyl_request_id_is_canonical (request_id))
+    return WYRELOG_E_INVALID;
+  if (g_str_equal (tenant, WYL_TENANT_DEFAULT))
+    return WYRELOG_E_POLICY;
+  if (sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT tenant_id,actor,new_owner,changed,applied FROM tenant_ownership_events WHERE request_id=?", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    gboolean matches = g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0), tenant) == 0
+        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1), actor) == 0
+        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2), target) == 0;
+    rc = matches && sqlite3_column_int (stmt, 4) == 1 ? WYRELOG_E_OK : WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK)
+      *changed = sqlite3_column_int (stmt, 3) != 0;
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || step != SQLITE_DONE)
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_IO;
+  gboolean collision = FALSE;
+  rc = service_retirement_namespace_collision (store, request_id, &collision);
+  if (rc != WYRELOG_E_OK || collision)
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_CONFLICT;
+  rc = prepare_stmt (store->db,
+          "SELECT 1 FROM service_retirement_receipts WHERE request_id=?1 "
+          "UNION ALL SELECT 1 FROM audit_events WHERE request_id=?1 AND action NOT IN ('decide','wr.tenant.manage') LIMIT 1", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || step != SQLITE_DONE)
+    return rc != WYRELOG_E_OK ? rc : step == SQLITE_ROW ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  rc = wyl_policy_store_read_tenant_authority (store, tenant, &record);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!system_admin && g_strcmp0 (record->owner_subject_id, actor) != 0) {
+    wyl_policy_tenant_authority_record_free (record);
+    return WYRELOG_E_AUTH;
+  }
+  gboolean transition = g_strcmp0 (record->owner_subject_id, target) != 0;
+  gchar audit_id[WYL_ID_STRING_BUF] = { 0 };
+  rc = service_domain_new_audit_id (audit_id);
+  gint64 now = g_get_real_time ();
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "INSERT INTO tenant_ownership_events(request_id,tenant_id,actor,previous_owner,new_owner,changed,audit_id,created_at_us) VALUES(?,?,?,?,?,?,?,?)", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, tenant);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 3, actor);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, record->owner_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 5, target);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int (stmt, 6, transition) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 7, audit_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 8, now) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "UPDATE tenants SET owner_subject_id=? WHERE tenant_id=?", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, target);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, tenant);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  gboolean inserted = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id, now,
+            actor, "tenant_transfer_owner", tenant, record->owner_subject_id,
+            target, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_record_audit_intention_full (store, audit_id, now,
+            actor, "tenant_transfer_owner", tenant, record->owner_subject_id,
+            target, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "UPDATE tenant_ownership_events SET applied=1 WHERE request_id=?", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, request_id);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  wyl_policy_tenant_authority_record_free (record);
+  if (rc == WYRELOG_E_OK)
+    *changed = transition;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_seal_tenant_keyed_capacity_core
   (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
-    guint32 receipt_version, WylPolicyServiceRetirementOutcome * retirement,
+    guint32 receipt_version, const gchar *acting_capacity, WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
   if (retirement != NULL)
@@ -27447,12 +27703,26 @@ wyl_policy_store_seal_tenant_keyed_core
     memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
   if (store == NULL || retirement == NULL || out_tenant == NULL)
     return WYRELOG_E_INVALID;
+  if (acting_capacity != NULL && g_strcmp0 (acting_capacity, "owner") != 0
+      && g_strcmp0 (acting_capacity, "system_admin") != 0)
+    return WYRELOG_E_INVALID;
   wyrelog_error_t rc =
       wyl_policy_store_service_authority_transaction_enter_participant
         (transaction, store);
   return rc == WYRELOG_E_OK ? service_tenant_seal_keyed_impl (store,
-             tenant_id, actor_subject_id, request_id, receipt_version, retirement,
+             tenant_id, actor_subject_id, request_id, receipt_version, acting_capacity, retirement,
              out_tenant) : rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_seal_tenant_keyed_core (WylServiceAuthorityTransaction *transaction,
+    wyl_policy_store_t *store, const gchar *tenant_id, const gchar *actor_subject_id,
+    const gchar *request_id, guint32 receipt_version,
+    WylPolicyServiceRetirementOutcome *retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  return wyl_policy_store_seal_tenant_keyed_capacity_core (transaction, store,
+             tenant_id, actor_subject_id, request_id, receipt_version, NULL, retirement, out_tenant);
 }
 
 static wyrelog_error_t

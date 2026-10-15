@@ -285,6 +285,8 @@ typedef struct
 {
   gchar *tenant_id;
   gboolean sealed;
+  gchar *owner;
+  gchar *sealed_by_capacity;
 } WylClientTenant;
 
 typedef struct
@@ -851,12 +853,22 @@ wyrelog_error_t wyl_client_graph_seal (WylClient * client,
 void wyl_client_tenant_clear (WylClientTenant * value);
 void wyl_client_tenant_list_clear (WylClientTenantList * value);
 /* Tenant management.  Every call needs a client whose credentials are bound
- * to __wr_default, and wr.tenant.manage there.  out_tenants must be
+ * to __wr_default. Listing and creation need wr.tenant.manage there;
+ * show, transfer and seal also accept the current owner. Show, transfer, seal and
+ * unseal require a live MFA session. Owners may unseal only owner-sealed tenants.
+ * out_tenants must be
  * zero-initialised or cleared; it is owned by the caller and must be cleared
  * after use. */
 wyrelog_error_t wyl_client_tenant_list (WylClient * client,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientTenantList * out_tenants);
+wyrelog_error_t wyl_client_tenant_show (WylClient *client, const gchar *name,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientTenant *out_tenant);
+wyrelog_error_t wyl_client_tenant_transfer_owner (WylClient *client,
+    const gchar *name, const gchar *target, const gchar *request_id,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gboolean *out_changed);
 /* Create, seal and unseal report through out_changed whether the call
  * changed the tenant; repeating one that already took effect succeeds with
  * FALSE.  A success answer that does not name the tenant is WYRELOG_E_IO,

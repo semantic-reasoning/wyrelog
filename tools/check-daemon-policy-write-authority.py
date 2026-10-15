@@ -35,7 +35,7 @@ FUNCTIONS = (
     "tenant_recovery_attempt_before_authorization",
     "tenant_seal_recovery_retain", "tenant_seal_recovery_discard",
     "wyl_daemon_http_context_rotate_access_token_key",
-    "tenant_mutation_handler",
+    "tenant_mutation_handler", "tenant_transfer_owner_handler", "mutate_tenant_transfer",
     "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
     "facts_graph_update_handler", "facts_graph_update_commit",
     "schema_register_handler", "rule_pack_register_handler",
@@ -64,6 +64,7 @@ OWNER_INVENTORY = {
     "wyl_daemon_http_policy_write_for_test":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TEST_POLICY_WRITE",),
     "tenant_mutation_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
+    "tenant_transfer_owner_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
     "tenant_recovery_attempt_before_authorization":
         ("WYL_DAEMON_POLICY_WRITE_OWNER_TENANT",),
     "graph_create_handler": ("WYL_DAEMON_POLICY_WRITE_OWNER_GRAPH_CREATE",),
@@ -143,7 +144,7 @@ OWNER_TABLE = (
 ALLOW_ACQUIRE = {
     "wyl_daemon_policy_write_acquire",
     "wyl_daemon_http_context_rotate_access_token_key",
-    "tenant_mutation_handler", "tenant_recovery_attempt_before_authorization",
+    "tenant_mutation_handler", "tenant_transfer_owner_handler", "tenant_recovery_attempt_before_authorization",
     "graph_create_handler", "facts_quota_handler", "graph_seal_handler",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler", "facts_graph_update_handler",
@@ -157,14 +158,14 @@ ALLOW_ACQUIRE = {
     "service_management_authority_arm_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
-    "mutate_tenant_lifecycle_publication", "tenant_recovery_repair_with_write",
+    "mutate_tenant_lifecycle_publication", "mutate_tenant_transfer", "tenant_recovery_repair_with_write",
     "tenant_create_resolve_failed_publication",
     # The graph-level update's commit step (#1393) runs under the write its
     # handler acquired and holds the policy store it was handed.
     "facts_graph_update_commit",
 }
 PROTECTED_HANDLERS = {
-    "tenant_mutation_handler", "graph_create_handler", "facts_quota_handler",
+    "tenant_mutation_handler", "tenant_transfer_owner_handler", "graph_create_handler", "facts_quota_handler",
     "graph_seal_handler",
     "schema_register_handler", "rule_pack_register_handler",
     "facts_route_handler",
@@ -178,6 +179,7 @@ PROTECTED_HANDLERS = {
     "wyl_daemon_http_configure_tenant_for_test",
 }
 MUTATORS = {
+    "wyl_policy_store_transfer_tenant_owner",
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
     "wyl_policy_store_create_fact_graph", "wyl_policy_store_set_graph_quota_limit",
     "wyl_policy_store_seal_fact_graph",
@@ -770,6 +772,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
     exact="wyl_daemon_http_add_exact_handler"
     prefix="wyl_daemon_http_add_prefix_handler"
     route_registrations={
+        "tenant_transfer_owner_handler": (exact,'"/tenants/transfer-owner"'),
         "tenant_create_handler": (exact,'"/tenants/create"'),
         "tenant_seal_handler": (exact,'"/tenants/seal"'),
         "tenant_unseal_handler": (exact,'"/tenants/unseal"'),
@@ -860,8 +863,8 @@ def validate_recover_write_boundary(defs):
         raise GuardError("recover WRITE owner bypasses automatic pinned authority")
 
 def validate_owner_inventory(defs):
-    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 21:
-        raise GuardError("daemon WRITE owner inventory must contain 21 owners")
+    if sum(len(owners) for owners in OWNER_INVENTORY.values()) != 22:
+        raise GuardError("daemon WRITE owner inventory must contain 22 owners")
     all_owner_tokens={owner for owners in OWNER_INVENTORY.values()
         for owner in owners}
     for name,expected in OWNER_INVENTORY.items():
