@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Freeze reviewed active-C token trees for daemon WRITE authority code."""
-import argparse, hashlib, json, re, shlex, subprocess, sys
+import argparse, functools, hashlib, json, re, shlex, subprocess, sys
 from pathlib import Path
 
 VERSION = 1
@@ -210,6 +210,13 @@ DAEMON_HTTP_OUTPUT = {
     "windows": "wyrelog/wyrelogd.exe.p/daemon_http.c.obj",
 }
 PUNCT = sorted(("<<=", ">>=", "...", "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "##"), key=len, reverse=True)
+# Longest-match order within each leading character, so the lexer tries
+# only the operators that can start at the byte it is looking at.
+PUNCT_BY_FIRST = {first: tuple(p for p in PUNCT if p[0] == first)
+    for first in {p[0] for p in PUNCT}}
+# str.isspace() and str.isalnum() runs; \s and \w are those predicates.
+WHITESPACE_RUN = re.compile(r"\s+")
+IDENTIFIER_TAIL = re.compile(r"\w*")
 
 class GuardError(Exception): pass
 
@@ -311,14 +318,18 @@ def preprocess(root, build_root, compiler_id):
     selected=[]; current=None; directory=Path(entry.get("directory",build_root))
     marker=re.compile(r'^\s*#(?:\s*line)?\s+\d+\s+"([^"]+)"')
     saw_source=False
+    @functools.lru_cache(maxsize=None)
+    def resolve_marker(name):
+        # Thousands of markers name the same few files; resolve each once.
+        marked=Path(name)
+        return (directory/marked).resolve() if not marked.is_absolute() else marked.resolve()
     for line in run.stdout.splitlines(keepends=True):
         match=marker.match(line)
         if match:
             name=match.group(1)
             if name.startswith("<"): current=None
             else:
-                marked=Path(name)
-                current=(directory/marked).resolve() if not marked.is_absolute() else marked.resolve()
+                current=resolve_marker(name)
                 if current==source: saw_source=True
             continue
         if current==source: selected.append(line)
@@ -326,6 +337,15 @@ def preprocess(root, build_root, compiler_id):
     return "".join(selected)
 
 def lex(source, preserve_pp=False):
+    """Token list of SOURCE; a fresh list, so callers may keep or mutate it.
+
+    The lexer is pure in its arguments and the self-test runs it on the same
+    text repeatedly (its own anchor check, then the guard's raw pass), so the
+    work is memoised on the text and only the list is rebuilt per call."""
+    return list(lex_tokens(source, preserve_pp))
+
+@functools.lru_cache(maxsize=4)
+def lex_tokens(source, preserve_pp=False):
     out=[]; i=0; n=len(source)
     while i<n:
         if preserve_pp and (i==0 or source[i-1]=="\n"):
@@ -343,17 +363,26 @@ def lex(source, preserve_pp=False):
                 out.append(("directive"," ".join(logical.split())))
                 i=end+1 if end<n else end
                 continue
-        if source[i].isspace(): i+=1; continue
-        if source.startswith("//",i):
-            j=source.find("\n",i+2); i=n if j<0 else j+1; continue
-        if source.startswith("/*",i):
-            j=source.find("*/",i+2)
-            if j<0: raise GuardError("unterminated comment")
-            i=j+2; continue
+        c=source[i]
+        if c.isspace():
+            # Stop after the last newline of the run so the directive check
+            # above still sees a line start.
+            run=WHITESPACE_RUN.match(source,i).group()
+            cut=run.rfind("\n")
+            i+=len(run) if cut<0 else cut+1
+            continue
+        if c=="/":
+            if source.startswith("//",i):
+                j=source.find("\n",i+2); i=n if j<0 else j+1; continue
+            if source.startswith("/*",i):
+                j=source.find("*/",i+2)
+                if j<0: raise GuardError("unterminated comment")
+                i=j+2; continue
         start=i
         prefix=""
-        for p in ("u8","L","u","U"):
-            if source.startswith(p,i) and i+len(p)<n and source[i+len(p)] in "\"'": prefix=p; i+=len(p); break
+        if c in "uLU":
+            for p in ("u8","L","u","U"):
+                if source.startswith(p,i) and i+len(p)<n and source[i+len(p)] in "\"'": prefix=p; i+=len(p); break
         if i<n and source[i] in "\"'":
             quote=source[i]; i+=1
             while i<n:
@@ -364,9 +393,8 @@ def lex(source, preserve_pp=False):
             else: raise GuardError("unterminated literal")
             out.append(("literal",source[start:i])); continue
         i=start
-        if source[i].isalpha() or source[i]=="_":
-            i+=1
-            while i<n and (source[i].isalnum() or source[i]=="_"): i+=1
+        if c.isalpha() or c=="_":
+            i=IDENTIFIER_TAIL.match(source,i+1).end()
             out.append(("identifier",source[start:i])); continue
         if source[i].isdigit() or (source[i]=="." and i+1<n and source[i+1].isdigit()):
             i+=1
@@ -375,12 +403,12 @@ def lex(source, preserve_pp=False):
                 if source[i] in "+-" and i>start and source[i-1] in "eEpP": i+=1; continue
                 break
             out.append(("number",source[start:i])); continue
-        punct=next((p for p in PUNCT if source.startswith(p,i)),None)
+        punct=next((p for p in PUNCT_BY_FIRST.get(source[i],()) if source.startswith(p,i)),None)
         if punct: out.append(("punct",punct)); i+=len(punct); continue
         if source[i] in "()[]{};,:?~!%^&*+-=/<>.|": out.append(("punct",source[i])); i+=1; continue
         if source[i]=="#": raise GuardError("preprocessor residue")
         raise GuardError(f"unrecognized byte at {i}")
-    return out
+    return tuple(out)
 
 def pairs(tokens):
     stack=[]; mate={}; opens={"(":")","[":"]","{":"}"}; closes=set(opens.values())
@@ -480,7 +508,16 @@ def validate_owner_fault_matrix(root):
     path=Path(root)/"tests/test-daemon-http-decide.c"
     if not path.is_file():
         raise GuardError(f"missing owner fault matrix: {path}")
-    source=path.read_text(encoding="utf-8")
+    validate_owner_fault_matrix_source(path.read_text(encoding="utf-8"))
+
+@functools.lru_cache(maxsize=4)
+def validate_owner_fault_matrix_source(source):
+    """Accept or reject the owner fault matrix in SOURCE, memoised on the text.
+
+    The verdict depends on nothing but the text.  A rejection raises and is
+    therefore not cached, so a mutated matrix is re-examined every time;
+    only an accepted text is remembered, which is what the self-test
+    presents on every one of its http.c fixtures."""
     table_marker=("static const PolicyWriteOwnerFaultCase "
         "policy_write_owner_fault_cases[] = {")
     if source.count(table_marker)!=1:
@@ -700,10 +737,10 @@ def raw_global_invariants(tokens, defs, check_directives=True):
     authority=MUTATORS|{"wyl_daemon_policy_write_acquire","g_mutex_lock",
         "g_mutex_unlock","g_mutex_trylock","g_mutex_lock_full"}
     protected=PROTECTED_HANDLERS
-    forbidden_directive=authority|protected|{"policy_mutation_lock"}
+    forbidden_directive=re.compile(r"\b(?:"+"|".join(re.escape(name)
+        for name in sorted(authority|protected|{"policy_mutation_lock"}))+r")\b")
     for kind,value in tokens:
-        if check_directives and kind=="directive" and any(re.search(r"\b"+re.escape(name)+r"\b",value)
-                for name in forbidden_directive):
+        if check_directives and kind=="directive" and forbidden_directive.search(value):
             raise GuardError("authority symbol in preprocessor directive is forbidden")
     for i,v in enumerate(values):
         if not check_directives and owner.get(i) is None: continue
@@ -760,7 +797,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
         own=owner.get(i)
         allowed=wrapper_calls.get(v,{}).get(own)
         if allowed is not None:
-            close=pairs(tokens)[i+1]
+            close=mate[i+1]
             args=" ".join(x for x in values[i+2:close] if x!=",")
             if not check_directives:
                 if allowed.endswith(" TRUE"): allowed=allowed[:-5]+" ( ! ( 0 ) )"
