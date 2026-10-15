@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     -- Every tenant has exactly one owner (#1338). Built-in tenants are owned
     -- by the reserved system owner 'wr.system'; any other tenant by a human
     -- subject. The store enforces this with tenant_owner_* triggers.
-    owner_subject_id         TEXT    NOT NULL DEFAULT ''
+    owner_subject_id         TEXT    NOT NULL DEFAULT '',
+    sealed_by_capacity       TEXT CHECK(sealed_by_capacity IN ('owner','system_admin'))
 );
 
 INSERT OR IGNORE INTO tenants (tenant_id, owner_subject_id, sealed,

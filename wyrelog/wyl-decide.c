@@ -317,6 +317,15 @@ guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
   return wyl_eval_guard (guard, &scope);
 }
 
+gboolean
+wyl_decide_req_guard_is_satisfied (const wyl_decide_req_t *req)
+{
+  if (req == NULL || !req->has_guard_context || !guard_context_is_valid (req))
+    return FALSE;
+  const wyl_guard_expr_t *guard = wyl_perm_arm_rule_lookup (req->action);
+  return guard == NULL || guard_is_satisfied (guard, req);
+}
+
 /* WYL_ENGINE_SESSION_REQUIRES: called only by the locked decision session. */
 static wyrelog_error_t
 remove_guard_eval_facts (WylEngineSession *session,

@@ -3503,8 +3503,8 @@ wyl_client_request_id_is_canonical (const gchar *request_id)
  * /tenants, or POST /tenants/<action>?name=<name> with an optional JSON
  * body.  A 503 is WYRELOG_E_BUSY. */
 static wyrelog_error_t
-client_tenant_request (WylClient *client, const gchar *action,
-    const gchar *name, const gchar *json_body, gint64 guard_timestamp,
+client_tenant_request_full (WylClient *client, const gchar *action,
+    const gchar *name, const gchar *json_body, const gchar *extra_query, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body)
 {
   g_autofree gchar *base_url = NULL;
@@ -3526,8 +3526,13 @@ client_tenant_request (WylClient *client, const gchar *action,
     g_autofree gchar *escaped_name = g_uri_escape_string (name, NULL, TRUE);
     uri = g_strdup_printf ("%s/tenants/%s?%s&name=%s", base_url, action,
             guard_query, escaped_name);
+    if (extra_query != NULL) {
+      gchar *extended = g_strconcat (uri, "&", extra_query, NULL);
+      g_free (uri);
+      uri = extended;
+    }
   }
-  g_autoptr (SoupMessage) message = soup_message_new (action == NULL ? "GET"
+  g_autoptr (SoupMessage) message = soup_message_new ((action == NULL || g_strcmp0 (action, "show") == 0) ? "GET"
       : "POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
@@ -3541,6 +3546,69 @@ client_tenant_request (WylClient *client, const gchar *action,
   if (rc != WYRELOG_E_OK && client->last_http_status == 503)
     return WYRELOG_E_BUSY;
   return rc;
+}
+
+static wyrelog_error_t
+client_tenant_request (WylClient *client, const gchar *action,
+    const gchar *name, const gchar *json_body, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body)
+{
+  return client_tenant_request_full (client, action, name, json_body, NULL,
+             guard_timestamp, guard_loc_class, guard_risk, out_body);
+}
+
+wyrelog_error_t
+wyl_client_tenant_show (WylClient *client, const gchar *name,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientTenant *out_tenant)
+{
+  if (out_tenant == NULL || name == NULL || name[0] == '\0')
+    return WYRELOG_E_INVALID;
+  wyl_client_tenant_clear (out_tenant);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_tenant_request (client, "show", name, NULL,
+          guard_timestamp, guard_loc_class, guard_risk, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  g_auto (WylClientTenantList) tenants = { 0 };
+  if (wyl_client_tenant_list_decode (data, size, &tenants) != WYRELOG_E_OK
+      || tenants.len != 1 || g_strcmp0 (tenants.items[0].tenant_id, name) != 0)
+    return WYRELOG_E_IO;
+  *out_tenant = tenants.items[0];
+  memset (&tenants.items[0], 0, sizeof tenants.items[0]);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_tenant_transfer_owner (WylClient *client, const gchar *name,
+    const gchar *target, const gchar *request_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gboolean *out_changed)
+{
+  if (name == NULL || name[0] == '\0' || target == NULL || target[0] == '\0'
+      || !wyl_request_id_is_canonical (request_id) || out_changed == NULL)
+    return WYRELOG_E_INVALID;
+  *out_changed = FALSE;
+  g_autofree gchar *escaped = g_uri_escape_string (target, NULL, TRUE);
+  g_autofree gchar *extra = g_strdup_printf ("to=%s&request_id=%s", escaped, request_id);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_tenant_request_full (client, "transfer-owner", name,
+          NULL, extra, guard_timestamp, guard_loc_class, guard_risk, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  g_autofree gchar *tenant = parse_simple_json_string_member (data, size, "tenant");
+  g_autofree gchar *owner = parse_simple_json_string_member (data, size, "owner");
+  gboolean ok = FALSE;
+  gboolean changed = FALSE;
+  if (!parse_simple_json_bool_member (data, size, "ok", &ok) || !ok
+      || !parse_simple_json_bool_member (data, size, "changed", &changed)
+      || g_strcmp0 (tenant, name) != 0 || g_strcmp0 (owner, target) != 0)
+    return WYRELOG_E_IO;
+  *out_changed = changed;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

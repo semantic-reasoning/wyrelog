@@ -6216,11 +6216,12 @@ test_tenant_list_and_create (void)
   };
   g_auto (FactForgetRun) run = { 0 };
   run_fake_daemon_case (200, "{\"tenants\":[{\"tenant\":\"__wr_default\","
-      "\"sealed\":false},{\"tenant\":\"acme:eu\",\"sealed\":true}]}", NULL,
+      "\"owner\":\"wr.system\",\"sealed_by_capacity\":null,\"sealed\":false},"
+      "{\"tenant\":\"acme:eu\",\"owner\":\"alice\",\"sealed_by_capacity\":\"owner\",\"sealed\":true}]}", NULL,
       list, FALSE, &run);
   assert_fact_forget_exit (&run, 0);
-  g_assert_cmpstr (run.out, ==, "tenant=__wr_default sealed=false\n"
-      "tenant=acme%3Aeu sealed=true\n");
+  g_assert_cmpstr (run.out, ==, "tenant=__wr_default owner=wr.system sealed=false sealed_by_capacity=none\n"
+      "tenant=acme%3Aeu owner=alice sealed=true sealed_by_capacity=owner\n");
   g_assert_nonnull (run.request);
   g_assert_true (g_str_has_prefix (run.request, "GET /tenants?"));
   g_assert_nonnull (g_strstr_len (run.request, -1, "tenant=__wr_default"));

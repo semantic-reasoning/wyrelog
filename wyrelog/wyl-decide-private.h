@@ -31,4 +31,7 @@ wyrelog_error_t wyl_decide_with_service_authority (WylHandle * handle,
     const wyl_decide_req_t * req, WylServiceDecisionAuthority * authority,
     wyl_decide_resp_t * resp);
 
+/* Shared catalogue guard evaluation for ownership authority. */
+gboolean wyl_decide_req_guard_is_satisfied (const wyl_decide_req_t *req);
+
 G_END_DECLS

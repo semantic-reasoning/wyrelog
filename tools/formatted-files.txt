@@ -198,6 +198,7 @@ wyrelog/auth/mfa-enrollment.c
 wyrelog/auth/mfa-validator.c
 wyrelog/auth/mfa-validator.h
 wyrelog/auth/service-auth-coordination.c
+wyrelog/auth/service-credential-domain-private.h
 wyrelog/auth/service-credential-domain.c
 wyrelog/auth/service-credential-handoff-delivery-private.c
 wyrelog/auth/service-credential-operation-coordinator-execute-private.c

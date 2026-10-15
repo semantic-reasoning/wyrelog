@@ -82,6 +82,8 @@ COVERAGE = {
     "/auth/logout": ("auth", "logout"),
     "/tenants": ("tenant", "list"),
     "/tenants/create": ("tenant", "create"),
+    "/tenants/show": ("tenant", "show"),
+    "/tenants/transfer-owner": ("tenant", "transfer-owner"),
     "/tenants/seal": ("tenant", "seal"),
     "/tenants/unseal": ("tenant", "unseal"),
     "/graphs/create": ("graph", "create"),

@@ -77,6 +77,7 @@ typedef struct
   const gchar *audit_id;
   gint64 audit_created_at_us;
   gboolean invalidation_completed;
+  const gchar *acting_capacity;
 } WylTenantSealPublicationRecovery;
 
 typedef wyrelog_error_t (*WylTenantSealPublicationRecoveryRetainFn)
@@ -119,6 +120,7 @@ typedef struct
   gboolean test_verify_opposite_state;
   const wyl_service_credential_mutation_authorization_t *authorization;
   gpointer data;
+  const gchar **acting_capacity;
 } wyl_tenant_seal_runtime_t;
 
 typedef struct
@@ -179,7 +181,7 @@ typedef struct
 typedef struct
 {
   void (*before_gate) (gpointer data);
-    gint64 (*now_us) (gpointer data);
+  gint64 (*now_us) (gpointer data);
   const wyl_service_credential_runtime_t *credential_runtime;
   gpointer data;
 } wyl_service_credential_verify_runtime_t;
@@ -279,7 +281,7 @@ typedef struct
   wyl_service_credential_handoff_disposition_reason_t reason;
   wyl_service_credential_handoff_disposition_outcome_t outcome;
   const wyl_service_credential_handoff_no_commit_evidence_t
-      * no_commit_evidence;
+  * no_commit_evidence;
 } wyl_service_credential_handoff_disposition_input_t;
 
 typedef struct
@@ -392,7 +394,7 @@ typedef struct
   wyl_service_credential_handoff_disposition_reason_t source_reason;
   wyl_service_credential_handoff_remediation_journal_state_t oar_source_state;
   wyl_service_credential_handoff_remediation_oar_cause_t oar_cause;
-    wyl_service_credential_handoff_remediation_journal_state_t
+  wyl_service_credential_handoff_remediation_journal_state_t
       resume_target_state;
 } wyl_service_credential_handoff_remediation_input_t;
 
@@ -420,7 +422,7 @@ typedef struct
   wyl_service_credential_handoff_remediation_journal_state_t observed_state;
   wyl_service_credential_handoff_remediation_journal_state_t oar_source_state;
   wyl_service_credential_handoff_remediation_oar_cause_t oar_cause;
-    wyl_service_credential_handoff_remediation_journal_state_t
+  wyl_service_credential_handoff_remediation_journal_state_t
       resume_target_state;
   wyl_service_credential_handoff_disposition_reason_t source_reason;
   gchar *decision_request_id;
@@ -465,7 +467,7 @@ wyrelog_error_t wyl_service_principal_create (WylHandle * handle,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_service_principal_t * out);
 wyrelog_error_t wyl_service_principal_create_with_runtime
-    (WylHandle * handle, const gchar * subject_id,
+  (WylHandle * handle, const gchar * subject_id,
     const gchar * display_name, const gchar * actor_subject_id,
     const gchar * request_id,
     const wyl_service_principal_create_runtime_t * runtime,
@@ -478,18 +480,18 @@ wyrelog_error_t wyl_service_principal_disable (WylHandle * handle,
     const gchar * subject_id, const gchar * actor_subject_id,
     const gchar * request_id, wyl_service_principal_t * out);
 wyrelog_error_t wyl_service_principal_disable_with_runtime
-    (WylHandle * handle, const gchar * subject_id,
+  (WylHandle * handle, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     const wyl_service_principal_disable_runtime_t * runtime,
     wyl_service_principal_t * out);
 wyrelog_error_t wyl_service_principal_disable_keyed_with_runtime
-    (WylHandle * handle, const gchar * subject_id,
+  (WylHandle * handle, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version,
     const wyl_service_principal_disable_runtime_t * runtime,
     WylServiceRetirementOutcome * retirement, wyl_service_principal_t * out);
 wyrelog_error_t wyl_tenant_seal_keyed_with_runtime
-    (WylHandle * handle, const gchar * tenant_id,
+  (WylHandle * handle, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version, const wyl_tenant_seal_runtime_t * runtime,
     WylServiceRetirementOutcome * retirement);
@@ -503,17 +505,17 @@ wyrelog_error_t wyl_tenant_seal_keyed_with_runtime
  * the corresponding new secret. */
 void wyl_service_credential_clear (wyl_service_credential_t * credential);
 void wyl_service_credential_issue_result_clear
-    (wyl_service_credential_issue_result_t * result);
+  (wyl_service_credential_issue_result_t * result);
 void wyl_service_credential_handoff_clear
-    (wyl_service_credential_handoff_t * handoff);
+  (wyl_service_credential_handoff_t * handoff);
 void wyl_service_credential_handoff_result_clear
-    (wyl_service_credential_handoff_result_t * result);
+  (wyl_service_credential_handoff_result_t * result);
 wyrelog_error_t wyl_service_credential_issue (WylHandle * handle,
     const gchar * subject_id, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 expires_at_us, wyl_service_credential_issue_result_t * out);
 wyrelog_error_t wyl_service_credential_issue_with_runtime
-    (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
+  (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 expires_at_us,
     const wyl_service_credential_issue_runtime_t * runtime,
@@ -522,7 +524,7 @@ wyrelog_error_t wyl_service_credential_issue_with_runtime
  * No plaintext secret crosses this API. handoff and all runtime descriptors
  * are borrowed only until the call returns. */
 wyrelog_error_t wyl_service_credential_issue_handoff_with_runtime
-    (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
+  (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 expires_at_us,
     const wyl_service_credential_handoff_request_t * handoff,
@@ -544,11 +546,11 @@ wyrelog_error_t wyl_service_credential_foreach (WylHandle * handle,
  * be non-reentrant and MUST NOT call APIs on the same handle, policy store or
  * service domain. */
 wyrelog_error_t wyl_service_credential_verify_authoritative
-    (WylHandle * handle, const gchar * credential_id,
+  (WylHandle * handle, const gchar * credential_id,
     const gchar * presented_secret, gsize presented_secret_len,
     gboolean * out_authenticated);
 wyrelog_error_t wyl_service_credential_verify_authoritative_with_runtime
-    (WylHandle * handle, const gchar * credential_id,
+  (WylHandle * handle, const gchar * credential_id,
     const gchar * presented_secret, gsize presented_secret_len,
     const wyl_service_credential_verify_runtime_t * runtime,
     gboolean * out_authenticated);
@@ -556,51 +558,51 @@ wyrelog_error_t wyl_service_credential_revoke (WylHandle * handle,
     const gchar * credential_id, const gchar * actor_subject_id,
     const gchar * request_id, wyl_service_credential_t * out);
 wyrelog_error_t wyl_service_credential_revoke_with_runtime
-    (WylHandle * handle, const gchar * credential_id,
+  (WylHandle * handle, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     const wyl_service_credential_revoke_runtime_t * runtime,
     wyl_service_credential_t * out);
 wyrelog_error_t wyl_service_credential_revoke_keyed_with_runtime
-    (WylHandle * handle, const gchar * credential_id,
+  (WylHandle * handle, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     guint32 receipt_version,
     const wyl_service_credential_revoke_runtime_t * runtime,
     WylServiceRetirementOutcome * retirement, wyl_service_credential_t * out);
 void wyl_service_credential_handoff_disposition_result_clear
-    (wyl_service_credential_handoff_disposition_result_t * result);
+  (wyl_service_credential_handoff_disposition_result_t * result);
 G_GNUC_INTERNAL void wyl_service_credential_handoff_cancellation_result_clear
-    (wyl_service_credential_handoff_cancellation_result_t * result);
+  (wyl_service_credential_handoff_cancellation_result_t * result);
 G_GNUC_INTERNAL void wyl_service_credential_handoff_remediation_result_clear
-    (wyl_service_credential_handoff_remediation_result_t * result);
+  (wyl_service_credential_handoff_remediation_result_t * result);
 wyrelog_error_t wyl_service_credential_handoff_record_disposition
-    (WylHandle * handle,
+  (WylHandle * handle,
     const wyl_service_credential_handoff_disposition_input_t * input,
     wyl_service_credential_handoff_disposition_result_t * out_result);
 wyrelog_error_t wyl_service_credential_handoff_record_not_committed
-    (WylHandle * handle,
+  (WylHandle * handle,
     const wyl_service_credential_handoff_disposition_input_t * input,
     wyl_service_credential_handoff_disposition_result_t * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_handoff_claim_cancellation
-    (WylHandle * handle,
+wyl_service_credential_handoff_claim_cancellation
+  (WylHandle * handle,
     const wyl_service_credential_handoff_cancellation_input_t * input,
     const wyl_service_credential_handoff_cancellation_runtime_t * runtime,
     wyl_service_credential_handoff_cancellation_result_t * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_handoff_remediate_exact
-    (WylHandle * handle,
+wyl_service_credential_handoff_remediate_exact
+  (WylHandle * handle,
     const wyl_service_credential_handoff_remediation_input_t * input,
     const wyl_service_credential_handoff_remediation_runtime_t * runtime,
     wyl_service_credential_handoff_remediation_result_t * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_handoff_resolve_remediation
-    (WylHandle * handle, const gchar * remediation_request_id,
+wyl_service_credential_handoff_resolve_remediation
+  (WylHandle * handle, const gchar * remediation_request_id,
     const gchar * current_actor_subject_id,
     const wyl_service_credential_handoff_remediation_runtime_t * runtime,
     wyl_service_credential_handoff_remediation_result_t * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_handoff_resolve_remediation_incident
-    (WylHandle * handle, const gchar * original_request_id,
+wyl_service_credential_handoff_resolve_remediation_incident
+  (WylHandle * handle, const gchar * original_request_id,
     const guint8 journal_snapshot_digest
     [WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES],
     wyl_service_credential_handoff_remediation_result_t * out_result);
@@ -627,7 +629,7 @@ wyrelog_error_t wyl_service_credential_rotate (WylHandle * handle,
     const gchar * request_id, gint64 new_expires_at_us,
     wyl_service_credential_issue_result_t * out);
 wyrelog_error_t wyl_service_credential_rotate_with_runtime
-    (WylHandle * handle, const gchar * old_credential_id,
+  (WylHandle * handle, const gchar * old_credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us,
     const wyl_service_credential_rotate_runtime_t * runtime,
@@ -636,7 +638,7 @@ wyrelog_error_t wyl_service_credential_rotate_with_runtime
  * non-zero and is used by the authoritative rotate CAS. No plaintext secret
  * crosses this API; handoff and runtime are borrowed only for the call. */
 wyrelog_error_t wyl_service_credential_rotate_handoff_checked_with_runtime
-    (WylHandle * handle, const gchar * old_credential_id,
+  (WylHandle * handle, const gchar * old_credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us,
     const wyl_service_credential_handoff_request_t * handoff,

@@ -13,6 +13,7 @@
 
 #include "fact-test-support.h"
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -607,6 +608,129 @@ tenant_iter_probe_cb (const gchar *tenant_id, gboolean sealed,
     probe->tenant_a_sealed = sealed;
   }
   return WYRELOG_E_OK;
+}
+
+static gint
+check_tenant_seal_capacity (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean changed = FALSE;
+  g_autofree gchar *path = NULL;
+  gint fd = g_file_open_tmp ("tenant-owner-1339-XXXXXX", &path, NULL);
+  g_assert_cmpint (fd, >=, 0);
+  g_close (fd, NULL);
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "capacity-test",
+      "alice", &changed), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT sealed_by_capacity IS NULL FROM tenants WHERE tenant_id='capacity-test'", 1));
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+      "capacity-test", TRUE), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT sealed_by_capacity='system_admin' FROM tenants WHERE tenant_id='capacity-test'", 1));
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
+      "capacity-test", FALSE), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT sealed_by_capacity IS NULL FROM tenants WHERE tenant_id='capacity-test'", 1));
+  gboolean transferred = FALSE;
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  /* The HTTP correlation id may equal the durable transfer id. Its
+   * authorization decision is not a competing mutation receipt. */
+  gboolean audit_inserted = FALSE;
+  g_assert_cmpint (wyl_policy_store_append_audit_event_full (store,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073133", 1, "alice",
+      "wr.tenant.manage", "__wr_default", NULL, NULL, request,
+      WYL_DECISION_DENY, &audit_inserted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store,
+      "capacity-test", "alice", "bob", request, FALSE, &transferred), ==, WYRELOG_E_OK);
+  g_autofree gchar *first_request = g_strdup (request);
+  g_assert_true (transferred);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store,
+      "capacity-test", "alice", "bob", request, FALSE, &transferred), ==, WYRELOG_E_OK);
+  g_assert_true (transferred);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store,
+      "capacity-test", "alice", "charlie", request, FALSE, &transferred), ==, WYRELOG_E_CONFLICT);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT count(*) FROM tenant_ownership_events WHERE applied=1", 1));
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT owner_subject_id='bob' FROM tenants WHERE tenant_id='capacity-test'", 1));
+  /* A real lifecycle mutation using that id still conflicts. */
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_append_audit_event_full (store,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c073134", 1, "bob",
+      "tenant_unseal", "capacity-test", NULL, NULL, request,
+      WYL_DECISION_ALLOW, &audit_inserted), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store, "capacity-test",
+      "bob", "charlie", request, FALSE, &transferred), ==, WYRELOG_E_CONFLICT);
+  wyl_policy_store_rollback_mutation (store);
+  static const gchar *faults[] = {
+    "CREATE TEMP TRIGGER transfer_fault BEFORE UPDATE OF owner_subject_id ON tenants BEGIN SELECT RAISE(ABORT,'fault'); END",
+    "CREATE TEMP TRIGGER transfer_fault AFTER INSERT ON tenant_ownership_events BEGIN SELECT RAISE(ABORT,'fault'); END",
+    "CREATE TEMP TRIGGER transfer_fault BEFORE INSERT ON audit_events WHEN NEW.action='tenant_transfer_owner' BEGIN SELECT RAISE(ABORT,'fault'); END",
+    "CREATE TEMP TRIGGER transfer_fault BEFORE INSERT ON audit_intentions WHEN NEW.action='tenant_transfer_owner' BEGIN SELECT RAISE(ABORT,'fault'); END",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_assert_cmpint (sqlite3_exec (db, faults[i], NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store,
+        "capacity-test", "bob", "charlie", request, FALSE, &transferred), !=, WYRELOG_E_OK);
+    wyl_policy_store_rollback_mutation (store);
+    g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER transfer_fault", NULL, NULL, NULL), ==, SQLITE_OK);
+    g_assert_true (pragma_integer_equals (db,
+        "SELECT owner_subject_id='bob' FROM tenants WHERE tenant_id='capacity-test'", 1));
+    g_assert_true (pragma_integer_equals (db, "SELECT count(*) FROM tenant_ownership_events", 1));
+    g_assert_true (pragma_integer_equals (db, "SELECT count(*) FROM audit_events WHERE action='tenant_transfer_owner'", 1));
+  }
+  /* Completed receipts cannot be rewritten or removed. */
+  g_assert_cmpint (sqlite3_exec (db, "UPDATE tenant_ownership_events SET new_owner='charlie'", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, "DELETE FROM tenant_ownership_events", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER tenant_owner_update_guard", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TRIGGER tenant_owner_update_guard BEFORE UPDATE ON tenants WHEN NEW.owner_subject_id IS NOT OLD.owner_subject_id BEGIN SELECT CASE WHEN NOT (OLD.owner_subject_id='' AND (typeof(NEW.owner_subject_id)='text' AND length(NEW.owner_subject_id) BETWEEN 1 AND 128 AND NEW.owner_subject_id NOT GLOB '*[^A-Za-z0-9._:-]*' AND NEW.owner_subject_id NOT IN ('.','..') AND ((NEW.tenant_id='__wr_default' AND NEW.owner_subject_id='wr.system') OR (NEW.tenant_id<>'__wr_default' AND substr(NEW.owner_subject_id,1,3)<>'wr.' AND substr(NEW.owner_subject_id,1,4)<>'svc:')))) THEN RAISE(ABORT,'tenant owner is immutable') END; END", NULL, NULL, NULL), ==, SQLITE_OK);
+  /* A failed migration must leave the predecessor column layout intact. */
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "capacity-test", TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER tenant_capacity_transition;"
+      "DROP TRIGGER tenant_capacity_update_guard;"
+      "ALTER TABLE tenants DROP COLUMN sealed_by_capacity;", NULL, NULL, NULL), ==, SQLITE_OK);
+  wyl_policy_store_graph_authority_migration_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), !=, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT count(*) FROM pragma_table_info('tenants') WHERE name='sealed_by_capacity'", 0));
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT sealed_by_capacity='system_admin' FROM tenants WHERE tenant_id='capacity-test'", 1));
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (db,
+      "SELECT count(*) FROM tenant_ownership_events", 1));
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store, "capacity-test",
+      "bob", "charlie", request, FALSE, &transferred), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transfer_tenant_owner (store, "capacity-test",
+      "alice", "bob", first_request, FALSE, &transferred), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_true (pragma_integer_equals (wyl_policy_store_get_db (store),
+      "SELECT owner_subject_id='charlie' AND sealed_by_capacity='system_admin' FROM tenants WHERE tenant_id='capacity-test'", 1));
+  g_clear_pointer (&store, wyl_policy_store_close);
+  g_remove (path);
+  return 0;
 }
 
 static gint
@@ -5599,6 +5723,7 @@ check_store_principal_states_legacy_schema_migration (void)
 static gint
 check_store_validate_principal_domain (void)
 {
+  check_tenant_seal_capacity ();
   g_autoptr (wyl_policy_store_t) store = NULL;
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
     return 1620;

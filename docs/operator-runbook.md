@@ -2334,9 +2334,11 @@ collecting.
 
 ## Tenants
 
-Tenant management runs as a `__wr_default` session and needs
-`wr.tenant.manage` there, armed. Every command below takes the usual guard
-options.
+Tenant management uses a `__wr_default` human session and the usual guard
+options. Global list and create require `wr.tenant.manage` there. Show,
+ownership transfer and seal also permit the current owner, even without
+tenant permission rows. Show, transfer, seal and unseal require MFA assurance;
+create retains its existing authorization requirements.
 
 ```sh
 wyctl --daemon-url "$BASE_URL" tenant list \
@@ -2348,11 +2350,39 @@ wyctl --daemon-url "$BASE_URL" tenant create --name acme \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
-`tenant list` prints one `tenant=<tenant> sealed=<bool>` line per tenant.
+`tenant list` includes `tenant`, `owner`, `sealed` and `sealed_by_capacity`
+on each output line. `tenant show --name acme` reports those fields for one
+tenant. An active tenant reports `sealed_by_capacity=none`.
 `tenant create` prints `tenant=<tenant> changed=<bool>`; creating a tenant that
 already exists succeeds with `changed=false`. Creating a tenant grants the
 caller the `wr.system_admin` role in it and records the caller as the tenant's
 owner.
+
+Transfer ownership immediately with:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant transfer-owner --name acme --to alice \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+The current owner or a SYSTEM administrator may transfer. The target must be
+an ordinary human subject; `svc:` and `wr.` names are refused. Built-in tenants
+cannot be transferred. Permissions remain unchanged, including the former
+owner's grants. A same-owner transfer reports `changed=false`. The command
+prints its request id; use `--request-id` with the same target to retry an
+uncertain outcome. The original actor may retrieve that recorded result after
+losing ownership, without applying the transfer again. Reusing an id for a
+different intent is refused. User-registry active-user checks are deferred to
+#1337.
+
+The seal records whether the actor acted as `owner` or `system_admin`.
+Administrator capacity takes precedence when both apply. An owner seal may be
+lifted by the current owner or an administrator; an administrator seal may be
+lifted only by an administrator. Transfer preserves this capacity. Existing
+sealed tenants migrate conservatively to administrator capacity. Owner and
+capacity updates are transactional; back up the policy store before upgrading,
+and use that backup for rollback to an older binary.
 
 Sealing closes the whole tenant: every request that names it is refused, and
 its service credentials stop working (see "Incident revocation and
@@ -2386,7 +2416,9 @@ safe to repeat: once done they answer `changed=false`. So after a 5xx or no
 answer, repeat the same command before anything else. A seal can also answer
 `503 tenant_lifecycle_coordination_required`; repeat it the same way.
 
-Unsealing reopens the tenant; it does not unseal its graphs:
+Unsealing clears the recorded seal capacity and reopens the tenant; it does
+not unseal its graphs. Use a default-tenant session even when the target is
+sealed:
 
 ```sh
 wyctl --daemon-url "$BASE_URL" tenant unseal --name acme \

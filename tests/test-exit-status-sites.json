@@ -232,35 +232,35 @@
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 1960,
+    "line": 1966,
     "api": "_Exit",
     "expression": "81",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 1971,
+    "line": 1977,
     "api": "_Exit",
     "expression": "outer_transaction ? (rc == WYRELOG_E_BUSY ? 0 : 83) :\n        (rc == WYRELOG_E_OK\n        && mutation == WYL_POLICY_AUTHORITY_MUTATION_APPLIED ? 0 : 82)",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3199,
+    "line": 3205,
     "api": "_Exit",
     "expression": "73",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3218,
+    "line": 3224,
     "api": "_Exit",
     "expression": "74",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-policy-graph-authority.c",
-    "line": 3222,
+    "line": 3228,
     "api": "_Exit",
     "expression": "75",
     "platform": "posix-normalized-wrapper"

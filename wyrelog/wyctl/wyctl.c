@@ -243,6 +243,7 @@ typedef struct
   gchar *guard_loc_class;
   gchar *guard_risk_arg;
   gboolean confirm;
+  gchar *to;
 } WyctlTenantOptions;
 
 typedef struct
@@ -598,6 +599,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphSealOptions,
 static void
 wyctl_tenant_options_clear (WyctlTenantOptions *opts)
 {
+  g_clear_pointer (&opts->to, g_free);
   g_clear_pointer (&opts->name, g_free);
   g_clear_pointer (&opts->request_id, g_free);
   g_clear_pointer (&opts->access_token_file, g_free);
@@ -7507,7 +7509,7 @@ create_tenant_client (const WyctlOptions *global_opts,
 
 static const gchar *const tenant_exit_codes =
     "Tenant management runs as the __wr_default session and needs\n"
-    "wr.tenant.manage there.\n"
+    "wr.tenant.manage there for list/create. Owners may show, transfer and seal.\n"
     "\n"
     "Exit codes:\n"
     "  0: the request succeeded.\n"
@@ -7526,9 +7528,16 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
 {
   g_auto (WyctlTenantOptions) opts = { 0 };
   gboolean listing = g_strcmp0 (action, "list") == 0;
+  gboolean showing = g_strcmp0 (action, "show") == 0;
+  gboolean transferring = g_strcmp0 (action, "transfer-owner") == 0;
   gboolean sealing = g_strcmp0 (action, "seal") == 0;
   GOptionEntry name_entry[] = {
     {"name", 0, 0, G_OPTION_ARG_STRING, &opts.name, "Tenant name", "TENANT"},
+    {NULL}
+  };
+  GOptionEntry transfer_entries[] = {
+    {"to", 0, 0, G_OPTION_ARG_STRING, &opts.to, "New human owner", "SUBJECT"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id, "Transfer request id to repeat", "ID"},
     {NULL}
   };
   GOptionEntry seal_entries[] = {
@@ -7554,6 +7563,8 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   g_autoptr (GOptionContext) context = g_option_context_new (summary);
   if (!listing)
     g_option_context_add_main_entries (context, name_entry, NULL);
+  if (transferring)
+    g_option_context_add_main_entries (context, transfer_entries, NULL);
   if (sealing)
     g_option_context_add_main_entries (context, seal_entries, NULL);
   g_option_context_add_main_entries (context, entries, NULL);
@@ -7584,9 +7595,13 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
     g_printerr ("wyctl: missing --name\n");
     return 2;
   }
+  if (transferring && (opts.to == NULL || opts.to[0] == '\0')) {
+    g_printerr ("wyctl: missing --to\n");
+    return 2;
+  }
   gchar minted[WYL_REQUEST_ID_STRING_BUF] = "";
   const gchar *request_id = NULL;
-  if (sealing) {
+  if (sealing || transferring) {
     if (opts.request_id != NULL) {
       if (!wyl_request_id_is_canonical (opts.request_id)) {
         g_printerr ("wyctl: invalid --request-id\n");
@@ -7623,15 +7638,33 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
     for (gsize i = 0; i < tenants.len; i++) {
       g_autofree gchar *tenant_id =
           g_uri_escape_string (tenants.items[i].tenant_id, NULL, TRUE);
-      g_print ("tenant=%s sealed=%s\n", tenant_id,
-          tenants.items[i].sealed ? "true" : "false");
+      g_autofree gchar *owner = g_uri_escape_string (tenants.items[i].owner, NULL, TRUE);
+      g_print ("tenant=%s owner=%s sealed=%s sealed_by_capacity=%s\n", tenant_id, owner,
+          tenants.items[i].sealed ? "true" : "false",
+          tenants.items[i].sealed_by_capacity != NULL ? tenants.items[i].sealed_by_capacity : "none");
     }
     return 0;
   }
 
+  if (showing) {
+    g_auto (WylClientTenant) info = { 0 };
+    wyrelog_error_t rc = wyl_client_tenant_show (client, opts.name, guard_timestamp,
+            opts.guard_loc_class, guard_risk, &info);
+    int exit_rc = fact_remote_exit (client, command, rc, "tenant_show_failed");
+    if (exit_rc != 0)
+      return exit_rc;
+    g_autofree gchar *name = g_uri_escape_string (info.tenant_id, NULL, TRUE);
+    g_autofree gchar *owner = g_uri_escape_string (info.owner, NULL, TRUE);
+    g_print ("tenant=%s owner=%s sealed=%s sealed_by_capacity=%s\n", name, owner,
+        info.sealed ? "true" : "false", info.sealed_by_capacity != NULL ? info.sealed_by_capacity : "none");
+    return 0;
+  }
   gboolean changed = FALSE;
   wyrelog_error_t rc;
-  if (sealing)
+  if (transferring)
+    rc = wyl_client_tenant_transfer_owner (client, opts.name, opts.to, request_id,
+            guard_timestamp, opts.guard_loc_class, guard_risk, &changed);
+  else if (sealing)
     rc = wyl_client_tenant_seal (client, opts.name, request_id,
             guard_timestamp, opts.guard_loc_class, guard_risk, &changed);
   else if (g_strcmp0 (action, "create") == 0)
@@ -7644,7 +7677,7 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   int exit_rc = fact_remote_exit (client, command, rc, fallback);
   g_autofree gchar *tenant = g_uri_escape_string (opts.name, NULL, TRUE);
   if (exit_rc == 0) {
-    if (sealing)
+    if (sealing || transferring)
       g_print ("tenant=%s changed=%s request_id=%s\n", tenant,
           changed ? "true" : "false", request_id);
     else
@@ -7663,6 +7696,8 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
    * it as a fact before any advice. */
   if (sealing)
     g_printerr ("wyctl: tenant seal request_id=%s\n", request_id);
+  if (transferring)
+    g_printerr ("wyctl: tenant transfer-owner request_id=%s; retry the same intent with this id\n", request_id);
   if (pending)
     g_printerr ("wyctl: a tenant change that failed, this one or an earlier "
         "one, may be pending; repeat it (a seal with its --request-id) "
@@ -7838,6 +7873,10 @@ run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: missing tenant command\n");
     return 2;
   }
+  if (g_strcmp0 (argv[1], "show") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "show");
+  if (g_strcmp0 (argv[1], "transfer-owner") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "transfer-owner");
   if (g_strcmp0 (argv[1], "list") == 0)
     return run_tenant_command (global_opts, argc - 1, argv + 1, "list");
   if (g_strcmp0 (argv[1], "create") == 0)
@@ -7980,7 +8019,7 @@ main (int argc, char **argv)
       "  status                     Check daemon health and readiness\n"
       "  policy                     Check decisions and manage permissions/roles\n"
       "  profile                    Report the daemon's profile\n"
-      "  tenant                     List, create, seal and unseal tenants\n"
+      "  tenant                     Show, create, transfer, seal and unseal tenants\n"
       "  graph                      Create, list and seal fact graphs\n"
       "  fact                       Manage schemas, facts, quotas, and restores\n"
       "  datalog                    Query stored facts\n"
