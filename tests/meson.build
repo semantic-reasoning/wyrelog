@@ -1018,13 +1018,16 @@ if build_client
       )
     endif
     # The Windows clang-cl full suite measured this case at 61.15 seconds
-    # (CI run 35311765477) with every assertion passing.  Keep the normal
-    # 60-second deadline on other hosts, but leave measured headroom on the
-    # hosted Windows runner instead of treating scheduler contention as a
-    # functional failure.
+    # (CI run 35311765477) with every assertion passing, and later between
+    # 44.01 and 91.12 seconds with the test unchanged (runs 38666073545,
+    # 38570747241, 38566692465, 38676358194 and 38681889499; issue #1413),
+    # where 91.12 seconds was a TIMEOUT against the 90-second limit.  Keep
+    # the normal 60-second deadline on other hosts, but leave measured
+    # headroom on the hosted Windows runner instead of treating scheduler
+    # contention as a functional failure.
     test_daemon_http_facts_timeout = 60
     if host_machine.system() == 'windows'
-      test_daemon_http_facts_timeout = 90
+      test_daemon_http_facts_timeout = 150
     endif
     test('daemon-http-facts', test_daemon_http_facts,
       env : test_daemon_http_facts_env,
