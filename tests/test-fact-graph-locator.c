@@ -751,6 +751,24 @@ record_unexpected_provisioned_checkpoint (const gchar *point,
 }
 #endif
 
+/* BASE with its object moved so the result equals neither BASE nor AVOID.
+ * Objects are inodes the filesystem allocates, so BASE's successor can be
+ * another live identity: when a new main's inode is the old main's minus
+ * one, a plain increment hands the opener the old identity, which it refuses
+ * as INVALID before it reaches the POLICY under test (#1408). */
+static WylFactArtifactInventoryIdentity
+perturbed_identity (const WylFactArtifactInventoryIdentity *base,
+    const WylFactArtifactInventoryIdentity *avoid)
+{
+  WylFactArtifactInventoryIdentity wrong = *base;
+  do
+    wrong.object++;
+  while (wrong.object == 0
+      || (avoid != NULL
+      && wyl_fact_artifact_inventory_identity_equal (&wrong, avoid)));
+  return wrong;
+}
+
 static void
 create_provisioned_pair (const gchar *stage_path, const gchar *final_path)
 {
@@ -1434,6 +1452,32 @@ test_posix_provisioned_restore_witness (void)
 #endif
 }
 
+/* #1408: an identity perturbed for a refusal must equal none of the
+ * identities the callee compares it against before the check under test. */
+static void
+test_identity_perturbation_misses_taken (void)
+{
+  const WylFactArtifactInventoryIdentity base = { .domain = 7, .object = 41 };
+  const WylFactArtifactInventoryIdentity next = { .domain = 7, .object = 42 };
+  const WylFactArtifactInventoryIdentity other = { .domain = 7, .object = 99 };
+  WylFactArtifactInventoryIdentity wrong = perturbed_identity (&base, &other);
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal (&wrong, &base));
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal (&wrong, &other));
+  g_assert_cmpuint (wrong.domain, ==, base.domain);
+  g_assert_cmpuint (wrong.object, ==, 42);
+  wrong = perturbed_identity (&base, &next);
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal (&wrong, &base));
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal (&wrong, &next));
+  g_assert_cmpuint (wrong.domain, ==, base.domain);
+  g_assert_cmpuint (wrong.object, ==, 43);
+  const WylFactArtifactInventoryIdentity last = {
+    .domain = 7, .object = G_MAXUINT64,
+  };
+  wrong = perturbed_identity (&last, NULL);
+  g_assert_false (wyl_fact_artifact_inventory_identity_equal (&wrong, &last));
+  g_assert_cmpuint (wrong.object, !=, 0);
+}
+
 static void
 test_posix_provisioned_restore_dual_witness (void)
 {
@@ -1498,8 +1542,8 @@ test_posix_provisioned_restore_dual_witness (void)
       &old_identity, &new_identity, &witness), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
         (witness, &graph), ==, WYRELOG_E_OK);
-  WylFactArtifactInventoryIdentity wrong = new_identity;
-  wrong.object++;
+  WylFactArtifactInventoryIdentity wrong = perturbed_identity (&new_identity,
+          &old_identity);
   g_assert_cmpint (wyl_fact_graph_provisioned_restore_dual_witness_open
         (&graph, exact_operation_uuid, restore_uuid, replacement_uuid,
       &old_identity, &wrong, &rejected), ==, WYRELOG_E_POLICY);
@@ -1664,8 +1708,8 @@ test_posix_restore_companion_post_publish (void)
       WYL_FACT_GRAPH_RESTORE_POST_PUBLISH_DUAL_COMPANION, &shape), !=,
       WYRELOG_E_OK);
   g_assert_null (shape);
-  WylFactArtifactInventoryIdentity wrong_new = new_identity;
-  wrong_new.object++;
+  WylFactArtifactInventoryIdentity wrong_new = perturbed_identity
+        (&new_identity, &old_identity);
   g_assert_cmpint (wyl_fact_graph_restore_post_publish_shape_open
         (&resolver, &graph, lease, exact_operation_uuid, restore_uuid,
       replacement_uuid, &old_identity, &wrong_new,
@@ -2605,6 +2649,8 @@ main (int argc, char **argv)
       test_posix_pre_stage_inventory);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-witness",
       test_posix_provisioned_restore_witness);
+  g_test_add_func ("/fact-graph-locator/posix/identity-perturbation",
+      test_identity_perturbation_misses_taken);
   g_test_add_func ("/fact-graph-locator/posix/provisioned-restore-dual-witness",
       test_posix_provisioned_restore_dual_witness);
   g_test_add_func ("/fact-graph-locator/posix/restore-companion-post-publish",
