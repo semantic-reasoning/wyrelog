@@ -37,6 +37,7 @@ COMMAND_PATHS = {
     ("fact", "retract"): 2,
     ("fact", "update"): 2,
     ("fact", "forget"): 2,
+    ("fact", "repair"): 2,
     ("fact", "status"): 2,
     ("fact", "verify"): 2,
     ("fact", "restore", "dry-run"): 3,

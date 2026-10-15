@@ -112,7 +112,7 @@ EXPECTED_PARSE_SITES = {
     "run_fact_quota": "WyctlFactQuotaOptions",
     "run_fact_quota_operation_status": "WyctlFactQuotaOperationOptions",
     "run_fact_mutation": "WyctlFactPutOptions",
-    "run_fact_forget": "WyctlFactForgetOptions",
+    "run_fact_erase": "WyctlFactForgetOptions",
     "run_fact_status": "WyctlFactStatusOptions",
     "run_fact_restore": "WyctlFactRestoreOptions",
     "run_fact_verify": "WyctlFactVerifyOptions",

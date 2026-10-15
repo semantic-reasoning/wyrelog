@@ -1325,16 +1325,27 @@ if build_client and host_machine.system() != 'windows'
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
   ]
-  test_wyctl_policy_daemon_deps = [
-    wyrelog_dep,
+  # The fact flow leaves a batch the way an old wrong-relation forget did,
+  # through the store's SQL seam (#1280), which exists only in the
+  # WYL_TEST_HANDLE_SEAMS build of the library.  As for
+  # test-daemon-http-facts, that build comes first on the link line so every
+  # library symbol resolves to it rather than to the shared library behind
+  # the client dependency.
+  if get_option('enable_fact_store').allowed()
+    test_wyctl_policy_daemon_c_args += ['-DWYL_HAS_FACT_STORE',
+      '-DWYL_TEST_HANDLE_SEAMS']
+    test_wyctl_policy_daemon_deps = [wyrelog_handle_test_seams_dep]
+  else
+    test_wyctl_policy_daemon_deps = [wyrelog_dep]
+  endif
+  test_wyctl_policy_daemon_deps += [
     wyrelog_client_dep,
     libsoup_dep,
     sodium_dep,
     service_session_private_dep,
   ]
   if get_option('enable_fact_store').allowed()
-    test_wyctl_policy_daemon_c_args += '-DWYL_HAS_FACT_STORE'
-    test_wyctl_policy_daemon_deps += duckdb_dep
+    test_wyctl_policy_daemon_deps += [duckdb_dep, sqlite_dep]
   endif
   test_wyctl_policy_daemon_deps += daemon_http_private_dep
   test_wyctl_policy_daemon = executable('test-wyctl-policy-daemon',

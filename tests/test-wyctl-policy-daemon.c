@@ -31,6 +31,9 @@
 #include "wyrelog/client.h"
 #ifdef WYL_HAS_FACT_STORE
 #include "wyrelog/fact/store-private.h"
+#ifdef WYL_HAS_FACT_STORE
+#include "wyrelog/fact/store-test-seams-private.h"
+#endif
 #endif
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -144,6 +147,7 @@ grant_fact_authority (WylHandle *handle, const gchar *subject)
     "wr.fact.retract",
     "wr.fact.update",
     "wr.fact.forget",
+    "wr.fact.repair",
     "wr.fact.read",
     "wr.datalog.query",
   };
@@ -209,6 +213,45 @@ check_fact_projection_batch_rows (WylHandle *handle, const gchar *batch_id,
       &rows) != WYRELOG_E_OK)
     return 102;
   return rows == expected_rows ? 0 : 103;
+}
+
+/* Leave BATCH_ID in the shape an old wrong-relation forget produced (#1273):
+ * its rows stay in the orders projection while its batch and event rows are
+ * gone, one completed zero-purge forget intent names another projection, and
+ * one forget audit record matches.  The daemon test seeds the same shape. */
+static gint
+seed_orphaned_forget (WylHandle *handle, const gchar *batch_id)
+{
+  GraphPathProbe probe = {
+    .graph_id = "orders",
+  };
+  if (wyl_policy_store_foreach_fact_graph (wyl_handle_get_policy_store
+        (handle), WYL_TENANT_DEFAULT, graph_path_cb, &probe) != WYRELOG_E_OK
+      || probe.storage_path == NULL)
+    return 110;
+  g_autofree gchar *path = probe.storage_path;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 111;
+  g_autofree gchar *sql = g_strdup_printf (
+    "INSERT INTO fact_forget_intent (op_uuid, batch_id, tenant_id, "
+    "graph_id, namespace_id, relation_name, schema_version, "
+    "projection_table, content_hash, idempotency_key, operator, reason, "
+    "rows_purged, state, created_at_us, completed_at_us) "
+    "SELECT '%s-op', batch_id, tenant_id, graph_id, 'other-ns', 'other', 2, "
+    "'old-wrong-projection', content_hash, idempotency_key, 'old-admin', "
+    "'old wrong relation', 0, 'COMPLETED', 100, 101 FROM fact_batches "
+    "WHERE batch_id = '%s';"
+    "INSERT INTO fact_forget_audit (id, batch_id, tenant_id, graph_id, "
+    "operator, reason, rows_purged, created_at_us) "
+    "VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit), "
+    "'%s', '%s', 'orders', 'old-admin', 'old wrong relation', 0, 101);"
+    "DELETE FROM fact_event_log WHERE batch_id = '%s';"
+    "DELETE FROM fact_batches WHERE batch_id = '%s';"
+    "DROP TABLE fact_orphan_repair_audit;", batch_id, batch_id, batch_id,
+    WYL_TENANT_DEFAULT, batch_id, batch_id);
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK ? 0 : 112;
 }
 
 /* The payload digest the daemon binds to a logical quota operation is the
@@ -1721,9 +1764,102 @@ main (void)
   assert_wyctl_stdout_contains (fact_status_graph_argv,
       "\ngraph=orders state=ready queryable=true ");
   assert_wyctl_stdout (fact_verify_argv,
-      "tenant=__wr_default graph=orders verified=true\n");
+      "tenant=__wr_default graph=orders verified=true "
+      "orphan_repair_candidate_batches=0 orphan_repair_candidate_rows=0\n");
   assert_wyctl_failed (fact_verify_missing_argv, 5,
       "wyctl: fact verify failed: graph_not_found\n");
+
+  /* #1280: rows an old wrong-relation forget left behind show up in fact
+   * verify as repair candidates, and fact repair erases exactly them. */
+  gchar *orphan_input_path = NULL;
+  gint orphan_fd = g_file_open_tmp ("wyctl-facts-orphan-XXXXXX",
+          &orphan_input_path, &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (orphan_fd, >=, 0);
+  g_assert_true (g_close (orphan_fd, NULL));
+  g_assert_true (g_file_set_contents (orphan_input_path,
+      "order_id,amount\no-7,70\n", -1, &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *orphan_input_path_autofree = orphan_input_path;
+  gchar *fact_put_orphan_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "put",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "orphan-1",
+    "--idempotency-key", "orphan-key-1",
+    "--format", "csv",
+    "--input", orphan_input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_put_orphan_argv,
+      "action=put batch_id=orphan-1 operation_id=orphan-key-1 replay=false "
+      "mutation_class=committed_ready effect=unknown\n");
+  if (seed_orphaned_forget (handle, "orphan-1") != 0)
+    return wyl_test_normalize_exit_status (109);
+  assert_wyctl_stdout (fact_verify_argv,
+      "tenant=__wr_default graph=orders verified=true "
+      "orphan_repair_candidate_batches=1 orphan_repair_candidate_rows=1\n");
+  gchar *fact_repair_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "repair",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "orphan-1",
+    "--operator", "repair-admin",
+    "--reason", "repair old defect",
+    "--confirm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  gchar *fact_repair_unconfirmed_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "repair",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "orphan-1",
+    "--operator", "repair-admin",
+    "--reason", "repair old defect",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_rejected (fact_repair_unconfirmed_argv,
+      "wyctl: fact repair erases the orphaned rows permanently; "
+      "pass --confirm\n");
+  if (check_fact_projection_batch_rows (handle, "orphan-1", 1) != 0)
+    return wyl_test_normalize_exit_status (113);
+  assert_wyctl_stdout (fact_repair_argv,
+      "action=repair batch_id=orphan-1 rows_purged=1 "
+      "mutation_class=committed_ready reconcile=false\n");
+  if (check_fact_projection_batch_rows (handle, "orphan-1", 0) != 0)
+    return wyl_test_normalize_exit_status (114);
+  assert_wyctl_stdout (fact_verify_argv,
+      "tenant=__wr_default graph=orders verified=true "
+      "orphan_repair_candidate_batches=0 orphan_repair_candidate_rows=0\n");
+  assert_wyctl_failed (fact_repair_argv, 5,
+      "wyctl: fact repair failed: fact_orphan_repair_candidate_not_found\n");
 
   /* #1238: list the tenant's graphs, then seal a second graph, which the
    * graph-count quota of 2 configured above still admits. */
