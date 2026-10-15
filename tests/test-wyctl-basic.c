@@ -4139,6 +4139,14 @@ test_login_raced_output_reports_collision (gconstpointer data)
   "wyctl: the forget outcome is unknown; re-run the same command, and a " \
   "404 fact_batch_not_found then means the batch is already erased or " \
   "never existed\n"
+#define FACT_REPAIR_REFUSED \
+  "wyctl: fact repair refused: a value holds a control byte, " \
+  "--batch-id is \"operator\" or \"reason\", --operator is " \
+  "\"reason\", or the request exceeds 4096 bytes\n"
+#define FACT_REPAIR_UNKNOWN_HINT \
+  "wyctl: the repair outcome is unknown; re-run the same command, and a " \
+  "404 fact_orphan_repair_candidate_not_found then means the rows are " \
+  "already repaired or were never a candidate\n"
 
 /* Run `wyctl fact forget` against a one-request fake daemon answering
  * STATUS with BODY.  EXTRA replaces the default target options when it is
@@ -4164,12 +4172,13 @@ fact_forget_run_clear (FactForgetRun *run)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (FactForgetRun, fact_forget_run_clear);
 
-/* As run_fact_forget_case, but the fake daemon answers DELAY_MS late and
- * the command then runs with --timeout-ms 500 instead of 2000. */
+/* As run_fact_forget_case, for `wyctl fact COMMAND` (forget or repair,
+ * which take the same target), and the fake daemon answers DELAY_MS late
+ * and the command then runs with --timeout-ms 500 instead of 2000. */
 static void
-run_fact_forget_case_delayed (guint status, const gchar *body,
-    guint delay_ms, const gchar *const *extra, gboolean configured,
-    FactForgetRun *run)
+run_fact_erase_case_delayed (const gchar *command, guint status,
+    const gchar *body, guint delay_ms, const gchar *const *extra,
+    gboolean configured, FactForgetRun *run)
 {
   g_autofree gchar *token_path = write_token_with_mode ("token-1", 0600);
   g_autoptr (GSocketListener) listener = NULL;
@@ -4206,7 +4215,7 @@ run_fact_forget_case_delayed (guint status, const gchar *body,
   g_ptr_array_add (argv, "--timeout-ms");
   g_ptr_array_add (argv, delay_ms > 0 ? "500" : "2000");
   g_ptr_array_add (argv, "fact");
-  g_ptr_array_add (argv, "forget");
+  g_ptr_array_add (argv, (gpointer) command);
   for (const gchar *const *arg = extra != NULL ? extra : target; *arg != NULL;
       arg++)
     g_ptr_array_add (argv, (gpointer) *arg);
@@ -4236,7 +4245,16 @@ static void
 run_fact_forget_case (guint status, const gchar *body,
     const gchar *const *extra, gboolean configured, FactForgetRun *run)
 {
-  run_fact_forget_case_delayed (status, body, 0, extra, configured, run);
+  run_fact_erase_case_delayed ("forget", status, body, 0, extra, configured,
+      run);
+}
+
+static void
+run_fact_repair_case (guint status, const gchar *body,
+    const gchar *const *extra, gboolean configured, FactForgetRun *run)
+{
+  run_fact_erase_case_delayed ("repair", status, body, 0, extra, configured,
+      run);
 }
 
 static void
@@ -4344,8 +4362,8 @@ static void
 test_fact_forget_times_out (void)
 {
   g_auto (FactForgetRun) run = { 0 };
-  run_fact_forget_case_delayed (403, "{\"error\":\"fact_forget_denied\"}",
-      2000, NULL, FALSE, &run);
+  run_fact_erase_case_delayed ("forget", 403,
+      "{\"error\":\"fact_forget_denied\"}", 2000, NULL, FALSE, &run);
   assert_fact_forget_exit (&run, 5);
   g_assert_nonnull (run.request);
   g_assert_cmpstr (run.out, ==, "");
@@ -5156,6 +5174,159 @@ test_fact_forget_ignores_configured_target (void)
       "mutation_class=committed_degraded reconcile=true\n");
 }
 
+/* #1280: `fact repair` takes forget's target and confirmation, posts to the
+ * relation's :repair route, and prints the same receipt under its own
+ * action. */
+static void
+test_fact_repair_success (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_repair_case (200, "{\"ok\":true,\"committed\":true,"
+      "\"rows_purged\":3,\"queryable\":true,\"reconcile\":false,"
+      "\"engine_generation\":7,\"mutation_class\":\"committed_ready\"}", NULL,
+      FALSE, &run);
+  assert_fact_forget_exit (&run, 0);
+  g_assert_cmpstr (run.out, ==, "action=repair batch_id=b%201 rows_purged=3 "
+      "mutation_class=committed_ready reconcile=false\n");
+  g_assert_cmpstr (run.err, ==, "");
+  g_assert_nonnull (run.request);
+  g_assert_true (g_str_has_prefix (run.request,
+      "POST /facts/t/g/r:repair?"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "namespace=ns"));
+  g_assert_nonnull (g_strstr_len (run.request, -1, "schema_version=1"));
+  g_assert_nonnull (g_strstr_len (run.request, -1,
+      "Authorization: Bearer token-1"));
+  g_assert_nonnull (g_strstr_len (run.request, -1,
+      "{\"batch_id\":\"b 1\",\"operator\":\"ops\",\"reason\":\"gdpr erase\"}"));
+}
+
+/* The repair's audit failure has its own code; the rows are gone all the
+ * same, and wyctl says not to retry. */
+static void
+test_fact_repair_audit_failed (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_repair_case (500, "{\"ok\":false,"
+      "\"error\":\"fact_orphan_repair_audit_failed\",\"purged\":true,"
+      "\"rows_purged\":2,\"mutation_class\":\"committed_ready\"}", NULL,
+      FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_cmpstr (run.out, ==, "action=repair batch_id=b%201 rows_purged=2 "
+      "purged=true audit=failed\n");
+  g_assert_cmpstr (run.err, ==,
+      "wyctl: fact repair failed: fact_orphan_repair_audit_failed\n"
+      "wyctl: rows erased; audit record failed; do not retry\n");
+}
+
+/* The error code alone says the rows are gone, even in a body that does not
+ * carry the purge fields. */
+static void
+test_fact_repair_audit_failed_bare (void)
+{
+  g_auto (FactForgetRun) run = { 0 };
+  run_fact_repair_case (500,
+      "{\"error\":\"fact_orphan_repair_audit_failed\"}", NULL, FALSE, &run);
+  assert_fact_forget_exit (&run, 5);
+  g_assert_cmpstr (run.out, ==, "");
+  g_assert_cmpstr (run.err, ==,
+      "wyctl: fact repair failed: fact_orphan_repair_audit_failed\n"
+      "wyctl: rows erased; audit record failed; do not retry\n");
+}
+
+static void
+test_fact_repair_status_errors (void)
+{
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    gint exit_status;
+    gboolean unknown;
+  } cases[] = {
+    {400, "invalid_fact_request", 3, FALSE},
+    {401, "fact_auth_required", 6, FALSE},
+    {403, "fact_repair_denied", 4, FALSE},
+    {404, "fact_orphan_repair_candidate_not_found", 5, FALSE},
+    {409, "graph_sealed", 4, FALSE},
+    {500, "fact_orphan_repair_failed", 5, TRUE},
+    {503, "fact_store_busy", 5, TRUE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            cases[i].code);
+    g_autofree gchar *expected = g_strdup_printf (
+      "wyctl: fact repair failed: %s\n%s", cases[i].code,
+      cases[i].unknown ? FACT_REPAIR_UNKNOWN_HINT : "");
+    run_fact_repair_case (cases[i].status, body, NULL, FALSE, &run);
+    assert_fact_forget_exit (&run, cases[i].exit_status);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, expected);
+  }
+  g_auto (FactForgetRun) unreadable = { 0 };
+  run_fact_repair_case (200, "{}", NULL, FALSE, &unreadable);
+  assert_fact_forget_exit (&unreadable, 5);
+  g_assert_cmpstr (unreadable.out, ==, "");
+  g_assert_cmpstr (unreadable.err, ==, "wyctl: fact repair failed: "
+      "fact_repair_failed\n" FACT_REPAIR_UNKNOWN_HINT);
+}
+
+/* Every refusal happens before a request; the configured default tenant
+ * and graph are never a repair target either. */
+static void
+test_fact_repair_refusals (void)
+{
+  static const gchar *const no_confirm[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "why", NULL,
+  };
+  static const gchar *const no_graph[] = {
+    "--tenant", "t", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "why", "--confirm", NULL,
+  };
+  static const gchar *const no_reason[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--confirm", NULL,
+  };
+  static const gchar *const control_byte[] = {
+    "--tenant", "t", "--graph", "g", "--namespace", "ns", "--relation", "r",
+    "--schema-version", "1", "--batch-id", "b", "--operator", "ops",
+    "--reason", "line\nbreak", "--confirm", NULL,
+  };
+  static const gchar *const configured[] = {
+    "--namespace", "ns", "--relation", "r", "--schema-version", "1",
+    "--batch-id", "b", "--operator", "ops", "--reason", "why", "--confirm",
+    NULL,
+  };
+  static const struct
+  {
+    const gchar *const *args;
+    gboolean configured;
+    const gchar *err;
+  } cases[] = {
+    {no_confirm, FALSE, "wyctl: fact repair erases the orphaned rows "
+     "permanently; pass --confirm\n"},
+    {no_graph, FALSE, "wyctl: fact repair needs --tenant and --graph on the "
+     "command line\n"},
+    {no_reason, FALSE, "wyctl: missing fact repair target option\n"},
+    {control_byte, FALSE, FACT_REPAIR_REFUSED},
+    {configured, TRUE, "wyctl: fact repair needs --tenant and --graph on "
+     "the command line\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_fact_repair_case (200, "{}", cases[i].args, cases[i].configured,
+        &run);
+    assert_fact_forget_exit (&run, 2);
+    g_assert_null (run.request);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, cases[i].err);
+  }
+}
+
 /* Run wyctl with ARGS against a one-request fake daemon answering STATUS
  * with BODY, DELAY_MS late (only the body, with HEADERS_FIRST).  An argument
  * "@TOKEN@" is replaced by a protected token file holding "token-1";
@@ -5425,7 +5596,8 @@ test_fact_verify (void)
       "\"orphan_repair_candidate_batches\":0,"
       "\"orphan_repair_candidate_rows\":0}", NULL, args, FALSE, &run);
   assert_fact_forget_exit (&run, 0);
-  g_assert_cmpstr (run.out, ==, "tenant=t graph=orders verified=true\n");
+  g_assert_cmpstr (run.out, ==, "tenant=t graph=orders verified=true "
+      "orphan_repair_candidate_batches=0 orphan_repair_candidate_rows=0\n");
   g_assert_cmpstr (run.err, ==, "");
   g_assert_nonnull (run.request);
   g_assert_true (g_str_has_prefix (run.request, "GET /facts/verify?"));
@@ -6486,6 +6658,14 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/profile-status", test_profile_status);
   g_test_add_func ("/wyctl/fact-forget-ignores-configured-target",
       test_fact_forget_ignores_configured_target);
+  g_test_add_func ("/wyctl/fact-repair-success", test_fact_repair_success);
+  g_test_add_func ("/wyctl/fact-repair-audit-failed",
+      test_fact_repair_audit_failed);
+  g_test_add_func ("/wyctl/fact-repair-audit-failed-bare",
+      test_fact_repair_audit_failed_bare);
+  g_test_add_func ("/wyctl/fact-repair-status-errors",
+      test_fact_repair_status_errors);
+  g_test_add_func ("/wyctl/fact-repair-refusals", test_fact_repair_refusals);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
       test_datalog_query_gsettings_supplies_daemon_url);
   g_test_add_func (

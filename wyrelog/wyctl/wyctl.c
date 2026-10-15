@@ -3307,17 +3307,110 @@ run_fact_verify (const WyctlOptions *global_opts, gint argc, gchar **argv)
   int exit_rc = fact_remote_exit (client, "fact verify", rc,
           "fact_verify_failed");
   if (exit_rc == 0)
-    g_print ("tenant=%s graph=%s verified=true\n", escaped_tenant,
-        escaped_graph);
+    g_print ("tenant=%s graph=%s verified=true "
+        "orphan_repair_candidate_batches=%" G_GUINT64_FORMAT
+        " orphan_repair_candidate_rows=%" G_GUINT64_FORMAT "\n",
+        escaped_tenant, escaped_graph,
+        verification.orphan_repair_candidate_batches,
+        verification.orphan_repair_candidate_rows);
   return exit_rc;
 }
 
-/* Erase every row of one committed batch.  The erase cannot be undone, so
- * the target must be typed on the command line: --confirm, --tenant and
- * --graph are checked before any file is read or request is sent, and the
- * tenant and graph never fall back to the configured defaults. */
+/* What tells forget and repair apart for the operator: the words, the codes
+ * the daemon gives their outcomes, and the client call.  Both erase rows of
+ * one batch irreversibly and take the same target. */
+typedef struct
+{
+  const gchar *command;
+  const gchar *action;
+  const gchar *summary;
+  const gchar *description;
+  const gchar *batch_id_help;
+  const gchar *confirm_refusal;
+  const gchar *audit_failed_code;
+  const gchar *failed_code;
+  const gchar *unknown_hint;
+  wyrelog_error_t (*send) (WylClient *client, const gchar *tenant,
+      const gchar *graph, const gchar *namespace_id, const gchar *relation,
+      guint32 schema_version, const gchar *batch_id, const gchar *operator_id,
+      const gchar *reason, gint64 guard_timestamp,
+      const gchar *guard_loc_class, gint64 guard_risk,
+      WylClientFactForgetResult *out_result);
+} WyctlFactEraseCommand;
+
+static const WyctlFactEraseCommand wyctl_fact_forget_command = {
+  .command = "fact forget",
+  .action = "forget",
+  .summary = "- erase every row of one fact batch",
+  .description =
+      "The erase cannot be undone.  --operator is an annotation; the audited\n"
+      "actor is the subject of the access token.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the batch was erased and the erase was audited.\n"
+      "  2: local arguments or credentials are invalid; nothing was sent.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy or the graph is sealed.\n"
+      "  5: missing batch, graph or schema; transport, busy, internal or\n"
+      "     unreadable-response failure, including rows erased without an\n"
+      "     audit record.  Without a readable answer the outcome is unknown;\n"
+      "     re-run the same command to learn it.\n"
+      "  6: authentication failed or is required.",
+  .batch_id_help = "Batch id to erase",
+  .confirm_refusal =
+      "wyctl: fact forget erases the batch permanently; pass --confirm\n",
+  .audit_failed_code = "fact_forget_audit_failed",
+  .failed_code = "fact_forget_failed",
+  .unknown_hint =
+      "wyctl: the forget outcome is unknown; re-run the same command, and a "
+      "404 fact_batch_not_found then means the batch is already erased or "
+      "never existed\n",
+  .send = wyl_client_fact_forget_batch,
+};
+
+/* #1280: the rows an old wrong-relation forget left in a batch's actual
+ * projection.  fact verify counts the candidates; the target names the
+ * rows' actual relation, namespace and schema version. */
+static const WyctlFactEraseCommand wyctl_fact_repair_command = {
+  .command = "fact repair",
+  .action = "repair",
+  .summary = "- erase the rows an old wrong-relation forget left behind",
+  .description =
+      "The erase cannot be undone.  The relation, namespace and schema\n"
+      "version name the rows' actual projection; fact verify counts the\n"
+      "candidates.  --operator is an annotation; the audited actor is the\n"
+      "subject of the access token.\n"
+      "\n"
+      "Exit codes:\n"
+      "  0: the rows were erased and the repair was audited.\n"
+      "  2: local arguments or credentials are invalid; nothing was sent.\n"
+      "  3: the daemon rejected the request as invalid.\n"
+      "  4: the daemon denied the request by policy or the graph is sealed.\n"
+      "  5: the batch is not a repair candidate, or is already repaired;\n"
+      "     missing graph or schema; transport, busy, internal or\n"
+      "     unreadable-response failure, including rows erased without an\n"
+      "     audit record.  Without a readable answer the outcome is unknown;\n"
+      "     re-run the same command to learn it.\n"
+      "  6: authentication failed or is required.",
+  .batch_id_help = "Batch id whose orphaned rows to erase",
+  .confirm_refusal =
+      "wyctl: fact repair erases the orphaned rows permanently; pass --confirm\n",
+  .audit_failed_code = "fact_orphan_repair_audit_failed",
+  .failed_code = "fact_repair_failed",
+  .unknown_hint =
+      "wyctl: the repair outcome is unknown; re-run the same command, and a "
+      "404 fact_orphan_repair_candidate_not_found then means the rows are "
+      "already repaired or were never a candidate\n",
+  .send = wyl_client_fact_repair_batch,
+};
+
+/* Erase rows of one committed batch.  The erase cannot be undone, so the
+ * target must be typed on the command line: --confirm, --tenant and --graph
+ * are checked before any file is read or request is sent, and the tenant
+ * and graph never fall back to the configured defaults. */
 static int
-run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
+run_fact_erase (const WyctlOptions *global_opts, gint argc, gchar **argv,
+    const WyctlFactEraseCommand *cmd)
 {
   g_auto (WyctlFactForgetOptions) opts = { 0 };
   GOptionEntry entries[] = {
@@ -3332,7 +3425,7 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
     {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
      "Schema version", "N"},
     {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id,
-     "Batch id to erase", "ID"},
+     cmd->batch_id_help, "ID"},
     {"operator", 0, 0, G_OPTION_ARG_STRING, &opts.operator_id,
      "Operator annotation recorded with the erase", "NAME"},
     {"reason", 0, 0, G_OPTION_ARG_STRING, &opts.reason,
@@ -3350,40 +3443,25 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
     {NULL}
   };
   g_autoptr (GError) error = NULL;
-  g_autoptr (GOptionContext) context =
-      g_option_context_new ("- erase every row of one fact batch");
+  g_autoptr (GOptionContext) context = g_option_context_new (cmd->summary);
   g_option_context_add_main_entries (context, entries, NULL);
-  g_option_context_set_description (context,
-      "The erase cannot be undone.  --operator is an annotation; the audited\n"
-      "actor is the subject of the access token.\n"
-      "\n"
-      "Exit codes:\n"
-      "  0: the batch was erased and the erase was audited.\n"
-      "  2: local arguments or credentials are invalid; nothing was sent.\n"
-      "  3: the daemon rejected the request as invalid.\n"
-      "  4: the daemon denied the request by policy or the graph is sealed.\n"
-      "  5: missing batch, graph or schema; transport, busy, internal or\n"
-      "     unreadable-response failure, including rows erased without an\n"
-      "     audit record.  Without a readable answer the outcome is unknown;\n"
-      "     re-run the same command to learn it.\n"
-      "  6: authentication failed or is required.");
+  g_option_context_set_description (context, cmd->description);
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
     return 2;
   }
   if (argc > 1) {
-    g_printerr ("wyctl: unexpected fact forget argument: %s\n", argv[1]);
+    g_printerr ("wyctl: unexpected %s argument: %s\n", cmd->command, argv[1]);
     return 2;
   }
   if (!opts.confirm) {
-    g_printerr ("wyctl: fact forget erases the batch permanently; "
-        "pass --confirm\n");
+    g_printerr ("%s", cmd->confirm_refusal);
     return 2;
   }
   if (opts.tenant == NULL || opts.tenant[0] == '\0' || opts.graph == NULL
       || opts.graph[0] == '\0') {
-    g_printerr ("wyctl: fact forget needs --tenant and --graph on the "
-        "command line\n");
+    g_printerr ("wyctl: %s needs --tenant and --graph on the command line\n",
+        cmd->command);
     return 2;
   }
   if (opts.namespace_id == NULL || opts.namespace_id[0] == '\0'
@@ -3391,7 +3469,7 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
       || opts.batch_id == NULL || opts.batch_id[0] == '\0'
       || opts.operator_id == NULL || opts.operator_id[0] == '\0'
       || opts.reason == NULL || opts.reason[0] == '\0') {
-    g_printerr ("wyctl: missing fact forget target option\n");
+    g_printerr ("wyctl: missing %s target option\n", cmd->command);
     return 2;
   }
   guint32 schema_version = 0;
@@ -3420,42 +3498,43 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
   if (client_rc != 0)
     return client_rc;
   g_auto (WylClientFactForgetResult) result = { 0 };
-  wyrelog_error_t rc = wyl_client_fact_forget_batch (client, opts.tenant,
-          opts.graph, opts.namespace_id, opts.relation, schema_version,
-          opts.batch_id, opts.operator_id, opts.reason, guard_timestamp,
-          opts.guard_loc_class, guard_risk, &result);
+  wyrelog_error_t rc = cmd->send (client, opts.tenant, opts.graph,
+          opts.namespace_id, opts.relation, schema_version, opts.batch_id,
+          opts.operator_id, opts.reason, guard_timestamp, opts.guard_loc_class,
+          guard_risk, &result);
   g_autofree gchar *batch_id = g_uri_escape_string (opts.batch_id, NULL,
           TRUE);
   if (rc == WYRELOG_E_INVALID
       && wyl_client_get_last_http_status (client) == 0) {
     /* Refused before any request by the client's own checks. */
-    g_printerr ("wyctl: fact forget refused: a value holds a control byte, "
+    g_printerr ("wyctl: %s refused: a value holds a control byte, "
         "--batch-id is \"operator\" or \"reason\", --operator is "
-        "\"reason\", or the request exceeds 4096 bytes\n");
+        "\"reason\", or the request exceeds 4096 bytes\n", cmd->command);
     return 2;
   }
   g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
   if (rc != WYRELOG_E_OK && !result.purged
-      && g_strcmp0 (error_code, "fact_forget_audit_failed") == 0) {
+      && g_strcmp0 (error_code, cmd->audit_failed_code) == 0) {
     /* The daemon names this error only after the rows are gone. */
-    (void) fact_remote_exit (client, "fact forget", rc,
-        "fact_forget_audit_failed");
+    (void) fact_remote_exit (client, cmd->command, rc,
+        cmd->audit_failed_code);
     g_printerr ("wyctl: rows erased; audit record failed; do not retry\n");
     return 5;
   }
   if (rc != WYRELOG_E_OK && result.purged && !result.audit_recorded) {
-    g_print ("action=forget batch_id=%s rows_purged=%" G_GUINT64_FORMAT
-        " purged=true audit=failed\n", batch_id, result.rows_purged);
-    (void) fact_remote_exit (client, "fact forget", rc,
-        "fact_forget_audit_failed");
+    g_print ("action=%s batch_id=%s rows_purged=%" G_GUINT64_FORMAT
+        " purged=true audit=failed\n", cmd->action, batch_id,
+        result.rows_purged);
+    (void) fact_remote_exit (client, cmd->command, rc,
+        cmd->audit_failed_code);
     g_printerr ("wyctl: rows erased; audit record failed; do not retry\n");
     return 5;
   }
-  int exit_rc = fact_remote_exit (client, "fact forget", rc,
-          "fact_forget_failed");
+  int exit_rc = fact_remote_exit (client, cmd->command, rc, cmd->failed_code);
   if (exit_rc == 0) {
-    g_print ("action=forget batch_id=%s rows_purged=%" G_GUINT64_FORMAT
-        " mutation_class=%s reconcile=%s\n", batch_id, result.rows_purged,
+    g_print ("action=%s batch_id=%s rows_purged=%" G_GUINT64_FORMAT
+        " mutation_class=%s reconcile=%s\n", cmd->action, batch_id,
+        result.rows_purged,
         result.mutation_class != NULL ? result.mutation_class : "unknown",
         result.reconcile ? "true" : "false");
   } else {
@@ -3463,11 +3542,23 @@ run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
      * error: the erase may have committed, since the daemon records its
      * intent first and a failed cleanup after the commit answers 500. */
     if (wyctl_remote_outcome_unknown (client, rc))
-      g_printerr ("wyctl: the forget outcome is unknown; re-run the same "
-          "command, and a 404 fact_batch_not_found then means the batch is "
-          "already erased or never existed\n");
+      g_printerr ("%s", cmd->unknown_hint);
   }
   return exit_rc;
+}
+
+static int
+run_fact_forget (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  return run_fact_erase (global_opts, argc, argv,
+             &wyctl_fact_forget_command);
+}
+
+static int
+run_fact_repair (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  return run_fact_erase (global_opts, argc, argv,
+             &wyctl_fact_repair_command);
 }
 
 static int
@@ -4477,6 +4568,8 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_fact_update (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "forget") == 0)
     return run_fact_forget (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "repair") == 0)
+    return run_fact_repair (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "status") == 0)
     return run_fact_status (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "verify") == 0)

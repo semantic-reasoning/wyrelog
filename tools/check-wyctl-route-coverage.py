@@ -72,6 +72,7 @@ COVERAGE = {
     "/facts/{tenant}/{graph}/{relation}:update": ("fact", "update"),
     "/facts/{tenant}/{graph}:update": ("fact", "update"),
     "/facts/{tenant}/{graph}/{relation}:forget": ("fact", "forget"),
+    "/facts/{tenant}/{graph}/{relation}:repair": ("fact", "repair"),
     "/datalog": ("datalog", "query"),
     "/auth/login": ("auth", "login"),
     "/auth/mfa/verify": ("auth", "login"),
@@ -102,9 +103,6 @@ COVERAGE = {
 }
 
 HTTP_ONLY = {
-    "/facts/{tenant}/{graph}/{relation}:repair":
-        "no wyctl command yet; repair through the HTTP route described in the "
-        "runbook (#1280)",
     "/profile/events":
         "machine-to-machine event forwarding from the service profile to "
         "the system profile; not an operator action",
