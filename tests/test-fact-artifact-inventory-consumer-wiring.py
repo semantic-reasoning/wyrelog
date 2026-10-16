@@ -1346,9 +1346,12 @@ WINDOWS_ACTIVE_COMMANDS = (
     "rem beside the DLL so g_subprocess-based tests can launch children.",
     'copy /Y "%VCPKG_INSTALLED_DIR%\\tools\\glib\\gspawn-win64-helper*.exe" "%VCPKG_INSTALLED_DIR%\\bin\\" >NUL',
     "meson compile -C builddir wyctl wyrelogd",
+    "if errorlevel 1 goto :fail",
     "if not exist builddir\\wyrelog\\wyctl.exe exit /b 1",
-    "builddir\\wyrelog\\wyctl.exe --help >NUL",
-    'builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
+    "meson devenv -C builddir %GITHUB_WORKSPACE%\\builddir\\wyrelog\\wyctl.exe --help >NUL",
+    "if %ERRORLEVEL% NEQ 0 goto :fail",
+    'meson devenv -C builddir %GITHUB_WORKSPACE%\\builddir\\wyrelog\\wyrelogd.exe --help | findstr /C:"--listen-port"',
+    "if %ERRORLEVEL% NEQ 0 goto :fail",
     'if "${{ matrix.secure_bridge }}"=="enabled" (',
     "meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows",
     "if errorlevel 1 goto :fail",
@@ -1371,6 +1374,22 @@ WINDOWS_ACTIVE_COMMANDS = (
 
 WINDOWS_FAIL_FAST_GUARD = "if errorlevel 1 goto :fail"
 WINDOWS_FAIL_FAST_TAIL = ("exit /b %ERRORLEVEL%", ":fail", "exit /b 1")
+# Commands ahead of the branch that build or run a binary, with the guard
+# each needs (first matching prefix wins): their status is overwritten by the
+# next command just the same.  The probes run through `meson devenv`, which
+# puts the subproject DLL directories on PATH; run bare, the binaries fail to
+# load on the runner (STATUS_DLL_NOT_FOUND), which went unnoticed while the
+# probes were unguarded.
+# A binary probe that crashes or fails to load exits with a negative NTSTATUS
+# (0xC0000135 is -1073741515), and `if errorlevel 1` is a signed >= 1 test
+# that stays silent on it (measured), so the probes compare against zero.
+WINDOWS_PROBE_GUARD = "if %ERRORLEVEL% NEQ 0 goto :fail"
+WINDOWS_PRE_BLOCK_GUARDS = (
+    ("meson devenv ", WINDOWS_PROBE_GUARD),
+    ("meson ", WINDOWS_FAIL_FAST_GUARD),
+    # Matches nothing today; keeps a bare probe that comes back guarded.
+    ("builddir\\", WINDOWS_PROBE_GUARD),
+)
 
 
 def validate_windows_fail_fast(path: str, windows_active: list[str]) -> None:
@@ -1381,7 +1400,9 @@ def validate_windows_fail_fast(path: str, windows_active: list[str]) -> None:
     reconstitution suite's ERROR.  The guard must leave the parenthesized
     block before exiting: an `exit /b 1` inside the block leaves cmd's process
     status at 0 (measured), so it jumps to a top-level :fail label, and the
-    else branch's status survives through `exit /b %ERRORLEVEL%`."""
+    else branch's status survives through `exit /b %ERRORLEVEL%`.  The same
+    holds ahead of the branch: an unguarded `meson compile` or `--help` probe
+    there is overwritten by whatever runs next."""
     begin = next(
         (
             index
@@ -1403,6 +1424,24 @@ def validate_windows_fail_fast(path: str, windows_active: list[str]) -> None:
         "E_INVENTORY_CI_WINDOWS_FAIL_FAST",
         f"{path} secure native-Windows branch is missing",
     )
+    for index in range(begin):
+        command = windows_active[index]
+        guard = next(
+            (
+                guard
+                for prefix, guard in WINDOWS_PRE_BLOCK_GUARDS
+                if command.startswith(prefix)
+            ),
+            None,
+        )
+        if guard is None:
+            continue
+        require(
+            windows_active[index + 1] == guard,
+            "E_INVENTORY_CI_WINDOWS_FAIL_FAST",
+            f"{path} native-Windows step lets a failing command pass: "
+            f"{command[:48]!r}",
+        )
     for index in range(begin + 1, end):
         command = windows_active[index]
         if not command.startswith("meson "):
@@ -3567,6 +3606,42 @@ def run_self_test(inputs: dict[str, str]) -> None:
             {"E_INVENTORY_CI_WINDOWS_FAIL_FAST"},
         )
     )
+
+    # Ahead of the branch the batch is just as blind: each build or --help
+    # probe loses its status to the next command unless it is guarded.
+    # A probe guarded with `if errorlevel 1` still passes a negative NTSTATUS
+    # exit, so the weaker guard is refused as well.
+    wyctl_help = (
+        "meson devenv -C builddir %GITHUB_WORKSPACE%\\builddir\\wyrelog\\"
+        "wyctl.exe --help >NUL"
+    )
+    for label, command, guard, replacement in (
+        ("windows-pre-block-compile-swallow",
+         "meson compile -C builddir wyctl wyrelogd",
+         WINDOWS_FAIL_FAST_GUARD, ""),
+        ("windows-pre-block-wyctl-help-swallow",
+         wyctl_help, WINDOWS_PROBE_GUARD, ""),
+        ("windows-pre-block-wyrelogd-help-swallow",
+         'meson devenv -C builddir %GITHUB_WORKSPACE%\\builddir\\wyrelog\\'
+         'wyrelogd.exe --help | findstr /C:"--listen-port"',
+         WINDOWS_PROBE_GUARD, ""),
+        ("windows-pre-block-probe-signed-guard",
+         wyctl_help, WINDOWS_PROBE_GUARD,
+         f"          {WINDOWS_FAIL_FAST_GUARD}\n"),
+    ):
+        pre_block_swallow = dict(inputs)
+        for path in (CI_PR, CI_MAIN):
+            pre_block_swallow[path] = replace_in_named_step(
+                pre_block_swallow[path],
+                "  build-windows:",
+                None,
+                "Build and test (clang-cl)",
+                f"{command}\n          {guard}\n",
+                f"{command}\n{replacement}",
+            )
+        mutations.append(
+            (label, pre_block_swallow, {"E_INVENTORY_CI_WINDOWS_FAIL_FAST"})
+        )
 
     windows_wrong_branch = dict(inputs)
     for path in (CI_PR, CI_MAIN):
