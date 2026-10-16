@@ -193,6 +193,26 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
     const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation);
+
+/*
+ * Executes SYNC_STAGED or RETAIN on a provisioned main whose authorized
+ * observation came from the capture above: unmarked, of the exact main the
+ * evidence recorded, under the request's directory and lease, with any stage
+ * the request's staged main.  Every other op is E_POLICY -- FINALIZE until
+ * the provisioning record's cleanup is journaled, the steps after RETAIN
+ * until the rollback-name decision.  A refused call touches nothing and
+ * reports UNKNOWN; an accepted one is the ordinary execute.
+ */
+wyrelog_error_t
+wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+  (WylFactArtifactTransitionWindows *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphWinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
 #endif
 
 /*
