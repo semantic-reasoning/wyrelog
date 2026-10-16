@@ -17,6 +17,17 @@ statements are ``return;`` (comments and ``(void) x;`` casts aside) is an
 offense.  The fix is to report ``g_test_skip`` with a platform-specific
 reason before returning, or to run the platform's own assertions.
 
+Three neighbouring shapes leave the body just as unrun and are offenses
+too.  A return wrapped in a block or in ``G_STMT_START``/``G_STMT_END`` is
+read through the braces.  An arm whose only statement is a ``goto`` is
+taken to jump past the assertions; a jump that lands before them is
+reported all the same, since the guard cannot follow labels.  And an arm
+with no statement at all, the skip-only arm with its ``g_test_skip``
+deleted, is reported as empty: when the body lives in the sibling arm this
+platform runs none of it.  An arm whose only content is another directive
+such as ``#define`` is not empty, and the shape is pinned here as well, so
+an empty arm is reported even when the body follows the chain.
+
 The guard pins the shape, not the outcome.  An arm that calls a helper is
 accepted whether or not that helper skips, as is an arm with an assertion,
 a declaration or any other statement.  An ``#elif`` or ``#else`` arm of a
@@ -33,9 +44,8 @@ attribute macro other than ``G_GNUC_*`` between the parameter list and the
 body are not recognised as ``test_`` definitions.  None of these shapes
 exists under tests/ today.  A cast of a member access such as
 ``(void) fixture->x;`` counts as a statement, which errs towards accepting.
-Other ways to leave a body unrun are outside the pinned shape: a platform
-arm that is empty because its skip was deleted, a return wrapped in braces
-or G_STMT_START, and a goto that jumps past the assertions.
+Other ways to leave a body unrun, such as a conditional return whose
+condition is always true on the platform, are outside the pinned shape.
 
 A block conditioned only on a feature macro such as
 WYL_HAS_SECURE_DUCKDB_BRIDGE is out of scope; tools/report-inactive-suites.py
@@ -69,7 +79,12 @@ CONTROL = {"if", "for", "while", "switch", "do", "else", "return", "sizeof",
 ATTRIBUTES = {"__attribute__", "__declspec", "alignas", "_Alignas",
               "noexcept", "decltype"}
 CALL_SHAPED_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_:~]*\s*\(|[()]")
-OFFENSE_RE = re.compile(r"(?:return;)+")
+# What remains of an arm once whitespace, unused-parameter casts, block
+# braces, G_STMT_START/G_STMT_END and statement terminators are removed:
+# nothing (an empty arm), or only returns and jumps.
+BLOCK_RE = re.compile(r"G_STMT_START|G_STMT_END|[{};]")
+GOTO_RE = re.compile(r"\bgoto\s+([A-Za-z_][A-Za-z0-9_]*)")
+LEAVE_RE = re.compile(r"(?:return|goto[A-Za-z_][A-Za-z0-9_]*)+")
 
 TRIGRAPHS = {
     "??=": "#",
@@ -252,6 +267,7 @@ class Arm:
     function: str | None
     depth: int
     text: list[str] = field(default_factory=list)
+    directives: int = 0
 
 
 @dataclass
@@ -288,15 +304,32 @@ def finish_arm(chain: Chain, depth_now: int, relative_path: str,
     if function is None or not function.startswith("test_"):
         return
     stats.platform_arms_in_tests += 1
-    compact = re.sub(r"\s+", "", CAST_RE.sub("", "\n".join(arm.text)))
-    if depth_now == arm.depth and OFFENSE_RE.fullmatch(compact):
-        findings.append(
-            f"{relative_path}:{arm.line}: "
-            f"{describe(arm, relative_path, chain)}"
-            f" in {function} returns without g_test_skip or an assertion in"
-            f" that arm, so this platform reports PASS with the rest of the"
-            f" body unrun; report g_test_skip (\"<platform-specific reason>\")"
-            f" before the return, or run the platform's own assertions")
+    if depth_now != arm.depth:
+        return
+    text = CAST_RE.sub("", "\n".join(arm.text))
+    residue = BLOCK_RE.sub("", re.sub(r"\s+", "", text))
+    if residue == "" and arm.directives == 0:
+        outcome = ("is empty, so this platform runs nothing here and reports"
+                   " PASS")
+        remedy = "there, run the platform's own assertions, or delete the arm"
+    elif LEAVE_RE.fullmatch(residue):
+        labels = sorted(set(GOTO_RE.findall(text)))
+        if not labels:
+            verb = "returns"
+        elif "return" in GOTO_RE.sub("", text):
+            verb = "returns or jumps to " + ", ".join(labels)
+        else:
+            verb = "jumps to " + ", ".join(labels)
+        outcome = (f"{verb} without g_test_skip or an assertion in that arm,"
+                   " so this platform reports PASS with the rest of the body"
+                   " unrun")
+        remedy = "before leaving, or run the platform's own assertions"
+    else:
+        return
+    findings.append(
+        f"{relative_path}:{arm.line}: {describe(arm, relative_path, chain)}"
+        f" in {function} {outcome}; report"
+        f" g_test_skip (\"<platform-specific reason>\") {remedy}")
 
 
 def scan_source(relative_path: str, source: str,
@@ -336,7 +369,11 @@ def scan_source(relative_path: str, source: str,
                 chain.arm = Arm(index, keyword, expression, platform,
                                 platform and not own,
                                 enclosing_function(contexts), len(contexts))
-            # Any other directive, a #define body included, is not code.
+            else:
+                # Any other directive, a #define body included, is not
+                # code, but an arm that carries one is not empty either.
+                for chain in chains:
+                    chain.arm.directives += 1
             continue
         # Every open arm owns the line: an outer arm is judged on all it
         # contains, nested arms included.
@@ -447,68 +484,107 @@ def self_test() -> None:
         raise AssertionError(f"{what} was accepted")
 
     # Positive fixtures: each is one offense, pinned by directive line,
-    # keyword and function so a scanner that flagged a sibling arm fails.
-    # Pairs rather than a dict, since several fixtures share a needle.
+    # keyword, function and the shape named in the finding, so a scanner
+    # that flagged a sibling arm or misread the shape fails.  Triples rather
+    # than a dict, since several fixtures share a needle.
     positives = (
         # bare return under #ifdef __APPLE__
-        ("tests/planted.c:4: #ifdef __APPLE__ in",
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "returns",
          planted("#ifdef __APPLE__\n  return;\n#endif\n"
                  "  g_assert_true (TRUE);\n")),
         # under #ifdef G_OS_WIN32, with an #else arm that runs assertions
-        ("tests/planted.c:4: #ifdef G_OS_WIN32 in",
+        ("tests/planted.c:4: #ifdef G_OS_WIN32 in", "returns",
          planted("#ifdef G_OS_WIN32\n  return;\n#else\n"
                  "  g_assert_true (TRUE);\n#endif\n")),
         # under #ifndef __linux__
-        ("tests/planted.c:4: #ifndef __linux__ in",
+        ("tests/planted.c:4: #ifndef __linux__ in", "returns",
          planted("#ifndef __linux__\n  return;\n#endif\n"
                  "  g_assert_true (TRUE);\n")),
         # a comment and an unused-parameter cast do not make it a body
-        ("tests/planted.c:4: #ifdef __APPLE__ in",
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "returns",
          planted("#ifdef __APPLE__\n  /* not on macOS */\n  (void) data;\n"
                  "  return;\n#endif\n  g_assert_true (TRUE);\n")),
         # compound condition
         ("tests/planted.c:4: #if !defined(__linux__) && !defined(__APPLE__)"
-         " in",
+         " in", "returns",
          planted("#if !defined(__linux__) && !defined(__APPLE__)\n"
                  "  return;\n#endif\n  g_assert_true (TRUE);\n")),
         # #elif arm naming a platform macro
-        ("tests/planted.c:6: #elif defined(G_OS_WIN32) in",
+        ("tests/planted.c:6: #elif defined(G_OS_WIN32) in", "returns",
          planted("#if defined(__linux__)\n  g_assert_true (TRUE);\n"
                  "#elif defined(G_OS_WIN32)\n  return;\n#endif\n")),
         # the swapped form: #else inherits the chain's platform condition
         ("tests/planted.c:6: #else (of #ifndef __APPLE__ at tests/planted.c:4)"
-         " in",
+         " in", "returns",
          planted("#ifndef __APPLE__\n  g_assert_true (TRUE);\n#else\n"
                  "  return;\n#endif\n")),
         # brace on the definition line
-        ("tests/planted.c:2: #ifdef _WIN32 in",
+        ("tests/planted.c:2: #ifdef _WIN32 in", "returns",
          "static void test_planted (void) {\n#ifdef _WIN32\n  return;\n"
          "#endif\n}\n"),
         # a spliced directive keeps its physical line
         ("tests/planted.c:4: #if defined(__APPLE__) || defined(G_OS_WIN32) in",
+         "returns",
          planted("#if defined(__APPLE__) \\\n    || defined(G_OS_WIN32)\n"
                  "  return;\n#endif\n")),
         # a C++ test inside an anonymous namespace (the suffix is not
         # consulted; the namespace brace is the point)
-        ("tests/planted.c:5: #ifdef G_OS_WIN32 in",
+        ("tests/planted.c:5: #ifdef G_OS_WIN32 in", "returns",
          "namespace {\nvoid\ntest_planted ()\n{\n#ifdef G_OS_WIN32\n"
          "  return;\n#endif\n}\n}\n"),
         # the outer arm's only statement hides behind a nested condition
-        ("tests/planted.c:4: #ifdef __APPLE__ in",
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "returns",
          planted("#ifdef __APPLE__\n#ifdef __aarch64__\n  return;\n#endif\n"
                  "#endif\n  g_assert_true (TRUE);\n")),
         # both nested arms return, so the outer arm is return-only
-        ("tests/planted.c:4: #ifdef G_OS_WIN32 in",
+        ("tests/planted.c:4: #ifdef G_OS_WIN32 in", "returns",
          planted("#ifdef G_OS_WIN32\n#ifdef HAVE_X\n  return;\n#else\n"
                  "  return;\n#endif\n#endif\n  g_assert_true (TRUE);\n")),
         # a stray quote in skipped prose must not blind the rest of the unit
-        ("tests/planted.c:7: #ifdef __APPLE__ in",
+        ("tests/planted.c:7: #ifdef __APPLE__ in", "returns",
          planted("#if 0\n  don't\n#endif\n#ifdef __APPLE__\n  return;\n"
                  "#endif\n  g_assert_true (TRUE);\n")),
+        # the return wrapped in a block
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "returns",
+         planted("#ifdef __APPLE__\n  {\n    return;\n  }\n#endif\n"
+                 "  g_assert_true (TRUE);\n")),
+        # the block on one line
+        ("tests/planted.c:4: #ifdef G_OS_WIN32 in", "returns",
+         planted("#ifdef G_OS_WIN32\n  { return; }\n#endif\n"
+                 "  g_assert_true (TRUE);\n")),
+        # the return inside G_STMT_START / G_STMT_END
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "returns",
+         planted("#ifdef __APPLE__\n  G_STMT_START { return; } G_STMT_END;\n"
+                 "#endif\n  g_assert_true (TRUE);\n")),
+        # a jump past the assertions
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "jumps to out without",
+         planted("#ifdef __APPLE__\n  goto out;\n#endif\n"
+                 "  g_assert_true (TRUE);\nout:\n  (void) data;\n")),
+        # a jump with a dead return behind it names both
+        ("tests/planted.c:4: #ifdef G_OS_WIN32 in",
+         "returns or jumps to out without",
+         planted("#ifdef G_OS_WIN32\n  goto out;\n  return;\n#endif\n"
+                 "  g_assert_true (TRUE);\nout:\n  (void) data;\n")),
+        # the skip-only arm with its skip deleted: nothing is left in it
+        ("tests/planted.c:4: #ifndef __linux__ in", "is empty",
+         planted("#ifndef __linux__\n#else\n  g_assert_true (TRUE);\n"
+                 "#endif\n")),
+        # the same with the body first and an inherited empty #else
+        ("tests/planted.c:6: #else (of #ifdef __APPLE__ at tests/planted.c:4)"
+         " in", "is empty",
+         planted("#ifdef __APPLE__\n  g_assert_true (TRUE);\n#else\n"
+                 "#endif\n")),
+        # a comment and a cast are no more a body here than before a return
+        ("tests/planted.c:4: #ifdef G_OS_WIN32 in", "is empty",
+         planted("#ifdef G_OS_WIN32\n  /* nothing on Windows yet */\n"
+                 "  (void) data;\n#endif\n  g_assert_true (TRUE);\n")),
+        # an empty statement is not a statement
+        ("tests/planted.c:4: #ifdef __APPLE__ in", "is empty",
+         planted("#ifdef __APPLE__\n  ;\n#endif\n  g_assert_true (TRUE);\n")),
     )
-    for needle, source in positives:
+    for needle, shape, source in positives:
         expect_failure({"tests/planted.c": source}, "E_PLATFORM_BARE_RETURN",
-                       (needle, "test_planted"))
+                       (needle, "test_planted", f" {shape}"))
 
     # Negative fixtures, each with the number of platform arms the scanner
     # must visit inside a test_ function, so an accepted shape is proven to
@@ -549,6 +625,25 @@ def self_test() -> None:
         # a nested non-platform return after an assertion in the outer arm
         (planted("#ifdef __APPLE__\n  g_assert_true (TRUE);\n#ifdef HAVE_X\n"
                  "  return;\n#endif\n#endif\n"), 1),
+        # a block that asserts before returning
+        (planted("#ifdef __APPLE__\n  { g_assert_true (TRUE); return; }\n"
+                 "#endif\n"), 1),
+        # a jump after an assertion
+        (planted("#ifdef __APPLE__\n  g_assert_true (TRUE);\n  goto out;\n"
+                 "#endif\n  g_assert_true (TRUE);\nout:\n  (void) data;\n"),
+         1),
+        # a platform arm that only defines a macro is not empty
+        (planted("#ifdef G_OS_WIN32\n#define SEP \"\\\\\"\n#else\n"
+                 "#define SEP \"/\"\n#endif\n  g_assert_cmpstr (SEP, !=, "
+                 "\"\");\n"), 2),
+        # nor is one whose define sits behind a nested condition
+        (planted("#ifdef __APPLE__\n#ifdef HAVE_X\n#define Y 1\n#endif\n"
+                 "#endif\n  g_assert_true (TRUE);\n"), 1),
+        # an empty arm on a condition that names no platform macro
+        (planted("#if HAVE_THING\n#endif\n  g_assert_true (TRUE);\n"), 0),
+        # an empty platform arm in a helper that is not a test
+        (planted("#ifdef G_OS_WIN32\n#endif\n", name="remove_tree_no_follow"),
+         0),
     )
     anchor = {"tests/anchor.c": planted(
         "#ifdef G_OS_WIN32\n  g_test_skip (\"x\");\n  return;\n#endif\n",
