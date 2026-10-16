@@ -392,6 +392,9 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/graph-bind
+/fact-offline-backup-source/windows/graph-bind-foreign-main
+/fact-offline-backup-source/windows/graph-bind-missing-evidence
 /fact-offline-backup-source/windows/graph-import
 /fact-offline-backup-source/windows/graph-import-revalidate-fails
 /fact-offline-backup-source/windows/graph-import-short-read

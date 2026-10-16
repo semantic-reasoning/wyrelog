@@ -438,11 +438,12 @@ wyl_fact_offline_restore_tenant_commit_admit_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
-#ifdef __APPLE__
-  /* The commit steps after admission are Linux-only (#1303 U5).  Refuse
-   * here so a bound macOS journal never reaches decision COMMIT, where
-   * abort would be barred and resume would have no step to run.  The body
-   * below is intentionally unreachable on Darwin until then. */
+#if defined(__APPLE__) || defined(G_OS_WIN32)
+  /* The commit steps after admission are Linux-only on macOS (#1303 U5)
+   * and stop at PUBLISHED_DURABLE on Windows (#1304).  Refuse here so a
+   * bound journal never reaches decision COMMIT, where abort would be
+   * barred and resume would have no step to finish.  The body below is
+   * intentionally unreachable on both until then. */
   (void) drain_timeout_us;
   (void) cancellable;
   return WYRELOG_E_POLICY;
@@ -520,11 +521,12 @@ wyl_fact_offline_restore_graph_commit_admit_run
   (void) cancellable;
   return WYRELOG_E_POLICY;
 #else
-#ifdef __APPLE__
-  /* The commit steps after admission are Linux-only (#1303 U5).  Refuse
-   * here so a bound macOS journal never reaches decision COMMIT, where
-   * abort would be barred and resume would have no step to run.  The body
-   * below is intentionally unreachable on Darwin until then. */
+#if defined(__APPLE__) || defined(G_OS_WIN32)
+  /* The commit steps after admission are Linux-only on macOS (#1303 U5)
+   * and stop at PUBLISHED_DURABLE on Windows (#1304).  Refuse here so a
+   * bound journal never reaches decision COMMIT, where abort would be
+   * barred and resume would have no step to finish.  The body below is
+   * intentionally unreachable on both until then. */
   (void) drain_timeout_us;
   (void) cancellable;
   return WYRELOG_E_POLICY;
