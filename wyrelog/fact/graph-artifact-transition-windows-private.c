@@ -1493,10 +1493,6 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
       || (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
       && slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK))
     return WYRELOG_E_INVALID;
-  /* RETAINED_ROLLBACK would accept the evidence under a different name; as
-   * on Darwin, that is refused until it is decided on its own. */
-  if (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN)
-    return WYRELOG_E_POLICY;
   wyl_id_t id = { 0 };
   if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
       || memcmp (id.bytes, provider->operation_uuid,
@@ -1528,8 +1524,13 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
         (provider, lifecycle, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
     return rc;
+  /* RETAINED_ROLLBACK accepts the evidenced object under the rollback name
+   * (ADR 0006, "Windows rollback name"): that name is derived from this
+   * operation and written only by its own RETAIN, never found by ID. */
   const WylFactArtifactMainTransitionEntryEvidence *old
-    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+    = &observation.entries[slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN
+      : WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK];
   if (!old->present || old->reparse || old->link_count != 1
       || old->owner_state
       != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
@@ -1553,15 +1554,19 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
 }
 
 /* The provenance half of an evidence-bound execute: the authorized
- * observation must be an unmarked READY_MAIN capture of the exact main the
- * provisioning evidence recorded, under the request's directory and lease,
- * with any stage the request's staged main. */
+ * observation must be unmarked and hold the exact object the provisioning
+ * evidence recorded, one link, either under the final name (READY_MAIN) or
+ * under the rollback name after RETAIN (RETAINED_ROLLBACK), which is which
+ * |out_slot| reports; a one-link object cannot be under both.  Directory and
+ * lease are the request's, any stage is the request's staged main, and after
+ * RETAIN any main is the request's staged main too. */
 static wyrelog_error_t
 provisioned_evidence_authorizes (const WylFactArtifactTransitionWindows
     *provider, const gchar *provisioning_uuid,
     const WylFactGraphWinOperationEvidence *evidence,
     const WylFactArtifactMainTransitionRequest *request,
-    const WylFactArtifactMainTransitionObservation *authorized)
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactGraphProvisionedRestoreSlot *out_slot)
 {
   wyl_id_t provisioning = { 0 };
   if (wyl_id_parse (provisioning_uuid, &provisioning) != WYRELOG_E_OK
@@ -1573,6 +1578,16 @@ provisioned_evidence_authorizes (const WylFactArtifactTransitionWindows
     = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
   const WylFactArtifactMainTransitionEntryEvidence *stage
     = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  const WylFactArtifactMainTransitionEntryEvidence *rollback
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK];
+  gboolean ready = main->present
+      && wyl_fact_artifact_inventory_identity_equal (&main->identity,
+          &evidenced);
+  gboolean retained = !ready && rollback->present
+      && wyl_fact_artifact_inventory_identity_equal (&rollback->identity,
+          &evidenced);
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = ready ? main : rollback;
   if (authorized->old_main_witness
       != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE
       || memcmp (evidence->operation_uuid, provisioning.bytes,
@@ -1581,9 +1596,10 @@ provisioned_evidence_authorizes (const WylFactArtifactTransitionWindows
       &provider->directory_identity)
       || !wyl_fact_artifact_inventory_identity_equal (&evidenced,
       &request->expected_main_identity)
-      || !main->present || main->link_count != 1
-      || !wyl_fact_artifact_inventory_identity_equal (&main->identity,
-      &evidenced)
+      || (!ready && !retained) || old->link_count != 1
+      || (retained && main->present
+      && !wyl_fact_artifact_inventory_identity_equal (&main->identity,
+      &request->staged_main_identity))
       || !wyl_fact_artifact_inventory_identity_equal
         (&authorized->directory_identity, &request->directory_identity)
       || !wyl_fact_artifact_inventory_identity_equal
@@ -1592,6 +1608,8 @@ provisioned_evidence_authorizes (const WylFactArtifactTransitionWindows
       && !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
       &request->staged_main_identity)))
     return WYRELOG_E_POLICY;
+  *out_slot = ready ? WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      : WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
   return WYRELOG_E_OK;
 }
 
@@ -1620,16 +1638,25 @@ wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
       || memcmp (id.bytes, provider->operation_uuid,
       sizeof provider->operation_uuid) != 0)
     return WYRELOG_E_POLICY;
-  /* Only the steps a READY_MAIN capture can authorize.  FINALIZE is refused
-   * as on POSIX until the provisioning record's cleanup is journaled, and
-   * the steps after RETAIN need the rollback-name decision. */
-  if (op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
-      && op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN)
-    return WYRELOG_E_POLICY;
+  WylFactGraphProvisionedRestoreSlot slot
+    = WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN;
   wyrelog_error_t rc = provisioned_evidence_authorizes (provider,
-          provisioning_uuid, evidence, request, authorized);
+          provisioning_uuid, evidence, request, authorized, &slot);
   if (rc != WYRELOG_E_OK)
     return rc;
+  /* Each slot admits only the steps that can follow from it.  FINALIZE is
+   * in neither list, as on POSIX, until the provisioning record's cleanup
+   * is journaled. */
+  gboolean allowed = slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      ? op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      : op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK;
+  if (!allowed)
+    return WYRELOG_E_POLICY;
   /* The public execute revalidates authority, binds the authorization, and
    * re-pins the authorized FileId before the effect. */
   return wyl_fact_artifact_transition_windows_execute (provider, authorized,

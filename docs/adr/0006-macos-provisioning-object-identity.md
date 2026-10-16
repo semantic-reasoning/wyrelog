@@ -213,3 +213,46 @@ on macOS until the commit and resume port decides that slot under the same
 rule. The transition model is not told that the witness ran: a one-link main
 is its ordinary shape, and the proof is the successful witness call in the
 restore path, which must therefore use the evidence form of the capture.
+
+## Windows rollback name
+
+Windows accepts the `RETAINED_ROLLBACK` slot that macOS still refuses. Like a
+macOS main, a provisioned Windows main has one link and is proved by its
+operation evidence, so the same comparison rule applies: the evidenced object
+is never found by its ID, and a name merely exposing the expected ID is not
+proof. The rollback name is accepted because acceptance rests on the object
+and on a name the operation fixes, not on a name that was searched for:
+
+- The name is `restore-<operation>.duckdb.superseded`, derived from the
+  restore operation's canonical UUID. The transition provider opens nothing
+  else in that slot and never looks an object up by its ID.
+- The object has one link, so while it is at the rollback name it is at no
+  other name; a second link anywhere refuses the step.
+- Every acceptance compares, from one correlated capture of the whole graph
+  directory, the volume and FileId with the evidence and the request, with
+  link count one, no reparse point and the conforming owner-only ACL. Case
+  aliases, delete-pending entries and unknown names fail the capture's
+  inventory, and the provider refuses any name component with a stream
+  separator.
+
+Acceptance does not prove how the object reached the rollback name. Only the
+operation's own `RETAIN` is meant to move it there, by a no-replace rename of
+the authorized, FileId-pinned main relative to the held graph directory
+handle, but the owner-only graph DACL keeps out only other, non-administrative
+principals (ADR 0005): a process running as the owner, an administrator, or a
+holder of the backup and restore privileges can rename the evidenced main to
+that name itself. That moves nothing the evidence does not already name, so it
+grants no integrity the owner lacks; it does mean the slot is not evidence
+that `RETAIN` was applied, and the journal, not the slot, is what records it.
+
+So the evidence form of the provisioned capture and execute admit
+`RETAINED_ROLLBACK` on Windows and authorize only the steps that follow
+`RETAIN` (`SYNC_ROLLBACK_FILE`, `SYNC_RETAIN_DIR`, `PUBLISH`,
+`SYNC_PUBLISH_DIR`, `ROLLBACK`). Every one of them renames onto an absent name
+or flushes; `FINALIZE`, the only delete, stays refused for a provisioned main
+until the provisioning record's cleanup is journaled. `PUBLISH` re-pins the
+stage it moves, not the object at the rollback name, so a caller must
+recapture and reauthorize before each step rather than reuse an authorization
+across a restart. macOS keeps refusing the slot; its commit and
+resume port may adopt this reasoning, which depends on nothing
+Windows-specific beyond the one-link main.

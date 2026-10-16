@@ -175,11 +175,12 @@ wyl_fact_artifact_transition_windows_with_retired_stage_recovery
 #ifdef G_OS_WIN32
 /*
  * The Windows form of the provisioned capture, proved by the provisioning
- * operation's evidence tuple instead of a companion link; READY_MAIN only,
- * RETAINED_ROLLBACK is E_POLICY.  The evidence must belong to the
- * provisioning operation and the provider's graph and name the request's
- * expected main, and one correlated capture must observe facts.duckdb as that
- * one-link owner-only object.  The observation's old_main_witness stays NONE:
+ * operation's evidence tuple instead of a companion link.  The evidence must
+ * belong to the provisioning operation and the provider's graph and name the
+ * request's expected main, and one correlated capture must observe that
+ * one-link owner-only object at the final name (READY_MAIN) or, after this
+ * operation's RETAIN, at its rollback name (RETAINED_ROLLBACK; ADR 0006,
+ * "Windows rollback name").  The observation's old_main_witness stays NONE:
  * the proof is the successful return.  Both outputs are zeroed on every
  * failure.
  */
@@ -195,13 +196,15 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
     WylFactArtifactMainTransitionObservation *out_observation);
 
 /*
- * Executes SYNC_STAGED or RETAIN on a provisioned main whose authorized
- * observation came from the capture above: unmarked, of the exact main the
- * evidence recorded, under the request's directory and lease, with any stage
- * the request's staged main.  Every other op is E_POLICY -- FINALIZE until
- * the provisioning record's cleanup is journaled, the steps after RETAIN
- * until the rollback-name decision.  A refused call touches nothing and
- * reports UNKNOWN; an accepted one is the ordinary execute.
+ * Executes a restore step on a provisioned main whose authorized observation
+ * came from the capture above: unmarked, holding the exact object the
+ * evidence recorded under the final name (SYNC_STAGED, RETAIN) or under the
+ * rollback name (SYNC_ROLLBACK_FILE, SYNC_RETAIN_DIR, PUBLISH,
+ * SYNC_PUBLISH_DIR, ROLLBACK), under the request's directory and lease, with
+ * any stage -- and after RETAIN any main -- the request's staged main.
+ * FINALIZE and every step outside its slot are E_POLICY; FINALIZE until the
+ * provisioning record's cleanup is journaled.  A refused call touches
+ * nothing and reports UNKNOWN; an accepted one is the ordinary execute.
  */
 wyrelog_error_t
 wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
