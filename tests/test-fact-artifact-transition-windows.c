@@ -2309,6 +2309,7 @@ test_capture_provisioned_with_evidence_rejects (void)
             WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "foreign");
         break;
       case 5:
+        /* RETAINED before any RETAIN: nothing is at the rollback name. */
         slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
         break;
       case 6:
@@ -2547,6 +2548,193 @@ test_execute_provisioned_with_evidence_rejects (void)
   }
 }
 
+/* Authorizes and executes each op through the evidence-bound execute,
+ * recording its effect and durability. */
+static void
+apply_provisioned_ops (Provider *provider, Transition *tx,
+    const Lifecycle *life, const WylFactGraphWinOperationEvidence *evidence,
+    const Request *req, const WylFactArtifactMainTransitionOp *ops,
+    gsize n_ops)
+{
+  for (gsize i = 0; i < n_ops; i++) {
+    Observation authorized = { 0 };
+    authorize_op (provider, tx, life, ops[i], &authorized);
+    WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+    WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+          (provider, PROVISIONING_UUID, evidence, req, &authorized, ops[i],
+        &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    Observation after = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+        life, &after), ==, WYRELOG_E_OK);
+    after.durability = durability;
+    Result res = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (tx, ops[i],
+        effect, &after, &res), ==, WYRELOG_E_OK);
+    g_assert_cmpint (res.refusal, ==, MT (REFUSAL_NONE));
+  }
+}
+
+/* Captures the provisioned main by its evidence under the rollback name, as
+ * a restart after RETAIN does, and admits it as RETAINED. */
+static Transition *
+admit_provisioned_retained (Provider *provider, const Lifecycle *life,
+    const WylFactGraphWinOperationEvidence *evidence, const Request *req)
+{
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+        (provider, PROVISIONING_UUID, evidence, req,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, life,
+      &snapshot, &obs), ==, WYRELOG_E_OK);
+  g_assert_cmpint (obs.old_main_witness, ==, MT (OLD_WITNESS_NONE));
+  Result res = { 0 };
+  Transition *tx = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (req, snapshot,
+      &obs, &res, &tx), ==, WYRELOG_E_OK);
+  g_assert_cmpint (res.refusal, ==, MT (REFUSAL_NONE));
+  g_assert_cmpint (res.state, ==, MT (STATE_RETAINED));
+  return tx;
+}
+
+/* After RETAIN the evidenced main is accepted under the rollback name: a
+ * restarted operation re-captures it there and either publishes the stage
+ * over the final name or rolls the old main back. */
+static void
+test_provisioned_retained_lifecycles (void)
+{
+  for (guint mode = 0; mode < 2; mode++) {
+    Fixture f;
+    fixture_init (&f, mode == 0 ? "retained-publish" : "retained-rollback");
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_provisioned_ready (&f, &life, &evidence, &req);
+    g_autoptr (WylFactArtifactMainTransition) tx
+      = admit_provisioned_ready (provider, &life, &evidence, &req);
+    const WylFactArtifactMainTransitionOp ready_ops[] = {
+      MT (OP_SYNC_STAGED), MT (OP_RETAIN),
+    };
+    apply_provisioned_ops (provider, tx, &life, &evidence, &req, ready_ops,
+        G_N_ELEMENTS (ready_ops));
+
+    if (mode == 0) {
+      /* A restart re-captures the main under the rollback name; the steps
+       * continue on the original transition, which holds the durability a
+       * journal would otherwise carry across the restart. */
+      Transition *restarted
+        = admit_provisioned_retained (provider, &life, &evidence, &req);
+      wyl_fact_artifact_main_transition_free (restarted);
+      const WylFactArtifactMainTransitionOp ops[] = {
+        MT (OP_SYNC_ROLLBACK_FILE), MT (OP_SYNC_RETAIN_DIR), MT (OP_PUBLISH),
+        MT (OP_SYNC_PUBLISH_DIR),
+      };
+      apply_provisioned_ops (provider, tx, &life, &evidence, &req, ops,
+          G_N_ELEMENTS (ops));
+      Observation obs = { 0 };
+      g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+          &life, &obs), ==, WYRELOG_E_OK);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal
+            (&obs.entries[SLOT_MAIN].identity, &req.staged_main_identity));
+      g_assert_false (obs.entries[SLOT_STAGE].present);
+    } else {
+      g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+      req.resume_forbidden = TRUE;
+      tx = admit_provisioned_retained (provider, &life, &evidence, &req);
+      const WylFactArtifactMainTransitionOp ops[] = { MT (OP_ROLLBACK) };
+      apply_provisioned_ops (provider, tx, &life, &evidence, &req, ops,
+          G_N_ELEMENTS (ops));
+      Observation obs = { 0 };
+      g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+          &life, &obs), ==, WYRELOG_E_OK);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal
+            (&obs.entries[SLOT_MAIN].identity, &req.expected_main_identity));
+      g_assert_false (obs.entries[SLOT_ROLLBACK].present);
+    }
+    g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
+    fixture_clear (&f);
+  }
+}
+
+/* The rollback name is accepted only for the evidenced object, only for the
+ * steps after RETAIN, and only with the staged main at the final name. */
+static void
+test_provisioned_retained_rejects (void)
+{
+  for (guint scenario = 0; scenario < 5; scenario++) {
+    Fixture f;
+    g_autofree gchar *tag = g_strdup_printf ("retained-reject-%u", scenario);
+    fixture_init (&f, tag);
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_provisioned_ready (&f, &life, &evidence, &req);
+    g_autoptr (WylFactArtifactMainTransition) tx
+      = admit_provisioned_ready (provider, &life, &evidence, &req);
+    const WylFactArtifactMainTransitionOp ready_ops[] = {
+      MT (OP_SYNC_STAGED), MT (OP_RETAIN),
+    };
+    apply_provisioned_ops (provider, tx, &life, &evidence, &req, ready_ops,
+        G_N_ELEMENTS (ready_ops));
+
+    if (scenario == 0) {
+      /* A same-name file at the rollback name is not the evidenced object. */
+      remove_graph_entry (&f, f.names.rollback);
+      create_owner_only_file (f.directory.graph_handle, f.names.rollback,
+          "foreign");
+      g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+      Observation obs = { 0 };
+      g_assert_cmpint
+        (wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+            (provider, PROVISIONING_UUID, &evidence, &req,
+          WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &life,
+          &snapshot, &obs), ==, WYRELOG_E_POLICY);
+      g_assert_null (snapshot);
+    } else {
+      WylFactArtifactMainTransitionOp authorized_op
+        = scenario == 3 ? MT (OP_SYNC_PUBLISH_DIR) : MT (OP_SYNC_ROLLBACK_FILE);
+      if (scenario == 3) {
+        const WylFactArtifactMainTransitionOp ops[] = {
+          MT (OP_SYNC_ROLLBACK_FILE), MT (OP_SYNC_RETAIN_DIR),
+          MT (OP_PUBLISH),
+        };
+        apply_provisioned_ops (provider, tx, &life, &evidence, &req, ops,
+            G_N_ELEMENTS (ops));
+      }
+      Observation authorized = { 0 };
+      authorize_op (provider, tx, &life, authorized_op, &authorized);
+      WylFactArtifactMainTransitionOp op = authorized_op;
+      if (scenario == 1)
+        /* A step that only a READY_MAIN capture can authorize. */
+        op = MT (OP_RETAIN);
+      else if (scenario == 2)
+        op = MT (OP_SYNC_STAGED);
+      else if (scenario == 3)
+        /* After PUBLISH the main must be the staged main. */
+        req.staged_main_identity.object_bytes[3] ^= 1;
+      else
+        /* Something at the rollback name, but not the evidenced object. */
+        authorized.entries[SLOT_ROLLBACK].identity.object_bytes[3] ^= 1;
+      wyl_fact_artifact_transition_windows_set_test_fault (WF (
+            EXECUTE_LEASE_VERIFY));
+      g_assert_cmpint (execute_provisioned (provider, &evidence, &req,
+          &authorized, op, WYRELOG_E_POLICY), ==, MT (EFFECT_UNKNOWN));
+      g_assert_false
+        (wyl_fact_artifact_transition_windows_test_fault_was_consumed (WF (
+            EXECUTE_LEASE_VERIFY)));
+    }
+    g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
+    fixture_clear (&f);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2627,6 +2815,11 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-artifact-transition/windows/provisioned/execute-rejects",
       test_execute_provisioned_with_evidence_rejects);
+  g_test_add_func ("/fact-artifact-transition/windows/provisioned/retained",
+      test_provisioned_retained_lifecycles);
+  g_test_add_func
+    ("/fact-artifact-transition/windows/provisioned/retained-rejects",
+      test_provisioned_retained_rejects);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 
