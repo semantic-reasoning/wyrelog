@@ -172,6 +172,29 @@ wyl_fact_artifact_transition_windows_with_retired_stage_recovery
     WylFactArtifactTransitionWindowsRetiredStageRecoveryFunc callback,
     gpointer user_data);
 
+#ifdef G_OS_WIN32
+/*
+ * The Windows form of the provisioned capture, proved by the provisioning
+ * operation's evidence tuple instead of a companion link; READY_MAIN only,
+ * RETAINED_ROLLBACK is E_POLICY.  The evidence must belong to the
+ * provisioning operation and the provider's graph and name the request's
+ * expected main, and one correlated capture must observe facts.duckdb as that
+ * one-link owner-only object.  The observation's old_main_witness stays NONE:
+ * the proof is the successful return.  Both outputs are zeroed on every
+ * failure.
+ */
+wyrelog_error_t
+wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+  (WylFactArtifactTransitionWindows *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphWinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation);
+#endif
+
 /*
  * A zero-identity restore stage can never be adopted by its operation name.
  * Proves both operation names are absent and the expected main is exact --
