@@ -1694,6 +1694,70 @@ test_provisioned_pair_evidence_form (void)
   remove_tree_no_follow (root);
 }
 
+/* A pair proves it belongs to a supplied graph directory by the identity of
+ * the object that directory holds, not by its cached identity or its name:
+ * the pair's own directory and a fresh open of the same graph pass, a
+ * different graph is refused, and a cleared directory cannot be compared. */
+static void
+test_provisioned_pair_revalidate_in_directory (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070590";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+
+  provisioned_pair_publish (root, operation, &locator, &resolver, &graph,
+      &evidence);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence (&graph,
+      operation, &evidence, &pair), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (NULL, &graph), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, &graph), ==, WYRELOG_E_OK);
+
+  WylFactGraphResolver same_resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory same = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  open_graph (root, &locator, &same_resolver, &same);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, &same), ==, WYRELOG_E_OK);
+
+  /* A sibling graph whose cached identity is forged to the pair's: only the
+   * held object's identity decides. */
+  WylFactGraphLocator other_locator = { 0 };
+  WylFactGraphResolver other_resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory other = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  init_locator (&other_locator, "tenant", "other");
+  open_graph (root, &other_locator, &other_resolver, &other);
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, &other), ==, WYRELOG_E_POLICY);
+  other.graph_identity = graph.graph_identity;
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, &other), ==, WYRELOG_E_POLICY);
+
+  WylFactGraphDirectory cleared = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_provisioned_pair_revalidate_in_directory
+        (pair, &cleared), ==, WYRELOG_E_IO);
+
+  wyl_fact_graph_provisioned_pair_free (pair);
+  wyl_fact_graph_directory_clear (&other);
+  wyl_fact_graph_resolver_clear (&other_resolver);
+  wyl_fact_graph_locator_clear (&other_locator);
+  wyl_fact_graph_directory_clear (&same);
+  wyl_fact_graph_resolver_clear (&same_resolver);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
 /* Every rejection above is produced by the evidence opener before the pair
  * authority runs, so none of it exercises the new code.  These cases race the
  * two seams the pair adds and replace the graph directory out from under a
@@ -2845,6 +2909,9 @@ main (int argc, char **argv)
       test_pre_stage_inventory_hard_link);
   g_test_add_func ("/fact-graph-locator/windows/provisioned-pair-main-identity",
       test_provisioned_pair_main_identity);
+  g_test_add_func
+    ("/fact-graph-locator/windows/provisioned-pair-revalidate-in-directory",
+      test_provisioned_pair_revalidate_in_directory);
   g_test_add_func ("/fact-graph-locator/windows/resolver-open-child-regular",
       test_resolver_open_child_regular);
   g_test_add_func ("/fact-graph-locator/windows/restore-stage-reader",
