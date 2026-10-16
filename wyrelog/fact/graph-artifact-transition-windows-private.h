@@ -93,13 +93,21 @@ typedef enum
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_ENTRY_SUBSTITUTE,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
+  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_RECOVER_RETIRE_SYNC_DIR,
   WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_COUNT,
 } WylFactArtifactTransitionWindowsTestFault;
 
 #ifdef G_OS_WIN32
 typedef void (*WylFactArtifactTransitionWindowsTestPostOpenHook)
   (HANDLE directory_handle, const gchar *name, gpointer user_data);
+typedef void (*WylFactArtifactTransitionWindowsTestPostSyncHook)
+  (HANDLE directory_handle, gpointer user_data);
 #endif
+
+/* The same function type as the POSIX provider's
+ * WylFactArtifactRetiredStageRecoveryFunc, so one callback serves both. */
+typedef wyrelog_error_t (*WylFactArtifactTransitionWindowsRetiredStageRecoveryFunc)
+  (gpointer user_data);
 
 /*
  * Runs the out-of-band capability experiment against |directory| using two
@@ -147,6 +155,23 @@ wyrelog_error_t wyl_fact_artifact_transition_windows_execute
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
 
+/*
+ * Proves an abandoned operation left neither its stage nor its rollback name
+ * behind, then runs |callback| under the retained authority.  Two complete
+ * correlated captures must each admit as a terminal ABANDONED transition with
+ * both operation names absent, and a proven flush of the graph directory
+ * separates them; an unprovable flush is E_IO even where the probe reported
+ * the directory flush UNSUPPORTED.  |request->resume_forbidden| is required.
+ * The callback's code is returned; it never runs on a failed proof.
+ */
+wyrelog_error_t
+wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+  (WylFactArtifactTransitionWindows *provider,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactTransitionWindowsRetiredStageRecoveryFunc callback,
+    gpointer user_data);
+
 void wyl_fact_artifact_transition_windows_free
   (WylFactArtifactTransitionWindows *provider);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactTransitionWindows,
@@ -164,6 +189,9 @@ gboolean wyl_fact_artifact_transition_windows_test_fault_was_consumed
 #ifdef G_OS_WIN32
 void wyl_fact_artifact_transition_windows_set_test_post_open_hook
   (WylFactArtifactTransitionWindowsTestPostOpenHook hook, gpointer user_data);
+/* Runs after the recovery proof's directory flush, before its second pass. */
+void wyl_fact_artifact_transition_windows_set_test_recovery_post_sync_hook
+  (WylFactArtifactTransitionWindowsTestPostSyncHook hook, gpointer user_data);
 #endif
 
 G_END_DECLS

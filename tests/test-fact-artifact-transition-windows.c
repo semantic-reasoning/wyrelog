@@ -1859,6 +1859,158 @@ test_retire_stage_requires_directory_flush (void)
   fixture_clear (&f);
 }
 
+static void
+recreate_stage_after_recovery_sync (HANDLE directory_handle,
+    gpointer user_data)
+{
+  create_owner_only_file (directory_handle, user_data, "reappeared");
+}
+
+static wyrelog_error_t
+count_retired_stage_recovery (gpointer user_data)
+{
+  guint *calls = user_data;
+  (*calls)++;
+  return WYRELOG_E_OK;
+}
+
+/* Opens a provider on a stage (and an old main when |with_main|), captures,
+ * and returns the abandoning request; the caller retires the stage. */
+static Provider *
+open_for_recovery (Fixture *f, gboolean with_main, const Lifecycle *life,
+    Request *out_request)
+{
+  if (with_main)
+    create_owner_only_file (f->directory.graph_handle,
+        WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "old-main");
+  create_owner_only_file (f->directory.graph_handle, f->names.stage,
+      "stage");
+  Capability cap = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_probe_capability
+        (&f->directory, OPERATION_UUID, &cap), ==, WYRELOG_E_OK);
+  Provider *provider = NULL;
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_open (&f->resolver,
+      &f->directory, f->lease, OPERATION_UUID, &cap, &provider), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_capture (provider,
+      life, &snapshot, &obs), ==, WYRELOG_E_OK);
+  *out_request = request_for (&obs, obs.entries[SLOT_MAIN].identity,
+          obs.entries[SLOT_STAGE].identity, !with_main);
+  out_request->resume_forbidden = TRUE;
+  return provider;
+}
+
+static void
+remove_graph_entry (const Fixture *f, const gchar *name)
+{
+  g_autofree gchar *path = g_build_filename (f->graph_path, name, NULL);
+  g_assert_cmpint (g_remove (path), ==, 0);
+}
+
+/* The callback runs once, under retained authority, only after two
+ * inventories agree that the abandoned operation left no stage and no
+ * rollback, with a proven directory flush between them. */
+static void
+test_retired_stage_recovery (void)
+{
+  for (guint mode = 0; mode < 2; mode++) {
+    Fixture f;
+    fixture_init (&f, mode == 0 ? "recover-main" : "recover-absent");
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_for_recovery (&f, mode == 0, &life, &req);
+    remove_graph_entry (&f, f.names.stage);
+
+    guint calls = 0;
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+          (provider, &req, &life, count_retired_stage_recovery, &calls), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (calls, ==, 1);
+
+    wyl_fact_artifact_transition_windows_set_test_fault (WF (
+          RECOVER_RETIRE_SYNC_DIR));
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+          (provider, &req, &life, count_retired_stage_recovery, &calls), ==,
+        WYRELOG_E_IO);
+    g_assert_cmpuint (calls, ==, 1);
+    g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed
+          (WF (RECOVER_RETIRE_SYNC_DIR)));
+
+    wyl_fact_artifact_transition_windows_set_test_recovery_post_sync_hook
+      (recreate_stage_after_recovery_sync, f.names.stage);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+          (provider, &req, &life, count_retired_stage_recovery, &calls), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpuint (calls, ==, 1);
+    wyl_fact_artifact_transition_windows_set_test_recovery_post_sync_hook
+      (NULL, NULL);
+
+    req.resume_forbidden = FALSE;
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+          (provider, &req, &life, count_retired_stage_recovery, &calls), ==,
+        WYRELOG_E_INVALID);
+    g_assert_cmpuint (calls, ==, 1);
+    fixture_clear (&f);
+  }
+}
+
+static void
+test_retired_stage_recovery_rejects_conflicts (void)
+{
+  for (guint scenario = 0; scenario < 6; scenario++) {
+    Fixture f;
+    g_autofree gchar *tag = g_strdup_printf ("recover-conflict-%u", scenario);
+    fixture_init (&f, tag);
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_for_recovery (&f, TRUE, &life, &req);
+    remove_graph_entry (&f, f.names.stage);
+    switch (scenario) {
+      case 0:
+        req.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+        break;
+      case 1:
+        req.lease_identity.object_bytes[0] ^= 0xff;
+        break;
+      case 2:
+        /* Removed rather than parked, so no extra entry is what refuses. */
+        remove_graph_entry (&f, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+        create_owner_only_file (f.directory.graph_handle,
+            WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "replacement");
+        break;
+      case 3:
+        create_owner_only_file (f.directory.graph_handle, f.names.rollback,
+            "rollback");
+        break;
+      case 4:
+        create_owner_only_file (f.directory.graph_handle,
+            "foreign-restore.duckdb", "foreign");
+        break;
+      case 5:
+        create_owner_only_file (f.directory.graph_handle, "facts.duckdb.wal",
+            "wal");
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    guint calls = 0;
+    wyrelog_error_t rc
+      = wyl_fact_artifact_transition_windows_with_retired_stage_recovery
+          (provider, &req, &life, count_retired_stage_recovery, &calls);
+    g_assert_cmpint (rc, ==, WYRELOG_E_POLICY);
+    g_assert_cmpuint (calls, ==, 0);
+    fixture_clear (&f);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1919,6 +2071,11 @@ main (int argc, char **argv)
       test_finalize_requires_directory_flush);
   g_test_add_func ("/fact-artifact-transition/windows/retire-flush",
       test_retire_stage_requires_directory_flush);
+  g_test_add_func ("/fact-artifact-transition/windows/recovery/retired-stage",
+      test_retired_stage_recovery);
+  g_test_add_func
+    ("/fact-artifact-transition/windows/recovery/retired-stage-conflicts",
+      test_retired_stage_recovery_rejects_conflicts);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 
