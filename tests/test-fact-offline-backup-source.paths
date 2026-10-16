@@ -81,7 +81,6 @@
 /fact-offline-backup-source/import/unconfirmed
 /fact-offline-backup-source/import/unsealed
 /fact-offline-backup-source/import/untrusted
-/fact-offline-backup-source/import/windows-fail-closed
 /fact-offline-backup-source/import/wrong-graph
 /fact-offline-backup-source/import/wrong-inode
 /fact-offline-backup-source/import/wrong-manifest
@@ -393,6 +392,9 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/graph-import
+/fact-offline-backup-source/windows/graph-import-revalidate-fails
+/fact-offline-backup-source/windows/graph-import-short-read
 /fact-offline-backup-source/windows/graph-source
 /fact-offline-backup-source/windows/graph-source-evidence-drift
 /fact-offline-backup-source/windows/graph-source-missing-evidence
