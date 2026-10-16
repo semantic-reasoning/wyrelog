@@ -1574,9 +1574,12 @@ jobs:
           rem beside the DLL so g_subprocess-based tests can launch children.
           copy /Y "%VCPKG_INSTALLED_DIR%\tools\glib\gspawn-win64-helper*.exe" "%VCPKG_INSTALLED_DIR%\bin\" >NUL
           meson compile -C builddir wyctl wyrelogd
+          if errorlevel 1 goto :fail
           if not exist builddir\wyrelog\wyctl.exe exit /b 1
-          builddir\wyrelog\wyctl.exe --help >NUL
-          builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
+          meson devenv -C builddir %GITHUB_WORKSPACE%\builddir\wyrelog\wyctl.exe --help >NUL
+          if %ERRORLEVEL% NEQ 0 goto :fail
+          meson devenv -C builddir %GITHUB_WORKSPACE%\builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
+          if %ERRORLEVEL% NEQ 0 goto :fail
           if "${{ matrix.secure_bridge }}"=="enabled" (
             meson compile -C builddir test-windows-appverifier-probe test-windows-appverifier-probe-dll test-secure-duckdb-temp-child-windows test-fact-artifact-transition-driver test-fact-artifact-transition-windows
             if errorlevel 1 goto :fail
