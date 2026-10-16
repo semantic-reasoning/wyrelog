@@ -2011,6 +2011,201 @@ test_retired_stage_recovery_rejects_conflicts (void)
   }
 }
 
+static const gchar PROVISIONING_UUID[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a0";
+
+/* Publishes facts.duckdb from an exact provisioning stage and adopts it as an
+ * evidence pair, which is how a Windows main gets its provenance. */
+static WylFactGraphProvisionedPair *
+publish_provisioned_main (Fixture *f)
+{
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&f->directory,
+      PROVISIONING_UUID, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+      &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&f->directory,
+      &stage, &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+  WylFactGraphProvisionedPair *pair = NULL;
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&f->directory, PROVISIONING_UUID, &evidence, &pair), ==,
+      WYRELOG_E_OK);
+  return pair;
+}
+
+/* Opens a provider and builds the request for an operation that never bound
+ * a stage: zero staged identity, main absent or the pair's one-link main. */
+static Provider *
+open_for_unbound (Fixture *f, const Lifecycle *life, gboolean main_absent,
+    Request *out_request)
+{
+  Capability cap = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_probe_capability
+        (&f->directory, OPERATION_UUID, &cap), ==, WYRELOG_E_OK);
+  Provider *provider = NULL;
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_open (&f->resolver,
+      &f->directory, f->lease, OPERATION_UUID, &cap, &provider), ==,
+      WYRELOG_E_OK);
+  Observation obs = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+      life, &obs), ==, WYRELOG_E_OK);
+  *out_request = request_for (&obs, obs.entries[SLOT_MAIN].identity,
+          (Identity) { 0 }, main_absent);
+  out_request->resume_forbidden = TRUE;
+  return provider;
+}
+
+/* An empty graph and a provisioned one-link main both prove absence, with
+ * the callback run once each, a failed flush E_IO, and a stage reappearing
+ * after the flush E_POLICY. */
+static void
+test_unbound_absence (void)
+{
+  for (guint mode = 0; mode < 2; mode++) {
+    Fixture f;
+    fixture_init (&f, mode == 0 ? "unbound-empty" : "unbound-provisioned");
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    WylFactGraphProvisionedPair *pair = mode == 0 ? NULL
+        : publish_provisioned_main (&f);
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_for_unbound (&f, &life, mode == 0, &req);
+
+    guint calls = 0;
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_with_unbound_absence
+          (provider, pair, &req, &life, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (calls, ==, 1);
+
+    wyl_fact_artifact_transition_windows_set_test_fault (WF (
+          RECOVER_RETIRE_SYNC_DIR));
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_with_unbound_absence
+          (provider, pair, &req, &life, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_IO);
+    g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed
+          (WF (RECOVER_RETIRE_SYNC_DIR)));
+
+    wyl_fact_artifact_transition_windows_set_test_recovery_post_sync_hook
+      (recreate_stage_after_recovery_sync, f.names.stage);
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_with_unbound_absence
+          (provider, pair, &req, &life, count_retired_stage_recovery,
+        &calls), ==, WYRELOG_E_POLICY);
+    wyl_fact_artifact_transition_windows_set_test_recovery_post_sync_hook
+      (NULL, NULL);
+    g_assert_cmpuint (calls, ==, 1);
+
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
+    g_clear_pointer (&pair, wyl_fact_graph_provisioned_pair_free);
+    fixture_clear (&f);
+  }
+}
+
+/* Every malformed request is E_INVALID and every visible contradiction is
+ * E_POLICY; the callback never runs. */
+static void
+test_unbound_absence_rejects (void)
+{
+  for (guint scenario = 0; scenario < 9; scenario++) {
+    Fixture f;
+    g_autofree gchar *tag = g_strdup_printf ("unbound-reject-%u", scenario);
+    fixture_init (&f, tag);
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    gboolean provisioned = scenario >= 4;
+    WylFactGraphProvisionedPair *pair = provisioned
+        ? publish_provisioned_main (&f) : NULL;
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_for_unbound (&f, &life, !provisioned, &req);
+    WylFactGraphProvisionedPair *passed = pair;
+    WylFactGraphProvisionedPair *sibling_pair = NULL;
+    Fixture sibling = { 0 };
+    if (scenario == 8) {
+      sibling.resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+      sibling.directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+      g_assert_cmpint (wyl_fact_graph_resolver_open (f.root,
+          &sibling.resolver), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_graph_locator_init (&sibling.locator,
+          "tenant", "sibling"), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_fact_graph_resolver_open_directory
+            (&sibling.resolver, &sibling.locator, TRUE, &sibling.directory),
+          ==, WYRELOG_E_OK);
+      sibling_pair = publish_provisioned_main (&sibling);
+    }
+    wyrelog_error_t expected = WYRELOG_E_POLICY;
+    switch (scenario) {
+      case 0:
+        /* A stage at the operation's name, even with nothing bound. */
+        create_owner_only_file (f.directory.graph_handle, f.names.stage,
+            "stage");
+        break;
+      case 1:
+        /* A main where the request expects none. */
+        create_owner_only_file (f.directory.graph_handle,
+            WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "main");
+        break;
+      case 2:
+        req.staged_main_identity.object_width = 16;
+        req.staged_main_identity.object_bytes[0] = 1;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 3:
+        req.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+        break;
+      case 4: {
+        /* The provisioned main gains a second link outside the graph
+         * directory, so no extra entry is what refuses it.  The pair's own
+         * revalidation requires a single link and refuses first; the
+         * provider's link-count check stays as defense in depth. */
+        g_autofree gchar *main_path = g_build_filename (f.graph_path,
+                WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, NULL);
+        g_autofree gchar *link_path = g_build_filename (f.root,
+                "outside-link.duckdb", NULL);
+        g_autofree WCHAR *wide_main = g_utf8_to_utf16 (main_path, -1, NULL,
+                NULL, NULL);
+        g_autofree WCHAR *wide_link = g_utf8_to_utf16 (link_path, -1, NULL,
+                NULL, NULL);
+        g_assert_true (CreateHardLinkW (wide_link, wide_main, NULL));
+        break;
+      }
+      case 5:
+        create_owner_only_file (f.directory.graph_handle, f.names.rollback,
+            "rollback");
+        break;
+      case 6:
+        /* A pair is required exactly when a main is expected. */
+        passed = NULL;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 7:
+        req.resume_forbidden = FALSE;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 8:
+        /* A genuine pair, but for a sibling graph: the main here matches the
+         * request, so only the directory proof refuses it. */
+        passed = sibling_pair;
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    guint calls = 0;
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_with_unbound_absence
+          (provider, passed, &req, &life, count_retired_stage_recovery,
+        &calls), ==, expected);
+    g_assert_cmpuint (calls, ==, 0);
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
+    g_clear_pointer (&pair, wyl_fact_graph_provisioned_pair_free);
+    g_clear_pointer (&sibling_pair, wyl_fact_graph_provisioned_pair_free);
+    wyl_fact_graph_directory_clear (&sibling.directory);
+    wyl_fact_graph_locator_clear (&sibling.locator);
+    wyl_fact_graph_resolver_clear (&sibling.resolver);
+    fixture_clear (&f);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2076,6 +2271,11 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-artifact-transition/windows/recovery/retired-stage-conflicts",
       test_retired_stage_recovery_rejects_conflicts);
+  g_test_add_func ("/fact-artifact-transition/windows/recovery/unbound-absence",
+      test_unbound_absence);
+  g_test_add_func
+    ("/fact-artifact-transition/windows/recovery/unbound-absence-rejects",
+      test_unbound_absence_rejects);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 

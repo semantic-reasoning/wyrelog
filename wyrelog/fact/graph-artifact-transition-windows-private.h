@@ -172,6 +172,23 @@ wyl_fact_artifact_transition_windows_with_retired_stage_recovery
     WylFactArtifactTransitionWindowsRetiredStageRecoveryFunc callback,
     gpointer user_data);
 
+/*
+ * A zero-identity restore stage can never be adopted by its operation name.
+ * Proves both operation names are absent and the expected main is exact --
+ * absent with |pair| NULL, or present as |pair|'s one-link object -- across
+ * two complete inventories separated by a proven directory flush, then runs
+ * |callback| under the retained authority.  |pair| is revalidated against the
+ * provider's own directory before each pass.  A visible or ambiguous entry
+ * leaves the journal caller's decision unchanged.
+ */
+wyrelog_error_t wyl_fact_artifact_transition_windows_with_unbound_absence
+  (WylFactArtifactTransitionWindows *provider,
+    WylFactGraphProvisionedPair *pair,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactTransitionWindowsRetiredStageRecoveryFunc callback,
+    gpointer user_data);
+
 void wyl_fact_artifact_transition_windows_free
   (WylFactArtifactTransitionWindows *provider);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylFactArtifactTransitionWindows,
