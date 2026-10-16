@@ -123,7 +123,13 @@ def c_code_only(source: str) -> str:
             if current == delimiter:
                 output[index] = " "
                 state = "code"
-            elif current != "\n":
+            elif current == "\n":
+                # A C literal cannot span a line once splices are joined, so
+                # an unterminated quote (prose in an #if 0 block, an #error
+                # or #warning message) ends with its line instead of
+                # swallowing every directive after it (#1416).
+                state = "code"
+            else:
                 output[index] = " "
         index += 1
     return "".join(output)
@@ -253,6 +259,24 @@ def self_test() -> None:
         {"tests/planted.c": "/* G_OS_WIN32 is unanswerable here; see #1216. */\n"
                             "#include \"local.h\"\n#ifdef G_OS_WIN32\n"
                             "#endif\n"})
+    # A stray quote the compiler never sees as a literal must not blind the
+    # scanner to the directives after it (#1416): prose in an inactive block,
+    # an #error message there, and an active #warning each carry one.
+    violation = f"#ifndef G_OS_WIN32\n{define}#endif\n#include <stdio.h>\n"
+    for stray in (
+            "#if 0\nthis isn't compiled\n#endif\n",
+            "#if 0\n#error this isn't ready\n#endif\n",
+            "#warning can't guard this yet\n",
+            "#if 0\nsay \"stop\n#endif\n",
+    ):
+        expect_failure({"tests/planted.c": stray + violation},
+                       "E_CONFIG_TOKEN_GUARD")
+    # A directive is line-anchored, so the one way a literal can still hide
+    # one is a splice: the string continues on the physical line below and
+    # the directive text there is literal contents, not a directive.
+    expect_success(
+        {"tests/planted.c": f"{define}const char *s = \"abc\\\n"
+                            "#ifdef G_OS_WIN32\";\n#include <stdio.h>\n"})
 
 
 def main() -> int:
