@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/graph-artifact-transition-platform-private.h"
 #ifdef __APPLE__
 #include "fact/graph-locator-darwin-private.h"
 #endif
@@ -47,7 +47,7 @@ typedef struct
   WylFactGraphDirectory directory;
   WylFactGraphProvisionedPair *pair;
   gchar *provisioning_uuid;
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   guint selected_index;
   /* Set only for ROLLBACK_ADMIT_ORPHAN, after the orphan proof. */
   WylFactArtifactInventoryIdentity orphan_identity;
@@ -62,7 +62,7 @@ selected_graph (GraphRollback *rollback)
 static void
 rollback_graph_resources_clear (GraphRollback *rollback)
 {
-  g_clear_pointer (&rollback->provider, wyl_fact_artifact_transition_posix_free);
+  g_clear_pointer (&rollback->provider, wyl_fact_artifact_transition_free);
   g_clear_pointer (&rollback->pair, wyl_fact_graph_provisioned_pair_free);
   g_clear_pointer (&rollback->provisioning_uuid, g_free);
   wyl_fact_graph_directory_clear (&rollback->directory);
@@ -391,12 +391,12 @@ recover_unbound_callback (gpointer user_data)
 static wyrelog_error_t
 open_provider (GraphRollback *rollback)
 {
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_probe_capability
+  WylFactArtifactTransitionCapability capability = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_probe_capability
         (&rollback->directory, rollback->journal.operation_uuid,
           &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&rollback->resolver,
+    rc = wyl_fact_artifact_transition_open (&rollback->resolver,
             &rollback->directory, rollback->lease,
             rollback->journal.operation_uuid, &capability,
             &rollback->provider);
@@ -446,12 +446,12 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
 {
   *out_admitted = FALSE;
   wyrelog_error_t rc = open_provider (rollback);
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   WylFactArtifactMainTransitionObservation observation = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
+    rc = wyl_fact_artifact_transition_observe (rollback->provider,
             &lifecycle, &observation);
   const WylFactArtifactMainTransitionEntryEvidence *stage
     = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
@@ -463,7 +463,7 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
   if (rc == WYRELOG_E_OK) {
     WylFactArtifactMainTransitionRequest request = request_for (rollback,
             &observation);
-    rc = wyl_fact_artifact_transition_posix_with_unbound_absence
+    rc = wyl_fact_artifact_transition_with_unbound_absence
           (rollback->provider, rollback->pair, &request, &lifecycle,
             recover_unbound_callback, rollback);
   }
@@ -473,14 +473,14 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
 static wyrelog_error_t
 retire_stage (GraphRollback *rollback)
 {
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation before = { 0 };
   wyrelog_error_t rc = check_current (rollback);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_capture (rollback->provider,
+    rc = wyl_fact_artifact_transition_capture (rollback->provider,
             &lifecycle, &snapshot, &before);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -502,7 +502,7 @@ retire_stage (GraphRollback *rollback)
   }
 #endif
   if (!before.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE].present)
-    return wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+    return wyl_fact_artifact_transition_with_retired_stage_recovery
              (rollback->provider, &request, &lifecycle,
                recover_absent_callback, rollback);
 
@@ -524,7 +524,7 @@ retire_stage (GraphRollback *rollback)
     = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_execute (rollback->provider,
+    rc = wyl_fact_artifact_transition_execute (rollback->provider,
             &before, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE,
             &effect, &durability);
   if (rc != WYRELOG_E_OK)
@@ -535,7 +535,7 @@ retire_stage (GraphRollback *rollback)
     return WYRELOG_E_BUSY;
 
   WylFactArtifactMainTransitionObservation after = { 0 };
-  rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
+  rc = wyl_fact_artifact_transition_observe (rollback->provider,
           &lifecycle, &after);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_main_transition_record (transition,
@@ -562,13 +562,13 @@ verify_completed_stage_absent (GraphRollback *rollback)
 {
   wyrelog_error_t rc = rollback->provider == NULL
     ? open_provider (rollback) : WYRELOG_E_OK;
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_capture (rollback->provider,
+    rc = wyl_fact_artifact_transition_capture (rollback->provider,
             &lifecycle, &snapshot, &observation);
   if (rc == WYRELOG_E_OK)
     rc = check_current (rollback);
