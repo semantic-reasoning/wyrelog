@@ -1552,6 +1552,90 @@ wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
   return WYRELOG_E_OK;
 }
 
+/* The provenance half of an evidence-bound execute: the authorized
+ * observation must be an unmarked READY_MAIN capture of the exact main the
+ * provisioning evidence recorded, under the request's directory and lease,
+ * with any stage the request's staged main. */
+static wyrelog_error_t
+provisioned_evidence_authorizes (const WylFactArtifactTransitionWindows
+    *provider, const gchar *provisioning_uuid,
+    const WylFactGraphWinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized)
+{
+  wyl_id_t provisioning = { 0 };
+  if (wyl_id_parse (provisioning_uuid, &provisioning) != WYRELOG_E_OK
+      || !wyl_fact_graph_windows_operation_evidence_equal (evidence, evidence))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactInventoryIdentity evidenced
+    = inventory_identity_from_windows (&evidence->artifact_identity);
+  const WylFactArtifactMainTransitionEntryEvidence *main
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  if (authorized->old_main_witness
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE
+      || memcmp (evidence->operation_uuid, provisioning.bytes,
+      sizeof evidence->operation_uuid) != 0
+      || !transition_win_identity_equal (&evidence->graph_identity,
+      &provider->directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal (&evidenced,
+      &request->expected_main_identity)
+      || !main->present || main->link_count != 1
+      || !wyl_fact_artifact_inventory_identity_equal (&main->identity,
+      &evidenced)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->directory_identity, &request->directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->lease_identity, &request->lease_identity)
+      || (stage->present
+      && !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
+      &request->staged_main_identity)))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+  (WylFactArtifactTransitionWindows *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphWinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (out_durability != NULL)
+    *out_durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
+  if (provider == NULL || provisioning_uuid == NULL || evidence == NULL
+      || request == NULL || request->operation_uuid == NULL
+      || request->expected_main_absent || authorized == NULL
+      || out_effect == NULL || out_durability == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  /* Only the steps a READY_MAIN capture can authorize.  FINALIZE is refused
+   * as on POSIX until the provisioning record's cleanup is journaled, and
+   * the steps after RETAIN need the rollback-name decision. */
+  if (op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      && op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = provisioned_evidence_authorizes (provider,
+          provisioning_uuid, evidence, request, authorized);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* The public execute revalidates authority, binds the authorization, and
+   * re-pins the authorized FileId before the effect. */
+  return wyl_fact_artifact_transition_windows_execute (provider, authorized,
+             op, out_effect, out_durability);
+}
+
 wyrelog_error_t
 wyl_fact_artifact_transition_windows_with_unbound_absence
   (WylFactArtifactTransitionWindows *provider,

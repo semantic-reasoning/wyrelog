@@ -2347,6 +2347,206 @@ test_capture_provisioned_with_evidence_rejects (void)
   }
 }
 
+/* Captures a provisioned main by its evidence and admits it as READY. */
+static Transition *
+admit_provisioned_ready (Provider *provider, const Lifecycle *life,
+    const WylFactGraphWinOperationEvidence *evidence, const Request *req)
+{
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+        (provider, PROVISIONING_UUID, evidence, req,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, life, &snapshot,
+      &obs), ==, WYRELOG_E_OK);
+  Result res = { 0 };
+  Transition *tx = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (req, snapshot,
+      &obs, &res, &tx), ==, WYRELOG_E_OK);
+  g_assert_cmpint (res.state, ==, MT (STATE_READY));
+  return tx;
+}
+
+static WylFactArtifactMainTransitionEffect
+execute_provisioned (Provider *provider,
+    const WylFactGraphWinOperationEvidence *evidence, const Request *req,
+    const Observation *authorized, WylFactArtifactMainTransitionOp op,
+    wyrelog_error_t expected)
+{
+  WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+  WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+        (provider, PROVISIONING_UUID, evidence, req, authorized, op, &effect,
+      &durability), ==, expected);
+  return effect;
+}
+
+/* SYNC_STAGED and RETAIN run on a provisioned main through its evidence, and
+ * the old main ends at the rollback name. */
+static void
+test_execute_provisioned_with_evidence (void)
+{
+  Fixture f;
+  fixture_init (&f, "execute-provisioned");
+  Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  Request req = { 0 };
+  g_autoptr (WylFactArtifactTransitionWindows) provider
+    = open_provisioned_ready (&f, &life, &evidence, &req);
+  g_autoptr (WylFactArtifactMainTransition) tx
+    = admit_provisioned_ready (provider, &life, &evidence, &req);
+
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_SYNC_STAGED), MT (OP_RETAIN),
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (ops); i++) {
+    Observation authorized = { 0 };
+    authorize_op (provider, tx, &life, ops[i], &authorized);
+    WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+    WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+          (provider, PROVISIONING_UUID, &evidence, &req, &authorized, ops[i],
+        &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    Observation after = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+        &life, &after), ==, WYRELOG_E_OK);
+    after.durability = durability;
+    Result res = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (tx, ops[i],
+        effect, &after, &res), ==, WYRELOG_E_OK);
+    g_assert_cmpint (res.refusal, ==, MT (REFUSAL_NONE));
+  }
+  g_assert_false (graph_entry_exists (&f,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME));
+  g_assert_true (graph_entry_exists (&f, f.names.rollback));
+  fixture_clear (&f);
+}
+
+/* A refused call never reaches the public execute: its first seam, armed
+ * beforehand, is left unconsumed and the main keeps its FileId.  A main
+ * substituted after authorization passes the evidence check but is not
+ * renamed, because the public execute re-pins the authorized FileId. */
+static void
+test_execute_provisioned_with_evidence_rejects (void)
+{
+  for (guint scenario = 0; scenario < 15; scenario++) {
+    Fixture f;
+    g_autofree gchar *tag = g_strdup_printf ("execute-prov-reject-%u",
+            scenario);
+    fixture_init (&f, tag);
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_provisioned_ready (&f, &life, &evidence, &req);
+    g_autoptr (WylFactArtifactMainTransition) tx
+      = admit_provisioned_ready (provider, &life, &evidence, &req);
+    WylFactArtifactMainTransitionOp op = MT (OP_SYNC_STAGED);
+    Observation authorized = { 0 };
+    authorize_op (provider, tx, &life, op, &authorized);
+    const Identity main_before = authorized.entries[SLOT_MAIN].identity;
+    wyrelog_error_t expected = WYRELOG_E_POLICY;
+    switch (scenario) {
+      case 0:
+        op = MT (OP_FINALIZE);
+        break;
+      case 1:
+        op = MT (OP_PUBLISH);
+        break;
+      case 2:
+        authorized.old_main_witness = MT (OLD_WITNESS_MAIN);
+        break;
+      case 3:
+        evidence.artifact_identity.file_id[3] ^= 1;
+        break;
+      case 4:
+        evidence.graph_identity.file_id[3] ^= 1;
+        break;
+      case 5:
+        evidence.operation_uuid[15] ^= 1;
+        break;
+      case 6:
+        req.expected_main_identity.object_bytes[3] ^= 1;
+        break;
+      case 7:
+        req.staged_main_identity.object_bytes[3] ^= 1;
+        break;
+      case 8:
+        evidence.version = 0;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 9:
+        break;
+      case 10:
+        /* An observation of some other main than the evidence names. */
+        authorized.entries[SLOT_MAIN].identity.object_bytes[3] ^= 1;
+        break;
+      case 11:
+        req.lease_identity.object_bytes[3] ^= 1;
+        break;
+      case 12:
+        req.directory_identity.object_bytes[3] ^= 1;
+        break;
+      case 13:
+        req.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+        break;
+      case 14:
+        req.expected_main_absent = TRUE;
+        expected = WYRELOG_E_INVALID;
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    if (scenario == 9) {
+      /* RETAIN authorized, then a same-name main swapped in. */
+      WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+      WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+      g_assert_cmpint
+        (wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+            (provider, PROVISIONING_UUID, &evidence, &req, &authorized, op,
+          &effect, &durability), ==, WYRELOG_E_OK);
+      g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+      Observation synced = { 0 };
+      g_assert_cmpint (wyl_fact_artifact_transition_windows_observe
+            (provider, &life, &synced), ==, WYRELOG_E_OK);
+      synced.durability = durability;
+      Result res = { 0 };
+      g_assert_cmpint (wyl_fact_artifact_main_transition_record (tx, op,
+          MT (EFFECT_APPLIED), &synced, &res), ==, WYRELOG_E_OK);
+      op = MT (OP_RETAIN);
+      authorize_op (provider, tx, &life, op, &authorized);
+      remove_graph_entry (&f, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+      create_owner_only_file (f.directory.graph_handle,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "foreign");
+      g_assert_cmpint (execute_provisioned (provider, &evidence, &req,
+          &authorized, op, WYRELOG_E_OK), ==, MT (EFFECT_NOT_APPLIED));
+      g_assert_true (graph_entry_exists (&f,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME));
+      g_assert_false (graph_entry_exists (&f, f.names.rollback));
+    } else {
+      /* The first seam inside the public execute stays armed. */
+      wyl_fact_artifact_transition_windows_set_test_fault (WF (
+            EXECUTE_LEASE_VERIFY));
+      g_assert_cmpint (execute_provisioned (provider, &evidence, &req,
+          &authorized, op, expected), ==, MT (EFFECT_UNKNOWN));
+      g_assert_false
+        (wyl_fact_artifact_transition_windows_test_fault_was_consumed (WF (
+            EXECUTE_LEASE_VERIFY)));
+      Observation after = { 0 };
+      g_assert_cmpint (wyl_fact_artifact_transition_windows_observe
+            (provider, &life, &after), ==, WYRELOG_E_OK);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal
+            (&after.entries[SLOT_MAIN].identity, &main_before));
+    }
+    g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
+    fixture_clear (&f);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2422,6 +2622,11 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-artifact-transition/windows/provisioned/capture-rejects",
       test_capture_provisioned_with_evidence_rejects);
+  g_test_add_func ("/fact-artifact-transition/windows/provisioned/execute",
+      test_execute_provisioned_with_evidence);
+  g_test_add_func
+    ("/fact-artifact-transition/windows/provisioned/execute-rejects",
+      test_execute_provisioned_with_evidence_rejects);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 
