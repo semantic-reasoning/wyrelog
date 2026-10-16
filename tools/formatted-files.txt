@@ -256,6 +256,7 @@ wyrelog/fact/graph-artifact-main-transition-private.h
 wyrelog/fact/graph-artifact-namespace-private.c
 wyrelog/fact/graph-artifact-namespace-private.h
 wyrelog/fact/graph-artifact-transition-names-private.h
+wyrelog/fact/graph-artifact-transition-platform-private.h
 wyrelog/fact/graph-artifact-transition-posix-private.c
 wyrelog/fact/graph-artifact-transition-posix-private.h
 wyrelog/fact/graph-artifact-transition-windows-private.c

@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/graph-artifact-transition-platform-private.h"
 #include "fact/graph-seal-private.h"
 #include "fact/offline-restore-journal-store-private.h"
 #include "fact/offline-restore-stage-private.h"
@@ -677,7 +677,7 @@ typedef struct
   WylFactGraphRuntimeManager *runtime;
   WylFactGraphKey *key;
   WylFactGraphDirectory *directory;
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   GBytes *expected_journal;
   const gchar *operation_uuid;
   const gchar *graph_id;
@@ -757,13 +757,13 @@ graph_bind_prove_effect (GBytes *canonical_journal,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_offline_restore_stage_reader_revalidate (reader);
 
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) initial = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_capture (context->provider,
+    rc = wyl_fact_artifact_transition_capture (context->provider,
             &lifecycle, &initial, &observation);
   WylFactArtifactMainTransitionRequest request = {
     .operation_uuid = journal->operation_uuid,
@@ -845,7 +845,7 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphKey key = { 0 };
   WylFactGraphQuiescenceToken *quiescence = NULL;
-  WylFactArtifactTransitionPosix *provider = NULL;
+  WylFactArtifactTransition *provider = NULL;
   WylPolicyOfflineRestoreRecord *record = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
@@ -940,12 +940,12 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
             &directory);
   wyl_fact_graph_locator_clear (&locator);
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  WylFactArtifactTransitionCapability capability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_probe_capability (&directory,
+    rc = wyl_fact_artifact_transition_probe_capability (&directory,
             operation_uuid, &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&resolver, &directory,
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
             lease, operation_uuid, &capability, &provider);
   if (rc == WYRELOG_E_OK) {
     GraphProvisioningBindEffect effect = {
@@ -975,7 +975,7 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
   if (rc != WYRELOG_E_OK)
     wyl_fact_offline_restore_journal_clear(out_committed);
   wyl_policy_offline_restore_record_free(record);
-  wyl_fact_artifact_transition_posix_free(provider);
+  wyl_fact_artifact_transition_free(provider);
   wyl_fact_graph_directory_clear(&directory);
   g_clear_pointer(&quiescence, wyl_fact_graph_quiescence_token_release);
   wyl_fact_graph_key_clear(&key);
@@ -5435,7 +5435,7 @@ sync_staged_journal_cas (wyl_policy_store_t *policy,
 }
 
 static wyrelog_error_t
-sync_staged_capture_ready (WylFactArtifactTransitionPosix *provider,
+sync_staged_capture_ready (WylFactArtifactTransition *provider,
     const WylFactOfflineRestoreJournal *journal,
     const gchar *old_provisioning_uuid,
     WylFactArtifactMainTransitionRequest *out_request,
@@ -5443,12 +5443,12 @@ sync_staged_capture_ready (WylFactArtifactTransitionPosix *provider,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
   *out_snapshot = NULL;
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) initial = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_capture
+  wyrelog_error_t rc = wyl_fact_artifact_transition_capture
         (provider, &lifecycle, &initial, &observation);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -5626,7 +5626,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
   WylFactGraphKey key = { 0 };
   WylFactGraphQuiescenceToken *quiescence = NULL;
   WylPolicyGraphRestoreReplacementRecord *row = NULL;
-  WylFactArtifactTransitionPosix *provider = NULL;
+  WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
@@ -5664,12 +5664,12 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator,
             FALSE, &directory);
   wyl_fact_graph_locator_clear (&locator);
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  WylFactArtifactTransitionCapability capability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_probe_capability (&directory,
+    rc = wyl_fact_artifact_transition_probe_capability (&directory,
             operation_uuid, &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&resolver, &directory,
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
             lease, operation_uuid, &capability, &provider);
   if (rc == WYRELOG_E_OK)
     rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
@@ -5778,7 +5778,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
     memset (&journal, 0, sizeof journal);
   } else if (rc == WYRELOG_E_OK)
     rc = WYRELOG_E_BUSY;
-  wyl_fact_artifact_transition_posix_free (provider);
+  wyl_fact_artifact_transition_free (provider);
   wyl_fact_graph_directory_clear (&directory);
   g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
   wyl_fact_graph_key_clear (&key);
@@ -5792,7 +5792,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
 #ifdef __linux__
 typedef struct
 {
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
 } RetainEffectContext;
 
@@ -5827,19 +5827,19 @@ early_commit_begin (wyl_policy_store_t *policy,
 }
 
 static wyrelog_error_t
-retain_capture (WylFactArtifactTransitionPosix *provider,
+retain_capture (WylFactArtifactTransition *provider,
     const WylFactOfflineRestoreJournal *journal, const gchar *old_uuid,
     WylFactGraphProvisionedRestoreSlot slot,
     WylFactArtifactMainTransitionRequest *out_request,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) preliminary = NULL;
   WylFactArtifactMainTransitionObservation observed = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_capture
+  wyrelog_error_t rc = wyl_fact_artifact_transition_capture
         (provider, &lifecycle, &preliminary, &observed);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -5866,14 +5866,14 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     gpointer user_data)
 {
   RetainEffectContext *context = user_data;
-  WylFactArtifactTransitionPosix *provider = context->provider;
+  WylFactArtifactTransition *provider = context->provider;
   const WylFactOfflineRestoreJournal *journal = context->journal;
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) initial = NULL;
   WylFactArtifactMainTransitionObservation first = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_capture
+  wyrelog_error_t rc = wyl_fact_artifact_transition_capture
         (provider, &lifecycle, &initial, &first);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -6018,7 +6018,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
   WylFactGraphKey key = { 0 };
   WylFactGraphQuiescenceToken *quiescence = NULL;
   WylPolicyGraphRestoreReplacementRecord *row = NULL;
-  WylFactArtifactTransitionPosix *provider = NULL;
+  WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
@@ -6082,12 +6082,12 @@ wyl_fact_offline_restore_graph_commit_retain_run
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator,
             FALSE, &directory);
   wyl_fact_graph_locator_clear (&locator);
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  WylFactArtifactTransitionCapability capability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_probe_capability (&directory,
+    rc = wyl_fact_artifact_transition_probe_capability (&directory,
             operation_uuid, &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&resolver, &directory,
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
             lease, operation_uuid, &capability, &provider);
   if (rc == WYRELOG_E_OK)
     rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
@@ -6150,7 +6150,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
       }
     }
   }
-  wyl_fact_artifact_transition_posix_free (provider);
+  wyl_fact_artifact_transition_free (provider);
   wyl_fact_graph_directory_clear (&directory);
   g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
   wyl_fact_graph_key_clear (&key);
@@ -6164,7 +6164,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
 #ifdef __linux__
 typedef struct
 {
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
   WylFactArtifactMainTransitionOp target;
 } SyncRetainedEffectContext;
@@ -6288,7 +6288,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
   WylFactGraphKey key = { 0 };
   WylFactGraphQuiescenceToken *quiescence = NULL;
   WylPolicyGraphRestoreReplacementRecord *row = NULL;
-  WylFactArtifactTransitionPosix *provider = NULL;
+  WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
@@ -6353,12 +6353,12 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator,
             FALSE, &directory);
   wyl_fact_graph_locator_clear (&locator);
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  WylFactArtifactTransitionCapability capability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_probe_capability (&directory,
+    rc = wyl_fact_artifact_transition_probe_capability (&directory,
             operation_uuid, &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&resolver, &directory,
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
             lease, operation_uuid, &capability, &provider);
   if (rc == WYRELOG_E_OK)
     rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
@@ -6424,7 +6424,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
       }
     }
   }
-  wyl_fact_artifact_transition_posix_free (provider);
+  wyl_fact_artifact_transition_free (provider);
   wyl_fact_graph_directory_clear (&directory);
   g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
   wyl_fact_graph_key_clear (&key);
@@ -6438,7 +6438,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
 #ifdef __linux__
 typedef struct
 {
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
   WylFactArtifactMainTransitionOp target;
 } PublishEffectContext;
@@ -6631,7 +6631,7 @@ wyl_fact_offline_restore_graph_commit_publish_run
   WylFactGraphKey key = { 0 };
   WylFactGraphQuiescenceToken *quiescence = NULL;
   WylPolicyGraphRestoreReplacementRecord *row = NULL;
-  WylFactArtifactTransitionPosix *provider = NULL;
+  WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
@@ -6697,12 +6697,12 @@ wyl_fact_offline_restore_graph_commit_publish_run
     rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator,
             FALSE, &directory);
   wyl_fact_graph_locator_clear (&locator);
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
+  WylFactArtifactTransitionCapability capability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_probe_capability (&directory,
+    rc = wyl_fact_artifact_transition_probe_capability (&directory,
             operation_uuid, &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&resolver, &directory,
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
             lease, operation_uuid, &capability, &provider);
   if (rc == WYRELOG_E_OK)
     rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
@@ -6770,7 +6770,7 @@ wyl_fact_offline_restore_graph_commit_publish_run
       }
     }
   }
-  wyl_fact_artifact_transition_posix_free (provider);
+  wyl_fact_artifact_transition_free (provider);
   wyl_fact_graph_directory_clear (&directory);
   g_clear_pointer (&quiescence, wyl_fact_graph_quiescence_token_release);
   wyl_fact_graph_key_clear (&key);

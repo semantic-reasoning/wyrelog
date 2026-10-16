@@ -15,7 +15,8 @@ Rules, all on wyrelog/fact/offline-restore-commit-authority-private.c:
 - graph_bind_prove_effect has exactly one ``#ifdef __APPLE__`` arm, and that
   arm calls the ``_with_evidence`` capture exactly once.
 - No other capture call (plain capture, name-only capture_provisioned,
-  observe) appears in that arm.
+  observe), in its POSIX or its platform-facade spelling, appears in that
+  arm.
 - The matching ``#else`` arm calls the name-only capture_provisioned, so the
   Linux body is the one this guard does not judge.
 
@@ -38,6 +39,9 @@ PLAIN_CALLS = (
     "wyl_fact_artifact_transition_posix_capture_provisioned",
     "wyl_fact_artifact_transition_posix_capture",
     "wyl_fact_artifact_transition_posix_observe",
+    # The platform facade's spellings of the same plain calls.
+    "wyl_fact_artifact_transition_capture",
+    "wyl_fact_artifact_transition_observe",
 )
 
 
@@ -189,6 +193,16 @@ def self_test() -> None:
             "#else",
             "  rc = wyl_fact_artifact_transition_posix_capture (provider,"
             " &lifecycle, &s, &o);\n#else",
+        ),
+        "facade capture beside the evidence call": POSITIVE.replace(
+            "#else",
+            "  rc = wyl_fact_artifact_transition_capture (provider,"
+            " &lifecycle, &s, &o);\n#else",
+        ),
+        "facade observe beside the evidence call": POSITIVE.replace(
+            "#else",
+            "  rc = wyl_fact_artifact_transition_observe (provider,"
+            " &lifecycle, &o);\n#else",
         ),
         "evidence call twice": POSITIVE.replace(
             "#else",
