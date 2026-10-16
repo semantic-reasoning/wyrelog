@@ -46,7 +46,6 @@ static gboolean parse_checksum (const gchar *text, guint8 digest[32]);
 static gboolean checksum_matches (GChecksum *checksum,
     const guint8 expected[32]);
 
-#ifndef G_OS_WIN32
 static wyrelog_error_t
 reader_authority_revalidate (WylFactOfflineRestoreStageReader *reader)
 {
@@ -66,7 +65,6 @@ reader_authority_revalidate (WylFactOfflineRestoreStageReader *reader)
           (reader->native_reader);
   return rc;
 }
-#endif
 
 wyrelog_error_t
 wyl_fact_offline_restore_stage_reader_open (WylFactGraphResolver *resolver,
@@ -77,14 +75,6 @@ wyl_fact_offline_restore_stage_reader_open (WylFactGraphResolver *resolver,
 {
   if (out_reader != NULL)
     *out_reader = NULL;
-#ifdef G_OS_WIN32
-  (void) resolver;
-  (void) directory;
-  (void) writer_lease;
-  (void) operation_uuid;
-  (void) expected_identity;
-  return WYRELOG_E_POLICY;
-#else
   if (resolver == NULL || directory == NULL || writer_lease == NULL
       || operation_uuid == NULL || expected_identity == NULL
       || out_reader == NULL || !same_root (resolver, directory))
@@ -117,19 +107,13 @@ wyl_fact_offline_restore_stage_reader_open (WylFactGraphResolver *resolver,
   }
   *out_reader = reader;
   return WYRELOG_E_OK;
-#endif
 }
 
 wyrelog_error_t
 wyl_fact_offline_restore_stage_reader_revalidate
   (WylFactOfflineRestoreStageReader *reader)
 {
-#ifdef G_OS_WIN32
-  (void) reader;
-  return WYRELOG_E_POLICY;
-#else
   return reader_authority_revalidate (reader);
-#endif
 }
 
 wyrelog_error_t
@@ -138,10 +122,6 @@ wyl_fact_offline_restore_stage_reader_get_size
 {
   if (out_size != NULL)
     *out_size = 0;
-#ifdef G_OS_WIN32
-  (void) reader;
-  return WYRELOG_E_POLICY;
-#else
   if (reader == NULL || out_size == NULL)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = reader_authority_revalidate (reader);
@@ -154,7 +134,6 @@ wyl_fact_offline_restore_stage_reader_get_size
   if (rc == WYRELOG_E_OK)
     *out_size = size;
   return rc;
-#endif
 }
 
 wyrelog_error_t
@@ -164,13 +143,6 @@ wyl_fact_offline_restore_stage_reader_read_at
 {
   if (out_bytes_read != NULL)
     *out_bytes_read = 0;
-#ifdef G_OS_WIN32
-  (void) reader;
-  (void) offset;
-  (void) buffer;
-  (void) length;
-  return WYRELOG_E_POLICY;
-#else
   if (reader == NULL || buffer == NULL || out_bytes_read == NULL
       || length == 0 || length > RESTORE_STAGE_READ_CHUNK)
     return WYRELOG_E_INVALID;
@@ -184,7 +156,6 @@ wyl_fact_offline_restore_stage_reader_read_at
   if (rc == WYRELOG_E_OK)
     *out_bytes_read = bytes_read;
   return rc;
-#endif
 }
 
 wyrelog_error_t
@@ -192,12 +163,6 @@ wyl_fact_offline_restore_stage_reader_verify_content
   (WylFactOfflineRestoreStageReader *reader, guint64 expected_bytes,
     const gchar *expected_checksum)
 {
-#ifdef G_OS_WIN32
-  (void) reader;
-  (void) expected_bytes;
-  (void) expected_checksum;
-  return WYRELOG_E_POLICY;
-#else
   guint8 expected_digest[32];
   if (reader == NULL || expected_bytes == 0 || expected_bytes > G_MAXINT64
       || !parse_checksum (expected_checksum, expected_digest))
@@ -241,7 +206,6 @@ wyl_fact_offline_restore_stage_reader_verify_content
     return rc;
   return checksum_matches (checksum, expected_digest)
          ? WYRELOG_E_OK : WYRELOG_E_POLICY;
-#endif
 }
 
 void

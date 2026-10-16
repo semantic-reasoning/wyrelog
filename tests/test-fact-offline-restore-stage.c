@@ -211,7 +211,6 @@ test_post_create_failure_leaves_unrecoverable_orphan (void)
   remove_tree (root);
 }
 
-#ifndef G_OS_WIN32
 typedef struct
 {
   const gchar *sidecar_path;
@@ -284,7 +283,6 @@ test_sidecar_appearing_during_create_is_rejected (void)
   wyl_fact_graph_locator_clear (&locator);
   remove_tree (root);
 }
-#endif
 
 static void
 test_stage_substitution_rejects_write_and_finalize (void)
@@ -529,7 +527,38 @@ copy_fixture_clear (CopyFixture *fixture)
 static gchar *checksum_text (const guint8 *bytes, gsize length);
 static void corrupt_first_byte (const gchar *path);
 
-#ifndef G_OS_WIN32
+static void
+flip_inventory_identity (WylFactArtifactInventoryIdentity *identity)
+{
+#ifdef G_OS_WIN32
+  identity->object_bytes[0] ^= 0x01;
+#else
+  identity->object ^= 1;
+#endif
+}
+
+static void
+append_byte (const gchar *path, guint8 byte)
+{
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  HANDLE handle = CreateFileW ((LPCWSTR) wide, FILE_APPEND_DATA,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+          NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  DWORD written = 0;
+  g_assert_true (WriteFile (handle, &byte, 1, &written, NULL));
+  g_assert_cmpuint (written, ==, 1);
+  CloseHandle (handle);
+#else
+  gint append_fd = g_open (path, O_WRONLY | O_APPEND, 0);
+  g_assert_cmpint (append_fd, >=, 0);
+  g_assert_cmpint (write (append_fd, &byte, 1), ==, 1);
+  g_assert_cmpint (close (append_fd), ==, 0);
+#endif
+}
+
 typedef struct
 {
   CopyFixture *fixture;
@@ -548,26 +577,28 @@ replace_restore_stage_after_reader_open (const gchar *point,
             ".displaced", NULL);
     if (g_rename (race->fixture->path, displaced) != 0)
       return WYRELOG_E_IO;
+#ifdef G_OS_WIN32
+    g_autofree gchar *basename = g_path_get_basename (race->fixture->path);
+    if (!g_file_set_contents (race->fixture->path, "", 0, NULL))
+      return WYRELOG_E_IO;
+    return wyl_fact_graph_directory_secure_file_mode
+             (&race->fixture->directory, basename);
+#else
     gint fd = g_open (race->fixture->path,
             O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0)
       return WYRELOG_E_IO;
     if (close (fd) != 0)
       return WYRELOG_E_IO;
+#endif
   }
   return WYRELOG_E_OK;
 }
-#endif
 
 static void
 test_restore_stage_reader_reopen_read_only (void)
 {
   WylFactOfflineRestoreStageReader *reader = NULL;
-#ifdef G_OS_WIN32
-  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open (NULL, NULL,
-      NULL, NULL, NULL, &reader), ==, WYRELOG_E_POLICY);
-  g_assert_null (reader);
-#else
   CopyFixture fixture;
   copy_fixture_init (&fixture);
   const guint8 payload[] = "reopened restore payload";
@@ -604,11 +635,7 @@ test_restore_stage_reader_reopen_read_only (void)
 
   /* This capability authenticates namespace/object identity, not content.
    * A caller must compare the consumed bytes with the journal digest. */
-  gint fd = g_open (fixture.path, O_WRONLY, 0);
-  g_assert_cmpint (fd, >=, 0);
-  const guint8 replacement = (guint8) (payload[0] ^ 0xff);
-  g_assert_cmpint (pwrite (fd, &replacement, 1, 0), ==, 1);
-  g_assert_cmpint (close (fd), ==, 0);
+  corrupt_first_byte (fixture.path);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_read_at (reader, 0,
       actual, sizeof actual, &bytes_read), ==, WYRELOG_E_OK);
   g_assert_cmpuint (bytes_read, ==, sizeof actual);
@@ -618,7 +645,7 @@ test_restore_stage_reader_reopen_read_only (void)
   wyl_fact_offline_restore_stage_reader_free (reader);
   reader = NULL;
 
-  identity.object++;
+  flip_inventory_identity (&identity);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
         (&fixture.resolver, &fixture.directory, fixture.lease,
       fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_POLICY);
@@ -628,7 +655,7 @@ test_restore_stage_reader_reopen_read_only (void)
   RestoreReaderOpenRace race = { .fixture = &fixture };
   fixture.directory.checkpoint = replace_restore_stage_after_reader_open;
   fixture.directory.checkpoint_data = &race;
-  identity.object--;
+  flip_inventory_identity (&identity);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_open
         (&fixture.resolver, &fixture.directory, fixture.lease,
       fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_POLICY);
@@ -639,16 +666,11 @@ test_restore_stage_reader_reopen_read_only (void)
   fixture.directory.checkpoint = NULL;
   fixture.directory.checkpoint_data = NULL;
   copy_fixture_clear (&fixture);
-#endif
 }
 
 static void
 test_restore_stage_reader_verify_content (void)
 {
-#ifdef G_OS_WIN32
-  g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
-        (NULL, 0, NULL), ==, WYRELOG_E_POLICY);
-#else
   CopyFixture fixture;
   copy_fixture_init (&fixture);
   const gsize length = 128 * 1024 + 17;
@@ -675,11 +697,7 @@ test_restore_stage_reader_verify_content (void)
       fixture.operation_uuid, &identity, &reader), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
         (reader, length, checksum), ==, WYRELOG_E_OK);
-  gint append_fd = g_open (fixture.path, O_WRONLY | O_APPEND, 0);
-  g_assert_cmpint (append_fd, >=, 0);
-  const guint8 appended = 0xa5;
-  g_assert_cmpint (write (append_fd, &appended, 1), ==, 1);
-  g_assert_cmpint (close (append_fd), ==, 0);
+  append_byte (fixture.path, 0xa5);
   g_assert_cmpint (wyl_fact_offline_restore_stage_reader_verify_content
         (reader, length, checksum), ==, WYRELOG_E_POLICY);
   g_assert_true (truncate_file (fixture.path, length));
@@ -703,7 +721,6 @@ test_restore_stage_reader_verify_content (void)
         (&fixture.directory, "facts.duckdb");
   g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
   copy_fixture_clear (&fixture);
-#endif
 }
 
 static void
@@ -755,11 +772,6 @@ test_same_size_corruption_cannot_finalize (void)
 static void
 test_restore_stage_rejects_duckdb_sidecars (void)
 {
-#ifdef G_OS_WIN32
-  /* Restore-stage readers are intentionally unsupported on Windows today. */
-  g_test_skip ("restore-stage readers are not yet ported to Windows");
-  return;
-#else
   static const gchar *const suffixes[] = {
     ".wal", ".wal.checkpoint", ".wal.recovery",
   };
@@ -811,7 +823,6 @@ test_restore_stage_rejects_duckdb_sidecars (void)
   wyl_fact_offline_restore_stage_reader_free (reader);
   g_assert_cmpint (g_remove (sidecar), ==, 0);
   copy_fixture_clear (&fixture);
-#endif
 }
 
 static void
@@ -1401,10 +1412,8 @@ main (int argc, char **argv)
       test_restore_stage_reader_verify_content);
   g_test_add_func ("/fact-offline-restore-stage/post-create-orphan",
       test_post_create_failure_leaves_unrecoverable_orphan);
-#ifndef G_OS_WIN32
   g_test_add_func ("/fact-offline-restore-stage/sidecar-create-race",
       test_sidecar_appearing_during_create_is_rejected);
-#endif
   g_test_add_func ("/fact-offline-restore-stage/substitute-fails-closed",
       test_stage_substitution_rejects_write_and_finalize);
   g_test_add_func ("/fact-offline-restore-stage/no-generic-transition",

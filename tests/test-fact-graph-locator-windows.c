@@ -2530,6 +2530,99 @@ test_resolver_open_child_regular (void)
   remove_tree_no_follow (root);
 }
 
+static void
+test_restore_stage_reader_roundtrip_and_attacks (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a0";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphRestoreStageReader *reader = NULL;
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact (&graph,
+      operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (_write (stage.fd, "restore-bytes", 13), ==, 13);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_sync (&graph, &stage),
+      ==, WYRELOG_E_OK);
+  WylFactArtifactInventoryIdentity expected =
+      inventory_identity_from_evidence (&stage.identity);
+  g_autofree gchar *stage_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, stage.stage_basename);
+  g_assert_nonnull (stage_path);
+  wyl_fact_graph_stage_clear (&stage);
+
+  /* Missing stage file returns WYRELOG_E_NOT_FOUND. */
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_reader_open_exact
+        (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a1", &expected, &reader),
+      ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (reader);
+
+  /* Malformed or mismatched expected identity fails closed with POLICY. */
+  WylFactArtifactInventoryIdentity bad = { 0 };
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_reader_open_exact
+        (&graph, operation, &bad, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+
+  /* Trailing-dot alias of sidecar or stage fails closed with POLICY. */
+  g_autofree gchar *sidecar_alias = g_strdup_printf ("%s.wal.", stage_path);
+  g_assert_true (create_private_file_extended (sidecar_alias));
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_reader_open_exact
+        (&graph, operation, &expected, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+  delete_file_extended (sidecar_alias);
+
+  g_autofree gchar *stage_alias = g_strdup_printf ("%s.", stage_path);
+  g_assert_true (create_private_file_extended (stage_alias));
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_reader_open_exact
+        (&graph, operation, &expected, &reader), ==, WYRELOG_E_POLICY);
+  g_assert_null (reader);
+  delete_file_extended (stage_alias);
+
+  /* Happy path open, size, and positional read. */
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_reader_open_exact
+        (&graph, operation, &expected, &reader), ==, WYRELOG_E_OK);
+  g_assert_nonnull (reader);
+  guint64 size = 0;
+  g_assert_cmpint (wyl_fact_graph_restore_stage_reader_get_size (reader, &size),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (size, ==, 13);
+  guint8 buf[13] = { 0 };
+  gsize bytes_read = 0;
+  g_assert_cmpint (wyl_fact_graph_restore_stage_reader_read_at (reader, 8, buf,
+      5, &bytes_read), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (bytes_read, ==, 5);
+  g_assert_cmpmem (buf, 5, "bytes", 5);
+
+  /* Second hard link on the stage file revokes the reader. */
+  g_autofree gchar *outside = g_build_filename (root, "stage-link", NULL);
+  g_autofree gunichar2 *outside_wide = wide_path (outside);
+  g_autofree gunichar2 *stage_wide = wide_path (stage_path);
+  g_assert_true (CreateHardLinkW ((LPCWSTR) outside_wide,
+      (LPCWSTR) stage_wide, NULL));
+  g_assert_cmpint (wyl_fact_graph_restore_stage_reader_revalidate (reader), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (DeleteFileW ((LPCWSTR) outside_wide));
+  g_assert_cmpint (wyl_fact_graph_restore_stage_reader_revalidate (reader), ==,
+      WYRELOG_E_OK);
+
+  /* Unprotecting the stage file DACL revokes the reader. */
+  unprotect_dacl (stage_path);
+  g_assert_cmpint (wyl_fact_graph_restore_stage_reader_revalidate (reader), ==,
+      WYRELOG_E_POLICY);
+
+  wyl_fact_graph_restore_stage_reader_free (reader);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2606,6 +2699,8 @@ main (int argc, char **argv)
       test_provisioned_pair_main_identity);
   g_test_add_func ("/fact-graph-locator/windows/resolver-open-child-regular",
       test_resolver_open_child_regular);
+  g_test_add_func ("/fact-graph-locator/windows/restore-stage-reader",
+      test_restore_stage_reader_roundtrip_and_attacks);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 #endif
