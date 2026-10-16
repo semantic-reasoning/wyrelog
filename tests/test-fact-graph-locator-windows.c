@@ -2623,6 +2623,154 @@ test_restore_stage_reader_roundtrip_and_attacks (void)
   remove_tree_no_follow (root);
 }
 
+/* NTFS stamps file and directory times from the system clock, whose tick may
+ * be as coarse as 15.6 ms.  Waiting for that clock to advance puts a mutation
+ * in a later tick than every time pinned before it, so a race the times are
+ * meant to expose cannot hide inside one tick. */
+static void
+wait_for_clock_tick (void)
+{
+  FILETIME start, now;
+  GetSystemTimeAsFileTime (&start);
+  do {
+    g_usleep (1000);
+    GetSystemTimeAsFileTime (&now);
+  } while (now.dwLowDateTime == start.dwLowDateTime
+      && now.dwHighDateTime == start.dwHighDateTime);
+}
+
+/* Rewrite the first byte in place through a handle of its own and close it,
+ * so the size stays put and only the file's times can show the change. */
+static void
+rewrite_first_byte (const gchar *path)
+{
+  g_autofree gunichar2 *wide = wide_path (path);
+  g_assert_nonnull (wide);
+  HANDLE handle = CreateFileW ((LPCWSTR) wide, GENERIC_WRITE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  guint8 byte = 0xa5;
+  DWORD written = 0;
+  g_assert_true (WriteFile (handle, &byte, 1, &written, NULL));
+  g_assert_cmpuint (written, ==, 1);
+  g_assert_true (CloseHandle (handle));
+}
+
+/* The post-stage form over a live pair: exactly this operation's stage is
+ * admitted beside the main, its every Windows-specific substitution fails
+ * closed, and a same-size rewrite in place moves the fingerprint. */
+static void
+test_restore_inventory_roundtrip_and_attacks (void)
+{
+  static const gchar *const operation =
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c0705b1";
+  PreStageFixture fixture;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphRestoreInventory first = { 0 };
+  WylFactGraphRestoreInventory second = { 0 };
+  WylFactGraphRestoreInventory zero = { 0 };
+  WylFactGraphPreStageInventory pre_stage = { 0 };
+
+  pre_stage_fixture_init (&fixture, "01890f47-3c4b-7cc2-b8c4-dc0c0c0705b0");
+  g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
+        (&fixture.graph, operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (_write (stage.fd, "restored", 8), ==, 8);
+  WylFactArtifactInventoryIdentity expected =
+      inventory_identity_from_evidence (&stage.identity);
+  g_autofree gchar *stage_path =
+      wyl_fact_graph_directory_descriptive_file (&fixture.graph,
+          stage.stage_basename);
+  g_assert_nonnull (stage_path);
+
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &first), ==, WYRELOG_E_OK);
+  g_assert_true (first.main_present);
+  g_assert_cmpuint (first.stage_bytes, ==, 8);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.stage_identity, &expected));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.main_identity, &fixture.expected_main));
+  g_assert_cmpuint (first.observation.entry_fingerprint, !=, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (second.observation.entry_fingerprint, ==,
+      first.observation.entry_fingerprint);
+
+  /* The stage is admitted only in the post-stage form, and only under its
+   * own operation. */
+  g_assert_cmpint (pre_stage_run (&fixture, &pre_stage), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c0705b2", &expected,
+      &fixture.expected_main, &second), ==, WYRELOG_E_POLICY);
+  g_assert_cmpmem (&second, sizeof second, &zero, sizeof zero);
+
+  /* A stage identity must be present and in the sixteen-byte form. */
+  WylFactArtifactInventoryIdentity none = { 0 };
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &none, &fixture.expected_main, &second), ==,
+      WYRELOG_E_INVALID);
+  WylFactArtifactInventoryIdentity flipped = expected;
+  flipped.object_bytes[0] ^= 0x01;
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &flipped, &fixture.expected_main, &second), ==,
+      WYRELOG_E_POLICY);
+
+  /* A trailing-dot spelling beside the stage is a collision, not a second
+   * stage. */
+  g_autofree gchar *stage_alias = g_strdup_printf ("%s.", stage_path);
+  g_assert_true (create_private_file_extended (stage_alias));
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &second), ==,
+      WYRELOG_E_POLICY);
+  delete_file_extended (stage_alias);
+
+  /* A second link to the stage, minted outside the graph directory. */
+  g_autofree gchar *outside = g_build_filename (fixture.root, "stage-link",
+          NULL);
+  g_autofree gunichar2 *outside_wide = wide_path (outside);
+  g_autofree gunichar2 *stage_wide = wide_path (stage_path);
+  g_assert_true (CreateHardLinkW ((LPCWSTR) outside_wide,
+      (LPCWSTR) stage_wide, NULL));
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &second), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (DeleteFileW ((LPCWSTR) outside_wide));
+
+  /* A same-size rewrite in place is visible only through the entry's times;
+   * the stage's writer still holds it open, so its size is read from the
+   * pinned handle rather than the lazily refreshed directory entry. */
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &first), ==, WYRELOG_E_OK);
+  wait_for_clock_tick ();
+  rewrite_first_byte (stage_path);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (second.stage_bytes, ==, 8);
+  g_assert_cmpuint (second.observation.entry_fingerprint, !=,
+      first.observation.entry_fingerprint);
+
+  /* An inherited DACL on the stage is never the stage. */
+  unprotect_dacl (stage_path);
+  g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
+        (&fixture.resolver, &fixture.graph, fixture.lease, fixture.pair,
+      operation, &expected, &fixture.expected_main, &second), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpmem (&second, sizeof second, &zero, sizeof zero);
+
+  wyl_fact_graph_stage_clear (&stage);
+  pre_stage_fixture_clear (&fixture);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2701,6 +2849,8 @@ main (int argc, char **argv)
       test_resolver_open_child_regular);
   g_test_add_func ("/fact-graph-locator/windows/restore-stage-reader",
       test_restore_stage_reader_roundtrip_and_attacks);
+  g_test_add_func ("/fact-graph-locator/windows/restore-inventory",
+      test_restore_inventory_roundtrip_and_attacks);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 #endif

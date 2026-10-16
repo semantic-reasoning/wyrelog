@@ -11,8 +11,11 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <stdio.h>
+#include <string.h>
 #ifdef G_OS_WIN32
 #include <windows.h>
+#include <aclapi.h>
+#include <io.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -1086,7 +1089,109 @@ test_readback_fault (gconstpointer data)
   copy_fixture_clear (&fixture);
 }
 
-#ifndef G_OS_WIN32
+/* The inventory identity a restore stage was created with, in each
+ * provider's form: device and inode on POSIX, volume serial and the sixteen
+ * byte FileId on Windows. */
+static WylFactArtifactInventoryIdentity
+stage_inventory_identity (const WylFactGraphStage *stage)
+{
+  WylFactArtifactInventoryIdentity identity = { 0 };
+#ifdef G_OS_WIN32
+  identity.domain = stage->identity.volume_serial;
+  memcpy (identity.object_bytes, stage->identity.file_id,
+      sizeof identity.object_bytes);
+  identity.object_width = sizeof identity.object_bytes;
+#else
+  identity.domain = stage->device;
+  identity.object = stage->inode;
+#endif
+  return identity;
+}
+
+static WylFactArtifactInventoryIdentity
+resolver_inventory_identity (const WylFactGraphResolver *resolver)
+{
+  WylFactArtifactInventoryIdentity identity = { 0 };
+#ifdef G_OS_WIN32
+  identity.domain = resolver->identity.volume_serial;
+  memcpy (identity.object_bytes, resolver->identity.file_id,
+      sizeof identity.object_bytes);
+  identity.object_width = sizeof identity.object_bytes;
+#else
+  identity.domain = resolver->device;
+  identity.object = resolver->inode;
+#endif
+  return identity;
+}
+
+static void
+stage_write_all (WylFactGraphStage *stage, const gchar *bytes, guint length)
+{
+#ifdef G_OS_WIN32
+  g_assert_cmpint (_write (stage->fd, bytes, length), ==, (gint) length);
+#else
+  g_assert_cmpint (write (stage->fd, bytes, length), ==, (gssize) length);
+#endif
+}
+
+static void
+stage_read_front (WylFactGraphStage *stage, guint8 *buffer, guint length)
+{
+#ifdef G_OS_WIN32
+  g_assert_cmpint (_lseeki64 (stage->fd, 0, SEEK_SET), ==, 0);
+  g_assert_cmpint (_read (stage->fd, buffer, length), ==, (gint) length);
+#else
+  g_assert_cmpint (pread (stage->fd, buffer, length, 0), ==, (gssize) length);
+#endif
+}
+
+#ifdef G_OS_WIN32
+/* NTFS stamps file and directory times from the system clock, whose tick may
+ * be as coarse as 15.6 ms.  Waiting for that clock to advance puts a mutation
+ * in a later tick than every time pinned before it, so a race the times are
+ * meant to expose cannot hide inside one tick. */
+static void
+wait_for_clock_tick (void)
+{
+  FILETIME start, now;
+  GetSystemTimeAsFileTime (&start);
+  do {
+    g_usleep (1000);
+    GetSystemTimeAsFileTime (&now);
+  } while (now.dwLowDateTime == start.dwLowDateTime
+      && now.dwHighDateTime == start.dwHighDateTime);
+}
+
+/* The Windows form of a permission downgrade: the owner-only DACL starts
+ * inheriting from the parent, as g_chmod (path, 0640) widens POSIX bits. */
+static void
+unprotect_dacl (const gchar *path)
+{
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  g_assert_cmpint (SetNamedSecurityInfoW ((LPWSTR) wide, SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+}
+
+static gboolean
+hard_link (const gchar *existing, const gchar *link_path)
+{
+  g_autofree gunichar2 *existing_wide = g_utf8_to_utf16 (existing, -1, NULL,
+          NULL, NULL);
+  g_autofree gunichar2 *link_wide = g_utf8_to_utf16 (link_path, -1, NULL,
+          NULL, NULL);
+  return existing_wide != NULL && link_wide != NULL
+         && CreateHardLinkW ((LPCWSTR) link_wide, (LPCWSTR) existing_wide, NULL);
+}
+#else
+static gboolean
+hard_link (const gchar *existing, const gchar *link_path)
+{
+  return link (existing, link_path) == 0;
+}
+#endif
+
 static void
 test_restore_inventory (void)
 {
@@ -1095,21 +1200,23 @@ test_restore_inventory (void)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
-  g_assert_cmpint (write (stage.fd, "payload", 7), ==, 7);
-  WylFactArtifactInventoryIdentity identity = {
-    .domain = stage.device, .object = stage.inode,
-  };
+  stage_write_all (&stage, "payload", 7);
+  WylFactArtifactInventoryIdentity identity = stage_inventory_identity (&stage);
   WylFactArtifactInventoryIdentity absent = { 0 };
+  WylFactArtifactInventoryIdentity guard =
+      resolver_inventory_identity (&fixture.resolver);
   WylFactGraphRestoreInventory first, second;
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
       fixture.operation_uuid, &identity, &absent, &first), ==, WYRELOG_E_OK);
   g_assert_cmpuint (first.stage_bytes, ==, 7);
   g_assert_false (first.main_present);
-  g_assert_cmpuint (first.observation.guard_identity.object, ==,
-      fixture.resolver.inode);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.observation.guard_identity, &guard));
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&first.stage_identity, &identity));
   guint8 readback[7];
-  g_assert_cmpint (pread (stage.fd, readback, sizeof readback, 0), ==, 7);
+  stage_read_front (&stage, readback, sizeof readback);
   g_assert_cmpmem (readback, sizeof readback, "payload", 7);
   /* Reader access may change atime, but must not invalidate an observation. */
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
@@ -1121,7 +1228,7 @@ test_restore_inventory (void)
         (&fixture.directory, "facts.duckdb.lock");
   g_assert_false (g_file_test (lock, G_FILE_TEST_EXISTS));
   g_assert_true (g_file_set_contents (lock, "", 0, NULL));
-  g_assert_cmpint (g_chmod (lock, 0600), ==, 0);
+  g_assert_true (wyl_test_secure_regular_file (lock, NULL));
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
       fixture.operation_uuid, &identity, &absent, &second), ==, WYRELOG_E_OK);
@@ -1140,30 +1247,56 @@ test_restore_inventory_rejects (gconstpointer data)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
-  WylFactArtifactInventoryIdentity identity = {
-    .domain = stage.device, .object = stage.inode,
-  };
+  WylFactArtifactInventoryIdentity identity = stage_inventory_identity (&stage);
   WylFactArtifactInventoryIdentity absent = { 0 };
   g_autofree gchar *extra = NULL;
+  g_autofree gchar *alias = NULL;
   if (g_str_equal (kind, "identity"))
-    identity.object++;
-  else if (g_str_equal (kind, "mode"))
+    flip_inventory_identity (&identity);
+  else if (g_str_equal (kind, "mode")) {
+#ifdef G_OS_WIN32
+    unprotect_dacl (fixture.path);
+#else
     g_assert_cmpint (fchmod (stage.fd, 0640), ==, 0);
-  else if (g_str_equal (kind, "symlink")) {
+#endif
+  } else if (g_str_equal (kind, "symlink")) {
+#ifdef G_OS_WIN32
+    /* A held handle would leave the name delete-pending, so release it before
+     * a junction takes the stage's name. */
+    wyl_fact_graph_stage_clear (&stage);
+    g_assert_cmpint (g_remove (fixture.path), ==, 0);
+    extra = g_build_filename (fixture.root, "junction-target", NULL);
+    g_assert_true (wyl_test_create_secure_directory (extra, NULL));
+    g_assert_true (wyl_test_create_directory_alias (fixture.path, extra,
+        NULL));
+    alias = g_strdup (fixture.path);
+#else
     g_assert_cmpint (g_remove (fixture.path), ==, 0);
     g_assert_cmpint (symlink ("missing", fixture.path), ==, 0);
+#endif
   } else if (g_str_equal (kind, "fifo")) {
+#ifdef G_OS_WIN32
+    wyl_fact_graph_stage_clear (&stage);
+    copy_fixture_clear (&fixture);
+    g_test_skip ("Windows has no FIFO a directory entry can name");
+    return;
+#else
     g_assert_cmpint (g_remove (fixture.path), ==, 0);
     g_assert_cmpint (mkfifo (fixture.path, 0600), ==, 0);
-  }else if (g_str_equal (kind, "directory")) {
+#endif
+  } else if (g_str_equal (kind, "directory")) {
     g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path
           (&fixture.directory);
     extra = g_strconcat (path, "-old", NULL);
+#ifdef G_OS_WIN32
+    /* NTFS refuses to rename a directory with an open file beneath it. */
+    wyl_fact_graph_stage_clear (&stage);
+#endif
     g_assert_cmpint (g_rename (path, extra), ==, 0);
     g_assert_cmpint (g_mkdir (path, 0700), ==, 0);
   } else if (g_str_equal (kind, "links")) {
     extra = g_build_filename (fixture.root, "alias", NULL);
-    g_assert_cmpint (link (fixture.path, extra), ==, 0);
+    g_assert_true (hard_link (fixture.path, extra));
   } else if (g_str_equal (kind, "bound")) {
     for (guint i = 0; i < 128; i++) {
       g_autofree gchar *name = g_strdup_printf ("unknown-%u", i);
@@ -1176,9 +1309,14 @@ test_restore_inventory_rejects (gconstpointer data)
         ? g_strconcat (fixture.path, ".wal", NULL)
         : wyl_fact_graph_directory_descriptive_file (&fixture.directory, kind);
     g_assert_true (g_file_set_contents (extra, "", 0, NULL));
-    g_assert_cmpint (g_chmod (extra, 0600), ==, 0);
-    if (g_str_equal (kind, "facts.duckdb.lock"))
+    g_assert_true (wyl_test_secure_regular_file (extra, NULL));
+    if (g_str_equal (kind, "facts.duckdb.lock")) {
+#ifdef G_OS_WIN32
+      unprotect_dacl (extra);
+#else
       g_assert_cmpint (g_chmod (extra, 0644), ==, 0);
+#endif
+    }
   }
   WylFactGraphRestoreInventory inventory, zero = { 0 };
   memset (&inventory, 0xff, sizeof inventory);
@@ -1187,6 +1325,8 @@ test_restore_inventory_rejects (gconstpointer data)
       fixture.operation_uuid, &identity, &absent, &inventory), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpmem (&inventory, sizeof inventory, &zero, sizeof zero);
+  if (alias != NULL)
+    g_assert_true (wyl_test_remove_directory_alias (alias, NULL));
   wyl_fact_graph_stage_clear (&stage);
   copy_fixture_clear (&fixture);
 }
@@ -1211,27 +1351,38 @@ test_restore_inventory_pair (void)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
-  WylFactArtifactInventoryIdentity identity = {
-    .domain = stage.device, .object = stage.inode,
-  };
+  WylFactArtifactInventoryIdentity identity = stage_inventory_identity (&stage);
   WylFactGraphStage provision = WYL_FACT_GRAPH_STAGE_INIT;
   const gchar *operation = "01900000-0000-7000-8000-000000000001";
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact
         (&fixture.directory, operation, &provision), ==, WYRELOG_E_OK);
-  WylFactArtifactInventoryIdentity main = {
-    .domain = provision.device, .object = provision.inode,
-  }, absent = { 0 };
+  WylFactArtifactInventoryIdentity main = stage_inventory_identity
+        (&provision), absent = { 0 };
+  WylFactGraphProvisionedPair *pair = NULL;
+#ifdef G_OS_WIN32
+  /* Windows publishes by rename; the pair is adopted from the evidence the
+   * stage minted before the rename, not from a retained companion. */
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&provision, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence
+        (&fixture.directory, &provision, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&fixture.directory, operation, &evidence, &pair), ==, WYRELOG_E_OK);
+#else
   g_assert_cmpint (wyl_fact_graph_stage_publish (&fixture.directory,
       &provision), ==, WYRELOG_E_OK);
-  WylFactGraphProvisionedPair *pair = NULL;
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_pair_exact
         (&fixture.directory, operation, &pair), ==, WYRELOG_E_OK);
+#endif
   WylFactGraphRestoreInventory inventory, zero = { 0 };
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, pair,
       fixture.operation_uuid, &identity, &main, &inventory), ==, WYRELOG_E_OK);
   g_assert_true (inventory.main_present);
-  g_assert_cmpuint (inventory.main_identity.object, ==, main.object);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal
+        (&inventory.main_identity, &main));
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, NULL,
       fixture.operation_uuid, &identity, &absent, &inventory), ==,
@@ -1245,12 +1396,12 @@ test_restore_inventory_pair (void)
         (&fixture.resolver, &fixture.directory, fixture.lease, pair,
       fixture.operation_uuid, &identity, &absent, &inventory), ==,
       WYRELOG_E_INVALID);
-  main.object++;
+  flip_inventory_identity (&main);
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, pair,
       fixture.operation_uuid, &identity, &main, &inventory), ==,
       WYRELOG_E_POLICY);
-  main.object--;
+  flip_inventory_identity (&main);
   /* Another syntactically valid, secure provision companion is foreign even
    * when it has its own valid two-link provenance shape. */
   g_autofree gchar *foreign = wyl_fact_graph_directory_descriptive_file
@@ -1258,8 +1409,8 @@ test_restore_inventory_pair (void)
           "provision-01900000-0000-7000-8000-000000000002.sqlite");
   g_autofree gchar *alias = g_build_filename (fixture.root, "foreign", NULL);
   g_assert_true (g_file_set_contents (foreign, "", 0, NULL));
-  g_assert_cmpint (g_chmod (foreign, 0600), ==, 0);
-  g_assert_cmpint (link (foreign, alias), ==, 0);
+  g_assert_true (wyl_test_secure_regular_file (foreign, NULL));
+  g_assert_true (hard_link (foreign, alias));
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
         (&fixture.resolver, &fixture.directory, fixture.lease, pair,
       fixture.operation_uuid, &identity, &main, &inventory), ==,
@@ -1280,9 +1431,8 @@ test_restore_inventory_authority (void)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
-  WylFactArtifactInventoryIdentity identity = {
-    .domain = stage.device, .object = stage.inode,
-  }, absent = { 0 };
+  WylFactArtifactInventoryIdentity identity = stage_inventory_identity (&stage),
+      absent = { 0 };
   WylFactGraphRestoreInventory inventory, zero = { 0 };
   memset (&inventory, 0xff, sizeof inventory);
   g_assert_cmpint (wyl_fact_graph_directory_restore_inventory
@@ -1323,20 +1473,39 @@ inventory_race (const gchar *point, gpointer data)
   if (strcmp (race->action, "io") == 0)
     return WYRELOG_E_IO;
   if (strcmp (race->action, "metadata") == 0) {
+#ifdef G_OS_WIN32
+    unprotect_dacl (race->fixture->path);
+#else
     g_assert_cmpint (g_chmod (race->fixture->path, 0640), ==, 0);
+#endif
   } else if (strcmp (race->action, "content") == 0) {
+#ifdef G_OS_WIN32
+    /* Same size: only the stage's own times can show this rewrite. */
+    wait_for_clock_tick ();
+#endif
     corrupt_first_byte (race->fixture->path);
   } else if (strcmp (race->action, "directory") == 0) {
     g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path
           (&race->fixture->directory);
+#ifdef G_OS_WIN32
+    /* NTFS refuses to rename a directory while the observation holds entries
+     * beneath it open, so the replacement cannot happen here; weakening the
+     * graph directory's DACL is the authority change that can. */
+    unprotect_dacl (path);
+#else
     g_autofree gchar *old = g_strconcat (path, "-old", NULL);
     g_assert_cmpint (g_rename (path, old), ==, 0);
     g_assert_cmpint (g_mkdir (path, 0700), ==, 0);
+#endif
   } else {
     g_autofree gchar *path = wyl_fact_graph_directory_descriptive_file
           (&race->fixture->directory, "facts.duckdb.lock");
+#ifdef G_OS_WIN32
+    /* The lock was not listed, so only the directory's times can show it. */
+    wait_for_clock_tick ();
+#endif
     g_assert_true (g_file_set_contents (path, "changed", 7, NULL));
-    g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+    g_assert_true (wyl_test_secure_regular_file (path, NULL));
   }
   return WYRELOG_E_OK;
 }
@@ -1349,10 +1518,9 @@ test_restore_inventory_race (gconstpointer data)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   g_assert_cmpint (wyl_fact_graph_directory_restore_stage_create_exact
         (&fixture.directory, fixture.operation_uuid, &stage), ==, WYRELOG_E_OK);
-  g_assert_cmpint (write (stage.fd, "payload", 7), ==, 7);
-  WylFactArtifactInventoryIdentity identity = {
-    .domain = stage.device, .object = stage.inode,
-  }, absent = { 0 };
+  stage_write_all (&stage, "payload", 7);
+  WylFactArtifactInventoryIdentity identity = stage_inventory_identity (&stage),
+      absent = { 0 };
   InventoryRace race = { &fixture, data, FALSE };
   fixture.directory.checkpoint = inventory_race;
   fixture.directory.checkpoint_data = &race;
@@ -1368,13 +1536,11 @@ test_restore_inventory_race (gconstpointer data)
   wyl_fact_graph_stage_clear (&stage);
   copy_fixture_clear (&fixture);
 }
-#endif
 
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
-#ifndef G_OS_WIN32
   g_test_add_func ("/fact-offline-restore-stage/inventory/success",
       test_restore_inventory);
   g_test_add_func ("/fact-offline-restore-stage/inventory/authority",
@@ -1403,7 +1569,6 @@ main (int argc, char **argv)
             NULL);
     g_test_add_data_func (name, inventory_races[i], test_restore_inventory_race);
   }
-#endif
   g_test_add_func ("/fact-offline-restore-stage/create-write-finalize-collision",
       test_create_write_finalize_and_collision);
   g_test_add_func ("/fact-offline-restore-stage/reopen-read-only",
