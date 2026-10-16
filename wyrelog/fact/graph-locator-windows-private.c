@@ -1811,6 +1811,32 @@ wyl_fact_graph_provisioned_pair_revalidate
   return rc;
 }
 
+/* As on POSIX: revalidate the pair, then compare the object the pair's own
+ * directory holds with the object the supplied directory holds.  Both
+ * identities are queried from the handles; the supplied directory's cached
+ * identity is not evidence. */
+wyrelog_error_t
+wyl_fact_graph_provisioned_pair_revalidate_in_directory
+  (WylFactGraphProvisionedPair *pair,
+    const WylFactGraphDirectory *directory)
+{
+  if (pair == NULL || directory == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_provisioned_pair_revalidate (pair);
+  WylFactGraphWinIdentity held = { 0 }, supplied = { 0 };
+  if (rc == WYRELOG_E_OK
+      && (!handle_is_valid (pair->directory.graph_handle)
+      || !handle_is_valid (directory->graph_handle)))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = query_directory_identity (pair->directory.graph_handle, &held);
+  if (rc == WYRELOG_E_OK)
+    rc = query_directory_identity (directory->graph_handle, &supplied);
+  if (rc == WYRELOG_E_OK && !identity_equal (&held, &supplied))
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
 WylFactGraphProvisionedPair *
 wyl_fact_graph_provisioned_pair_ref (WylFactGraphProvisionedPair * pair)
 {
