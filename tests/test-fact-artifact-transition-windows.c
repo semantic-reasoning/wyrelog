@@ -1653,6 +1653,212 @@ test_child_crash_restarts_from_fresh_capture (void)
   fixture_clear (&fixture);
 }
 
+/* Observes, authorizes and executes each op in turn, recording APPLIED. */
+static void
+apply_ops (Provider *provider, Transition *transition,
+    const Lifecycle *life, const WylFactArtifactMainTransitionOp *ops,
+    gsize n_ops, Result *result)
+{
+  for (gsize i = 0; i < n_ops; i++) {
+    Observation step = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+        life, &step), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+        ops[i], &step, result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result->refusal, ==, MT (REFUSAL_NONE));
+    WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+    WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_execute (provider,
+        &step, ops[i], &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+        life, &step), ==, WYRELOG_E_OK);
+    step.durability = durability;
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+        ops[i], effect, &step, result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result->refusal, ==, MT (REFUSAL_NONE));
+  }
+}
+
+/* Opens a provider on an old main plus a stage and admits the transition. */
+static void
+open_mode_a (Fixture *f, const Lifecycle *life, Provider **out_provider,
+    Request *out_request, Transition **out_transition)
+{
+  create_owner_only_file (f->directory.graph_handle,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "old-main");
+  create_owner_only_file (f->directory.graph_handle, f->names.stage,
+      "new-stage");
+  Capability cap = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_probe_capability
+        (&f->directory, OPERATION_UUID, &cap), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_open (&f->resolver,
+      &f->directory, f->lease, OPERATION_UUID, &cap, out_provider), ==,
+      WYRELOG_E_OK);
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_capture
+        (*out_provider, life, &snapshot, &obs), ==, WYRELOG_E_OK);
+  *out_request = request_for (&obs, obs.entries[SLOT_MAIN].identity,
+          obs.entries[SLOT_STAGE].identity, FALSE);
+  Result result = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (out_request,
+      snapshot, &obs, &result, out_transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_READY));
+}
+
+static void
+authorize_op (Provider *provider, Transition *transition,
+    const Lifecycle *life, WylFactArtifactMainTransitionOp op,
+    Observation *out_authorized)
+{
+  Result result = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+      life, out_authorized), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      op, out_authorized, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.refusal, ==, MT (REFUSAL_NONE));
+}
+
+static WylFactArtifactMainTransitionEffect
+execute_op (Provider *provider, const Observation *authorized,
+    WylFactArtifactMainTransitionOp op)
+{
+  WylFactArtifactMainTransitionEffect effect = MT (EFFECT_NOT_APPLIED);
+  WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_execute (provider,
+      authorized, op, &effect, &durability), ==, WYRELOG_E_OK);
+  return effect;
+}
+
+static gboolean
+graph_entry_exists (const Fixture *f, const gchar *name)
+{
+  g_autofree gchar *path = g_build_filename (f->graph_path, name, NULL);
+  return g_file_test (path, G_FILE_TEST_EXISTS);
+}
+
+/* FINALIZE authorized against the retained old main must not report APPLIED
+ * for a different file planted at the rollback name: the name is not
+ * provenance, and the foreign file has to survive. */
+static void
+test_finalize_substituted_rollback_not_applied (void)
+{
+  Fixture f;
+  fixture_init (&f, "finalize-substituted");
+  Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactTransitionWindows) provider = NULL;
+  g_autoptr (WylFactArtifactMainTransition) tx = NULL;
+  Request req = { 0 };
+  open_mode_a (&f, &life, &provider, &req, &tx);
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_SYNC_STAGED), MT (OP_RETAIN), MT (OP_SYNC_ROLLBACK_FILE),
+    MT (OP_SYNC_RETAIN_DIR), MT (OP_PUBLISH), MT (OP_SYNC_PUBLISH_DIR),
+  };
+  Result res = { 0 };
+  apply_ops (provider, tx, &life, ops, G_N_ELEMENTS (ops), &res);
+
+  Observation authorized = { 0 };
+  authorize_op (provider, tx, &life, MT (OP_FINALIZE), &authorized);
+  g_autofree gchar *rollback_path = g_build_filename (f.graph_path,
+          f.names.rollback, NULL);
+  g_assert_cmpint (g_remove (rollback_path), ==, 0);
+  create_owner_only_file (f.directory.graph_handle, f.names.rollback,
+      "foreign");
+
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_FINALIZE)), ==,
+      MT (EFFECT_NOT_APPLIED));
+  g_assert_true (graph_entry_exists (&f, f.names.rollback));
+  fixture_clear (&f);
+}
+
+/* FINALIZE earns APPLIED only behind a proven directory flush: a failed
+ * flush after the delete is UNKNOWN, and a retry over the already-absent name
+ * flushes again before claiming APPLIED. */
+static void
+test_finalize_requires_directory_flush (void)
+{
+  Fixture f;
+  fixture_init (&f, "finalize-flush");
+  Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactTransitionWindows) provider = NULL;
+  g_autoptr (WylFactArtifactMainTransition) tx = NULL;
+  Request req = { 0 };
+  open_mode_a (&f, &life, &provider, &req, &tx);
+  const WylFactArtifactMainTransitionOp ops[] = {
+    MT (OP_SYNC_STAGED), MT (OP_RETAIN), MT (OP_SYNC_ROLLBACK_FILE),
+    MT (OP_SYNC_RETAIN_DIR), MT (OP_PUBLISH), MT (OP_SYNC_PUBLISH_DIR),
+  };
+  Result res = { 0 };
+  apply_ops (provider, tx, &life, ops, G_N_ELEMENTS (ops), &res);
+
+  Observation authorized = { 0 };
+  authorize_op (provider, tx, &life, MT (OP_FINALIZE), &authorized);
+  wyl_fact_artifact_transition_windows_set_test_fault (WF (
+        EXECUTE_FINALIZE_SYNC_DIR));
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_FINALIZE)), ==,
+      MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed (
+        WF (EXECUTE_FINALIZE_SYNC_DIR)));
+  g_assert_false (graph_entry_exists (&f, f.names.rollback));
+
+  wyl_fact_artifact_transition_windows_set_test_fault (WF (
+        EXECUTE_FINALIZE_SYNC_DIR));
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_FINALIZE)), ==,
+      MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed (
+        WF (EXECUTE_FINALIZE_SYNC_DIR)));
+
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_FINALIZE)), ==,
+      MT (EFFECT_APPLIED));
+  fixture_clear (&f);
+}
+
+/* RETIRE_STAGE follows the same rule, and an already-absent stage is APPLIED
+ * once the directory flush is proven, as on POSIX. */
+static void
+test_retire_stage_requires_directory_flush (void)
+{
+  Fixture f;
+  fixture_init (&f, "retire-flush");
+  Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+  g_autoptr (WylFactArtifactTransitionWindows) provider = NULL;
+  g_autoptr (WylFactArtifactMainTransition) tx = NULL;
+  Request req = { 0 };
+  open_mode_a (&f, &life, &provider, &req, &tx);
+  const WylFactArtifactMainTransitionOp prep[] = {
+    MT (OP_SYNC_STAGED), MT (OP_RETAIN),
+  };
+  Result res = { 0 };
+  apply_ops (provider, tx, &life, prep, G_N_ELEMENTS (prep), &res);
+
+  req.resume_forbidden = TRUE;
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_capture (provider,
+      &life, &snapshot, &obs), ==, WYRELOG_E_OK);
+  g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&req, snapshot,
+      &obs, &res, &tx), ==, WYRELOG_E_OK);
+  g_assert_cmpint (res.state, ==, MT (STATE_RETAINED));
+  const WylFactArtifactMainTransitionOp unwind[] = { MT (OP_ROLLBACK) };
+  apply_ops (provider, tx, &life, unwind, G_N_ELEMENTS (unwind), &res);
+
+  Observation authorized = { 0 };
+  authorize_op (provider, tx, &life, MT (OP_RETIRE_STAGE), &authorized);
+  wyl_fact_artifact_transition_windows_set_test_fault (WF (
+        EXECUTE_RETIRE_STAGE_SYNC_DIR));
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_RETIRE_STAGE)),
+      ==, MT (EFFECT_UNKNOWN));
+  g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed (
+        WF (EXECUTE_RETIRE_STAGE_SYNC_DIR)));
+  g_assert_false (graph_entry_exists (&f, f.names.stage));
+
+  g_assert_cmpint (execute_op (provider, &authorized, MT (OP_RETIRE_STAGE)),
+      ==, MT (EFFECT_APPLIED));
+  fixture_clear (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1707,6 +1913,12 @@ main (int argc, char **argv)
       test_graph_directory_authority_is_revalidated);
   g_test_add_func ("/fact-artifact-transition/windows/driver/child-crash-restart",
       test_child_crash_restarts_from_fresh_capture);
+  g_test_add_func ("/fact-artifact-transition/windows/finalize-substituted",
+      test_finalize_substituted_rollback_not_applied);
+  g_test_add_func ("/fact-artifact-transition/windows/finalize-flush",
+      test_finalize_requires_directory_flush);
+  g_test_add_func ("/fact-artifact-transition/windows/retire-flush",
+      test_retire_stage_requires_directory_flush);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 

@@ -69,9 +69,15 @@ optional on any supported platform. `directory_after_retain` and
 `directory_after_publish` are directory seams, and they are the only place the
 documented platform capability gap is allowed to surface.
 
-A directory flush the platform cannot prove blocks `FINALIZE` alone -- the
-single irreversible step -- so the operation rests convergently rather than
-resting in a state with no main artifact.
+A directory flush the platform cannot prove blocks `FINALIZE` alone among the
+forward steps -- the single irreversible step -- so the operation rests
+convergently rather than resting in a state with no main artifact.
+
+The two deleting steps, `FINALIZE` and `RETIRE_STAGE`, report `APPLIED` only
+behind a directory flush proven after the delete, on every platform, and an
+already-absent name is flushed again before it is reported. An unprovable
+flush leaves them `UNKNOWN`. On a volume without a provable directory flush an
+abandoned operation therefore keeps its stage until a flush can be proven.
 
 ### Every mutation targets an absent name
 

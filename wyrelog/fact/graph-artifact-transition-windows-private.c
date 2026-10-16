@@ -963,12 +963,15 @@ static wyrelog_error_t
 execute_open_expected (const WylFactArtifactTransitionWindows *provider,
     const gchar *name, ACCESS_MASK access_mask,
     const WylFactArtifactMainTransitionEntryEvidence *expected,
-    HANDLE *out_handle, WylFactArtifactMainTransitionEffect *out_effect)
+    HANDLE *out_handle, gboolean *out_absent,
+    WylFactArtifactMainTransitionEffect *out_effect)
 {
   HANDLE handle = INVALID_HANDLE_VALUE;
   NTSTATUS status = WYL_STATUS_SUCCESS;
   if (out_handle != NULL)
     *out_handle = INVALID_HANDLE_VALUE;
+  if (out_absent != NULL)
+    *out_absent = FALSE;
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
   if (provider == NULL || name == NULL || expected == NULL
@@ -978,6 +981,11 @@ execute_open_expected (const WylFactArtifactTransitionWindows *provider,
   wyrelog_error_t rc = open_entry_handle (provider->graph_handle, name,
           access_mask, FILE_OPEN, &handle, &status);
   if (rc != WYRELOG_E_OK) {
+    /* Only a missing name is absence; a refused open is not. */
+    if (out_absent != NULL)
+      *out_absent = status == WYL_STATUS_OBJECT_NAME_NOT_FOUND
+          || status == WYL_STATUS_OBJECT_PATH_NOT_FOUND
+          || status == WYL_STATUS_NO_SUCH_FILE;
     if (status == WYL_STATUS_OBJECT_NAME_NOT_FOUND
         || status == WYL_STATUS_OBJECT_PATH_NOT_FOUND
         || status == WYL_STATUS_NO_SUCH_FILE
@@ -1051,7 +1059,7 @@ execute_rename (const WylFactArtifactTransitionWindows *provider,
 
   wyrelog_error_t rc = execute_open_expected (provider, source_name,
           READ_CONTROL | DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-          expected_source, &handle, out_effect);
+          expected_source, &handle, NULL, out_effect);
   if (rc != WYRELOG_E_OK || handle == INVALID_HANDLE_VALUE)
     return rc;
 
@@ -1136,7 +1144,7 @@ execute_sync_file (const WylFactArtifactTransitionWindows *provider,
 
   wyrelog_error_t rc = execute_open_expected (provider, name,
           READ_CONTROL | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-          expected, &handle, out_effect);
+          expected, &handle, NULL, out_effect);
   if (rc != WYRELOG_E_OK || handle == INVALID_HANDLE_VALUE)
     return rc;
 
@@ -1223,18 +1231,26 @@ execute_sync_dir (const WylFactArtifactTransitionWindows *provider,
   return WYRELOG_E_OK;
 }
 
+/* Removes an authorized entry and earns APPLIED only behind a proven flush of
+ * the graph directory, as the POSIX provider does: a prior attempt may have
+ * removed the name without making the directory update durable, so an
+ * already-absent name is flushed again.  Only a missing name counts as
+ * absent; a name that opens onto anything but the authorized object is
+ * NOT_APPLIED and is left in place. */
 static wyrelog_error_t
-execute_unlink_entry (const WylFactArtifactTransitionWindows *provider,
+execute_delete_and_sync_dir (const WylFactArtifactTransitionWindows *provider,
     const gchar *name,
     const WylFactArtifactMainTransitionEntryEvidence *expected,
-    gboolean absent_is_applied,
     WylFactArtifactTransitionWindowsTestFault verify_fault,
     WylFactArtifactTransitionWindowsTestFault unlink_fault,
+    WylFactArtifactTransitionWindowsTestFault sync_fault,
     WylFactArtifactMainTransitionEffect *out_effect)
 {
   WylNtSetInformationFile set_info = nt_set_information_file ();
   HANDLE handle = INVALID_HANDLE_VALUE;
   NTSTATUS status = WYL_STATUS_SUCCESS;
+  gboolean absent = FALSE;
+  gboolean flush_ok = FALSE;
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
   if (provider == NULL || name == NULL || expected == NULL || out_effect == NULL
@@ -1246,19 +1262,15 @@ execute_unlink_entry (const WylFactArtifactTransitionWindows *provider,
     return WYRELOG_E_OK;
   }
 
-  if (absent_is_applied && !expected->present) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-    return WYRELOG_E_OK;
-  }
-
   wyrelog_error_t rc = execute_open_expected (provider, name,
           READ_CONTROL | DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, expected,
-          &handle, out_effect);
-  if (rc != WYRELOG_E_OK || handle == INVALID_HANDLE_VALUE) {
-    if (absent_is_applied
-        && *out_effect == WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED)
-      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
+          &handle, &absent, out_effect);
+  if (rc != WYRELOG_E_OK)
     return rc;
+  if (handle == INVALID_HANDLE_VALUE) {
+    if (!absent)
+      return WYRELOG_E_OK;
+    goto sync_directory;
   }
 
   WylFileDispositionInfo disp = { .delete_file = TRUE };
@@ -1271,26 +1283,34 @@ execute_unlink_entry (const WylFactArtifactTransitionWindows *provider,
   }
   CloseHandle (handle);
 
-  if (NT_SUCCESS (status)) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-  } else if (absent_is_applied
-      && (status == WYL_STATUS_OBJECT_NAME_NOT_FOUND
-      || status == WYL_STATUS_OBJECT_PATH_NOT_FOUND
-      || status == WYL_STATUS_NO_SUCH_FILE)) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED;
-  } else if (status == WYL_STATUS_OBJECT_NAME_NOT_FOUND
-      || status == WYL_STATUS_OBJECT_PATH_NOT_FOUND
-      || status == WYL_STATUS_NO_SUCH_FILE
-      || status == WYL_STATUS_ACCESS_DENIED
-      || status == WYL_STATUS_PRIVILEGE_NOT_HELD
-      || status == WYL_STATUS_FILE_IS_A_DIRECTORY
-      || status == WYL_STATUS_CANNOT_DELETE
-      || status == WYL_STATUS_DELETE_PENDING
-      || status == WYL_STATUS_MEDIA_WRITE_PROTECTED) {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
-  } else {
-    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (!NT_SUCCESS (status) && status != WYL_STATUS_OBJECT_NAME_NOT_FOUND
+      && status != WYL_STATUS_OBJECT_PATH_NOT_FOUND
+      && status != WYL_STATUS_NO_SUCH_FILE) {
+    if (status == WYL_STATUS_ACCESS_DENIED
+        || status == WYL_STATUS_PRIVILEGE_NOT_HELD
+        || status == WYL_STATUS_FILE_IS_A_DIRECTORY
+        || status == WYL_STATUS_CANNOT_DELETE
+        || status == WYL_STATUS_MEDIA_WRITE_PROTECTED)
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED;
+    else
+      /* DELETE_PENDING included: the object goes once its last handle
+       * closes, so the delete is neither refused nor proven. */
+      *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+    return WYRELOG_E_OK;
   }
+
+sync_directory:
+  /* Unlike SYNC_*_DIR, an unsupported directory flush is not a capability
+   * answer here: an unprovable flush blocks the claim. */
+  if (windows_fault_take (sync_fault)) {
+    (void) take_next_flush_error ();
+    flush_ok = FALSE;
+  } else {
+    flush_ok = FlushFileBuffers (provider->graph_handle);
+  }
+  *out_effect = flush_ok
+      ? WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
+      : WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   return WYRELOG_E_OK;
 }
 
@@ -1369,18 +1389,20 @@ wyl_fact_artifact_transition_windows_execute
                  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_ROLLBACK_RENAME,
                  out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE:
-      return execute_unlink_entry (provider, provider->names.stage,
+      return execute_delete_and_sync_dir (provider, provider->names.stage,
                  &authorized->entries
-                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE], FALSE,
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE],
                  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_RETIRE_STAGE_VERIFY,
                  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_RETIRE_STAGE_UNLINK,
+                 WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_RETIRE_STAGE_SYNC_DIR,
                  out_effect);
     case WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE:
-      return execute_unlink_entry (provider, provider->names.rollback,
+      return execute_delete_and_sync_dir (provider, provider->names.rollback,
                  &authorized->entries
-                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK], TRUE,
+                 [WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK],
                  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_FINALIZE_VERIFY,
                  WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_FINALIZE_UNLINK,
+                 WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_FINALIZE_SYNC_DIR,
                  out_effect);
     default:
       return WYRELOG_E_INVALID;
