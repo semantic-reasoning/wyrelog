@@ -100,7 +100,8 @@ wyrelog_error_t wyl_fact_offline_restore_tenant_preflight_run
  * an existing provisioned main, and an existing selected runtime entry. The
  * historical source generation and file size may differ from the destination;
  * all destination generations, main identity, store identity and schema must
- * match the journal. Windows fails closed before filesystem/input access.
+ * match the journal. On Windows the destination main is proved by its
+ * provisioning operation evidence, as the backup source opens it.
  *
  * Retains root authority, destination reader guard and selected quiescence.
  * Only after fresh admission checks does it call input or create a stage.

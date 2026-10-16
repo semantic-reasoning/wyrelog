@@ -6217,51 +6217,6 @@ test_graph_import_invalid_input (void)
   g_assert_null (journal.graphs);
 }
 
-#ifdef G_OS_WIN32
-static wyrelog_error_t
-import_windows_read (guint64 offset, guint8 *buffer, gsize capacity,
-    gsize *out_read, gpointer data)
-{
-  (void) offset;
-  (void) buffer;
-  (void) capacity;
-  (void) out_read;
-  (*(guint *) data)++;
-  return WYRELOG_E_IO;
-}
-
-static wyrelog_error_t
-import_windows_revalidate (gpointer data)
-{
-  (*(guint *) data)++;
-  return WYRELOG_E_IO;
-}
-#endif
-
-static void
-test_graph_import_windows (void)
-{
-#ifdef G_OS_WIN32
-  BackupFixture fixture = { 0 };
-  fixture_init (&fixture, "wyl-import-windows-XXXXXX");
-  guint calls = 0;
-  const WylFactOfflineRestoreInput input = {
-    import_windows_read, import_windows_revalidate,
-  };
-  g_autoptr (GBytes) manifest = g_bytes_new_static ("{}", 2);
-  WylFactOfflineRestoreJournal journal = { 0 };
-  g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
-        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "zeta",
-      manifest, "018f22d0-7b6d-7a5b-8c31-123456789ab4", 1, 0,
-      &input, &calls, &journal), ==, WYRELOG_E_POLICY);
-  g_assert_null (journal.graphs);
-  g_assert_cmpuint (calls, ==, 0);
-  fixture_clear (&fixture);
-#else
-  g_test_skip ("Windows-only fail-closed boundary");
-#endif
-}
-
 #ifndef G_OS_WIN32
 static void
 rollback_test_advance (SessionFixture *f, gboolean begin)
@@ -15472,6 +15427,159 @@ test_restore_begin_windows (void)
 #endif
 }
 
+#ifdef G_OS_WIN32
+typedef struct
+{
+  const gchar *mode;
+  GBytes *payload;
+  guint64 offset;
+  guint reads;
+  guint validations;
+} WindowsImportInput;
+
+/* Streams the backed-up artifact in uneven pieces, as the POSIX import
+ * cases do, and truncates it on request. */
+static wyrelog_error_t
+windows_import_read (guint64 offset, guint8 *buffer, gsize capacity,
+    gsize *out_read, gpointer data)
+{
+  WindowsImportInput *input = data;
+  gsize length = 0;
+  const guint8 *bytes = g_bytes_get_data (input->payload, &length);
+  g_assert_cmpuint (offset, ==, input->offset);
+  input->reads++;
+  *out_read = 0;
+  if (offset == length)
+    return WYRELOG_E_OK;
+  if (g_str_equal (input->mode, "short-read") && offset >= length / 2)
+    return WYRELOG_E_OK;
+  *out_read = MIN (MIN (capacity, (gsize) 17003), length - offset);
+  memcpy (buffer, bytes + offset, *out_read);
+  input->offset += *out_read;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+windows_import_revalidate (gpointer data)
+{
+  WindowsImportInput *input = data;
+  input->validations++;
+  if (g_str_equal (input->mode, "revalidate-fails") && input->validations == 2)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static WylFactArtifactInventoryIdentity
+windows_file_identity (const gchar *path)
+{
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  HANDLE handle = CreateFileW ((LPCWSTR) wide, FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+          OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  FILE_ID_INFO info = { 0 };
+  g_assert_true (GetFileInformationByHandleEx (handle, FileIdInfo, &info,
+      sizeof info));
+  g_assert_true (CloseHandle (handle));
+  WylFactArtifactInventoryIdentity identity = {
+    .domain = info.VolumeSerialNumber,
+    .object_width = sizeof info.FileId.Identifier,
+  };
+  memcpy (identity.object_bytes, info.FileId.Identifier,
+      sizeof info.FileId.Identifier);
+  return identity;
+}
+#endif
+
+/* After a graph begin, the import copies the backed-up artifact into the
+ * operation's restore stage under the held lease and journals the stage's
+ * identity.  A short stream is refused as a broken artifact contract and a
+ * failed source revalidation is refused, each journalling nothing. */
+static void
+test_graph_import_run_windows (gconstpointer data)
+{
+#ifndef G_OS_WIN32
+  (void) data;
+  g_test_skip ("Windows graph restore import");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0021";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-import-win-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  WylFactOfflineRestoreJournal begun = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", operation, TRUE, 0,
+      &begun), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (begun.revision, ==, 1);
+  wyl_fact_offline_restore_journal_clear (&begun);
+
+  GBytes *payload = NULL;
+  for (guint i = 0; i < capture.completed_graphs->len; i++)
+    if (g_str_equal (g_ptr_array_index (capture.completed_graphs, i), "zeta"))
+      payload = g_ptr_array_index (capture.artifact_bytes, i);
+  g_assert_nonnull (payload);
+  WindowsImportInput input = { .mode = mode, .payload = payload };
+  const WylFactOfflineRestoreInput callbacks = {
+    windows_import_read, windows_import_revalidate,
+  };
+  WylFactOfflineRestoreJournal imported = { 0 };
+  wyrelog_error_t rc = wyl_fact_offline_restore_graph_import_run
+        (fixture.policy, fixture.root, fixture.runtime, "tenant-a", "zeta",
+          capture.manifest, operation, 1, 0, &callbacks, &input, &imported);
+
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+          stage_name);
+  WylFactOfflineRestoreJournal stored = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation, &stored), ==, WYRELOG_E_OK);
+  if (g_str_equal (mode, "success")) {
+    g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (imported.revision, ==, 2);
+    g_assert_cmpuint (stored.revision, ==, 2);
+    g_autofree gchar *contents = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (stage_path, &contents, &length, NULL));
+    gsize expected_length = 0;
+    const guint8 *expected = g_bytes_get_data (payload, &expected_length);
+    g_assert_cmpmem (contents, length, expected, expected_length);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (imported.graphs, 0);
+    WylFactArtifactInventoryIdentity stage_identity =
+        windows_file_identity (stage_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal
+          (&graph->staged_main_identity, &stage_identity));
+    g_assert_cmpuint (input.validations, ==, 2);
+  } else {
+    /* Both fail inside the copy window, not at an earlier admission
+     * check: the first revalidation ran and the stream was read. */
+    g_assert_cmpint (rc, ==, g_str_equal (mode, "short-read")
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    g_assert_cmpuint (input.reads, >, 1);
+    g_assert_cmpuint (input.validations, ==,
+        g_str_equal (mode, "short-read") ? 1 : 2);
+    g_assert_null (imported.graphs);
+    g_assert_cmpuint (stored.revision, ==, 1);
+    /* The unbound stage is kept for recovery, never silently removed. */
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+  }
+  wyl_fact_offline_restore_journal_clear (&stored);
+  wyl_fact_offline_restore_journal_clear (&imported);
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -15481,8 +15589,6 @@ main (int argc, char **argv)
       test_source_match_ignores_live_allocation);
   g_test_add_func ("/fact-offline-backup-source/import/invalid",
       test_graph_import_invalid_input);
-  g_test_add_func ("/fact-offline-backup-source/import/windows-fail-closed",
-      test_graph_import_windows);
   g_test_add_func ("/fact-offline-backup-source/coordinator/invalid",
       test_graph_coordinator_invalid_input);
   g_test_add_func ("/fact-offline-backup-source/session-invalid-constructor",
@@ -16102,6 +16208,14 @@ main (int argc, char **argv)
       test_restore_dry_run_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/graph-import",
+      "success", test_graph_import_run_windows);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/windows/graph-import-revalidate-fails",
+      "revalidate-fails", test_graph_import_run_windows);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/windows/graph-import-short-read",
+      "short-read", test_graph_import_run_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/graph-source",
       test_graph_source_windows);
   g_test_add_func
