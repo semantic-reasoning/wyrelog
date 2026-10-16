@@ -181,8 +181,8 @@ TEST_REGISTRATION_PROFILES = {
         "90b55bb9dce7f0a99c851f067f718039ad4492ef13b05b5485161b8ebf7fcef2",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
-        29,
-        "e4006c3f846ca017f2d6f38919d0cc31ff8a2dd8e67ce436cd170bfc5b8880e5",
+        31,
+        "3340181aa5a49235cc0545b011a8250c749f20c271c69aa88449a4febbaecd9b",
     ),
 }
 
@@ -192,7 +192,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-posix.c":
         "44f314b3666522480971d9e3b8d6b22dfdd8f2d97373f47505f32d13697684ba",
     "tests/test-fact-artifact-transition-windows.c":
-        "449e6147ecf86efd8ac77eb7ea2441378582710ad09e465cd49cee7c581faf57",
+        "60134195aa893961cad0a3857625c41a7e8a1b63875c19e025e9cfff698b9274",
 }
 
 WINDOWS_AUTHORITY_BODY_SHA256 = (
@@ -203,7 +203,7 @@ WINDOWS_AUTHORITY_TEST_BODY_SHA256 = (
 )
 WINDOWS_AUTHORITY_CALLER_BODY_SHA256 = {
     "wyl_fact_artifact_transition_windows_open":
-        "e44f9e4a8d31bf6f99a83a79d44e77d8d4342dd53d2b24ab2eb8f0030bc6d6a4",
+        "3e28855127a4fb511be09ff3eeca1256bd85c989bfe7410c2a4a179270c81318",
     "wyl_fact_artifact_transition_windows_capture":
         "1f09b653232cc457cc1d1815cedf0318596d2154638ebfdb332575ba8b7a810e",
     "wyl_fact_artifact_transition_windows_execute":
