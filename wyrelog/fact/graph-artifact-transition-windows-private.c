@@ -1472,6 +1472,87 @@ wyl_fact_artifact_transition_windows_with_retired_stage_recovery
 }
 
 wyrelog_error_t
+wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+  (WylFactArtifactTransitionWindows *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphWinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionWindowsLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+  if (out_snapshot != NULL)
+    *out_snapshot = NULL;
+  if (out_observation != NULL)
+    *out_observation = (WylFactArtifactMainTransitionObservation) { 0 };
+  if (out_snapshot == NULL || out_observation == NULL || provider == NULL
+      || provisioning_uuid == NULL || evidence == NULL || request == NULL
+      || lifecycle == NULL || request->operation_uuid == NULL
+      || request->expected_main_absent
+      || (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      && slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK))
+    return WYRELOG_E_INVALID;
+  /* RETAINED_ROLLBACK would accept the evidence under a different name; as
+   * on Darwin, that is refused until it is decided on its own. */
+  if (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN)
+    return WYRELOG_E_POLICY;
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  wyl_id_t provisioning = { 0 };
+  if (wyl_id_parse (provisioning_uuid, &provisioning) != WYRELOG_E_OK
+      || !wyl_fact_graph_windows_operation_evidence_equal (evidence, evidence))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactInventoryIdentity evidenced
+    = inventory_identity_from_windows (&evidence->artifact_identity);
+  if (memcmp (evidence->operation_uuid, provisioning.bytes,
+      sizeof evidence->operation_uuid) != 0
+      || !transition_win_identity_equal (&evidence->graph_identity,
+      &provider->directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal (&evidenced,
+      &request->expected_main_identity))
+    return WYRELOG_E_POLICY;
+
+  /* No separate name witness: the correlated capture already binds each
+   * name to one FileId and refuses aliases, reparse points, extra links and
+   * foreign owners, so the evidence is proven by the two equalities below
+   * (evidence = request above, observed main = request here).  A
+   * substitution after the capture is caught when execute re-pins the
+   * authorized FileId. */
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  WylFactArtifactMainTransitionObservation observation = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_windows_capture
+        (provider, lifecycle, &snapshot, &observation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  if (!old->present || old->reparse || old->link_count != 1
+      || old->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || !wyl_fact_artifact_inventory_identity_equal (&old->identity,
+      &request->expected_main_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->directory_identity, &observation.directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&request->lease_identity, &observation.lease_identity)
+      /* As the Darwin witness refuses a leftover provisioning stage, refuse
+       * any entry beyond the operation's own names here rather than leaving
+       * it to the caller's admit. */
+      || wyl_fact_artifact_main_transition_inventory_refusal (snapshot,
+      &observation) != WYL_FACT_ARTIFACT_MAIN_TRANSITION_REFUSAL_NONE)
+    return WYRELOG_E_POLICY;
+  /* old_main_witness stays NONE: the marker licenses a second link and a
+   * Windows main has none.  The proof is the successful return. */
+  *out_snapshot = g_steal_pointer (&snapshot);
+  *out_observation = observation;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_fact_artifact_transition_windows_with_unbound_absence
   (WylFactArtifactTransitionWindows *provider,
     WylFactGraphProvisionedPair *pair,

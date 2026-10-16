@@ -2014,10 +2014,13 @@ test_retired_stage_recovery_rejects_conflicts (void)
 static const gchar PROVISIONING_UUID[] =
     "01890f47-3c4b-7cc2-b8c4-dc0c0c0705a0";
 
-/* Publishes facts.duckdb from an exact provisioning stage and adopts it as an
- * evidence pair, which is how a Windows main gets its provenance. */
+/* Publishes facts.duckdb from an exact provisioning stage, which is how a
+ * Windows main gets its provenance, and returns the evidence tuple when
+ * asked.  Adopts it as an evidence pair only when |adopt_pair|: the pair holds
+ * the main open, so a test that replaces the main must not adopt. */
 static WylFactGraphProvisionedPair *
-publish_provisioned_main (Fixture *f)
+publish_provisioned_main (Fixture *f,
+    WylFactGraphWinOperationEvidence *out_evidence, gboolean adopt_pair)
 {
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   WylFactGraphWinOperationEvidence evidence = { 0 };
@@ -2028,6 +2031,10 @@ publish_provisioned_main (Fixture *f)
   g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&f->directory,
       &stage, &evidence), ==, WYRELOG_E_OK);
   wyl_fact_graph_stage_clear (&stage);
+  if (out_evidence != NULL)
+    *out_evidence = evidence;
+  if (!adopt_pair)
+    return NULL;
   WylFactGraphProvisionedPair *pair = NULL;
   g_assert_cmpint
     (wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
@@ -2069,7 +2076,7 @@ test_unbound_absence (void)
     fixture_init (&f, mode == 0 ? "unbound-empty" : "unbound-provisioned");
     Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
     WylFactGraphProvisionedPair *pair = mode == 0 ? NULL
-        : publish_provisioned_main (&f);
+        : publish_provisioned_main (&f, NULL, TRUE);
     Request req = { 0 };
     g_autoptr (WylFactArtifactTransitionWindows) provider
       = open_for_unbound (&f, &life, mode == 0, &req);
@@ -2115,7 +2122,7 @@ test_unbound_absence_rejects (void)
     Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
     gboolean provisioned = scenario >= 4;
     WylFactGraphProvisionedPair *pair = provisioned
-        ? publish_provisioned_main (&f) : NULL;
+        ? publish_provisioned_main (&f, NULL, TRUE) : NULL;
     Request req = { 0 };
     g_autoptr (WylFactArtifactTransitionWindows) provider
       = open_for_unbound (&f, &life, !provisioned, &req);
@@ -2132,7 +2139,7 @@ test_unbound_absence_rejects (void)
       g_assert_cmpint (wyl_fact_graph_resolver_open_directory
             (&sibling.resolver, &sibling.locator, TRUE, &sibling.directory),
           ==, WYRELOG_E_OK);
-      sibling_pair = publish_provisioned_main (&sibling);
+      sibling_pair = publish_provisioned_main (&sibling, NULL, TRUE);
     }
     wyrelog_error_t expected = WYRELOG_E_POLICY;
     switch (scenario) {
@@ -2202,6 +2209,140 @@ test_unbound_absence_rejects (void)
     wyl_fact_graph_directory_clear (&sibling.directory);
     wyl_fact_graph_locator_clear (&sibling.locator);
     wyl_fact_graph_resolver_clear (&sibling.resolver);
+    fixture_clear (&f);
+  }
+}
+
+/* Publishes an evidence main and a restore stage, opens a provider, and
+ * builds the READY request that expects that main and that stage. */
+static Provider *
+open_provisioned_ready (Fixture *f, const Lifecycle *life,
+    WylFactGraphWinOperationEvidence *out_evidence, Request *out_request)
+{
+  (void) publish_provisioned_main (f, out_evidence, FALSE);
+  create_owner_only_file (f->directory.graph_handle, f->names.stage,
+      "restore-stage");
+  Capability cap = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_probe_capability
+        (&f->directory, OPERATION_UUID, &cap), ==, WYRELOG_E_OK);
+  Provider *provider = NULL;
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_open (&f->resolver,
+      &f->directory, f->lease, OPERATION_UUID, &cap, &provider), ==,
+      WYRELOG_E_OK);
+  Observation obs = { 0 };
+  g_assert_cmpint (wyl_fact_artifact_transition_windows_observe (provider,
+      life, &obs), ==, WYRELOG_E_OK);
+  *out_request = request_for (&obs, obs.entries[SLOT_MAIN].identity,
+          obs.entries[SLOT_STAGE].identity, FALSE);
+  return provider;
+}
+
+/* The evidence-bound capture admits a provisioned main as READY with no
+ * old-main marker: the proof is the call's success. */
+static void
+test_capture_provisioned_with_evidence (void)
+{
+  Fixture f;
+  fixture_init (&f, "capture-provisioned");
+  Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  Request req = { 0 };
+  g_autoptr (WylFactArtifactTransitionWindows) provider
+    = open_provisioned_ready (&f, &life, &evidence, &req);
+
+  g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
+  Observation obs = { 0 };
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+        (provider, PROVISIONING_UUID, &evidence, &req,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &life, &snapshot,
+      &obs), ==, WYRELOG_E_OK);
+  g_assert_nonnull (snapshot);
+  g_assert_cmpint (obs.old_main_witness, ==, MT (OLD_WITNESS_NONE));
+  Result res = { 0 };
+  g_autoptr (WylFactArtifactMainTransition) tx = NULL;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&req, snapshot,
+      &obs, &res, &tx), ==, WYRELOG_E_OK);
+  g_assert_cmpint (res.refusal, ==, MT (REFUSAL_NONE));
+  g_assert_cmpint (res.state, ==, MT (STATE_READY));
+  fixture_clear (&f);
+}
+
+/* Every contradiction between the evidence, the request and the directory is
+ * refused with both outputs zeroed. */
+static void
+test_capture_provisioned_with_evidence_rejects (void)
+{
+  for (guint scenario = 0; scenario < 10; scenario++) {
+    Fixture f;
+    g_autofree gchar *tag = g_strdup_printf ("capture-prov-reject-%u",
+            scenario);
+    fixture_init (&f, tag);
+    Lifecycle life = { .sealed = TRUE, .main_binding_live = FALSE };
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    Request req = { 0 };
+    g_autoptr (WylFactArtifactTransitionWindows) provider
+      = open_provisioned_ready (&f, &life, &evidence, &req);
+    WylFactGraphProvisionedRestoreSlot slot
+      = WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN;
+    const gchar *provisioning = PROVISIONING_UUID;
+    wyrelog_error_t expected = WYRELOG_E_POLICY;
+    switch (scenario) {
+      case 0:
+        /* Evidence minted for another operation. */
+        evidence.operation_uuid[15] ^= 1;
+        break;
+      case 1:
+        provisioning = OPERATION_UUID;
+        break;
+      case 2:
+        evidence.graph_identity.volume_serial ^= 1;
+        break;
+      case 3:
+        /* The evidence names some other object than the request expects. */
+        evidence.artifact_identity.file_id[0] ^= 1;
+        break;
+      case 4:
+        /* A same-name file swapped in after the evidence was minted. */
+        remove_graph_entry (&f, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+        create_owner_only_file (f.directory.graph_handle,
+            WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, "foreign");
+        break;
+      case 5:
+        slot = WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
+        break;
+      case 6:
+        evidence.version = 0;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 7:
+        req.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+        break;
+      case 8:
+        req.expected_main_absent = TRUE;
+        expected = WYRELOG_E_INVALID;
+        break;
+      case 9:
+        /* A leftover entry: refused by the capture itself, not left to the
+         * caller's admit. */
+        create_owner_only_file (f.directory.graph_handle,
+            "leftover-provisioning.duckdb", "leftover");
+        break;
+      default:
+        g_assert_not_reached ();
+    }
+    WylFactArtifactInventorySnapshot *snapshot
+      = (WylFactArtifactInventorySnapshot *) &evidence;
+    Observation obs;
+    memset (&obs, 0xa5, sizeof obs);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+          (provider, provisioning, &evidence, &req, slot, &life, &snapshot,
+        &obs), ==, expected);
+    g_assert_null (snapshot);
+    const Observation zero = { 0 };
+    g_assert_cmpint (memcmp (&obs, &zero, sizeof obs), ==, 0);
+    g_clear_pointer (&provider, wyl_fact_artifact_transition_windows_free);
     fixture_clear (&f);
   }
 }
@@ -2276,6 +2417,11 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-artifact-transition/windows/recovery/unbound-absence-rejects",
       test_unbound_absence_rejects);
+  g_test_add_func ("/fact-artifact-transition/windows/provisioned/capture",
+      test_capture_provisioned_with_evidence);
+  g_test_add_func
+    ("/fact-artifact-transition/windows/provisioned/capture-rejects",
+      test_capture_provisioned_with_evidence_rejects);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
 

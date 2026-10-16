@@ -181,8 +181,8 @@ TEST_REGISTRATION_PROFILES = {
         "90b55bb9dce7f0a99c851f067f718039ad4492ef13b05b5485161b8ebf7fcef2",
     ),
     "tests/test-fact-artifact-transition-windows.c": (
-        31,
-        "3340181aa5a49235cc0545b011a8250c749f20c271c69aa88449a4febbaecd9b",
+        33,
+        "5b289c14c18a7aeb752dbf8efcc1f72255a22c953de44308320d2a5137589052",
     ),
 }
 
@@ -192,7 +192,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-posix.c":
         "44f314b3666522480971d9e3b8d6b22dfdd8f2d97373f47505f32d13697684ba",
     "tests/test-fact-artifact-transition-windows.c":
-        "60134195aa893961cad0a3857625c41a7e8a1b63875c19e025e9cfff698b9274",
+        "79c79bff0721143916bd986e6341f8ee54c93facca685a9349f5129022e19582",
 }
 
 WINDOWS_AUTHORITY_BODY_SHA256 = (
