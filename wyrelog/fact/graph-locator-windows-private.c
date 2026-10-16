@@ -18,30 +18,6 @@
 
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
 
-wyrelog_error_t
-wyl_fact_graph_directory_restore_inventory
-  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
-    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
-    const gchar *operation_uuid,
-    const WylFactArtifactInventoryIdentity *expected_stage,
-    const WylFactArtifactInventoryIdentity *expected_main,
-    WylFactGraphRestoreInventory *out_inventory)
-{
-  if (out_inventory != NULL)
-    memset (out_inventory, 0, sizeof *out_inventory);
-  if (resolver == NULL || directory == NULL || lease == NULL
-      || operation_uuid == NULL || expected_stage == NULL
-      || expected_main == NULL || out_inventory == NULL)
-    return WYRELOG_E_INVALID;
-  (void) pair;
-  WylFactArtifactTransitionNames names = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
-        (operation_uuid, &names);
-  wyl_fact_artifact_transition_names_clear (&names);
-  /* No filesystem access: durable Windows restore authority is unavailable. */
-  return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
-}
-
 struct _WylFactRootWriterLease
 {
   WylFactGraphResolver resolver;
@@ -2566,17 +2542,22 @@ wyl_fact_graph_stage_clear (WylFactGraphStage *stage)
   *stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
 }
 
-/* Pre-stage restore inventory.
+/* Restore inventory, before and after the restore stage exists.
  *
  * POSIX pins the companion hard link and nlink == 2.  Windows publishes by
  * rename, so the final is at NumberOfLinks == 1 by construction and the
  * provisioned pair's operation evidence is the substitute witness.  What this
  * provider proves is therefore: the writer lease authorizes this resolver, the
  * held pair still binds this graph directory and names the expected main, the
- * graph directory holds nothing but that main and the optional lock -- a
- * stage, rollback, WAL sidecar, foreign entry, reparse point, directory or
- * alias-equivalent spelling fails closed -- and that none of it changed while
- * it was being observed.
+ * graph directory holds nothing but that main, the optional lock and, after
+ * staging, this operation's exact restore stage -- any other stage, rollback,
+ * WAL sidecar, foreign entry, reparse point, directory or alias-equivalent
+ * spelling fails closed -- and that none of it changed while it was being
+ * observed.  Each pinned entry's ChangeTime and LastWriteTime are held across
+ * the window and folded into the fingerprint, as POSIX folds every pinned
+ * entry's mtime and ctime into its stat digest; that is what notices a
+ * same-size rewrite in place.  LastAccessTime is left out, so reading an
+ * observed entry never invalidates the observation.
  *
  * Alternate data streams are invisible to directory enumeration here as to
  * every Windows enumeration.  They cannot be adopted as the main, because
@@ -2594,28 +2575,28 @@ typedef struct
   const gchar *utf8;
 } PreStageEntry;
 
+/* The POSIX scan's stage, main and lock slots.  Its fourth slot is the
+ * retained provisioning companion, which Windows does not have. */
 enum
 {
-  PRE_STAGE_SLOT_MAIN = 0,
-  PRE_STAGE_SLOT_LOCK,
-  PRE_STAGE_SLOT_COUNT
+  INVENTORY_SLOT_STAGE = 0,
+  INVENTORY_SLOT_MAIN,
+  INVENTORY_SLOT_LOCK,
+  INVENTORY_SLOT_COUNT
 };
 
 /* POSIX caps the scan at six entries including the dot entries. */
 #define PRE_STAGE_MAX_ENTRIES 4
 
-static const PreStageEntry pre_stage_entries[PRE_STAGE_SLOT_COUNT] = {
-  { L"facts.duckdb", 12, "facts.duckdb" },
-  { L"facts.duckdb.lock", 17, "facts.duckdb.lock" },
-};
-
 typedef struct
 {
   gboolean listed;
   guint8 listed_file_id[16];
-  guint64 listed_size;
+  guint64 size;
   HANDLE handle;
   WylFactGraphWinIdentity identity;
+  LARGE_INTEGER change_time;
+  LARGE_INTEGER write_time;
 } PreStageSlot;
 
 typedef struct
@@ -2730,8 +2711,11 @@ pre_stage_entry_bounds_valid (const BYTE *buffer, gsize capacity,
   return TRUE;
 }
 
+/* An entry whose wide spelling is NULL is not allowed in this form. */
 static wyrelog_error_t
-pre_stage_enumerate (HANDLE graph, PreStageSlot slots[PRE_STAGE_SLOT_COUNT])
+pre_stage_enumerate (HANDLE graph,
+    const PreStageEntry entries[INVENTORY_SLOT_COUNT],
+    PreStageSlot slots[INVENTORY_SLOT_COUNT])
 {
   BYTE buffer[64 * 1024];
   gboolean restart = TRUE;
@@ -2760,8 +2744,10 @@ pre_stage_enumerate (HANDLE graph, PreStageSlot slots[PRE_STAGE_SLOT_COUNT])
         gint slot = -1;
         if (++count > PRE_STAGE_MAX_ENTRIES)
           return WYRELOG_E_POLICY;
-        for (gint i = 0; slot < 0 && i < PRE_STAGE_SLOT_COUNT; i++) {
-          const PreStageEntry *allowed = &pre_stage_entries[i];
+        for (gint i = 0; slot < 0 && i < INVENTORY_SLOT_COUNT; i++) {
+          const PreStageEntry *allowed = &entries[i];
+          if (allowed->wide == NULL)
+            continue;
           if (!directory_name_is_alias (entry->file_name, units,
               allowed->wide, allowed->units))
             continue;
@@ -2781,7 +2767,6 @@ pre_stage_enumerate (HANDLE graph, PreStageSlot slots[PRE_STAGE_SLOT_COUNT])
         slots[slot].listed = TRUE;
         memcpy (slots[slot].listed_file_id, &entry->file_id,
             sizeof slots[slot].listed_file_id);
-        slots[slot].listed_size = (guint64) entry->end_of_file.QuadPart;
       }
       if (entry->next_entry_offset == 0)
         break;
@@ -2789,6 +2774,19 @@ pre_stage_enumerate (HANDLE graph, PreStageSlot slots[PRE_STAGE_SLOT_COUNT])
           + entry->next_entry_offset);
     }
   }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+pre_stage_times (HANDLE handle, LARGE_INTEGER *out_change,
+    LARGE_INTEGER *out_write)
+{
+  FILE_BASIC_INFO basic = { 0 };
+  if (!GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
+      sizeof basic))
+    return WYRELOG_E_IO;
+  *out_change = basic.ChangeTime;
+  *out_write = basic.LastWriteTime;
   return WYRELOG_E_OK;
 }
 
@@ -2812,11 +2810,15 @@ pre_stage_size (HANDLE handle, guint64 *out_size)
  * the live process token; within one process the pinned pair->owner_token
  * cannot differ from it, and the main's identity is in any case required to
  * equal the evidence identity whose DACL the pair revalidation already proved
- * under that pinned token. */
+ * under that pinned token.
+ *
+ * The listing binds the name to an object by FileId only.  The size is read
+ * from the pinned handle: NTFS refreshes a directory entry's EndOfFile lazily
+ * while the file is open, so a restore stage its writer still holds is listed
+ * at a stale size. */
 static wyrelog_error_t
 pre_stage_pin (HANDLE graph, const PreStageEntry *allowed, PreStageSlot *slot)
 {
-  guint64 size = 0;
   wyrelog_error_t rc = open_relative_regular (graph, allowed->utf8,
           FILE_READ_ATTRIBUTES, FALSE, TRUE, &slot->handle, &slot->identity);
   if (rc == WYRELOG_E_NOT_FOUND)
@@ -2826,13 +2828,15 @@ pre_stage_pin (HANDLE graph, const PreStageEntry *allowed, PreStageSlot *slot)
   if (memcmp (slot->listed_file_id, slot->identity.file_id,
       sizeof slot->listed_file_id) != 0)
     return WYRELOG_E_POLICY;
-  rc = pre_stage_size (slot->handle, &size);
-  if (rc == WYRELOG_E_OK && size != slot->listed_size)
-    rc = WYRELOG_E_POLICY;
+  rc = pre_stage_size (slot->handle, &slot->size);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_times (slot->handle, &slot->change_time, &slot->write_time);
   return rc;
 }
 
-/* The held object is unchanged and its name still resolves to it. */
+/* The held object is unchanged and its name still resolves to it.  The
+ * reopen repeats the strict DACL, link-count and single-spelling proofs on the
+ * object the name now resolves to, which must be the held one. */
 static wyrelog_error_t
 pre_stage_recheck (HANDLE graph, const PreStageEntry *allowed,
     const PreStageSlot *slot)
@@ -2841,12 +2845,20 @@ pre_stage_recheck (HANDLE graph, const PreStageEntry *allowed,
   WylFactGraphWinIdentity named = { 0 };
   HANDLE reopened = INVALID_HANDLE_VALUE;
   guint64 size = 0;
+  LARGE_INTEGER change_time = { 0 };
+  LARGE_INTEGER write_time = { 0 };
   wyrelog_error_t rc = query_regular_identity (slot->handle, &held);
   if (rc == WYRELOG_E_OK && !identity_equal (&held, &slot->identity))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = pre_stage_size (slot->handle, &size);
-  if (rc == WYRELOG_E_OK && size != slot->listed_size)
+  if (rc == WYRELOG_E_OK && size != slot->size)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_times (slot->handle, &change_time, &write_time);
+  if (rc == WYRELOG_E_OK
+      && (change_time.QuadPart != slot->change_time.QuadPart
+      || write_time.QuadPart != slot->write_time.QuadPart))
     rc = WYRELOG_E_POLICY;
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2873,12 +2885,14 @@ pre_stage_digest_u64 (GChecksum *sum, guint64 value)
 
 /* The same shape as the POSIX digest: the directory's identity and the stat
  * it was observed with, then per slot a marker, and for a listed slot its
- * name, identity and size.  Folding the directory times in is what lets a
- * caller comparing two observations notice a mutate-and-revert between them. */
+ * name, identity, size and times.  Folding the directory times in is what lets
+ * a caller comparing two observations notice a mutate-and-revert between them;
+ * the entry times do the same for a rewrite in place. */
 static wyrelog_error_t
 pre_stage_fingerprint (const WylFactGraphWinIdentity *graph,
     const PreStageDirectoryWitness *witness,
-    const PreStageSlot slots[PRE_STAGE_SLOT_COUNT], guint64 *out_fingerprint)
+    const PreStageEntry entries[INVENTORY_SLOT_COUNT],
+    const PreStageSlot slots[INVENTORY_SLOT_COUNT], guint64 *out_fingerprint)
 {
   GChecksum *sum = g_checksum_new (G_CHECKSUM_SHA256);
   guint8 digest[32];
@@ -2891,18 +2905,20 @@ pre_stage_fingerprint (const WylFactGraphWinIdentity *graph,
   g_checksum_update (sum, graph->file_id, sizeof graph->file_id);
   pre_stage_digest_u64 (sum, (guint64) witness->change_time.QuadPart);
   pre_stage_digest_u64 (sum, (guint64) witness->write_time.QuadPart);
-  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++) {
+  for (guint i = 0; i < INVENTORY_SLOT_COUNT; i++) {
     guint8 marker[2] = { (guint8) i, (guint8) (slots[i].listed ? 1 : 0) };
     g_checksum_update (sum, marker, sizeof marker);
     if (!slots[i].listed)
       continue;
-    g_checksum_update (sum, (const guint8 *) pre_stage_entries[i].utf8,
-        strlen (pre_stage_entries[i].utf8) + 1);
+    g_checksum_update (sum, (const guint8 *) entries[i].utf8,
+        strlen (entries[i].utf8) + 1);
     g_checksum_update (sum, (const guint8 *) &slots[i].identity.volume_serial,
         sizeof slots[i].identity.volume_serial);
     g_checksum_update (sum, slots[i].identity.file_id,
         sizeof slots[i].identity.file_id);
-    pre_stage_digest_u64 (sum, slots[i].listed_size);
+    pre_stage_digest_u64 (sum, slots[i].size);
+    pre_stage_digest_u64 (sum, (guint64) slots[i].change_time.QuadPart);
+    pre_stage_digest_u64 (sum, (guint64) slots[i].write_time.QuadPart);
   }
   g_checksum_get_digest (sum, digest, &length);
   g_checksum_free (sum);
@@ -2910,6 +2926,142 @@ pre_stage_fingerprint (const WylFactGraphWinIdentity *graph,
     fingerprint = (fingerprint << 8) | digest[i];
   *out_fingerprint = fingerprint;
   return WYRELOG_E_OK;
+}
+
+/* The POSIX restore_inventory_capture.  The pre-stage form takes no
+ * operation and no stage; the post-stage form requires this operation's exact
+ * stage, with the identity the caller staged, and still nothing else. */
+static wyrelog_error_t
+restore_inventory_capture
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    gboolean pre_stage, WylFactGraphRestoreInventory *out_inventory)
+{
+  if (out_inventory != NULL)
+    memset (out_inventory, 0, sizeof *out_inventory);
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || expected_main == NULL || out_inventory == NULL
+      || (pre_stage ? operation_uuid != NULL || expected_stage != NULL
+                    : operation_uuid == NULL || expected_stage == NULL))
+    return WYRELOG_E_INVALID;
+  gboolean present = FALSE;
+  gboolean stage_present = FALSE;
+  if ((!pre_stage && (!inventory_identity_win_form (expected_stage,
+      &stage_present) || !stage_present))
+      || !inventory_identity_win_form (expected_main, &present)
+      || present != (pair != NULL))
+    return WYRELOG_E_INVALID;
+  WylFactGraphWinIdentity main_identity =
+      win_identity_from_inventory (expected_main);
+  WylFactGraphWinIdentity stage_identity = { 0 };
+  if (!pre_stage)
+    stage_identity = win_identity_from_inventory (expected_stage);
+  WylFactArtifactTransitionNames names = { 0 };
+  gunichar2 *stage_wide = NULL;
+  PreStageEntry entries[INVENTORY_SLOT_COUNT] = {
+    { NULL, 0, NULL },
+    { L"facts.duckdb", 12, "facts.duckdb" },
+    { L"facts.duckdb.lock", 17, "facts.duckdb.lock" },
+  };
+  PreStageSlot slots[INVENTORY_SLOT_COUNT] = { 0 };
+  PreStageDirectoryWitness before = { 0 };
+  PreStageDirectoryWitness after = { 0 };
+  WylFactGraphRestoreInventory result = { 0 };
+  for (guint i = 0; i < INVENTORY_SLOT_COUNT; i++)
+    slots[i].handle = INVALID_HANDLE_VALUE;
+
+  wyrelog_error_t rc = pre_stage ? WYRELOG_E_OK
+      : wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK && !pre_stage) {
+    glong units = 0;
+    stage_wide = g_utf8_to_utf16 (names.stage, -1, NULL, &units, NULL);
+    if (stage_wide == NULL || units <= 0)
+      rc = WYRELOG_E_INVALID;
+    else {
+      entries[INVENTORY_SLOT_STAGE].wide = (const WCHAR *) stage_wide;
+      entries[INVENTORY_SLOT_STAGE].units = (gsize) units;
+      entries[INVENTORY_SLOT_STAGE].utf8 = names.stage;
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_authority (resolver, directory, lease, pair,
+            &main_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_directory_witness (directory->graph_handle, &before);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_enumerate (directory->graph_handle, entries, slots);
+  if (rc == WYRELOG_E_OK
+      && (present != slots[INVENTORY_SLOT_MAIN].listed
+      || pre_stage == slots[INVENTORY_SLOT_STAGE].listed))
+    rc = WYRELOG_E_POLICY;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < INVENTORY_SLOT_COUNT; i++) {
+    if (slots[i].listed)
+      rc = pre_stage_pin (directory->graph_handle, &entries[i], &slots[i]);
+  }
+  if (rc == WYRELOG_E_OK
+      && ((present && !identity_equal (&slots[INVENTORY_SLOT_MAIN].identity,
+      &main_identity))
+      || (!pre_stage
+      && !identity_equal (&slots[INVENTORY_SLOT_STAGE].identity,
+      &stage_identity))))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-inventory-enumerated",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_authority (resolver, directory, lease, pair,
+            &main_identity);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < INVENTORY_SLOT_COUNT; i++) {
+    if (slots[i].listed)
+      rc = pre_stage_recheck (directory->graph_handle, &entries[i], &slots[i]);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_directory_witness (directory->graph_handle, &after);
+  if (rc == WYRELOG_E_OK
+      && (before.change_time.QuadPart != after.change_time.QuadPart
+      || before.write_time.QuadPart != after.write_time.QuadPart))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_fingerprint (&directory->graph_identity, &before, entries,
+            slots, &result.observation.entry_fingerprint);
+  if (rc == WYRELOG_E_OK) {
+    result.observation.directory_identity =
+        inventory_identity_from_win (&directory->graph_identity);
+    result.observation.guard_identity =
+        inventory_identity_from_win (&resolver->identity);
+    if (!pre_stage) {
+      result.stage_identity = *expected_stage;
+      result.stage_bytes = slots[INVENTORY_SLOT_STAGE].size;
+    }
+    result.main_identity = *expected_main;
+    result.main_present = present;
+  }
+  for (guint i = 0; i < INVENTORY_SLOT_COUNT; i++) {
+    if (handle_is_valid (slots[i].handle) && !CloseHandle (slots[i].handle)
+        && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+  }
+  g_free (stage_wide);
+  wyl_fact_artifact_transition_names_clear (&names);
+  if (rc == WYRELOG_E_OK)
+    *out_inventory = result;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_inventory
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, WylFactGraphProvisionedPair *pair,
+    const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_stage,
+    const WylFactArtifactInventoryIdentity *expected_main,
+    WylFactGraphRestoreInventory *out_inventory)
+{
+  return restore_inventory_capture (resolver, directory, lease, pair,
+             operation_uuid, expected_stage, expected_main, FALSE, out_inventory);
 }
 
 wyrelog_error_t
@@ -2921,74 +3073,16 @@ wyl_fact_graph_directory_pre_stage_inventory
 {
   if (out_inventory != NULL)
     memset (out_inventory, 0, sizeof *out_inventory);
-  if (resolver == NULL || directory == NULL || lease == NULL
-      || expected_main == NULL || out_inventory == NULL)
+  if (out_inventory == NULL)
     return WYRELOG_E_INVALID;
-  gboolean present = FALSE;
-  if (!inventory_identity_win_form (expected_main, &present)
-      || present != (pair != NULL))
-    return WYRELOG_E_INVALID;
-  WylFactGraphWinIdentity main_identity =
-      win_identity_from_inventory (expected_main);
-  PreStageSlot slots[PRE_STAGE_SLOT_COUNT] = { 0 };
-  PreStageDirectoryWitness before = { 0 };
-  PreStageDirectoryWitness after = { 0 };
-  WylFactGraphPreStageInventory result = { 0 };
-  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++)
-    slots[i].handle = INVALID_HANDLE_VALUE;
-
-  wyrelog_error_t rc = pre_stage_authority (resolver, directory, lease, pair,
-          &main_identity);
-  if (rc == WYRELOG_E_OK)
-    rc = pre_stage_directory_witness (directory->graph_handle, &before);
-  if (rc == WYRELOG_E_OK)
-    rc = pre_stage_enumerate (directory->graph_handle, slots);
-  if (rc == WYRELOG_E_OK && present != slots[PRE_STAGE_SLOT_MAIN].listed)
-    rc = WYRELOG_E_POLICY;
-  for (guint i = 0; rc == WYRELOG_E_OK && i < PRE_STAGE_SLOT_COUNT; i++) {
-    if (slots[i].listed)
-      rc = pre_stage_pin (directory->graph_handle, &pre_stage_entries[i],
-              &slots[i]);
-  }
-  if (rc == WYRELOG_E_OK && present
-      && !identity_equal (&slots[PRE_STAGE_SLOT_MAIN].identity,
-      &main_identity))
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
-    rc = directory->checkpoint ("restore-inventory-enumerated",
-            directory->checkpoint_data);
-  if (rc == WYRELOG_E_OK)
-    rc = pre_stage_authority (resolver, directory, lease, pair,
-            &main_identity);
-  for (guint i = 0; rc == WYRELOG_E_OK && i < PRE_STAGE_SLOT_COUNT; i++) {
-    if (slots[i].listed)
-      rc = pre_stage_recheck (directory->graph_handle, &pre_stage_entries[i],
-              &slots[i]);
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = pre_stage_directory_witness (directory->graph_handle, &after);
-  if (rc == WYRELOG_E_OK
-      && (before.change_time.QuadPart != after.change_time.QuadPart
-      || before.write_time.QuadPart != after.write_time.QuadPart))
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK)
-    rc = pre_stage_fingerprint (&directory->graph_identity, &before, slots,
-            &result.observation.entry_fingerprint);
+  WylFactGraphRestoreInventory captured = { 0 };
+  wyrelog_error_t rc = restore_inventory_capture (resolver, directory, lease,
+          pair, NULL, NULL, expected_main, TRUE, &captured);
   if (rc == WYRELOG_E_OK) {
-    result.observation.directory_identity =
-        inventory_identity_from_win (&directory->graph_identity);
-    result.observation.guard_identity =
-        inventory_identity_from_win (&resolver->identity);
-    result.main_identity = *expected_main;
-    result.main_present = present;
+    out_inventory->observation = captured.observation;
+    out_inventory->main_identity = captured.main_identity;
+    out_inventory->main_present = captured.main_present;
   }
-  for (guint i = 0; i < PRE_STAGE_SLOT_COUNT; i++) {
-    if (handle_is_valid (slots[i].handle) && !CloseHandle (slots[i].handle)
-        && rc == WYRELOG_E_OK)
-      rc = WYRELOG_E_IO;
-  }
-  if (rc == WYRELOG_E_OK)
-    *out_inventory = result;
   return rc;
 }
 
