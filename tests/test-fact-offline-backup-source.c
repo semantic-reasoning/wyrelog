@@ -15818,6 +15818,167 @@ test_graph_rollback_windows (gconstpointer data)
 #endif
 }
 
+#if defined(G_OS_WIN32) && defined(WYL_TEST_HANDLE_SEAMS)
+static void
+windows_count_bind_effect (gpointer user_data)
+{
+  (*(guint *) user_data)++;
+}
+#endif
+
+/* After begin, import and a recorded preflight, the bind proves the old
+ * provisioned main by the ACTIVE record's evidence and journals the
+ * provisioning operation it found.  A replay returns the same journal;
+ * commit admission still refuses on Windows with the journal byte-identical,
+ * so the abort stays open and completes.  A main replaced by a same-bytes
+ * object, and a record without evidence, are refused unchanged. */
+static void
+test_graph_bind_windows (gconstpointer data)
+{
+#ifndef G_OS_WIN32
+  (void) data;
+  g_test_skip ("Windows graph restore bind by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0041";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-bind-win-XXXXXX", &capture, &bundle_root, &bundle);
+  WylFactOfflineRestoreJournal journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture.policy,
+      fixture.root, fixture.runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", operation, TRUE, 0,
+      &journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  windows_graph_import (&fixture, &capture, operation);
+  /* The replay-validation session is not ported to Windows, so record the
+   * preflight the way it would. */
+  WylFactOfflineRestoreJournal marked = { 0 };
+  WylFactOfflineRestoreStoreResult stored_result;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture.policy, operation, &journal), ==, WYRELOG_E_OK);
+  const guint64 imported = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight (&journal,
+      "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas (fixture.policy,
+      imported, &journal, &stored_result, &marked), ==, WYRELOG_E_OK);
+  g_assert_cmpint (stored_result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  const guint64 prepared = marked.revision;
+  g_autoptr (GBytes) prepared_journal = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&marked,
+      &prepared_journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  wyl_fact_offline_restore_journal_clear (&marked);
+
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  WylFactOfflineRestoreJournal committed = { 0 };
+  if (g_str_equal (mode, "foreign-main")
+      || g_str_equal (mode, "missing-evidence")) {
+    if (g_str_equal (mode, "foreign-main"))
+      windows_replace_with_same_bytes (main_path);
+    else
+      windows_rewrite_graph_evidence (&fixture,
+          "UPDATE fact_graph_provisioning SET "
+          "windows_operation_evidence_version=NULL,"
+          "windows_graph_volume_serial=NULL,windows_graph_file_id=NULL,"
+          "windows_artifact_volume_serial=NULL,windows_artifact_file_id=NULL "
+          "WHERE tenant_id='tenant-a' AND graph_id='zeta';");
+    /* A record without a tuple is refused by the read before the
+     * transaction, so the bind effect never runs; a replaced main gets
+     * past that read and is refused inside the effect, where the evidence
+     * capture observes an object that is not the evidenced one. */
+    guint effects = 0;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
+      (windows_count_bind_effect, &effects);
+#endif
+    g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, "zeta",
+        prepared, 0, &committed), ==, WYRELOG_E_POLICY);
+#ifdef WYL_TEST_HANDLE_SEAMS
+    wyl_fact_offline_restore_graph_bind_set_claim_checked_hook_for_test
+      (NULL, NULL);
+    g_assert_cmpuint (effects, ==, g_str_equal (mode, "foreign-main")
+        ? 1 : 0);
+#endif
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        prepared_journal, prepared);
+  } else {
+    g_autoptr (GPtrArray) provisioning = NULL;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+          (fixture.policy, "tenant-a", "zeta", &provisioning), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (provisioning->len, ==, 1);
+    const gchar *active_uuid = ((const WylPolicyGraphProvisioningRecord *)
+        g_ptr_array_index (provisioning, 0))->op_uuid;
+    g_autoptr (GBytes) first_bound = NULL;
+    for (guint attempt = 0; attempt < 2; attempt++) {
+      /* The second bind is the replay of the durable bound journal. */
+      g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+            (fixture.policy, fixture.root, fixture.runtime, operation, "zeta",
+          prepared, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpint (committed.version, ==,
+          WYL_FACT_OFFLINE_RESTORE_JOURNAL_HANDOFF_VERSION);
+      g_assert_cmpuint (committed.revision, ==, prepared + 1);
+      g_assert_cmpstr (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (committed.graphs, 0))->old_provisioning_uuid, ==,
+          active_uuid);
+      /* Bound and ready for the first commit step. */
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (committed.graphs, 0))->next_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED);
+      if (attempt == 0) {
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+              (&committed, &first_bound), ==, WYRELOG_E_OK);
+        wyl_fact_offline_restore_journal_clear (&committed);
+      }
+    }
+    g_autoptr (GBytes) bound_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &bound_journal), ==, WYRELOG_E_OK);
+    /* The replay returns the exact durable journal of the first bind. */
+    g_assert_true (g_bytes_equal (first_bound, bound_journal));
+    wyl_fact_offline_restore_journal_clear (&committed);
+
+    WylFactReplaySchedulerConfig config;
+    wyl_fact_replay_scheduler_config_defaults (&config);
+    g_autoptr (WylFactReplayScheduler) scheduler = NULL;
+    g_assert_cmpint (wyl_fact_replay_scheduler_new (&config, NULL,
+        &scheduler), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_admit_run
+          (fixture.policy, fixture.root, fixture.runtime, scheduler, bundle,
+        operation, prepared + 1, 0, NULL, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        bound_journal, prepared + 1);
+
+    g_assert_cmpint (wyl_fact_offline_restore_rollback_recover_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, 0,
+        &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (committed.decision, ==,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed),
+        ==, WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+    g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (committed.graphs, 0))->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -16460,6 +16621,12 @@ main (int argc, char **argv)
       "unbound", test_graph_rollback_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/graph-bind",
+      "bind", test_graph_bind_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/graph-bind-foreign-main",
+      "foreign-main", test_graph_bind_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/graph-bind-missing-evidence",
+      "missing-evidence", test_graph_bind_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/graph-import",
       "success", test_graph_import_run_windows);
   g_test_add_data_func

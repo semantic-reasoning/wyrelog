@@ -669,7 +669,7 @@ tenant_bind_effect (GBytes *canonical_journal,
 }
 
 #endif
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactRootWriterLease *lease;
@@ -684,6 +684,10 @@ typedef struct
 #ifdef __APPLE__
   const gchar *darwin_provisioning_uuid;
   const WylFactGraphDarwinOperationEvidence *darwin_evidence;
+#endif
+#ifdef G_OS_WIN32
+  const gchar *windows_provisioning_uuid;
+  const WylFactGraphWinOperationEvidence *windows_evidence;
 #endif
 } GraphProvisioningBindEffect;
 
@@ -789,11 +793,24 @@ graph_bind_prove_effect (GBytes *canonical_journal,
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
             &ready_snapshot, &ready);
 #else
+#ifdef G_OS_WIN32
+  /* As on macOS: a one-link main proved by the ACTIVE record's operation
+   * evidence, read before the transaction. */
+  if (rc == WYRELOG_E_OK
+      && g_strcmp0 (old_uuid, context->windows_provisioning_uuid) != 0)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+          (context->provider, old_uuid, context->windows_evidence, &request,
+            WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
+            &ready_snapshot, &ready);
+#else
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_transition_posix_capture_provisioned
           (context->provider, old_uuid, &request,
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
             &ready_snapshot, &ready);
+#endif
 #endif
   const WylFactArtifactMainTransitionEntryEvidence *stage =
       &ready.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
@@ -924,6 +941,32 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
       darwin_provisioning_uuid = g_strdup (row->op_uuid);
   }
 #endif
+#ifdef G_OS_WIN32
+  /* The Windows twin of the Darwin read above: the tuple is written once,
+   * while the row is reserved or staged, and never changes afterwards. */
+  g_autoptr (GPtrArray) provisioning = NULL;
+  g_autofree gchar *windows_provisioning_uuid = NULL;
+  WylFactGraphWinOperationEvidence windows_evidence = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_provisioning_list_for_graph (policy,
+            journal.tenant_id, graph_id, &provisioning);
+  if (rc == WYRELOG_E_OK && provisioning->len != 1)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    const WylPolicyGraphProvisioningRecord *row =
+        g_ptr_array_index (provisioning, 0);
+    if (row->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+        || g_strcmp0 (row->store_uuid, graph->store_uuid) != 0
+        || !row->has_windows_evidence
+        || !wyl_fact_graph_windows_operation_evidence_equal
+          (&row->windows_evidence, &row->windows_evidence))
+      rc = WYRELOG_E_POLICY;
+    else {
+      windows_evidence = row->windows_evidence;
+      windows_provisioning_uuid = g_strdup (row->op_uuid);
+    }
+  }
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -956,6 +999,10 @@ wyl_fact_offline_restore_graph_bind_provisioned_old_run
 #ifdef __APPLE__
       .darwin_provisioning_uuid = darwin_provisioning_uuid,
       .darwin_evidence = &darwin_evidence,
+#endif
+#ifdef G_OS_WIN32
+      .windows_provisioning_uuid = windows_provisioning_uuid,
+      .windows_evidence = &windows_evidence,
 #endif
     };
     WylPolicyOfflineRestoreStoreResult result =
@@ -2009,7 +2056,7 @@ tenant_publish_effect (GBytes *canonical_journal,
   }
   return WYRELOG_E_OK;
 }
-#elif !defined(__APPLE__)
+#elif !defined(__APPLE__) && !defined(G_OS_WIN32)
 wyrelog_error_t
 wyl_fact_offline_restore_graph_bind_provisioned_old_run
   (wyl_policy_store_t *policy, const gchar *fact_root,
