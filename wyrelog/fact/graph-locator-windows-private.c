@@ -42,63 +42,6 @@ wyl_fact_graph_directory_restore_inventory
   return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
 }
 
-/* The restore journal does not yet persist the historical graph-directory
- * identity required to reconstruct WylFactGraphWinOperationEvidence after a
- * restart. Keep this lower-level operation fail-closed until that durable
- * evidence exists; do not inspect the current namespace and synthesize it. */
-wyrelog_error_t
-wyl_fact_graph_directory_restore_stage_reader_open_exact
-  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
-    const WylFactArtifactInventoryIdentity *expected_identity,
-    WylFactGraphRestoreStageReader **out_reader)
-{
-  (void) directory;
-  (void) operation_uuid;
-  (void) expected_identity;
-  if (out_reader != NULL)
-    *out_reader = NULL;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_graph_restore_stage_reader_revalidate
-  (WylFactGraphRestoreStageReader *reader)
-{
-  (void) reader;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_graph_restore_stage_reader_get_size
-  (WylFactGraphRestoreStageReader *reader, guint64 *out_size)
-{
-  (void) reader;
-  if (out_size != NULL)
-    *out_size = 0;
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_graph_restore_stage_reader_read_at
-  (WylFactGraphRestoreStageReader *reader, guint64 offset, guint8 *buffer,
-    gsize length, gsize *out_bytes_read)
-{
-  (void) reader;
-  (void) offset;
-  (void) buffer;
-  (void) length;
-  if (out_bytes_read != NULL)
-    *out_bytes_read = 0;
-  return WYRELOG_E_POLICY;
-}
-
-void
-wyl_fact_graph_restore_stage_reader_free
-  (WylFactGraphRestoreStageReader *reader)
-{
-  (void) reader;
-}
-
 struct _WylFactRootWriterLease
 {
   WylFactGraphResolver resolver;
@@ -2045,6 +1988,9 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
   return rc;
 }
 
+static wyrelog_error_t restore_stage_sidecars_absent
+  (WylFactGraphDirectory *directory, const gchar *stage_basename);
+
 wyrelog_error_t
 wyl_fact_graph_directory_restore_stage_create_exact
   (WylFactGraphDirectory *directory, const gchar *operation_uuid,
@@ -2062,6 +2008,8 @@ wyl_fact_graph_directory_restore_stage_create_exact
     rc = wyl_fact_artifact_transition_names_derive (operation_uuid, &names);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_names_validate (directory, names.stage);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
   HANDLE handle = INVALID_HANDLE_VALUE;
   WylFactGraphWinIdentity identity = { 0 };
   if (rc == WYRELOG_E_OK)
@@ -2081,6 +2029,8 @@ wyl_fact_graph_directory_restore_stage_create_exact
             directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
   if (rc == WYRELOG_E_OK) {
     gint fd = _open_osfhandle ((intptr_t) handle, _O_BINARY | _O_RDWR);
     if (fd < 0)
@@ -2360,6 +2310,11 @@ wyl_fact_graph_directory_restore_stage_revalidate
             &stage->identity, &present, &exact);
   if (rc == WYRELOG_E_OK && (!present || !exact))
     rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = validate_regular_file (borrow_stage_handle (stage), &stage->identity,
+            TRUE);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, stage->stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   return rc;
@@ -2694,6 +2649,9 @@ inventory_identity_win_form (const WylFactArtifactInventoryIdentity *identity,
     return identity->domain == 0
            && memcmp (identity->object_bytes, zero, sizeof zero) == 0;
   if (identity->object_width != sizeof zero)
+    return FALSE;
+  if (identity->domain == 0
+      && memcmp (identity->object_bytes, zero, sizeof zero) == 0)
     return FALSE;
   *out_present = TRUE;
   return TRUE;
@@ -3049,5 +3007,353 @@ wyl_fact_graph_provisioned_pair_main_identity
   *out_identity =
       inventory_identity_from_win (&pair->evidence.artifact_identity);
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+restore_stage_sidecars_absent (WylFactGraphDirectory *directory,
+    const gchar *stage_basename)
+{
+  static const gchar *const suffixes[] = {
+    ".wal",
+    ".wal.checkpoint",
+    ".wal.recovery",
+  };
+  WylNtCreateFile nt_create = nt_create_file ();
+  gunichar2 *wide[G_N_ELEMENTS (suffixes)] = { NULL };
+  gsize units[G_N_ELEMENTS (suffixes)] = { 0 };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+
+  if (directory == NULL || !handle_is_valid (directory->graph_handle)
+      || stage_basename == NULL || nt_create == NULL)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++) {
+    g_autofree gchar *name = g_strconcat (stage_basename, suffixes[i], NULL);
+    glong count = 0;
+    wide[i] = name == NULL ? NULL
+        : g_utf8_to_utf16 (name, -1, NULL, &count, NULL);
+    if (wide[i] == NULL || count <= 0
+        || (gsize) count > G_MAXUSHORT / sizeof (WCHAR)) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    units[i] = (gsize) count;
+
+    UNICODE_STRING object_name = {
+      .Length = (USHORT) (units[i] * sizeof (WCHAR)),
+      .MaximumLength = (USHORT) (units[i] * sizeof (WCHAR)),
+      .Buffer = (PWSTR) wide[i],
+    };
+    OBJECT_ATTRIBUTES attributes = { 0 };
+    IO_STATUS_BLOCK iosb = { 0 };
+    HANDLE probe = INVALID_HANDLE_VALUE;
+    attributes.Length = sizeof attributes;
+    attributes.RootDirectory = directory->graph_handle;
+    attributes.ObjectName = &object_name;
+    attributes.Attributes = OBJ_CASE_INSENSITIVE;
+    NTSTATUS status = nt_create (&probe, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            NULL, 0);
+    if (handle_is_valid (probe)) {
+      CloseHandle (probe);
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    if (status >= 0) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    if ((ULONG) status != 0xC0000034UL) {
+      wyrelog_error_t mapped = ntstatus_to_error (status);
+      rc = mapped == WYRELOG_E_IO ? WYRELOG_E_IO : WYRELOG_E_POLICY;
+      goto out;
+    }
+  }
+
+  BYTE buffer[64 * 1024];
+  gboolean restart = TRUE;
+  for (;;) {
+    FILE_INFO_BY_HANDLE_CLASS info_class = (FILE_INFO_BY_HANDLE_CLASS)
+        (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
+        : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+    if (!GetFileInformationByHandleEx (directory->graph_handle, info_class,
+        buffer, sizeof buffer)) {
+      DWORD error = GetLastError ();
+      if (error == ERROR_NO_MORE_FILES)
+        break;
+      rc = error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+      goto out;
+    }
+    restart = FALSE;
+    WylFileIdExtdDirInfo *entry = (WylFileIdExtdDirInfo *) buffer;
+    for (;;) {
+      if (!pre_stage_entry_bounds_valid (buffer, sizeof buffer, entry)) {
+        rc = WYRELOG_E_POLICY;
+        goto out;
+      }
+      gsize entry_units = entry->file_name_length / sizeof (WCHAR);
+      for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++) {
+        if (directory_name_is_alias (entry->file_name, entry_units,
+            (const WCHAR *) wide[i], units[i])) {
+          rc = WYRELOG_E_POLICY;
+          goto out;
+        }
+      }
+      if (entry->next_entry_offset == 0)
+        break;
+      entry = (WylFileIdExtdDirInfo *) ((BYTE *) entry
+          + entry->next_entry_offset);
+    }
+  }
+
+out:
+  for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++)
+    g_free (wide[i]);
+  return rc;
+}
+
+struct WylFactGraphRestoreStageReader
+{
+  WylFactGraphDirectory *directory;
+  HANDLE handle;
+  gchar *stage_basename;
+  WylFactGraphWinIdentity identity;
+  WylFactGraphWinIdentity graph_identity;
+  guint64 size;
+  WylFactArtifactInventoryIdentity expected_identity;
+};
+
+static gboolean
+restore_reader_identity_matches (const WylFactGraphWinIdentity *observed,
+    const WylFactArtifactInventoryIdentity *expected)
+{
+  gboolean present = FALSE;
+  if (observed == NULL || expected == NULL
+      || !inventory_identity_win_form (expected, &present) || !present)
+    return FALSE;
+  WylFactGraphWinIdentity wanted = win_identity_from_inventory (expected);
+  return identity_equal (observed, &wanted);
+}
+
+static wyrelog_error_t
+restore_reader_check_name (WylFactGraphDirectory *directory,
+    const gchar *stage_basename,
+    const WylFactArtifactInventoryIdentity *expected_identity)
+{
+  HANDLE probe = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity observed = { 0 };
+  guint64 size = 0;
+  wyrelog_error_t rc = open_relative_regular (directory->graph_handle,
+          stage_basename, GENERIC_READ, FALSE, TRUE, &probe, &observed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = pre_stage_size (probe, &size);
+  if (!CloseHandle (probe) && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return restore_reader_identity_matches (&observed, expected_identity)
+         ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_restore_stage_reader_open_exact
+  (WylFactGraphDirectory *directory, const gchar *operation_uuid,
+    const WylFactArtifactInventoryIdentity *expected_identity,
+    WylFactGraphRestoreStageReader **out_reader)
+{
+  if (out_reader != NULL)
+    *out_reader = NULL;
+  if (directory == NULL || operation_uuid == NULL || expected_identity == NULL
+      || out_reader == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_names_derive
+        (operation_uuid, &names);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
+  if (rc == WYRELOG_E_OK && !utf8_component_is_safe (names.stage))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (directory, names.stage, expected_identity);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-reader-before-open",
+            directory->checkpoint_data);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_names_clear (&names);
+    return rc;
+  }
+
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity held_identity = { 0 };
+  guint64 held_size = 0;
+  rc = open_relative_regular (directory->graph_handle, names.stage,
+          GENERIC_READ, FALSE, TRUE, &handle, &held_identity);
+  if (rc == WYRELOG_E_OK
+      && !restore_reader_identity_matches (&held_identity, expected_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_size (handle, &held_size);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("restore-stage-reader-opened",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (directory, names.stage);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (directory, names.stage, expected_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = named_regular_bound_check (directory, names.stage, handle,
+            &held_identity, TRUE);
+  guint64 after_size = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_size (handle, &after_size);
+  if (rc == WYRELOG_E_OK && after_size != held_size)
+    rc = WYRELOG_E_POLICY;
+
+  WylFactGraphRestoreStageReader *reader = NULL;
+  if (rc == WYRELOG_E_OK) {
+    reader = g_try_new0 (WylFactGraphRestoreStageReader, 1);
+    if (reader == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else
+      reader->handle = INVALID_HANDLE_VALUE;
+  }
+  if (rc == WYRELOG_E_OK) {
+    reader->stage_basename = try_strdup (names.stage);
+    if (reader->stage_basename == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  if (rc == WYRELOG_E_OK) {
+    reader->directory = directory;
+    reader->handle = handle;
+    reader->identity = held_identity;
+    reader->graph_identity = directory->graph_identity;
+    reader->size = held_size;
+    reader->expected_identity = *expected_identity;
+    handle = INVALID_HANDLE_VALUE;
+    *out_reader = reader;
+    reader = NULL;
+  }
+  if (reader != NULL)
+    wyl_fact_graph_restore_stage_reader_free (reader);
+  if (handle_is_valid (handle))
+    CloseHandle (handle);
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_revalidate
+  (WylFactGraphRestoreStageReader *reader)
+{
+  if (reader == NULL || reader->directory == NULL
+      || !handle_is_valid (reader->handle) || reader->stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (reader->directory);
+  if (rc == WYRELOG_E_OK)
+    rc = restore_stage_sidecars_absent (reader->directory,
+            reader->stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = named_regular_bound_check (reader->directory, reader->stage_basename,
+            reader->handle, &reader->identity, TRUE);
+  guint64 held_size = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = pre_stage_size (reader->handle, &held_size);
+  if (rc == WYRELOG_E_OK
+      && (!restore_reader_identity_matches (&reader->identity,
+      &reader->expected_identity) || held_size != reader->size
+      || !identity_equal (&reader->directory->graph_identity,
+      &reader->graph_identity)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = restore_reader_check_name (reader->directory, reader->stage_basename,
+            &reader->expected_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (reader->directory);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_get_size
+  (WylFactGraphRestoreStageReader *reader, guint64 *out_size)
+{
+  if (out_size != NULL)
+    *out_size = 0;
+  if (reader == NULL || out_size == NULL || !handle_is_valid (reader->handle))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_restore_stage_reader_revalidate (reader);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint64 held_size = 0;
+  rc = pre_stage_size (reader->handle, &held_size);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (held_size != reader->size)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_restore_stage_reader_revalidate (reader);
+  if (rc == WYRELOG_E_OK)
+    *out_size = held_size;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_stage_reader_read_at
+  (WylFactGraphRestoreStageReader *reader, guint64 offset, guint8 *buffer,
+    gsize length, gsize *out_bytes_read)
+{
+  if (out_bytes_read != NULL)
+    *out_bytes_read = 0;
+  if (reader == NULL || !handle_is_valid (reader->handle) || buffer == NULL
+      || out_bytes_read == NULL || length == 0 || length > 64u * 1024u
+      || offset > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  guint64 size = 0;
+  wyrelog_error_t rc = wyl_fact_graph_restore_stage_reader_get_size (reader,
+          &size);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (offset > size || (guint64) length > size - offset)
+    return WYRELOG_E_INVALID;
+  gsize total = 0;
+  while (total < length) {
+    OVERLAPPED overlapped = { 0 };
+    guint64 position = offset + total;
+    DWORD amount = (DWORD) (length - total);
+    DWORD count = 0;
+    overlapped.Offset = (DWORD) (position & 0xffffffffu);
+    overlapped.OffsetHigh = (DWORD) (position >> 32);
+    if (!ReadFile (reader->handle, buffer + total, amount, &count,
+        &overlapped)) {
+      DWORD error = GetLastError ();
+      return error == ERROR_HANDLE_EOF ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+    if (count == 0)
+      return WYRELOG_E_POLICY;
+    total += (gsize) count;
+  }
+  rc = wyl_fact_graph_restore_stage_reader_get_size (reader, &size);
+  if (rc == WYRELOG_E_OK)
+    *out_bytes_read = total;
+  return rc;
+}
+
+void
+wyl_fact_graph_restore_stage_reader_free
+  (WylFactGraphRestoreStageReader *reader)
+{
+  if (reader == NULL)
+    return;
+  if (handle_is_valid (reader->handle))
+    CloseHandle (reader->handle);
+  g_free (reader->stage_basename);
+  g_free (reader);
 }
 #endif
