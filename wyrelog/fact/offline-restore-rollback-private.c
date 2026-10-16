@@ -11,7 +11,6 @@
 #include "fact/offline-restore-stage-private.h"
 #include "fact/root-writer-lease-private.h"
 
-#ifndef G_OS_WIN32
 #ifdef WYL_TEST_HANDLE_SEAMS
 static wyrelog_error_t (*rollback_checkpoint)
   (WylFactOfflineRestoreRollbackCheckpoint, gpointer);
@@ -186,6 +185,14 @@ open_active_pair (GraphRollback *rollback)
     rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
           (&rollback->directory, selected->op_uuid, &evidence,
             &rollback->pair);
+#elif defined(G_OS_WIN32)
+  /* As the Windows backup source and restore begin do: the pair is opened
+   * from the operation evidence on the ACTIVE record, never by name. */
+  if (!selected->has_windows_evidence)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&rollback->directory, selected->op_uuid, &selected->windows_evidence,
+          &rollback->pair);
 #else
   rc = wyl_fact_graph_directory_open_provisioned_pair_exact
         (&rollback->directory, selected->op_uuid, &rollback->pair);
@@ -486,7 +493,9 @@ retire_stage (GraphRollback *rollback)
     return rc;
   WylFactArtifactMainTransitionRequest request = request_for (rollback,
           &before);
-#ifndef __APPLE__
+  /* A macOS or Windows provisioned main has one link, so the link-two
+   * companion retire has no meaning there; the ordinary path below runs. */
+#if !defined(__APPLE__) && !defined(G_OS_WIN32)
   if (rollback->pair != NULL) {
     WylFactArtifactMainTransitionEffect effect
       = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
@@ -585,7 +594,6 @@ verify_completed_stage_absent (GraphRollback *rollback)
   }
   return rc;
 }
-#endif
 
 static wyrelog_error_t
 rollback_one_run
@@ -602,10 +610,6 @@ rollback_one_run
       || *operation_uuid == '\0' || expected_revision == 0
       || expected_revision >= G_MAXINT64 || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   GraphRollback rollback = {
     .policy = policy, .runtime = runtime_manager,
     .selected_index = selected_index,
@@ -733,7 +737,6 @@ rollback_one_run
   }
   rollback_clear (&rollback);
   return rc;
-#endif
 }
 
 wyrelog_error_t
@@ -842,10 +845,6 @@ wyl_fact_offline_restore_rollback_release_run
       || *operation_uuid == '\0' || expected_revision == 0
       || expected_revision >= G_MAXINT64)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   WylFactRootWriterLease *lease = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactOfflineRestoreJournal journal = { 0 };
@@ -869,6 +868,12 @@ wyl_fact_offline_restore_rollback_release_run
       || wyl_fact_offline_restore_journal_recovery (&journal)
       != WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE))
     rc = WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+  /* Tenant rollback is not ported to Windows, so no tenant journal can have
+   * reached a releasable state through it. */
+  if (rc == WYRELOG_E_OK && journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
+    rc = WYRELOG_E_POLICY;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -940,5 +945,4 @@ wyl_fact_offline_restore_rollback_release_run
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   wyl_fact_offline_restore_journal_clear (&journal);
   return rc;
-#endif
 }
