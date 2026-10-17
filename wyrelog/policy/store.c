@@ -13198,8 +13198,16 @@ migrate_tenant_restore_replacement_schema (sqlite3 *db)
       rc = graph_authority_object_matches (db, objects[i].type,
               objects[i].name, objects[i].sql);
     }
+    /* RENAME rewrites every trigger that names the renamed table unless
+     * legacy_alter_table is on, and the provisioning guards name it.  Drop
+     * them before the RENAME and reinstall them afterwards, as the graph
+     * replacement rebuild does, so they never end up naming the scratch
+     * table dropped below (#1429).  Any later rebuild of this table must do
+     * the same. */
     if (rc == WYRELOG_E_OK)
       rc = exec_sql (db,
+              "DROP TRIGGER fact_graph_provisioning_insert_guard;"
+              "DROP TRIGGER fact_graph_provisioning_update_guard;"
               "DROP TRIGGER fact_tenant_restore_replacement_insert_guard;"
               "DROP TRIGGER fact_tenant_restore_replacement_update_guard;"
               "DROP TRIGGER fact_tenant_restore_replacement_delete_guard;"
@@ -13214,10 +13222,26 @@ migrate_tenant_restore_replacement_schema (sqlite3 *db)
               "DROP TABLE fact_tenant_restore_replacements_pre_companion;");
     for (guint i = 1; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
       rc = exec_sql (db, objects[i].sql);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
+    if (rc == WYRELOG_E_OK)
+      rc = exec_sql (db, fact_graph_provisioning_update_guard_sql);
   }
   for (guint i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (objects); i++)
     rc = graph_authority_object_matches (db, objects[i].type,
             objects[i].name, objects[i].sql);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_object_matches (db, "trigger",
+            "fact_graph_provisioning_insert_guard",
+            fact_graph_provisioning_insert_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_object_matches (db, "trigger",
+            "fact_graph_provisioning_update_guard",
+            fact_graph_provisioning_update_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provisioning_require_true (db,
+            "SELECT NOT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE "
+            "instr(sql,'fact_tenant_restore_replacements_pre_companion')>0);");
   if (rc != WYRELOG_E_OK)
     return rc;
   return tenant_restore_replacement_validate_rows (db);
