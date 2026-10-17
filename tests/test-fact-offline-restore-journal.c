@@ -2,6 +2,7 @@
 #include "test-exit-status.h"
 
 #include <glib.h>
+#include <string.h>
 
 #include "wyrelog/fact/offline-restore-journal-private.h"
 
@@ -1106,6 +1107,203 @@ rollback_converges (void)
   wyl_fact_offline_restore_journal_clear (&journal);
 }
 
+static GBytes *
+journal_bytes (const WylFactOfflineRestoreJournal *journal)
+{
+  GBytes *bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (journal, &bytes),
+      ==, WYRELOG_E_OK);
+  return bytes;
+}
+
+static gboolean
+artifact_identity_same (const WylFactArtifactInventoryIdentity *a,
+    const WylFactArtifactInventoryIdentity *b)
+{
+  return a->domain == b->domain && a->object == b->object
+         && a->object_width == b->object_width
+         && memcmp (a->object_bytes, b->object_bytes,
+             sizeof a->object_bytes) == 0;
+}
+
+static gboolean
+artifact_identity_zero (const WylFactArtifactInventoryIdentity *value)
+{
+  WylFactArtifactInventoryIdentity zero = { 0 };
+  return artifact_identity_same (value, &zero);
+}
+
+static void
+assert_orphan_refused (WylFactOfflineRestoreJournal *journal,
+    const gchar *graph_id, const WylFactArtifactInventoryIdentity *orphan)
+{
+  g_autoptr (GBytes) before = journal_bytes (journal);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_admit_orphan_stage
+        (journal, graph_id, orphan), ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) after = journal_bytes (journal);
+  g_assert_true (g_bytes_equal (before, after));
+}
+
+static void
+assert_orphan_bound_for_retirement (const WylFactOfflineRestoreJournalGraph
+    *graph, const WylFactArtifactInventoryIdentity *orphan)
+{
+  g_assert_true (artifact_identity_same (&graph->staged_main_identity,
+      orphan));
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+  g_assert_cmpint (graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE);
+  g_assert_false (graph->transition_terminal);
+  g_assert_true (graph->resume_forbidden);
+  g_assert_false (graph->copied);
+  g_assert_cmpint (graph->attempt, ==, WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE);
+}
+
+/* #1407: an unbound orphan stage is admitted only as part of a rollback, so
+ * the identity the journal now vouches for can only be retired, never
+ * committed. */
+static void
+orphan_stage_admitted_for_rollback (void)
+{
+  g_autoptr (GBytes) manifest = manifest_bytes (TRUE);
+  g_autoptr (GPtrArray) targets = target_graphs ();
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_init (&journal, manifest,
+      OP, WYL_FACT_OFFLINE_RESTORE_SCOPE_TENANT, NULL, 31, 32, targets,
+      WYL_FACT_OFFLINE_RESTORE_CONFIRMATION_EXPLICIT,
+      WYL_FACT_OFFLINE_RESTORE_MANIFEST_AUTHENTICATED), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *alpha = g_ptr_array_index
+        (journal.graphs, 0);
+  WylFactOfflineRestoreJournalGraph *zeta = g_ptr_array_index
+        (journal.graphs, 1);
+  WylFactArtifactInventoryIdentity orphan = identity (401);
+  WylFactArtifactInventoryIdentity invalid = identity (402);
+  invalid.object_width = 8;
+  WylFactArtifactInventoryIdentity zero = { 0 };
+
+  assert_orphan_refused (&journal, "missing", &orphan);
+  assert_orphan_refused (&journal, "alpha", &invalid);
+  assert_orphan_refused (&journal, "alpha", &zero);
+  assert_orphan_refused (&journal, "alpha", &alpha->expected_main_identity);
+  guint64 revision = journal.revision;
+  journal.revision = G_MAXUINT64;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_admit_orphan_stage
+        (&journal, "alpha", &orphan), ==, WYRELOG_E_POLICY);
+  g_assert_true (artifact_identity_zero (&alpha->staged_main_identity));
+  g_assert_cmpint (journal.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  journal.revision = revision;
+  journal.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_admit_orphan_stage
+        (&journal, "alpha", &orphan), ==, WYRELOG_E_POLICY);
+  g_assert_true (artifact_identity_zero (&alpha->staged_main_identity));
+  g_assert_cmpuint (journal.revision, ==, revision);
+  journal.decision = WYL_FACT_OFFLINE_RESTORE_DECISION_NONE;
+
+  /* An undecided graph that is already bound is not an orphan. */
+  {
+    g_autoptr (GBytes) fresh = journal_bytes (&journal);
+    g_auto (WylFactOfflineRestoreJournal) bound = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decode (fresh, &bound),
+        ==, WYRELOG_E_OK);
+    WylFactArtifactInventoryIdentity staged = identity (406);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_bind_staged_identity
+          (&bound, "alpha", &staged), ==, WYRELOG_E_OK);
+    assert_orphan_refused (&bound, "alpha", &orphan);
+  }
+  /* Decided while alpha was unbound: the reopen must not take the main's
+   * identity, and a zero-identity graph with an attempt or that is not
+   * ABANDONED (shapes no legal step produces) is not reopened either. */
+  {
+    g_autoptr (GBytes) fresh = journal_bytes (&journal);
+    g_auto (WylFactOfflineRestoreJournal) decided = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decode (fresh,
+        &decided), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_offline_restore_journal_decide (&decided,
+        WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK), ==, WYRELOG_E_OK);
+    WylFactOfflineRestoreJournalGraph *decided_alpha = g_ptr_array_index
+          (decided.graphs, 0);
+    assert_orphan_refused (&decided, "alpha",
+        &decided_alpha->expected_main_identity);
+    decided_alpha->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED;
+    assert_orphan_refused (&decided, "alpha", &orphan);
+    decided_alpha->attempt = WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE;
+    decided_alpha->transition_state =
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY;
+    decided_alpha->transition_terminal = FALSE;
+    decided_alpha->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE;
+    assert_orphan_refused (&decided, "alpha", &orphan);
+  }
+
+  /* Undecided: the admission is the rollback decision itself. */
+  g_autoptr (GBytes) undecided = journal_bytes (&journal);
+  g_auto (WylFactOfflineRestoreJournal) previous = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (undecided,
+      &previous), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_admit_orphan_stage
+        (&journal, "alpha", &orphan), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&previous, &journal));
+  g_assert_cmpuint (journal.revision, ==, revision + 1);
+  g_assert_cmpint (journal.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+  assert_orphan_bound_for_retirement (alpha, &orphan);
+  g_assert_cmpint (zeta->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+  g_assert_true (zeta->transition_terminal);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_ROLLBACK);
+  g_autoptr (GBytes) admitted = journal_bytes (&journal);
+  WylFactOfflineRestoreJournal decoded = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (admitted,
+      &decoded), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&decoded);
+  /* A bound graph is not an orphan, whatever is on disk. */
+  assert_orphan_refused (&journal, "alpha", &orphan);
+  /* One revision admits one orphan: binding zeta in the same step is not a
+   * legal successor of the undecided journal. */
+  WylFactArtifactInventoryIdentity second = identity (405);
+  zeta->staged_main_identity = second;
+  zeta->transition_state = WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY;
+  zeta->transition_terminal = FALSE;
+  zeta->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE;
+  /* The shape alone is valid; only the step is refused. */
+  g_autoptr (GBytes) doubled = journal_bytes (&journal);
+  g_assert_false (wyl_fact_offline_restore_journal_is_legal_successor
+        (&previous, &journal));
+  wyl_fact_offline_restore_journal_clear (&journal);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (admitted,
+      &journal), ==, WYRELOG_E_OK);
+  alpha = g_ptr_array_index (journal.graphs, 0);
+  zeta = g_ptr_array_index (journal.graphs, 1);
+  wyl_fact_offline_restore_journal_clear (&previous);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode (admitted,
+      &previous), ==, WYRELOG_E_OK);
+
+  /* Decided: a graph abandoned while unbound reopens for one retirement. */
+  WylFactArtifactInventoryIdentity late = identity (403);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_admit_orphan_stage
+        (&journal, "zeta", &late), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_offline_restore_journal_is_legal_successor
+        (&previous, &journal));
+  g_assert_cmpuint (journal.revision, ==, revision + 2);
+  assert_orphan_bound_for_retirement (zeta, &late);
+  complete_step (&journal, "alpha",
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE);
+  complete_step (&journal, "zeta",
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE, TRUE);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&journal), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+  /* A retired graph keeps its identity, so it is never reopened. */
+  WylFactArtifactInventoryIdentity again = identity (404);
+  assert_orphan_refused (&journal, "zeta", &again);
+}
+
 static void
 tamper_and_invalid_scope (void)
 {
@@ -1179,6 +1377,8 @@ main (int argc, char **argv)
       not_applied_attempt_is_retryable);
   g_test_add_func ("/fact/offline-restore/rollback-converges",
       rollback_converges);
+  g_test_add_func ("/fact/offline-restore/orphan-stage-admission",
+      orphan_stage_admitted_for_rollback);
   g_test_add_func ("/fact/offline-restore/tamper-scope",
       tamper_and_invalid_scope);
   return wyl_test_normalize_exit_status (g_test_run ());

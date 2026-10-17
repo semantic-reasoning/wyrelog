@@ -10,11 +10,30 @@ The first successful rollback decision forbids restore resume. Tenant abort
 then processes graphs in journal order. It removes a stage only when the
 journal's recorded identity, sealed policy, main identity, provisioning pair,
 root lease, and closed graph runtime all agree. A graph with no recorded stage
-identity is checked for stage absence; an operation-named orphan is left for
-inspection. A foreign or replaced stage, missing claim, changed policy, stale
-revision, or busy runtime stops recovery without adopting the artifact. Graphs
-already marked ABANDONED are rechecked on each retry. A partial tenant abort
-keeps its claim and journal, so a later process can continue by UUID.
+identity is checked for stage absence.
+
+An import that fails after finalizing its stage but before the journal records
+the stage identity leaves an operation-named orphan that `prepare` cannot
+replace (#1407). Abort admits such a stage only after proving it is this
+operation's: the exact operation-derived name, opened without following links,
+a regular file with one link, owned by the restoring user with mode exactly
+0600, no sidecar, and the manifest's size and SHA-256 for that graph, all while
+the root writer lease is held. The proof is recorded first: one journal revision
+binds the identity and decides ROLLBACK (or, after another graph already
+decided, reopens the graph that was abandoned unbound). Only then does the
+ordinary retire path remove the stage, so a crash on either side of that
+revision is finished by the next abort. An admitted identity can only be
+retired, never committed. A stage that fails any check, including a partially
+written one, is left untouched and abort stops; no code path removes it, so the
+operator inspects and removes it by hand before retrying. In tenant scope the
+graphs before it may already be rolled back and the refused graph recorded
+ABANDONED, so the journal can read complete while that stage exists; release
+rechecks stage absence and refuses until it is gone.
+
+A foreign or replaced stage, missing claim, changed policy, stale revision, or
+busy runtime stops recovery without adopting the artifact. Graphs already
+marked ABANDONED are rechecked on each retry. A partial tenant abort keeps its
+claim and journal, so a later process can continue by UUID.
 
 Completion of rollback retains the claim and journal. Call the verified
 release entry point only after all selected graphs are ABANDONED. It holds one

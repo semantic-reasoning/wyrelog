@@ -3142,8 +3142,11 @@ session_journal_bytes (SessionFixture *f)
   return bytes;
 }
 
+/* Runs the stage half of an import and stops before the journal bind: the
+ * finalized, operation-named stage a failed bind CAS leaves behind (#1407). */
 static void
-session_stage_one_graph (SessionFixture *f, guint index)
+session_finalize_stage (SessionFixture *f, guint index,
+    WylFactArtifactInventoryIdentity *out_identity)
 {
   const gchar *graph = index == 0 ? "alpha" : "zeta";
   WylFactGraphLocator locator = { 0 };
@@ -3182,6 +3185,15 @@ session_stage_one_graph (SessionFixture *f, guint index)
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_root_writer_lease_release (lease);
+  *out_identity = identity;
+}
+
+static void
+session_stage_one_graph (SessionFixture *f, guint index)
+{
+  const gchar *graph = index == 0 ? "alpha" : "zeta";
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  session_finalize_stage (f, index, &identity);
   WylFactOfflineRestoreJournal journal = { 0 }, committed = { 0 };
   WylFactOfflineRestoreStoreResult result;
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
@@ -6513,12 +6525,14 @@ test_tenant_rollback_release_late_stage (void)
 #endif
 
 static void rollback_write_foreign (const gchar *path);
+static void assert_orphan_retired (const WylFactOfflineRestoreJournal
+    *committed, guint index, const gchar *stage, const GStatBuf *orphan);
 
 static void
 test_tenant_rollback_rejects (gconstpointer data)
 {
   const gchar *mode = data;
-  gboolean orphan = g_str_equal (mode, "unbound-orphan");
+  gboolean orphan = g_str_equal (mode, "unbound-foreign");
   SessionFixture f = { 0 };
   session_fixture_init (&f, orphan ? "partial-staging" : "success");
   g_autofree gchar *stage = session_stage_path (&f,
@@ -6558,6 +6572,32 @@ test_tenant_rollback_rejects (gconstpointer data)
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   if (!g_str_equal (mode, "missing-claim"))
     f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+/* #1407: in tenant scope the first graph decides ROLLBACK and abandons the
+ * unbound zeta; its genuine orphan is then admitted by reopening zeta. */
+static void
+test_tenant_rollback_unbound_orphan (void)
+{
+  SessionFixture f = { 0 };
+  session_fixture_init (&f, "partial-staging");
+  g_autofree gchar *alpha = session_stage_path (&f, "alpha");
+  g_autofree gchar *zeta = session_stage_path (&f, "zeta");
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  session_finalize_stage (&f, 1, &identity);
+  GStatBuf orphan = { 0 };
+  g_assert_cmpint (g_stat (zeta, &orphan), ==, 0);
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_tenant_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 2, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_false (g_file_test (alpha, G_FILE_TEST_EXISTS));
+  assert_orphan_retired (&committed, 1, zeta, &orphan);
+  g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, committed.revision, 0), ==, WYRELOG_E_OK);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
   session_fixture_clear (&f);
 }
 
@@ -6613,14 +6653,41 @@ test_tenant_rollback_partial_progress (void)
 }
 
 static void
+assert_orphan_retired (const WylFactOfflineRestoreJournal *committed,
+    guint index, const gchar *stage, const GStatBuf *orphan)
+{
+  g_assert_false (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (committed->decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (committed), ==,
+      WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
+  const WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (committed->graphs, index);
+  g_assert_cmpuint (graph->staged_main_identity.domain, ==,
+      (guint64) orphan->st_dev);
+  g_assert_cmpuint (graph->staged_main_identity.object, ==,
+      (guint64) orphan->st_ino);
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED);
+  g_assert_false (graph->copied);
+}
+
+/* #1407: a finalized stage whose bind CAS never landed is admitted by abort
+ * once it is proven to be this operation's, recorded, then retired. */
+static void
 test_graph_rollback_unbound_orphan (void)
 {
   SessionFixture f = { 0 };
   session_fixture_init_selected (&f, "coordinator", "zeta");
   g_autofree gchar *stage = session_stage_path (&f, "zeta");
-  g_assert_true (g_file_set_contents (stage, "orphan", -1, NULL));
+  g_autofree gchar *main_path = graph_file_path (&f.fixture, "zeta",
+          "facts.duckdb");
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  session_finalize_stage (&f, 1, &identity);
+  GStatBuf orphan = { 0 }, main_before = { 0 }, main_after = { 0 };
+  g_assert_cmpint (g_stat (stage, &orphan), ==, 0);
+  g_assert_cmpint (g_stat (main_path, &main_before), ==, 0);
   g_auto (WylFactOfflineRestoreJournal) before = { 0 };
-  g_auto (WylFactOfflineRestoreJournal) after = { 0 };
   g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
         (f.fixture.policy, session_operation, &before), ==, WYRELOG_E_OK);
@@ -6630,15 +6697,80 @@ test_graph_rollback_unbound_orphan (void)
       g_ptr_array_index (before.graphs, 0))->staged_main_identity));
   g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 1, 0, &committed), ==, WYRELOG_E_OK);
+  assert_orphan_retired (&committed, 0, stage, &orphan);
+  g_assert_cmpuint (committed.revision, ==, 4);
+  g_assert_cmpint (g_stat (main_path, &main_after), ==, 0);
+  g_assert_cmpuint (main_after.st_ino, ==, main_before.st_ino);
+  guint64 revision = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, revision);
+  g_assert_cmpint (wyl_fact_offline_restore_rollback_release_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, revision, 0), ==, WYRELOG_E_OK);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  session_fixture_clear (&f);
+}
+
+/* Each of these leaves an operation-named stage the journal cannot vouch
+ * for; abort refuses with the journal and the file untouched. */
+static void
+test_graph_rollback_unbound_orphan_refused (gconstpointer data)
+{
+  const gchar *mode = data;
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "coordinator", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  g_autofree gchar *outside = NULL;
+  if (g_str_equal (mode, "foreign"))
+    rollback_write_foreign (stage);
+  else {
+    WylFactArtifactInventoryIdentity identity = { 0 };
+    session_finalize_stage (&f, 1, &identity);
+  }
+  if (g_str_equal (mode, "flipped-byte")) {
+    FILE *file = g_fopen (stage, "r+b");
+    g_assert_nonnull (file);
+    g_assert_cmpint (fseek (file, -1, SEEK_END), ==, 0);
+    gint last = fgetc (file);
+    g_assert_cmpint (last, !=, EOF);
+    g_assert_cmpint (fseek (file, -1, SEEK_END), ==, 0);
+    g_assert_cmpint (fputc (last ^ 0x01, file), !=, EOF);
+    g_assert_cmpint (fclose (file), ==, 0);
+  } else if (g_str_equal (mode, "loose-mode"))
+    g_assert_cmpint (g_chmod (stage, 0644), ==, 0);
+  else if (g_str_equal (mode, "sidecar")) {
+    g_autofree gchar *sidecar = g_strconcat (stage, ".wal", NULL);
+    rollback_write_foreign (sidecar);
+  } else if (g_str_equal (mode, "extra-link")
+      || g_str_equal (mode, "symlink")) {
+    g_autofree gchar *name = g_path_get_basename (f.fixture.root);
+    g_autofree gchar *parent = g_path_get_dirname (f.fixture.root);
+    g_autofree gchar *leaf = g_strconcat (name, "-orphan-link", NULL);
+    outside = g_build_filename (parent, leaf, NULL);
+    if (g_str_equal (mode, "extra-link"))
+      g_assert_cmpint (link (stage, outside), ==, 0);
+    else {
+      g_assert_cmpint (g_rename (stage, outside), ==, 0);
+      g_assert_cmpint (symlink (outside, stage), ==, 0);
+    }
+  }
+  GStatBuf before = { 0 }, after = { 0 };
+  g_assert_cmpint (g_lstat (stage, &before), ==, 0);
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
       session_operation, 1, 0, &committed), ==, WYRELOG_E_POLICY);
   g_assert_null (committed.graphs);
-  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
-  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
-        (f.fixture.policy, session_operation, &after), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (after.revision, ==, 1);
-  g_assert_cmpint (after.decision, ==, WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
-  g_clear_pointer (&f.journal_before, g_bytes_unref);
-  f.journal_before = session_journal_bytes (&f);
+  g_assert_cmpint (g_lstat (stage, &after), ==, 0);
+  g_assert_cmpuint (after.st_ino, ==, before.st_ino);
+  g_assert_cmpuint (after.st_size, ==, before.st_size);
+  if (outside != NULL)
+    g_assert_cmpint (g_remove (outside), ==, 0);
+  /* journal_before from the fixture: the revision-1 journal is unchanged. */
   session_fixture_clear (&f);
 }
 
@@ -6675,23 +6807,38 @@ test_graph_rollback_unbound_absent (void)
 }
 
 #ifdef WYL_TEST_HANDLE_SEAMS
+typedef struct
+{
+  const gchar *path;
+  GBytes *bytes;
+} LateStage;
+
 static void
 create_unbound_stage_after_sync (G_GNUC_UNUSED gint directory_fd,
     gpointer user_data)
 {
-  const gchar *path = user_data;
-  g_assert_true (g_file_set_contents (path, "late-stage", -1, NULL));
-  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  const LateStage *late = user_data;
+  gsize length = 0;
+  const gchar *bytes = g_bytes_get_data (late->bytes, &length);
+  g_assert_true (g_file_set_contents (late->path, bytes, (gssize) length,
+      NULL));
+  g_assert_cmpint (g_chmod (late->path, 0600), ==, 0);
 }
 
+/* A stage that appears after the absence proof synced the directory is
+ * refused on that run, so absence is never recorded over it.  The stage
+ * carries the manifest bytes, so the next abort admits and retires it. */
 static void
 test_graph_rollback_unbound_post_sync_stage (void)
 {
   SessionFixture f = { 0 };
   session_fixture_init_selected (&f, "coordinator", "zeta");
   g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  LateStage late = {
+    .path = stage, .bytes = g_ptr_array_index (f.capture.artifact_bytes, 1),
+  };
   wyl_fact_artifact_transition_posix_set_recovery_post_sync_hook_for_test
-    (create_unbound_stage_after_sync, stage);
+    (create_unbound_stage_after_sync, &late);
   WylFactOfflineRestoreJournal committed = { 0 };
   wyrelog_error_t rc = wyl_fact_offline_restore_graph_rollback_run
         (f.fixture.policy, f.fixture.root, f.fixture.runtime,
@@ -6705,6 +6852,13 @@ test_graph_rollback_unbound_post_sync_stage (void)
   g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
         (f.fixture.policy, session_operation, &durable), ==, WYRELOG_E_OK);
   g_assert_cmpuint (durable.revision, ==, 1);
+  GStatBuf orphan = { 0 };
+  g_assert_cmpint (g_stat (stage, &orphan), ==, 0);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 1, 0, &committed), ==, WYRELOG_E_OK);
+  assert_orphan_retired (&committed, 0, stage, &orphan);
+  wyl_fact_offline_restore_journal_clear (&committed);
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
@@ -6906,6 +7060,56 @@ test_graph_rollback_crash (gconstpointer data)
   g_assert_cmpint (wyl_fact_offline_restore_journal_recovery (&committed), ==,
       WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE);
   wyl_fact_offline_restore_journal_clear (&committed);
+  g_clear_pointer (&f.journal_before, g_bytes_unref);
+  f.journal_before = session_journal_bytes (&f);
+  session_fixture_clear (&f);
+}
+
+/* The admission CAS is the durable decision; a crash on either side of it
+ * leaves an abort that converges on the next run. */
+static void
+test_graph_rollback_unbound_orphan_crash (gconstpointer data)
+{
+  const gchar *mode = data;
+  gboolean after_cas = g_str_equal (mode, "after-admission");
+  SessionFixture f = { 0 };
+  session_fixture_init_selected (&f, "coordinator", "zeta");
+  g_autofree gchar *stage = session_stage_path (&f, "zeta");
+  WylFactArtifactInventoryIdentity identity = { 0 };
+  session_finalize_stage (&f, 1, &identity);
+  GStatBuf orphan = { 0 };
+  g_assert_cmpint (g_stat (stage, &orphan), ==, 0);
+  RollbackCrash crash = {
+    .target = after_cas ? WYL_FACT_OFFLINE_RESTORE_ROLLBACK_AFTER_DECISION
+      : WYL_FACT_OFFLINE_RESTORE_ROLLBACK_BEFORE_DECISION_CAS,
+  };
+  wyl_fact_offline_restore_graph_rollback_set_checkpoint_for_test
+    (rollback_crash_checkpoint, &crash);
+  g_auto (WylFactOfflineRestoreJournal) committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, 1, 0, &committed), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_rollback_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_cmpuint (crash.calls, ==, 1);
+  g_assert_null (committed.graphs);
+  g_assert_true (g_file_test (stage, G_FILE_TEST_EXISTS));
+  g_auto (WylFactOfflineRestoreJournal) pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (f.fixture.policy, session_operation, &pending), ==, WYRELOG_E_OK);
+  const WylFactOfflineRestoreJournalGraph *graph = g_ptr_array_index
+        (pending.graphs, 0);
+  g_assert_cmpuint (pending.revision, ==, after_cas ? 2 : 1);
+  g_assert_cmpint (pending.decision, ==, after_cas
+      ? WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK
+      : WYL_FACT_OFFLINE_RESTORE_DECISION_NONE);
+  g_assert_true (after_cas
+      ? graph->staged_main_identity.object == (guint64) orphan.st_ino
+      : artifact_identity_is_zero (&graph->staged_main_identity));
+  g_assert_cmpint (wyl_fact_offline_restore_graph_rollback_run
+        (f.fixture.policy, f.fixture.root, f.fixture.runtime,
+      session_operation, pending.revision, 0, &committed), ==, WYRELOG_E_OK);
+  assert_orphan_retired (&committed, 0, stage, &orphan);
   g_clear_pointer (&f.journal_before, g_bytes_unref);
   f.journal_before = session_journal_bytes (&f);
   session_fixture_clear (&f);
@@ -15021,7 +15225,7 @@ main (int argc, char **argv)
       test_tenant_rollback_release_late_stage);
 #endif
   const gchar *tenant_rejections[] = {
-    "unbound-orphan", "substituted-stage", "changed-inode", "missing-claim",
+    "unbound-foreign", "substituted-stage", "changed-inode", "missing-claim",
     "stale",
   };
   for (guint i = 0; i < G_N_ELEMENTS (tenant_rejections); i++) {
@@ -15033,11 +15237,33 @@ main (int argc, char **argv)
   }
   g_test_add_func ("/fact-offline-backup-source/rollback/unbound-orphan",
       test_graph_rollback_unbound_orphan);
+  g_test_add_func
+    ("/fact-offline-backup-source/rollback/tenant-unbound-orphan",
+      test_tenant_rollback_unbound_orphan);
+  const gchar *orphan_refusals[] = {
+    "foreign", "flipped-byte", "loose-mode", "extra-link", "sidecar",
+    "symlink",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (orphan_refusals); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/rollback/unbound-orphan-refused/",
+            orphan_refusals[i], NULL);
+    g_test_add_data_func (path, orphan_refusals[i],
+        test_graph_rollback_unbound_orphan_refused);
+  }
   g_test_add_func ("/fact-offline-backup-source/rollback/unbound-absent",
       test_graph_rollback_unbound_absent);
 #ifdef WYL_TEST_HANDLE_SEAMS
   g_test_add_func ("/fact-offline-backup-source/rollback/unbound-post-sync-stage",
       test_graph_rollback_unbound_post_sync_stage);
+  const gchar *orphan_crashes[] = { "before-admission", "after-admission" };
+  for (guint i = 0; i < G_N_ELEMENTS (orphan_crashes); i++) {
+    g_autofree gchar *path = g_strconcat
+          ("/fact-offline-backup-source/rollback/unbound-orphan-crash/",
+            orphan_crashes[i], NULL);
+    g_test_add_data_func (path, orphan_crashes[i],
+        test_graph_rollback_unbound_orphan_crash);
+  }
   g_test_add_func ("/fact-offline-backup-source/rollback/unbound-sync-failure",
       test_graph_rollback_unbound_sync_failure);
 #endif

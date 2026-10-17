@@ -227,6 +227,16 @@ wyrelog_error_t wyl_fact_offline_restore_journal_mark_preflight
 wyrelog_error_t wyl_fact_offline_restore_journal_bind_staged_identity
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
     const WylFactArtifactInventoryIdentity *identity);
+/* #1407: binds an unbound orphan stage for retirement only.  On an
+ * undecided journal this is the ROLLBACK decision itself; on a ROLLBACK
+ * journal it reopens a graph that was abandoned while unbound, so a journal
+ * whose recovery read COMPLETE reads ROLLBACK again until that stage is
+ * retired.  The caller must prove the stage is this operation's (exact name,
+ * regular, one link, secure owner and mode, manifest size and checksum) under
+ * the root writer lease; this pure mutator does not. */
+wyrelog_error_t wyl_fact_offline_restore_journal_admit_orphan_stage
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const WylFactArtifactInventoryIdentity *identity);
 /* Records the old policy provisioning UUID for graph-local mode-A restore.
  * Caller must verify the ACTIVE record and matching graph/store generations;
  * this pure mutator does not prove those external facts. COMMIT stays closed

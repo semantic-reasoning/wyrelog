@@ -8,6 +8,7 @@
 #include "fact/graph-locator-darwin-private.h"
 #endif
 #include "fact/offline-restore-journal-store-private.h"
+#include "fact/offline-restore-stage-private.h"
 #include "fact/root-writer-lease-private.h"
 
 #ifndef G_OS_WIN32
@@ -48,6 +49,8 @@ typedef struct
   gchar *provisioning_uuid;
   WylFactArtifactTransitionPosix *provider;
   guint selected_index;
+  /* Set only for ROLLBACK_ADMIT_ORPHAN, after the orphan proof. */
+  WylFactArtifactInventoryIdentity orphan_identity;
 } GraphRollback;
 
 static WylFactOfflineRestoreJournalGraph *
@@ -259,6 +262,7 @@ check_current (GraphRollback *rollback)
 typedef enum
 {
   ROLLBACK_DECIDE,
+  ROLLBACK_ADMIT_ORPHAN,
   ROLLBACK_BEGIN,
   ROLLBACK_NOT_APPLIED,
   ROLLBACK_COMPLETE,
@@ -286,6 +290,10 @@ cas_change (GraphRollback *rollback, RollbackChange change)
         rc = wyl_fact_offline_restore_journal_decide (&desired,
                 WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
         break;
+      case ROLLBACK_ADMIT_ORPHAN:
+        rc = wyl_fact_offline_restore_journal_admit_orphan_stage (&desired,
+                graph_id, &rollback->orphan_identity);
+        break;
       case ROLLBACK_BEGIN:
         rc = wyl_fact_offline_restore_journal_begin_attempt (&desired,
                 graph_id, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE);
@@ -304,7 +312,8 @@ cas_change (GraphRollback *rollback, RollbackChange change)
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_offline_restore_journal_encode (&desired, &desired_bytes);
 #ifdef WYL_TEST_HANDLE_SEAMS
-  if (rc == WYRELOG_E_OK && change == ROLLBACK_DECIDE)
+  if (rc == WYRELOG_E_OK
+      && (change == ROLLBACK_DECIDE || change == ROLLBACK_ADMIT_ORPHAN))
     rc = run_checkpoint (WYL_FACT_OFFLINE_RESTORE_ROLLBACK_BEFORE_DECISION_CAS);
 #endif
   if (rc == WYRELOG_E_OK)
@@ -394,9 +403,48 @@ open_provider (GraphRollback *rollback)
   return rc;
 }
 
+/* #1407: an import that finalized its stage and then failed before the bind
+ * CAS leaves an operation-named stage the journal does not reference.  Admit
+ * it only when the exact-name reader (no symlink, regular, one link, owner and
+ * mode 0600, no sidecar) shows the manifest's size and checksum under the held
+ * lease, and record that in the journal before anything unlinks it: the
+ * admitted graph then takes the ordinary bound retire path.  Anything else,
+ * including a partial stage, is refused with the journal unchanged. */
 static wyrelog_error_t
-recover_unbound (GraphRollback *rollback)
+admit_orphan_stage (GraphRollback *rollback,
+    const WylFactArtifactMainTransitionObservation *observation)
 {
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &observation->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  const WylFactArtifactMainTransitionEntryEvidence *retained
+    = &observation->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK];
+  const WylFactOfflineRestoreJournalGraph *graph = selected_graph (rollback);
+  if (!stage->present || stage->reparse || stage->link_count != 1
+      || stage->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || retained->present)
+    return WYRELOG_E_POLICY;
+  g_autoptr (WylFactOfflineRestoreStageReader) reader = NULL;
+  wyrelog_error_t rc = wyl_fact_offline_restore_stage_reader_open
+        (&rollback->resolver, &rollback->directory, rollback->lease,
+          rollback->journal.operation_uuid, &stage->identity, &reader);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_fact_offline_restore_stage_reader_verify_content (reader,
+            graph->logical_bytes, graph->checksum);
+    /* A journal size or checksum the reader cannot check proves nothing. */
+    if (rc == WYRELOG_E_INVALID)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rollback->orphan_identity = stage->identity;
+  return cas_change (rollback, ROLLBACK_ADMIT_ORPHAN);
+}
+
+static wyrelog_error_t
+recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
+{
+  *out_admitted = FALSE;
   wyrelog_error_t rc = open_provider (rollback);
   WylFactArtifactTransitionPosixLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
@@ -405,6 +453,13 @@ recover_unbound (GraphRollback *rollback)
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
             &lifecycle, &observation);
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  if (rc == WYRELOG_E_OK && stage->present) {
+    rc = admit_orphan_stage (rollback, &observation);
+    *out_admitted = rc == WYRELOG_E_OK;
+    return rc;
+  }
   if (rc == WYRELOG_E_OK) {
     WylFactArtifactMainTransitionRequest request = request_for (rollback,
             &observation);
@@ -632,8 +687,12 @@ rollback_one_run
   gboolean unbound = rc == WYRELOG_E_OK
       && selected_graph (&rollback)->staged_main_identity.domain == 0
       && selected_graph (&rollback)->staged_main_identity.object == 0;
-  if (rc == WYRELOG_E_OK && unbound)
-    rc = recover_unbound (&rollback);
+  if (rc == WYRELOG_E_OK && unbound) {
+    gboolean admitted = FALSE;
+    rc = recover_unbound (&rollback, &admitted);
+    if (admitted)
+      unbound = FALSE;
+  }
   if (rc == WYRELOG_E_OK && !unbound
       && rollback.journal.decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE)
     rc = cas_change (&rollback, ROLLBACK_DECIDE);
