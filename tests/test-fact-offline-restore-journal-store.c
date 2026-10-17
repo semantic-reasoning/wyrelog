@@ -1323,6 +1323,67 @@ encrypted_rollback_failure (void)
 }
 #endif
 
+static gchar *
+schema_object_sql (sqlite3 *db, const gchar *name)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT sql FROM main.sqlite_master WHERE name=?1;", -1, &stmt, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, name, -1, SQLITE_TRANSIENT),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gchar *sql = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  g_assert_nonnull (sql);
+  return sql;
+}
+
+/* The tenant replacement rebuild renames the table, and SQLite rewrites every
+ * trigger that names it.  The provisioning guards name it, so they must come
+ * through the rebuild unchanged and still compile (#1429). */
+static void
+assert_provisioning_guards_intact (sqlite3 *db, const gchar *insert_guard,
+    const gchar *update_guard)
+{
+  g_autofree gchar *insert_now = schema_object_sql (db,
+          "fact_graph_provisioning_insert_guard");
+  g_autofree gchar *update_now = schema_object_sql (db,
+          "fact_graph_provisioning_update_guard");
+  g_assert_cmpstr (insert_now, ==, insert_guard);
+  g_assert_cmpstr (update_now, ==, update_guard);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT count(*) FROM main.sqlite_master WHERE "
+      "instr(sql,'fact_tenant_restore_replacements_pre_companion')>0;",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 0);
+  sqlite3_finalize (stmt);
+  /* A later RENAME re-parses every trigger, so a guard naming a dropped table
+   * would fail it. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "CREATE TABLE issue_1429_probe(x);"
+      "ALTER TABLE issue_1429_probe RENAME TO issue_1429_probe_renamed;"
+      "DROP TABLE issue_1429_probe_renamed;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  /* Preparing an INSERT compiles the insert guard's whole program, including
+   * its tenant replacement subquery; the guard then refuses the unowned row
+   * before the row's own constraints are checked. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "INSERT INTO fact_graph_provisioning(op_uuid,tenant_id,graph_id,"
+      "store_uuid,phase,expected_lifecycle_generation,"
+      "expected_reconciliation_generation,attempt) VALUES "
+      "('x','t','g','s','restore_selected',1,0,0);", NULL, NULL, NULL) & 0xff,
+      ==, SQLITE_CONSTRAINT);
+  g_assert_cmpstr (sqlite3_errmsg (db), ==, "provisioning authority mismatch");
+  /* Preparing an UPDATE compiles the update guard's program. */
+  g_assert_cmpint (sqlite3_exec (db,
+      "UPDATE fact_graph_provisioning SET phase=phase WHERE 0;", NULL, NULL,
+      NULL), ==, SQLITE_OK);
+}
+
 static void
 tenant_replacement_schema_variant (const gchar *old_phase)
 {
@@ -1332,8 +1393,13 @@ tenant_replacement_schema_variant (const gchar *old_phase)
   g_assert_cmpint (row_count (store, "fact_tenant_restore_replacements"),
       ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_autofree gchar *insert_guard = schema_object_sql (db,
+          "fact_graph_provisioning_insert_guard");
+  g_autofree gchar *update_guard = schema_object_sql (db,
+          "fact_graph_provisioning_update_guard");
   sqlite3_stmt *definitions = NULL;
-  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
       "SELECT name,sql FROM sqlite_master WHERE name IN ("
       "'fact_tenant_restore_replacements',"
       "'fact_tenant_restore_replacement_insert_guard',"
@@ -1364,26 +1430,40 @@ tenant_replacement_schema_variant (const gchar *old_phase)
   g_assert_nonnull (parts[1]);
   g_autofree gchar *predecessor = g_strdup_printf
         ("%s%s%s", parts[0], old_phase, parts[1]);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+  g_assert_cmpint (sqlite3_exec (db,
       "DROP TABLE fact_tenant_restore_replacements;", NULL, NULL, NULL),
       ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-      predecessor, NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-      insert_sql, NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+  g_assert_cmpint (sqlite3_exec (db, predecessor, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, insert_sql, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db,
       "CREATE TRIGGER fact_tenant_restore_replacement_update_guard "
       "BEFORE UPDATE ON fact_tenant_restore_replacements BEGIN "
       "SELECT RAISE(ABORT,'tenant restore replacement is immutable'); END;",
       NULL, NULL, NULL), ==, SQLITE_OK);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
-      delete_sql, NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, delete_sql, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  /* Apple's system SQLite defaults legacy_alter_table to on, which keeps
+   * triggers unrewritten by RENAME; most other builds default it off and
+   * rewrite every trigger naming the renamed table.  Pin the rewriting mode
+   * so the hazard is exercised on every host. */
+  g_assert_cmpint (sqlite3_exec (db, "PRAGMA legacy_alter_table=OFF;", NULL,
+      NULL, NULL), ==, SQLITE_OK);
+  /* The open that rebuilds the predecessor succeeds, and so does the next
+   * one: the rebuild must not leave anything the next preflight refuses. */
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+  assert_provisioning_guards_intact (db, insert_guard, update_guard);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  assert_provisioning_guards_intact (db, insert_guard, update_guard);
+  /* A partial tenant object set is refused, and the refusal rolls back
+   * without disturbing the provisioning guards. */
+  g_assert_cmpint (sqlite3_exec (db,
       "DROP TRIGGER fact_tenant_restore_replacement_delete_guard;",
       NULL, NULL, NULL), ==, SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_POLICY);
+  assert_provisioning_guards_intact (db, insert_guard, update_guard);
 }
 
 static void
