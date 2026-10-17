@@ -263,6 +263,22 @@ across a restart. macOS keeps refusing the slot; its commit and
 resume port may adopt this reasoning, which depends on nothing
 Windows-specific beyond the one-link main.
 
+A committed Windows graph restore therefore runs from the stage sync through
+`RETAIN`, the rollback-side flushes, `PUBLISH` and the directory flush, and
+stops at `PUBLISHED_DURABLE` with `FINALIZE` next. What follows on Linux stays
+refused on Windows. Selection, `FINALIZE` and promotion retire or replace the
+old main's provisioning record, and a Windows replacement main has no
+operation evidence of its own yet: the capture below is the macOS form, and
+nothing mints Windows evidence for the object `PUBLISH` placed at the main
+name. Companion recovery rebuilds the Linux companion link, which a Windows
+main does not have. Commit admission is refused on Windows as
+well, until the replay-validation session it requires runs there, and it must
+stay refused until the steps after `PUBLISHED_DURABLE` exist, so that no
+decided restore is left with no way to finish. Until then a Windows graph
+restore can be rolled back before commit but not committed, and the committed
+steps above are proved by tests that reach the decision directly; tenant-scope
+restores stay refused throughout.
+
 ## Restore replacement evidence
 
 A committed graph restore makes the published restore stage the graph's new
