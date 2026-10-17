@@ -130,6 +130,9 @@
 /fact-offline-backup-source/restore-populated-graph-schema-transition
 /fact-offline-backup-source/restore-replacement
 /fact-offline-backup-source/restore-replacement-commit-response
+/fact-offline-backup-source/restore-replacement-darwin-evidence
+/fact-offline-backup-source/restore-replacement-darwin-evidence-carry
+/fact-offline-backup-source/restore-replacement-darwin-evidence-migration
 /fact-offline-backup-source/restore-replacement-restart
 /fact-offline-backup-source/restore-replacement-schema-transition
 /fact-offline-backup-source/restore-staging-bad-checksum

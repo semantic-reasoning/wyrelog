@@ -1419,8 +1419,17 @@ tenant_selected_insert_guard_migration (void)
   const gchar *ending = strstr (tenant_branch, "THEN RAISE(ABORT,");
   g_assert_nonnull (ending);
   g_autofree gchar *prefix = g_strndup (current, tenant_branch - current);
+  /* The shipped tenant predecessor also predates the restore evidence
+   * carry, so its first statement refused all inserted evidence. */
+  const gchar *carry = strstr (prefix,
+          " AND NOT (NEW.phase='restore_selected' AND EXISTS(");
+  g_assert_nonnull (carry);
+  const gchar *carry_end = strstr (carry,
+          " THEN RAISE(ABORT,'Darwin provisioning evidence");
+  g_assert_nonnull (carry_end);
+  g_autofree gchar *carry_head = g_strndup (prefix, carry - prefix);
   g_autofree gchar *predecessor = g_strconcat
-        (prefix, ")) ", ending, NULL);
+        (carry_head, carry_end, ")) ", ending, NULL);
   g_assert_cmpint (sqlite3_exec (db,
       "DROP TRIGGER fact_graph_provisioning_insert_guard;",
       NULL, NULL, NULL), ==, SQLITE_OK);

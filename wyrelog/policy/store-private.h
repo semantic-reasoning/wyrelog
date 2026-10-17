@@ -3648,6 +3648,8 @@ typedef struct
   guint64 journal_revision;
   guint64 attempt;
   gchar *phase;
+  /* Opaque macOS envelope for the replacement main; NULL when absent. */
+  GBytes *darwin_operation_evidence;
 } WylPolicyGraphRestoreReplacementRecord;
 
 void wyl_policy_graph_restore_replacement_record_free
@@ -3679,6 +3681,26 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_mark_companion_synced
   (wyl_policy_store_t *store,
     const WylPolicyGraphRestoreReplacementRecord *expected,
     const WylPolicyOfflineRestoreRecord *expected_journal,
+    WylPolicyOfflineRestoreStoreResult *out_result,
+    WylPolicyGraphRestoreReplacementRecord **out_committed);
+/* Persist the replacement main's opaque Darwin operation evidence, write
+ * once, while the row is reserved and the exact post-PUBLISH durable v2
+ * COMMIT journal is pinned. Policy never decodes the envelope; the caller
+ * decodes it against replacement_uuid first. Results:
+ * - APPLIED: reserved row without evidence now carries these bytes;
+ * - UNCHANGED_REPLAY: reserved or companion_synced row already carries
+ *   exactly these bytes;
+ * - CONFLICT: other bytes, a companion_synced row without evidence, or an
+ *   expected record that differs from the row;
+ * - INVALID: wrong length, an expected record that is not reserved or
+ *   already carries other bytes, or a journal that is not post-PUBLISH;
+ * - STALE or NOT_FOUND: as for mark_companion_synced.
+ * On macOS the row must not advance to companion_synced before this
+ * commits and is re-read. */
+wyrelog_error_t wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+  (wyl_policy_store_t *store,
+    const WylPolicyGraphRestoreReplacementRecord *expected,
+    const WylPolicyOfflineRestoreRecord *expected_journal, GBytes *evidence,
     WylPolicyOfflineRestoreStoreResult *out_result,
     WylPolicyGraphRestoreReplacementRecord **out_committed);
 /* Runs one caller-owned filesystem effect while the exact journal, claim,

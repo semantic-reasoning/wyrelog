@@ -274,6 +274,161 @@ static const gchar fixture_pre_selected_fact_graph_provisioning_update_guard_sql
     "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
     "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
 
+/* Exact released schema immediately before Darwin replacement evidence. */
+static const gchar fixture_pre_darwin_evidence_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
+    "restore_operation_uuid TEXT PRIMARY KEY,"
+    "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
+    "AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) "
+    "AND substr(replacement_uuid,15,1)='7' AND "
+    "substr(replacement_uuid,20,1) GLOB '[89ab]' AND "
+    "length(replace(replacement_uuid,'-',''))=32 AND "
+    "replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' "
+    "AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified','selected_pending_cleanup')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+
+static const gchar fixture_pre_darwin_evidence_restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN "
+    "NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT ((NEW.phase=OLD.phase AND OLD.phase!='selected_pending_cleanup') OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='selected_pending_cleanup' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='restore_selected' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)) OR "
+    "(OLD.phase='selected_pending_cleanup' AND NEW.phase='verified' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_graphs AS g ON g.tenant_id=p.tenant_id "
+    "AND g.graph_id=p.graph_id "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='active' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND g.store_uuid=NEW.store_uuid AND g.lifecycle_state='active' "
+    "AND NEW.graph_lifecycle_generation<9223372036854775807 "
+    "AND g.lifecycle_generation=NEW.graph_lifecycle_generation+1 "
+    "AND g.reconciliation_generation=NEW.graph_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=4' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'policy_published=1' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'lifecycle_handoff=0' || char(10))>0))) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+
+static const gchar fixture_pre_darwin_replacement_fact_graph_provisioning_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))) OR "
+    "(NEW.phase='restore_selected' AND g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_graph_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.scope='graph' AND j.tenant_id=NEW.tenant_id "
+    "AND j.selected_graph_id=NEW.graph_id "
+    "AND j.revision>r.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)) OR "
+    "(NEW.phase='restore_selected' AND NEW.attempt=0 AND "
+    "g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_tenant_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_tenant_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid AND c.tenant_id=r.tenant_id "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' AND t.sealed=1 "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND j.scope='tenant' AND j.tenant_id=NEW.tenant_id "
+    "AND j.revision=r.journal_revision+1 "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=7' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 
 static gboolean
 pragma_integer_equals (sqlite3 *db, const gchar *sql, gint expected)
@@ -377,7 +532,9 @@ check_restore_replacement_zero_reconciliation_migration (void)
   sqlite3_finalize (stmt);
   if (step != SQLITE_DONE || sql->len != 4)
     return 9612;
-  const gchar *current = g_ptr_array_index (sql, 0);
+  /* Derive the released >0 predecessor from the pre-Darwin >=0 table. */
+  const gchar *current =
+      fixture_pre_darwin_evidence_restore_replacement_table_sql;
   const gchar *needle = "graph_reconciliation_generation>=0";
   const gchar *at = strstr (current, needle);
   if (at == NULL)
@@ -1422,6 +1579,108 @@ check_restore_promotion_trigger_migration (void)
     return 9634;
   return wyl_policy_store_create_schema (store) == WYRELOG_E_POLICY ?
          0 : 9635;
+}
+
+/* Install one replacement table shape with the given update guard and
+ * provisioning insert guard, keeping the other owned triggers canonical. */
+static gint
+install_restore_replacement_shape (sqlite3 *db, const gchar *table_sql,
+    const gchar *update_guard_sql, const gchar *provisioning_insert_sql)
+{
+  g_autofree gchar *insert_guard = schema_sql_for_name (db,
+          "fact_graph_restore_replacement_insert_guard");
+  g_autofree gchar *delete_guard = schema_sql_for_name (db,
+          "fact_graph_restore_replacement_delete_guard");
+  if (insert_guard == NULL || delete_guard == NULL)
+    return 1;
+  if (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_insert_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_insert_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
+      "DROP TABLE fact_graph_restore_replacements;",
+      NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, table_sql, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, insert_guard, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, update_guard_sql, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, delete_guard, NULL, NULL, NULL) != SQLITE_OK
+      || sqlite3_exec (db, provisioning_insert_sql, NULL, NULL, NULL)
+      != SQLITE_OK)
+    return 2;
+  return 0;
+}
+
+static gint
+check_restore_replacement_darwin_evidence_migration (void)
+{
+  const gchar *update_guards[] = {
+    fixture_pre_darwin_evidence_restore_replacement_update_guard_sql,
+    fixture_restore_replacement_update_guard_pre_promotion_sql,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (update_guards); i++) {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 9640;
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    if (install_restore_replacement_shape (db,
+        fixture_pre_darwin_evidence_restore_replacement_table_sql,
+        update_guards[i],
+        fixture_pre_darwin_replacement_fact_graph_provisioning_insert_guard_sql)
+        != 0)
+      return 9641;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK
+        || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 9642;
+    g_autofree gchar *table = schema_sql_for_name (db,
+            "fact_graph_restore_replacements");
+    g_autofree gchar *update_guard = schema_sql_for_name (db,
+            "fact_graph_restore_replacement_update_guard");
+    g_autofree gchar *provisioning_insert = schema_sql_for_name (db,
+            "fact_graph_provisioning_insert_guard");
+    if (table == NULL || update_guard == NULL || provisioning_insert == NULL
+        || strstr (table, "darwin_operation_evidence BLOB CHECK(") == NULL
+        || strstr (update_guard,
+        "OLD.darwin_operation_evidence IS NULL AND") == NULL
+        || strstr (update_guard,
+        "p.darwin_operation_evidence IS NEW.darwin_operation_evidence")
+        == NULL
+        || strstr (provisioning_insert,
+        "NOT (NEW.phase='restore_selected' AND EXISTS(") == NULL)
+      return 9643;
+  }
+
+  /* An evidence-bearing table or guard that no release shipped stays
+   * unowned. */
+  for (guint i = 0; i < 2; i++) {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
+        || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 9644;
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    g_autofree gchar *table = schema_sql_for_name (db,
+            "fact_graph_restore_replacements");
+    g_autofree gchar *update_guard = schema_sql_for_name (db,
+            "fact_graph_restore_replacement_update_guard");
+    g_autofree gchar *provisioning_insert = schema_sql_for_name (db,
+            "fact_graph_provisioning_insert_guard");
+    const gchar *needle = "length(darwin_operation_evidence)=56";
+    const gchar *at = table == NULL ? NULL : strstr (table, needle);
+    if (at == NULL || update_guard == NULL || provisioning_insert == NULL)
+      return 9645;
+    g_autofree gchar *prefix = g_strndup (table, at - table);
+    g_autofree gchar *short_table = g_strconcat (prefix,
+            "length(darwin_operation_evidence)=55", at + strlen (needle),
+            NULL);
+    if (install_restore_replacement_shape (db, i == 0 ? short_table : table,
+        i == 0 ? update_guard :
+        fixture_pre_darwin_evidence_restore_replacement_update_guard_sql,
+        provisioning_insert) != 0)
+      return 9646;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+      return 9647;
+  }
+  return 0;
 }
 
 static gint
@@ -7771,6 +8030,8 @@ main (void)
   if ((rc = check_restore_replacement_zero_reconciliation_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_promotion_trigger_migration ()) != 0)
+    return wyl_test_normalize_exit_status (rc);
+  if ((rc = check_restore_replacement_darwin_evidence_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);
   if ((rc = check_restore_selected_predecessor_migration ()) != 0)
     return wyl_test_normalize_exit_status (rc);

@@ -241,6 +241,17 @@ exec_rejected (sqlite3 *db, const gchar *sql)
   g_assert_cmpint (rc, !=, SQLITE_OK);
 }
 
+static void
+exec_rejected_with (sqlite3 *db, const gchar *sql, const gchar *expected)
+{
+  char *message = NULL;
+  int rc = sqlite3_exec (db, sql, NULL, NULL, &message);
+  g_assert_cmpint (rc, !=, SQLITE_OK);
+  g_assert_nonnull (message);
+  g_assert_nonnull (strstr (message, expected));
+  sqlite3_free (message);
+}
+
 static gint64
 scalar_int64 (sqlite3 *db, const gchar *sql)
 {
@@ -1306,6 +1317,22 @@ test_darwin_evidence_schema_is_structural_and_immutable (void)
     "'01890f47-3c4b-7cc2-b8c4-dc0c0c079204','provision-%s.sqlite',"
     "1,0,'reserved',0,1,1,zeroblob(56));", insert, insert, insert);
   exec_rejected (db, delete_insert);
+  /* Only a graph restore selection may carry evidence into an INSERT, and
+   * only for an existing replacement reservation of the same graph. */
+  static const gchar *carried_phases[] = { "restore_selected", "active" };
+  for (guint i = 0; i < G_N_ELEMENTS (carried_phases); i++) {
+    g_autofree gchar *carried = g_strdup_printf (
+      "INSERT INTO fact_graph_provisioning (op_uuid,tenant_id,graph_id,"
+      "store_uuid,stage_basename,expected_lifecycle_generation,"
+      "expected_reconciliation_generation,phase,attempt,created_at,"
+      "updated_at,darwin_operation_evidence) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c079205','graph-insert',"
+      "'graph-insert','01890f47-3c4b-7cc2-b8c4-dc0c0c079204',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c079205.sqlite',"
+      "1,0,'%s',0,1,1,zeroblob(56));", carried_phases[i]);
+    exec_rejected_with (db, carried,
+        "Darwin provisioning evidence requires reservation");
+  }
   g_assert_nonnull (opaque);
   g_assert_nonnull (staged);
   g_assert_nonnull (windows);

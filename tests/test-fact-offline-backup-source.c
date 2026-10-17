@@ -12667,9 +12667,617 @@ test_graph_populated_schema_transition_roundtrip (void)
 #endif
 }
 
+/* Exact released schema immediately before Darwin replacement evidence. */
+static const gchar fixture_pre_darwin_evidence_restore_replacement_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_restore_replacements ("
+    "restore_operation_uuid TEXT PRIMARY KEY,"
+    "replacement_uuid TEXT NOT NULL UNIQUE CHECK(typeof(replacement_uuid)='text' "
+    "AND length(replacement_uuid)=36 AND replacement_uuid=lower(replacement_uuid) "
+    "AND substr(replacement_uuid,15,1)='7' AND "
+    "substr(replacement_uuid,20,1) GLOB '[89ab]' AND "
+    "length(replace(replacement_uuid,'-',''))=32 AND "
+    "replace(replacement_uuid,'-','') NOT GLOB '*[^0-9a-f]*' AND "
+    "substr(replacement_uuid,9,1)='-' AND substr(replacement_uuid,14,1)='-' "
+    "AND substr(replacement_uuid,19,1)='-' AND substr(replacement_uuid,24,1)='-'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "old_provisioning_uuid TEXT NOT NULL CHECK(old_provisioning_uuid!=replacement_uuid),"
+    "store_uuid TEXT NOT NULL,"
+    "tenant_lifecycle_generation INTEGER NOT NULL CHECK(tenant_lifecycle_generation>0),"
+    "tenant_reconciliation_generation INTEGER NOT NULL CHECK(tenant_reconciliation_generation>0),"
+    "graph_lifecycle_generation INTEGER NOT NULL CHECK(graph_lifecycle_generation>0),"
+    "graph_reconciliation_generation INTEGER NOT NULL CHECK(graph_reconciliation_generation>=0),"
+    "journal_revision INTEGER NOT NULL CHECK(journal_revision>0),"
+    "companion_basename TEXT NOT NULL CHECK(companion_basename='provision-' || replacement_uuid || '.sqlite'),"
+    "phase TEXT NOT NULL CHECK(phase IN ('reserved','companion_synced','verified','selected_pending_cleanup')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK(attempt>=0),"
+    "created_at INTEGER NOT NULL CHECK(created_at>=0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(old_provisioning_uuid),"
+    "FOREIGN KEY(restore_operation_uuid) REFERENCES fact_offline_restore_journals(operation_uuid) ON DELETE RESTRICT,"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id));";
+
+static const gchar fixture_pre_darwin_evidence_restore_replacement_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_restore_replacement_update_guard "
+    "BEFORE UPDATE ON fact_graph_restore_replacements BEGIN "
+    "SELECT CASE WHEN "
+    "NEW.restore_operation_uuid IS NOT OLD.restore_operation_uuid "
+    "OR NEW.replacement_uuid IS NOT OLD.replacement_uuid "
+    "OR NEW.tenant_id IS NOT OLD.tenant_id OR NEW.graph_id IS NOT OLD.graph_id "
+    "OR NEW.old_provisioning_uuid IS NOT OLD.old_provisioning_uuid "
+    "OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.tenant_lifecycle_generation IS NOT OLD.tenant_lifecycle_generation "
+    "OR NEW.tenant_reconciliation_generation IS NOT OLD.tenant_reconciliation_generation "
+    "OR NEW.graph_lifecycle_generation IS NOT OLD.graph_lifecycle_generation "
+    "OR NEW.graph_reconciliation_generation IS NOT OLD.graph_reconciliation_generation "
+    "OR NEW.journal_revision IS NOT OLD.journal_revision "
+    "OR NEW.companion_basename IS NOT OLD.companion_basename "
+    "OR NEW.created_at IS NOT OLD.created_at OR NEW.updated_at<OLD.updated_at "
+    "OR NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "OR NOT ((NEW.phase=OLD.phase AND OLD.phase!='selected_pending_cleanup') OR "
+    "(OLD.phase='reserved' AND NEW.phase='companion_synced') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='verified') OR "
+    "(OLD.phase='companion_synced' AND NEW.phase='selected_pending_cleanup' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='restore_selected' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)) OR "
+    "(OLD.phase='selected_pending_cleanup' AND NEW.phase='verified' "
+    "AND EXISTS(SELECT 1 FROM fact_graph_provisioning AS p "
+    "JOIN fact_graphs AS g ON g.tenant_id=p.tenant_id "
+    "AND g.graph_id=p.graph_id "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=NEW.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid WHERE "
+    "p.op_uuid=NEW.replacement_uuid AND p.phase='active' "
+    "AND p.tenant_id=NEW.tenant_id AND p.graph_id=NEW.graph_id "
+    "AND p.store_uuid=NEW.store_uuid "
+    "AND g.store_uuid=NEW.store_uuid AND g.lifecycle_state='active' "
+    "AND NEW.graph_lifecycle_generation<9223372036854775807 "
+    "AND g.lifecycle_generation=NEW.graph_lifecycle_generation+1 "
+    "AND g.reconciliation_generation=NEW.graph_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.revision>NEW.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=4' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'policy_published=1' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'lifecycle_handoff=0' || char(10))>0))) "
+    "THEN RAISE(ABORT,'invalid restore replacement update') END; END;";
+
+static const gchar fixture_pre_darwin_replacement_fact_graph_provisioning_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.darwin_operation_evidence IS NOT NULL "
+    "THEN RAISE(ABORT,'Darwin provisioning evidence requires reservation') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))) OR "
+    "(NEW.phase='restore_selected' AND g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_graph_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_graph_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND c.tenant_id=NEW.tenant_id AND c.graph_id=NEW.graph_id "
+    "AND j.scope='graph' AND j.tenant_id=NEW.tenant_id "
+    "AND j.selected_graph_id=NEW.graph_id "
+    "AND j.revision>r.journal_revision "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=3' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)) OR "
+    "(NEW.phase='restore_selected' AND NEW.attempt=0 AND "
+    "g.lifecycle_state='sealed' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "EXISTS(SELECT 1 FROM fact_tenant_restore_replacements AS r "
+    "JOIN fact_offline_restore_journals AS j ON "
+    "j.operation_uuid=r.restore_operation_uuid "
+    "JOIN fact_offline_restore_tenant_claims AS c ON "
+    "c.operation_uuid=j.operation_uuid AND c.tenant_id=r.tenant_id "
+    "JOIN tenants AS t ON t.tenant_id=r.tenant_id WHERE "
+    "r.replacement_uuid=NEW.op_uuid AND r.tenant_id=NEW.tenant_id "
+    "AND r.graph_id=NEW.graph_id AND r.store_uuid=NEW.store_uuid "
+    "AND r.phase='companion_synced' "
+    "AND r.graph_lifecycle_generation=NEW.expected_lifecycle_generation "
+    "AND r.graph_reconciliation_generation=NEW.expected_reconciliation_generation "
+    "AND t.lifecycle_state='sealed' AND t.sealed=1 "
+    "AND t.lifecycle_generation=r.tenant_lifecycle_generation "
+    "AND t.reconciliation_generation=r.tenant_reconciliation_generation "
+    "AND j.scope='tenant' AND j.tenant_id=NEW.tenant_id "
+    "AND j.revision=r.journal_revision+1 "
+    "AND instr(CAST(j.journal_blob AS TEXT),'version=7' || char(10))>0 "
+    "AND instr(CAST(j.journal_blob AS TEXT),"
+    "'replacement_selected=1' || char(10))>0)))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+/* Opaque to policy: a version byte and the replacement UUID at offset 8,
+ * the layout U5 will decode, padded with a caller-chosen fill. */
+static GBytes *
+replacement_evidence_for_test (const gchar *replacement_uuid, guint8 fill)
+{
+  guint8 bytes[56];
+  memset (bytes, fill, sizeof bytes);
+  bytes[0] = 1;
+  guint at = 8;
+  for (const gchar *p = replacement_uuid; *p != '\0'; p++) {
+    if (*p == '-')
+      continue;
+    gint high = g_ascii_xdigit_value (p[0]);
+    gint low = g_ascii_xdigit_value (p[1]);
+    g_assert_cmpint (high, >=, 0);
+    g_assert_cmpint (low, >=, 0);
+    g_assert_cmpuint (at, <, 24);
+    bytes[at++] = (guint8) ((high << 4) | low);
+    p++;
+  }
+  g_assert_cmpuint (at, ==, 24);
+  return g_bytes_new (bytes, sizeof bytes);
+}
+
+static void
+assert_optional_evidence (GBytes *actual, GBytes *expected)
+{
+  if (expected == NULL) {
+    g_assert_null (actual);
+    return;
+  }
+  g_assert_nonnull (actual);
+  g_assert_true (g_bytes_equal (actual, expected));
+}
+
+static void
+assert_restore_sql_rejected (sqlite3 *db, const gchar *sql,
+    const gchar *expected)
+{
+  char *message = NULL;
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, &message), !=,
+      SQLITE_OK);
+  g_assert_nonnull (message);
+  if (strstr (message, expected) == NULL)
+    g_test_message ("unexpected refusal: %s", message);
+  g_assert_nonnull (strstr (message, expected));
+  sqlite3_free (message);
+}
+
+static wyrelog_error_t
+noop_selection_effect_for_test
+  (const WylPolicyGraphRestoreReplacementRecord *current, gpointer data)
+{
+  (void) data;
+  g_assert_cmpstr (current->phase, ==, "companion_synced");
+  return WYRELOG_E_OK;
+}
+
+/* The v3 successor the fact-side selection driver would hand to policy. */
+static GBytes *
+selected_record_for_test (const WylPolicyOfflineRestoreRecord *current,
+    WylPolicyOfflineRestoreRecord *out_selected)
+{
+  g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (current->journal_blob, &journal), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_replacement_selected
+        (&journal), ==, WYRELOG_E_OK);
+  GBytes *blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&journal,
+      &blob), ==, WYRELOG_E_OK);
+  *out_selected = *current;
+  out_selected->revision = journal.revision;
+  out_selected->journal_blob = blob;
+  return blob;
+}
+
+/* Replay selection's writes by hand with a forged carry. The INSERT is
+ * accepted; the replacement row's selection UPDATE must refuse it. */
+static void
+assert_restore_selection_carry_refused (sqlite3 *db,
+    const WylPolicyGraphRestoreReplacementRecord *row,
+    const WylPolicyOfflineRestoreRecord *selected, const gchar *evidence_sql)
+{
+  g_assert_cmpint (sqlite3_exec (db, "SAVEPOINT darwin_carry_test;", NULL,
+      NULL, NULL), ==, SQLITE_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE fact_offline_restore_journals SET revision=?1,"
+      "journal_blob=?2,updated_at=unixepoch() WHERE operation_uuid=?3;",
+      -1, &update, NULL), ==, SQLITE_OK);
+  gsize length = 0;
+  const guint8 *data = g_bytes_get_data (selected->journal_blob, &length);
+  g_assert_cmpint (sqlite3_bind_int64 (update, 1, selected->revision), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob64 (update, 2, data, length,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (update, 3, row->operation_uuid, -1,
+      SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  sqlite3_finalize (update);
+  g_autofree gchar *writes = g_strdup_printf
+        ("DELETE FROM fact_graph_provisioning WHERE op_uuid='%s' "
+          "AND phase='active';"
+          "INSERT INTO fact_graph_provisioning(op_uuid,tenant_id,graph_id,"
+          "store_uuid,stage_basename,expected_lifecycle_generation,"
+          "expected_reconciliation_generation,phase,attempt,created_at,"
+          "updated_at,darwin_operation_evidence) VALUES('%s','%s','%s','%s',"
+          "'%s',%" G_GUINT64_FORMAT ",%" G_GUINT64_FORMAT ",'restore_selected',"
+          "0,unixepoch(),unixepoch(),%s);", row->old_provisioning_uuid,
+          row->replacement_uuid, row->tenant_id, row->graph_id, row->store_uuid,
+          row->companion_basename, row->graph_lifecycle_generation,
+          row->graph_reconciliation_generation, evidence_sql);
+  g_assert_cmpint (sqlite3_exec (db, writes, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  assert_restore_sql_rejected (db,
+      "UPDATE fact_graph_restore_replacements SET "
+      "phase='selected_pending_cleanup',updated_at=unixepoch();",
+      "invalid restore replacement update");
+  g_assert_cmpint (sqlite3_exec (db, "ROLLBACK TO darwin_carry_test;"
+      "RELEASE darwin_carry_test;", NULL, NULL, NULL), ==, SQLITE_OK);
+}
+
+/* Return the store to the exact shape released before Darwin replacement
+ * evidence, keeping the reserved row, so the next open must migrate it. */
+static void
+downgrade_restore_replacement_schema_for_test (sqlite3 *db)
+{
+  static const gchar *kept[] = {
+    "fact_graph_restore_replacement_insert_guard",
+    "fact_graph_restore_replacement_delete_guard",
+    "fact_graph_provisioning_update_guard",
+    "fact_offline_restore_journal_delete_guard",
+  };
+  gchar *kept_sql[G_N_ELEMENTS (kept)] = { NULL };
+  for (guint i = 0; i < G_N_ELEMENTS (kept); i++) {
+    sqlite3_stmt *stmt = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (db,
+        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1;",
+        -1, &stmt, NULL), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_bind_text (stmt, 1, kept[i], -1,
+        SQLITE_STATIC), ==, SQLITE_OK);
+    g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+    kept_sql[i] = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    sqlite3_finalize (stmt);
+  }
+  static const gchar columns[] =
+      "restore_operation_uuid,replacement_uuid,tenant_id,graph_id,"
+      "old_provisioning_uuid,store_uuid,tenant_lifecycle_generation,"
+      "tenant_reconciliation_generation,graph_lifecycle_generation,"
+      "graph_reconciliation_generation,journal_revision,companion_basename,"
+      "phase,attempt,created_at,updated_at";
+  g_autofree gchar *copy = g_strdup_printf
+        ("INSERT INTO fact_graph_restore_replacements(%s) SELECT %s FROM "
+          "darwin_downgrade_rows;DROP TABLE darwin_downgrade_rows;", columns,
+          columns);
+  g_assert_cmpint (sqlite3_exec (db, "SAVEPOINT darwin_downgrade;"
+      "DROP TRIGGER fact_offline_restore_journal_delete_guard;"
+      "DROP TRIGGER fact_graph_provisioning_insert_guard;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_insert_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_update_guard;"
+      "DROP TRIGGER fact_graph_restore_replacement_delete_guard;"
+      "ALTER TABLE fact_graph_restore_replacements RENAME TO "
+      "darwin_downgrade_rows;", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      fixture_pre_darwin_evidence_restore_replacement_table_sql, NULL, NULL,
+      NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, copy, NULL, NULL, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  const gchar *installed[] = {
+    kept_sql[0],
+    fixture_pre_darwin_evidence_restore_replacement_update_guard_sql,
+    kept_sql[1],
+    fixture_pre_darwin_replacement_fact_graph_provisioning_insert_guard_sql,
+    kept_sql[2],
+    kept_sql[3],
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (installed); i++)
+    g_assert_cmpint (sqlite3_exec (db, installed[i], NULL, NULL, NULL), ==,
+        SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, "RELEASE darwin_downgrade;", NULL,
+      NULL, NULL), ==, SQLITE_OK);
+  for (guint i = 0; i < G_N_ELEMENTS (kept); i++)
+    g_free (kept_sql[i]);
+}
+
+static void
+restore_replacement_darwin_evidence_cases (BackupFixture *fixture,
+    const gchar *operation_uuid,
+    const WylPolicyGraphRestoreReplacementRecord *reserved, gboolean migrate)
+{
+  sqlite3 *db = wyl_policy_store_get_db (fixture->policy);
+  g_autofree gchar *policy_path = g_build_filename (fixture->root,
+          "policy.db", NULL);
+  if (migrate) {
+    g_assert_cmpint (sqlite3_exec (db, "SELECT darwin_operation_evidence "
+        "FROM fact_graph_restore_replacements;", NULL, NULL, NULL), ==,
+        SQLITE_OK);
+    downgrade_restore_replacement_schema_for_test (db);
+    g_assert_cmpint (sqlite3_exec (db, "SELECT darwin_operation_evidence "
+        "FROM fact_graph_restore_replacements;", NULL, NULL, NULL), !=,
+        SQLITE_OK);
+    g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+    g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture->policy),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+        WYRELOG_E_OK);
+    db = wyl_policy_store_get_db (fixture->policy);
+  }
+  WylPolicyGraphRestoreReplacementRecord *loaded = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture->policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (loaded->replacement_uuid, ==, reserved->replacement_uuid);
+  g_assert_cmpstr (loaded->phase, ==, "reserved");
+  g_assert_null (loaded->darwin_operation_evidence);
+  g_clear_pointer (&loaded, wyl_policy_graph_restore_replacement_record_free);
+
+  WylPolicyOfflineRestoreRecord *published = NULL;
+  g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture->policy,
+      operation_uuid, &published), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) evidence = replacement_evidence_for_test
+        (reserved->replacement_uuid, 0x11);
+  g_autoptr (GBytes) other = replacement_evidence_for_test
+        (reserved->replacement_uuid, 0x22);
+  WylPolicyOfflineRestoreStoreResult result = 0;
+  WylPolicyGraphRestoreReplacementRecord *committed = NULL;
+  WylPolicyGraphRestoreReplacementRecord *synced = NULL;
+
+  if (migrate) {
+    /* A migrated row that advanced without evidence can never gain it. */
+    g_assert_cmpint
+      (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+          (fixture->policy, reserved, published, &result, &synced), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+    g_assert_null (synced->darwin_operation_evidence);
+    g_assert_cmpint
+      (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+          (fixture->policy, reserved, published, evidence, &result,
+        &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
+    g_assert_null (committed);
+    assert_restore_sql_rejected (db,
+        "UPDATE fact_graph_restore_replacements SET "
+        "darwin_operation_evidence=zeroblob(56);",
+        "invalid restore replacement update");
+    WylPolicyOfflineRestoreRecord selected = { 0 };
+    g_autoptr (GBytes) selected_blob = selected_record_for_test (published,
+            &selected);
+    wyrelog_error_t select_rc = WYRELOG_E_OK;
+    select_rc = wyl_policy_store_graph_restore_select_with_effect
+          (fixture->policy, synced, published, &selected,
+            noop_selection_effect_for_test, NULL, &result);
+    g_autoptr (GPtrArray) rows = NULL;
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+          (fixture->policy, synced->tenant_id, synced->graph_id, &rows), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (rows->len, ==, 1);
+    const WylPolicyGraphProvisioningRecord *row = g_ptr_array_index (rows, 0);
+#ifdef __APPLE__
+    /* A macOS ACTIVE row without evidence would be unopenable, so policy
+     * refuses the selection before any write. */
+    g_assert_cmpint (select_rc, ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (row->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+    g_assert_cmpstr (row->op_uuid, ==, synced->old_provisioning_uuid);
+    WylPolicyOfflineRestoreRecord *after = NULL;
+    g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture->policy,
+        operation_uuid, &after), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (after->revision, ==, published->revision);
+    g_assert_true (g_bytes_equal (after->journal_blob,
+        published->journal_blob));
+    wyl_policy_offline_restore_record_free (after);
+    g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+          (fixture->policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+    g_assert_cmpstr (loaded->phase, ==, "companion_synced");
+    g_clear_pointer (&loaded,
+        wyl_policy_graph_restore_replacement_record_free);
+#else
+    /* Elsewhere an evidence-free replacement is the normal shape. */
+    g_assert_cmpint (select_rc, ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+    g_assert_cmpint (row->phase, ==,
+        WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED);
+    g_assert_cmpstr (row->op_uuid, ==, synced->replacement_uuid);
+    g_assert_null (row->darwin_operation_evidence);
+#endif
+    g_clear_pointer (&synced, wyl_policy_graph_restore_replacement_record_free);
+    wyl_policy_offline_restore_record_free (published);
+    return;
+  }
+
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=printf('%056d',0);", "CHECK");
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=zeroblob(55);", "CHECK");
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=zeroblob(57);", "CHECK");
+  g_autoptr (GBytes) short_evidence = g_bytes_new
+        (g_bytes_get_data (evidence, NULL), 55);
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, reserved, published, short_evidence, &result,
+      &committed), ==, WYRELOG_E_INVALID);
+  g_assert_null (committed);
+  /* Evidence is captured only after the journal proves PUBLISH durable. */
+  g_auto (WylFactOfflineRestoreJournal) early = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (published->journal_blob, &early), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *early_graph =
+      g_ptr_array_index (early.graphs, 0);
+  early_graph->transition_state =
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED;
+  early_graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR;
+  g_autoptr (GBytes) early_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&early,
+      &early_blob), ==, WYRELOG_E_OK);
+  WylPolicyOfflineRestoreRecord early_record = *published;
+  early_record.journal_blob = early_blob;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, reserved, &early_record, evidence, &result,
+      &committed), ==, WYRELOG_E_INVALID);
+  g_assert_null (committed);
+  WylPolicyGraphRestoreReplacementRecord stale = *reserved;
+  stale.attempt++;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, &stale, published, evidence, &result,
+      &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
+  g_assert_null (committed);
+
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, reserved, published, evidence, &result,
+      &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (committed->phase, ==, "reserved");
+  assert_optional_evidence (committed->darwin_operation_evidence, evidence);
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture->policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+  assert_optional_evidence (loaded->darwin_operation_evidence, evidence);
+  g_clear_pointer (&loaded, wyl_policy_graph_restore_replacement_record_free);
+  /* A lost response replays from the pre-evidence record. */
+  WylPolicyGraphRestoreReplacementRecord *replayed = NULL;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, reserved, published, evidence, &result,
+      &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
+  assert_optional_evidence (replayed->darwin_operation_evidence, evidence);
+  g_clear_pointer (&replayed,
+      wyl_policy_graph_restore_replacement_record_free);
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, committed, published, other, &result,
+      &replayed), ==, WYRELOG_E_INVALID);
+  g_assert_null (replayed);
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, reserved, published, other, &result,
+      &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
+  g_assert_null (replayed);
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=NULL;",
+      "invalid restore replacement update");
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=zeroblob(56);",
+      "invalid restore replacement update");
+
+  /* A caller copy from before the evidence write is stale. */
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture->policy, reserved, published, &result, &synced), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT);
+  g_assert_null (synced);
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture->policy, committed, published, &result, &synced), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (synced->phase, ==, "companion_synced");
+  assert_optional_evidence (synced->darwin_operation_evidence, evidence);
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+        (fixture->policy, committed, published, evidence, &result,
+      &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_POLICY_OFFLINE_RESTORE_STORE_UNCHANGED_REPLAY);
+  g_assert_cmpstr (replayed->phase, ==, "companion_synced");
+  g_clear_pointer (&replayed,
+      wyl_policy_graph_restore_replacement_record_free);
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_restore_replacements "
+      "SET darwin_operation_evidence=NULL;",
+      "invalid restore replacement update");
+
+  WylPolicyOfflineRestoreRecord selected = { 0 };
+  g_autoptr (GBytes) selected_blob = selected_record_for_test (published,
+          &selected);
+  assert_restore_selection_carry_refused (db, synced, &selected, "NULL");
+  assert_restore_selection_carry_refused (db, synced, &selected,
+      "zeroblob(56)");
+  g_assert_cmpint (wyl_policy_store_graph_restore_select_with_effect
+        (fixture->policy, synced, published, &selected,
+      noop_selection_effect_for_test, NULL, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+  g_autoptr (GPtrArray) rows = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture->policy, synced->tenant_id, synced->graph_id, &rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (rows->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *row = g_ptr_array_index (rows, 0);
+  g_assert_cmpint (row->phase, ==,
+      WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED);
+  g_assert_cmpstr (row->op_uuid, ==, synced->replacement_uuid);
+  assert_optional_evidence (row->darwin_operation_evidence, evidence);
+  g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
+        (fixture->policy, operation_uuid, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (loaded->phase, ==, "selected_pending_cleanup");
+  assert_optional_evidence (loaded->darwin_operation_evidence, evidence);
+  g_clear_pointer (&loaded, wyl_policy_graph_restore_replacement_record_free);
+  assert_restore_sql_rejected (db, "UPDATE fact_graph_provisioning SET "
+      "darwin_operation_evidence=NULL WHERE phase='restore_selected';",
+      "restore selection is recovery owned");
+  g_clear_pointer (&fixture->policy, wyl_policy_store_close);
+  g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture->policy), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (fixture->policy), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&synced, wyl_policy_graph_restore_replacement_record_free);
+  g_clear_pointer (&committed,
+      wyl_policy_graph_restore_replacement_record_free);
+  wyl_policy_offline_restore_record_free (published);
+}
+
 static void test_graph_restore_replacement_reservation(gconstpointer data) {
   gboolean ambiguous_commit = g_strcmp0(data, "commit-response") == 0;
   gboolean schema_transition = g_strcmp0(data, "schema-transition") == 0;
+  gboolean darwin_evidence = g_strcmp0 (data, "darwin-evidence") == 0;
+  gboolean darwin_migration =
+      g_strcmp0 (data, "darwin-evidence-migration") == 0;
+  gboolean darwin_carry = g_strcmp0 (data, "darwin-evidence-carry") == 0;
+#ifndef __linux__
+  if (darwin_carry) {
+    g_test_skip ("graph restore select, finalize and promote drivers run "
+        "only on Linux");
+    return;
+  }
+#endif
   BackupFixture fixture = {0};
   fixture_init(&fixture, "restore-replacement-XXXXXX");
   create_tenant(&fixture);
@@ -13331,6 +13939,39 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&published,
       &published_blob), ==, WYRELOG_E_OK);
   import_restore_journal_for_test (fixture.policy, &published);
+  if (darwin_evidence || darwin_migration) {
+    restore_replacement_darwin_evidence_cases (&fixture, operation_uuid,
+        reserved, darwin_migration);
+    wyl_fact_graph_runtime_status_clear (&sibling_before);
+    wyl_policy_graph_authority_record_free (sibling_authority_before);
+    wyl_policy_graph_restore_replacement_record_free (replayed);
+    wyl_policy_graph_restore_replacement_record_free (reserved);
+    wyl_policy_graph_authority_record_free (authority);
+    wyl_policy_tenant_authority_record_free (tenant);
+    fixture_clear (&fixture);
+    return;
+  }
+  g_autoptr (GBytes) carried_evidence = NULL;
+  if (darwin_carry) {
+    /* Stand in for the macOS capture after SYNC_PUBLISH_DIR. Linux never
+     * decodes these bytes, so its drivers must carry them unchanged. */
+    carried_evidence = replacement_evidence_for_test
+          (reserved->replacement_uuid, 0x5a);
+    WylPolicyOfflineRestoreRecord *carry_journal = NULL;
+    g_assert_cmpint (wyl_policy_store_offline_restore_load (fixture.policy,
+        operation_uuid, &carry_journal), ==, WYRELOG_E_OK);
+    WylPolicyGraphRestoreReplacementRecord *carried = NULL;
+    WylPolicyOfflineRestoreStoreResult carry_result = 0;
+    g_assert_cmpint
+      (wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+          (fixture.policy, reserved, carry_journal, carried_evidence,
+        &carry_result, &carried), ==, WYRELOG_E_OK);
+    g_assert_cmpint (carry_result, ==,
+        WYL_POLICY_OFFLINE_RESTORE_STORE_APPLIED);
+    wyl_policy_offline_restore_record_free (carry_journal);
+    wyl_policy_graph_restore_replacement_record_free (reserved);
+    reserved = carried;
+  }
 #ifdef __linux__
   /* Synthetic imported COMMIT: normal mode-A admission still refuses it. */
   g_autofree gchar *rollback_basename = g_strdup_printf
@@ -13594,12 +14235,16 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   g_assert_cmpint (selected_row->phase, ==,
       WYL_POLICY_GRAPH_PROVISIONING_RESTORE_SELECTED);
   g_assert_cmpstr (selected_row->op_uuid, ==, reserved->replacement_uuid);
+  assert_optional_evidence (selected_row->darwin_operation_evidence,
+      carried_evidence);
   WylPolicyGraphRestoreReplacementRecord *selected_replacement = NULL;
   g_assert_cmpint (wyl_policy_store_graph_restore_replacement_load
         (fixture.policy, operation_uuid, &selected_replacement), ==,
       WYRELOG_E_OK);
   g_assert_cmpstr (selected_replacement->phase, ==,
       "selected_pending_cleanup");
+  assert_optional_evidence (selected_replacement->darwin_operation_evidence,
+      carried_evidence);
   wyl_policy_graph_restore_replacement_record_free (selected_replacement);
   g_clear_pointer (&fixture.policy, wyl_policy_store_close);
   g_assert_cmpint (wyl_policy_store_open (policy_path, &fixture.policy), ==,
@@ -13902,6 +14547,18 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
         fixture.policy, fixture.root, fixture.runtime, &finalized,
         0, &promotion_resume), ==, WYRELOG_E_OK);
   g_assert_cmpuint(promotion_resume.revision, ==, finalized.revision + 2);
+  g_autoptr (GPtrArray) promoted_rows = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture.policy, "tenant-a", "alpha", &promoted_rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (promoted_rows->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *promoted_row =
+      g_ptr_array_index (promoted_rows, 0);
+  g_assert_cmpint (promoted_row->phase, ==,
+      WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_cmpstr (promoted_row->op_uuid, ==, reserved->replacement_uuid);
+  assert_optional_evidence (promoted_row->darwin_operation_evidence,
+      carried_evidence);
   WylFactGraphKey restored_key = {0};
   g_assert_cmpint(wyl_fact_graph_key_init(&restored_key, "tenant-a", "alpha"),
       ==, WYRELOG_E_OK);
@@ -15173,6 +15830,15 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/restore-replacement-schema-transition",
       "schema-transition", test_graph_restore_replacement_reservation);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-replacement-darwin-evidence",
+      "darwin-evidence", test_graph_restore_replacement_reservation);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-replacement-darwin-evidence-carry",
+      "darwin-evidence-carry", test_graph_restore_replacement_reservation);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/restore-replacement-darwin-evidence-migration",
+      "darwin-evidence-migration", test_graph_restore_replacement_reservation);
   g_test_add_func
     ("/fact-offline-backup-source/restore-populated-graph-schema-transition",
       test_graph_populated_schema_transition_roundtrip);
