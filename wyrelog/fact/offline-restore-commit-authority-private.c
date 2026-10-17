@@ -4185,11 +4185,19 @@ wyl_fact_offline_restore_graph_commit_finalize_set_checkpoint_for_test
 #endif
 
 
+/* POSIX identities carry the object in object with width zero; Windows
+ * ones carry a 128-bit FileId in object_bytes with width 16 and leave
+ * object zero. */
 static gboolean
 identity_present (const WylFactArtifactInventoryIdentity *identity)
 {
-  return identity != NULL && identity->domain != 0 && identity->object != 0
-         && (identity->object_width == 0 || identity->object_width == 16);
+  static const guint8 zero[16] = { 0 };
+  if (identity == NULL || identity->domain == 0)
+    return FALSE;
+  if (identity->object_width == 0)
+    return identity->object != 0;
+  return identity->object_width == 16 && identity->object == 0
+         && memcmp (identity->object_bytes, zero, sizeof zero) != 0;
 }
 
 static gboolean
@@ -5357,7 +5365,103 @@ wyl_fact_offline_restore_graph_commit_select_resume_run
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(G_OS_WIN32)
+/* What proves the old provisioned main to a commit step: its provisioning
+ * operation, which on Linux names the companion link, and on Windows also
+ * the operation evidence its ACTIVE record carries. */
+typedef struct
+{
+  const gchar *uuid;
+#ifdef G_OS_WIN32
+  WylFactGraphWinOperationEvidence evidence;
+#endif
+} GraphProvenance;
+
+/* Borrows the uuid from row.  Run after check_policy, which proves the
+ * ACTIVE record is the row's old provisioning operation; on Windows its
+ * tuple is written once, while the record is reserved or staged, so a later
+ * check_persisted keeps it current. */
+static wyrelog_error_t
+graph_provenance_load (wyl_policy_store_t *policy,
+    const WylFactOfflineRestoreJournal *journal,
+    const WylPolicyGraphRestoreReplacementRecord *row,
+    GraphProvenance *out_provenance)
+{
+  memset (out_provenance, 0, sizeof *out_provenance);
+#ifdef G_OS_WIN32
+  g_autoptr (GPtrArray) records = NULL;
+  wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list_for_graph
+        (policy, journal->tenant_id, journal->selected_graph_id, &records);
+  guint found = 0;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (records, i);
+    if (record->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE)
+      continue;
+    found++;
+    if (g_strcmp0 (record->op_uuid, row->old_provisioning_uuid) != 0
+        || g_strcmp0 (record->store_uuid, row->store_uuid) != 0
+        || !record->has_windows_evidence
+        || !wyl_fact_graph_windows_operation_evidence_equal
+          (&record->windows_evidence, &record->windows_evidence))
+      rc = WYRELOG_E_POLICY;
+    else
+      out_provenance->evidence = record->windows_evidence;
+  }
+  if (rc == WYRELOG_E_OK && found != 1)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#else
+  (void) policy;
+  (void) journal;
+#endif
+  out_provenance->uuid = row->old_provisioning_uuid;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_capture_provisioned (WylFactArtifactTransition *provider,
+    const GraphProvenance *provenance,
+    const WylFactArtifactMainTransitionRequest *request,
+    WylFactGraphProvisionedRestoreSlot slot,
+    const WylFactArtifactTransitionLifecycle *lifecycle,
+    WylFactArtifactInventorySnapshot **out_snapshot,
+    WylFactArtifactMainTransitionObservation *out_observation)
+{
+#ifdef G_OS_WIN32
+  return wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
+           (provider, provenance->uuid, &provenance->evidence, request, slot,
+             lifecycle, out_snapshot, out_observation);
+#else
+  return wyl_fact_artifact_transition_posix_capture_provisioned (provider,
+             provenance->uuid, request, slot, lifecycle, out_snapshot,
+             out_observation);
+#endif
+}
+
+/* The Windows execute infers the slot from which entry holds the evidenced
+ * FileId, so neither form takes one. */
+static wyrelog_error_t
+graph_execute_provisioned (WylFactArtifactTransition *provider,
+    const GraphProvenance *provenance,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+#ifdef G_OS_WIN32
+  return wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
+           (provider, provenance->uuid, &provenance->evidence, request,
+             authorized, op, out_effect, out_durability);
+#else
+  return wyl_fact_artifact_transition_posix_execute_provisioned (provider,
+             provenance->uuid, request, authorized, op, out_effect,
+             out_durability);
+#endif
+}
+
 static gboolean
 sync_staged_snapshot_valid (const WylFactOfflineRestoreJournal *journal,
     const WylPolicyGraphRestoreReplacementRecord *row,
@@ -5484,7 +5588,7 @@ sync_staged_journal_cas (wyl_policy_store_t *policy,
 static wyrelog_error_t
 sync_staged_capture_ready (WylFactArtifactTransition *provider,
     const WylFactOfflineRestoreJournal *journal,
-    const gchar *old_provisioning_uuid,
+    const GraphProvenance *provenance,
     WylFactArtifactMainTransitionRequest *out_request,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation)
@@ -5509,8 +5613,7 @@ sync_staged_capture_ready (WylFactArtifactTransition *provider,
     .expected_main_identity = graph->expected_main_identity,
     .staged_main_identity = graph->staged_main_identity,
   };
-  rc = wyl_fact_artifact_transition_posix_capture_provisioned (provider,
-          old_provisioning_uuid, &request,
+  rc = graph_capture_provisioned (provider, provenance, &request,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
           out_snapshot, out_observation);
   if (rc == WYRELOG_E_OK)
@@ -5663,7 +5766,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -5676,6 +5779,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
   WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
+  GraphProvenance provenance = { 0 };
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
@@ -5692,6 +5796,8 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
     rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
   if (rc == WYRELOG_E_OK)
     rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -5729,8 +5835,8 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
     WylFactArtifactMainTransitionRequest request = { 0 };
     g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
     WylFactArtifactMainTransitionObservation observation = { 0 };
-    rc = sync_staged_capture_ready (provider, &journal,
-            row->old_provisioning_uuid, &request, &snapshot, &observation);
+    rc = sync_staged_capture_ready (provider, &journal, &provenance,
+            &request, &snapshot, &observation);
     if (rc == WYRELOG_E_OK)
       rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
     if (rc == WYRELOG_E_OK)
@@ -5753,8 +5859,8 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
   if (rc == WYRELOG_E_OK)
     rc = check_runtime (runtime, &key);
   if (rc == WYRELOG_E_OK)
-    rc = sync_staged_capture_ready (provider, &journal,
-            row->old_provisioning_uuid, &request, &snapshot, &before);
+    rc = sync_staged_capture_ready (provider, &journal, &provenance,
+            &request, &snapshot, &before);
   g_autoptr (WylFactArtifactMainTransition) transition = NULL;
   WylFactArtifactMainTransitionResult transition_result = { 0 };
   if (rc == WYRELOG_E_OK)
@@ -5776,9 +5882,8 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_execute_provisioned (provider,
-            row->old_provisioning_uuid, &request, &before,
-            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+    rc = graph_execute_provisioned (provider, &provenance, &request,
+            &before, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
             &effect, &durability);
   if (rc == WYRELOG_E_OK
       && effect == WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_NOT_APPLIED)
@@ -5800,8 +5905,8 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   if (rc == WYRELOG_E_OK && effect ==
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
-    rc = sync_staged_capture_ready (provider, &journal,
-            row->old_provisioning_uuid, &request, &snapshot, &after);
+    rc = sync_staged_capture_ready (provider, &journal, &provenance,
+            &request, &snapshot, &after);
   if (rc == WYRELOG_E_OK && effect ==
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED) {
     after.durability = durability;

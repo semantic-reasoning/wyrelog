@@ -392,6 +392,10 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/commit-sync-staged
+/fact-offline-backup-source/windows/commit-sync-staged-foreign-main
+/fact-offline-backup-source/windows/commit-sync-staged-missing-evidence
+/fact-offline-backup-source/windows/commit-sync-staged-unknown-retry
 /fact-offline-backup-source/windows/graph-bind
 /fact-offline-backup-source/windows/graph-bind-foreign-main
 /fact-offline-backup-source/windows/graph-bind-missing-evidence
