@@ -1485,6 +1485,49 @@ wyl_fact_offline_restore_journal_bind_staged_identity
 }
 
 wyrelog_error_t
+wyl_fact_offline_restore_journal_admit_orphan_stage
+  (WylFactOfflineRestoreJournal *journal, const gchar *graph_id,
+    const WylFactArtifactInventoryIdentity *identity)
+{
+  WylFactOfflineRestoreJournalGraph *graph = find_graph (journal, graph_id);
+  if (graph == NULL || !valid_journal (journal)
+      || !can_advance_revision (journal)
+      || !identity_is_valid (identity)
+      || (!graph->expected_main_absent
+      && identity_equal (identity, &graph->expected_main_identity))
+      || !identity_is_zero (&graph->staged_main_identity)
+      || graph->copied
+      || graph->attempt != WYL_FACT_OFFLINE_RESTORE_ATTEMPT_NONE
+      || graph->pending_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE)
+    return WYRELOG_E_POLICY;
+  if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE) {
+    /* Deciding abandons this unbound graph; it is reopened below within the
+     * same revision. */
+    wyrelog_error_t rc = wyl_fact_offline_restore_journal_decide (journal,
+            WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  } else {
+    if (journal->decision != WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK
+        || journal->policy_generation_published
+        || journal->lifecycle_handoff_complete
+        || graph->transition_state
+        != WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_ABANDONED
+        || !graph->transition_terminal
+        || graph->next_op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE
+        || !graph->resume_forbidden)
+      return WYRELOG_E_POLICY;
+    journal->revision++;
+  }
+  /* The shape DECIDE(ROLLBACK) gives a bound graph. */
+  graph->staged_main_identity = *identity;
+  graph->transition_state = WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY;
+  graph->transition_terminal = FALSE;
+  graph->next_op = WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_fact_offline_restore_journal_mark_preflight
   (WylFactOfflineRestoreJournal *journal, const gchar *graph_id)
 {
@@ -1784,6 +1827,8 @@ wyl_fact_offline_restore_journal_recovery
   }
   if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_NONE)
     return WYL_FACT_OFFLINE_RESTORE_RECOVERY_ROLLBACK;
+  /* Under ROLLBACK, COMPLETE is not final: an orphan admission (#1407) can
+   * reopen a graph abandoned while unbound.  Release rechecks stage absence. */
   if (journal->decision == WYL_FACT_OFFLINE_RESTORE_DECISION_ROLLBACK) {
     for (guint i = 0; i < journal->graphs->len; i++) {
       WylFactOfflineRestoreJournalGraph *graph =
@@ -1854,6 +1899,14 @@ successor_bind (WylFactOfflineRestoreJournal *journal, gpointer data)
 {
   BindSuccessor *bind = data;
   return wyl_fact_offline_restore_journal_bind_staged_identity
+           (journal, bind->graph_id, &bind->identity);
+}
+
+static wyrelog_error_t
+successor_admit_orphan (WylFactOfflineRestoreJournal *journal, gpointer data)
+{
+  BindSuccessor *bind = data;
+  return wyl_fact_offline_restore_journal_admit_orphan_stage
            (journal, bind->graph_id, &bind->identity);
 }
 
@@ -2096,6 +2149,8 @@ wyl_fact_offline_restore_journal_is_legal_successor
                                  graph->old_provisioning_uuid };
     if (successor_from_candidate (current_bytes, desired, successor_bind,
         &bind)
+        || successor_from_candidate (current_bytes, desired,
+        successor_admit_orphan, &bind)
         || (handoff.old_uuid != NULL
         && successor_from_candidate (current_bytes, desired,
         successor_bind_handoff, &handoff))
