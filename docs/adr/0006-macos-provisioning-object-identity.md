@@ -68,9 +68,11 @@ already controls storage below the descriptor-relative namespace boundary.
 Operators must not mount a duplicated volume UUID at the configured fact root;
 trusted mount provenance and anti-rollback storage are separate controls.
 
-This decision defines a platform contract. It does not enable macOS
-provisioning, add policy-store columns, or change the current Linux or Windows
-runtime.
+This decision defines a platform contract. It does not by itself enable macOS
+provisioning or change the current Linux or Windows runtime. The policy-store
+columns that hold the evidence are added by the persistence work that
+implements it: the provisioning row's column, and the restore replacement's
+column described in the last section.
 
 ## Evidence version 1
 
@@ -256,3 +258,59 @@ recapture and reauthorize before each step rather than reuse an authorization
 across a restart. macOS keeps refusing the slot; its commit and
 resume port may adopt this reasoning, which depends on nothing
 Windows-specific beyond the one-link main.
+
+## Restore replacement evidence
+
+A committed graph restore makes the published restore stage the graph's new
+main. After promotion its replacement provisioning row is the `ACTIVE` row, so
+on macOS it must carry version 1 evidence bound to the replacement UUID; store
+open, backup and a later restore read only that row. The stage is not created
+by the provisioning protocol above: the restore creates
+`restore-<operation>.duckdb` exclusively through the held graph directory,
+records its device and inode, logical size and checksum in the journal before
+`RETAIN`, and `PUBLISH` renames that object onto `facts.duckdb`. For a restore
+stage the journal pin stands in for the creation descriptor that step 3 of the
+provisioning order requires.
+
+Evidence is therefore captured after `SYNC_PUBLISH_DIR`, by reopening
+`facts.duckdb` through the held graph chain, and is accepted only when that
+descriptor shows the journal's device and inode, the journal's logical size
+and checksum, link count one, mode 0600 and the effective owner, with the
+legacy stage name absent. A mismatch fails closed for operator disposition;
+nothing is minted for an object the journal does not name. The state is the
+same final-exists, evidence-absent seam as above, and it is resolved by the
+journal pin rather than refused. That departs from the provisioning rule
+deliberately: a live device and inode name exactly one object, APFS does not
+recycle file IDs while `ATTR_CMN_FILEID` lookup remains valid, and the full
+checksum re-read goes through the same descriptor whose identity is compared.
+The re-read costs one full read of the main.
+
+The device number is not durable identity: it only has to match within the
+restore that recorded it. A remount or reboot between `PUBLISH` and capture
+can change it; capture then refuses rather than weakening the comparison, and
+the restore is an operator wedge, not a retry. Once captured, the volume UUID
+and `ATTR_CMN_FILEID` pair is the durable identity, under the same capability
+gate as provisioning.
+
+The evidence commits write-once to the `reserved` replacement row and is
+re-read before the row advances. The schema cannot require evidence, because
+Linux and Windows replacement rows carry none, so the order is an obligation
+of the macOS commit path: on macOS the replacement row must not advance to
+`companion_synced` until its evidence is durable and re-read, and a selection
+whose replacement row carries no evidence is refused. Policy also refuses
+such a selection on macOS before any write. Selection copies the row's
+evidence into the `restore_selected` provisioning row in the same
+transaction, the replacement row's selection update refuses a missing or
+different copy, and promotion leaves it unchanged. Policy keeps the envelope
+opaque throughout; the caller decodes it against the replacement UUID before
+persisting it. The provisioning insert guard names only replacement columns
+that every released replacement table has, so no trigger refers to the new
+column before a migration creates it.
+
+| Durable observation | Required recovery result |
+| --- | --- |
+| Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed. |
+| `reserved`, evidence present | Re-read exactly and advance; never recapture. |
+| Evidence present, reopened main mismatches it | Fail closed without mutation. |
+| Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
+| `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |
