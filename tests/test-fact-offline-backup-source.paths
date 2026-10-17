@@ -392,6 +392,11 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/commit-publish
+/fact-offline-backup-source/windows/commit-publish-crash-after-rename
+/fact-offline-backup-source/windows/commit-publish-new-main-mismatch
+/fact-offline-backup-source/windows/commit-published-select-refused
+/fact-offline-backup-source/windows/commit-resume-to-published
 /fact-offline-backup-source/windows/commit-retain
 /fact-offline-backup-source/windows/commit-retain-crash-after-rename
 /fact-offline-backup-source/windows/commit-retain-substituted-rollback

@@ -2623,15 +2623,14 @@ test_provisioned_retained_lifecycles (void)
         G_N_ELEMENTS (ready_ops));
 
     if (mode == 0) {
-      /* A restart re-captures the main under the rollback name; the steps
-       * continue on the original transition, which holds the durability a
-       * journal would otherwise carry across the restart. */
-      Transition *restarted
-        = admit_provisioned_retained (provider, &life, &evidence, &req);
-      wyl_fact_artifact_main_transition_free (restarted);
+      /* A restart re-captures the main under the rollback name and admits
+       * it afresh, with no durability, as a restarted commit step does: it
+       * re-flushes the stage before the rollback-side steps. */
+      g_clear_pointer (&tx, wyl_fact_artifact_main_transition_free);
+      tx = admit_provisioned_retained (provider, &life, &evidence, &req);
       const WylFactArtifactMainTransitionOp ops[] = {
-        MT (OP_SYNC_ROLLBACK_FILE), MT (OP_SYNC_RETAIN_DIR), MT (OP_PUBLISH),
-        MT (OP_SYNC_PUBLISH_DIR),
+        MT (OP_SYNC_STAGED), MT (OP_SYNC_ROLLBACK_FILE),
+        MT (OP_SYNC_RETAIN_DIR), MT (OP_PUBLISH), MT (OP_SYNC_PUBLISH_DIR),
       };
       apply_provisioned_ops (provider, tx, &life, &evidence, &req, ops,
           G_N_ELEMENTS (ops));
@@ -2662,11 +2661,12 @@ test_provisioned_retained_lifecycles (void)
 }
 
 /* The rollback name is accepted only for the evidenced object, only for the
- * steps after RETAIN, and only with the staged main at the final name. */
+ * steps after RETAIN, only with the staged main at the final name, and its
+ * stage flush only for the staged main. */
 static void
 test_provisioned_retained_rejects (void)
 {
-  for (guint scenario = 0; scenario < 5; scenario++) {
+  for (guint scenario = 0; scenario < 6; scenario++) {
     Fixture f;
     g_autofree gchar *tag = g_strdup_printf ("retained-reject-%u", scenario);
     fixture_init (&f, tag);
@@ -2714,11 +2714,16 @@ test_provisioned_retained_rejects (void)
         /* A step that only a READY_MAIN capture can authorize. */
         op = MT (OP_RETAIN);
       else if (scenario == 2)
-        op = MT (OP_SYNC_STAGED);
+        /* FINALIZE waits for the provisioning record's cleanup. */
+        op = MT (OP_FINALIZE);
       else if (scenario == 3)
         /* After PUBLISH the main must be the staged main. */
         req.staged_main_identity.object_bytes[3] ^= 1;
-      else
+      else if (scenario == 5) {
+        /* The stage flush after RETAIN takes only the staged main. */
+        op = MT (OP_SYNC_STAGED);
+        authorized.entries[SLOT_STAGE].identity.object_bytes[3] ^= 1;
+      } else
         /* Something at the rollback name, but not the evidenced object. */
         authorized.entries[SLOT_ROLLBACK].identity.object_bytes[3] ^= 1;
       wyl_fact_artifact_transition_windows_set_test_fault (WF (
