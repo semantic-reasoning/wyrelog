@@ -392,6 +392,9 @@
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/sibling-policy-drift
 /fact-offline-backup-source/tenant-selected-cleanup-dispatch/unlink-restart
 /fact-offline-backup-source/unsealed-wal
+/fact-offline-backup-source/windows/commit-retain
+/fact-offline-backup-source/windows/commit-retain-crash-after-rename
+/fact-offline-backup-source/windows/commit-retain-substituted-rollback
 /fact-offline-backup-source/windows/commit-sync-staged
 /fact-offline-backup-source/windows/commit-sync-staged-foreign-main
 /fact-offline-backup-source/windows/commit-sync-staged-missing-evidence
