@@ -16173,6 +16173,132 @@ test_graph_commit_sync_staged_windows (gconstpointer data)
 #endif
 }
 
+/* After the stage sync, RETAIN moves the evidenced old main to the
+ * operation's rollback name and leaves the main name empty, journaled
+ * RETAINED with SYNC_ROLLBACK_FILE next.  A run that renamed and then
+ * stopped resumes from the UNKNOWN attempt with the main already absent; a
+ * rollback name holding a same-bytes object instead is refused with the
+ * journal unchanged. */
+static void
+test_graph_commit_retain_windows (gconstpointer data)
+{
+#ifndef G_OS_WIN32
+  (void) data;
+  g_test_skip ("Windows graph restore retain by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0043";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-retain-win-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = windows_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, decided, 0,
+      &committed), ==, WYRELOG_E_OK);
+  const guint64 synced = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  const WylFactArtifactInventoryIdentity old_main =
+      windows_file_identity (main_path);
+  guint64 revision = synced;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "crash-after-rename")
+      || g_str_equal (mode, "substituted-rollback")) {
+    const gchar *failure = "restore-retain-after-rename";
+    wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
+      (fail_retain_once, &failure);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, synced,
+        0, &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_null (failure);
+    g_assert_null (committed.operation_uuid);
+    /* The rename happened; the completion did not. */
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    WylFactOfflineRestoreJournal pending = { 0 };
+    g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+          (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (pending.revision, ==, synced + 1);
+    g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (pending.graphs, 0))->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+    g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+        g_ptr_array_index (pending.graphs, 0))->pending_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
+    g_autoptr (GBytes) pending_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&pending,
+        &pending_journal), ==, WYRELOG_E_OK);
+    revision = pending.revision;
+    wyl_fact_offline_restore_journal_clear (&pending);
+    if (g_str_equal (mode, "substituted-rollback")) {
+      windows_replace_with_same_bytes (rollback_path);
+      const WylFactArtifactInventoryIdentity substitute =
+          windows_file_identity (rollback_path);
+      g_assert_false (wyl_fact_artifact_inventory_identity_equal (&old_main,
+          &substitute));
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      /* Refused with nothing moved: the main name is still empty and the
+       * substitute still holds the rollback name. */
+      g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+      const WylFactArtifactInventoryIdentity after =
+          windows_file_identity (rollback_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&substitute,
+          &after));
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, revision);
+    }
+  }
+#endif
+  if (!g_str_equal (mode, "substituted-rollback")) {
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, synced + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+    g_assert_cmpint (graph->next_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+    g_assert_cmpint (graph->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+    g_autoptr (GBytes) retained_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &retained_journal), ==, WYRELOG_E_OK);
+    const guint64 retained = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        retained_journal, retained);
+    /* The old main object, not a copy, now holds the rollback name. */
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    const WylFactArtifactInventoryIdentity at_rollback =
+        windows_file_identity (rollback_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &at_rollback));
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -16815,6 +16941,12 @@ main (int argc, char **argv)
       "unbound", test_graph_rollback_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-retain",
+      "retained", test_graph_commit_retain_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-retain-crash-after-rename",
+      "crash-after-rename", test_graph_commit_retain_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-retain-substituted-rollback",
+      "substituted-rollback", test_graph_commit_retain_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged",
       "applied", test_graph_commit_sync_staged_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged-foreign-main",

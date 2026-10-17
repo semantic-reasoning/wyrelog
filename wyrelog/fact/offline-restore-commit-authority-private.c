@@ -5941,11 +5941,12 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
+  const GraphProvenance *provenance;
 } RetainEffectContext;
 
 static wyrelog_error_t
@@ -5980,7 +5981,8 @@ early_commit_begin (wyl_policy_store_t *policy,
 
 static wyrelog_error_t
 retain_capture (WylFactArtifactTransition *provider,
-    const WylFactOfflineRestoreJournal *journal, const gchar *old_uuid,
+    const WylFactOfflineRestoreJournal *journal,
+    const GraphProvenance *provenance,
     WylFactGraphProvisionedRestoreSlot slot,
     WylFactArtifactMainTransitionRequest *out_request,
     WylFactArtifactInventorySnapshot **out_snapshot,
@@ -6005,9 +6007,8 @@ retain_capture (WylFactArtifactTransition *provider,
     .expected_main_identity = graph->expected_main_identity,
     .staged_main_identity = graph->staged_main_identity,
   };
-  rc = wyl_fact_artifact_transition_posix_capture_provisioned (provider,
-          old_uuid, &request, slot, &lifecycle, out_snapshot,
-          out_observation);
+  rc = graph_capture_provisioned (provider, provenance, &request, slot,
+          &lifecycle, out_snapshot, out_observation);
   if (rc == WYRELOG_E_OK)
     *out_request = request;
   return rc;
@@ -6020,6 +6021,11 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
   RetainEffectContext *context = user_data;
   WylFactArtifactTransition *provider = context->provider;
   const WylFactOfflineRestoreJournal *journal = context->journal;
+  const GraphProvenance *provenance = context->provenance;
+  /* The provenance was read before the transaction; the row is the one
+   * the transaction holds. */
+  if (g_strcmp0 (row->old_provisioning_uuid, provenance->uuid) != 0)
+    return WYRELOG_E_BUSY;
   WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
@@ -6037,7 +6043,7 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
   WylFactArtifactMainTransitionRequest request = { 0 };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation before = { 0 };
-  rc = retain_capture (provider, journal, row->old_provisioning_uuid,
+  rc = retain_capture (provider, journal, provenance,
           slot, &request, &snapshot, &before);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -6058,9 +6064,8 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_transition_posix_execute_provisioned
-            (provider, row->old_provisioning_uuid, &request, &before,
-              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
+      rc = graph_execute_provisioned (provider, provenance, &request,
+              &before, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED,
               &effect, &durability);
     if (rc != WYRELOG_E_OK || effect !=
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
@@ -6069,7 +6074,7 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
       return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
     g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
     WylFactArtifactMainTransitionObservation synced = { 0 };
-    rc = retain_capture (provider, journal, row->old_provisioning_uuid,
+    rc = retain_capture (provider, journal, provenance,
             slot, &request, &snapshot, &synced);
     if (rc == WYRELOG_E_OK) {
       synced.durability = durability;
@@ -6084,9 +6089,8 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
             &synced, &result);
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_transition_posix_execute_provisioned
-            (provider, row->old_provisioning_uuid, &request, &synced,
-              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+      rc = graph_execute_provisioned (provider, provenance, &request,
+              &synced, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
               &effect, &durability);
     if (rc != WYRELOG_E_OK || effect !=
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED)
@@ -6105,7 +6109,7 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
 
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   WylFactArtifactMainTransitionObservation retained = { 0 };
-  rc = retain_capture (provider, journal, row->old_provisioning_uuid,
+  rc = retain_capture (provider, journal, provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &retained);
   if (rc != WYRELOG_E_OK)
@@ -6113,9 +6117,8 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
   WylFactArtifactMainTransitionEffect sync_effect =
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   WylFactArtifactMainTransitionDurabilityEvidence sync_durability = { 0 };
-  rc = wyl_fact_artifact_transition_posix_execute_provisioned (provider,
-          row->old_provisioning_uuid, &request, &retained,
-          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+  rc = graph_execute_provisioned (provider, provenance, &request,
+          &retained, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
           &sync_effect, &sync_durability);
   if (rc != WYRELOG_E_OK || sync_effect !=
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_APPLIED
@@ -6131,7 +6134,7 @@ retain_effect (const WylPolicyGraphRestoreReplacementRecord *row,
   }
 #endif
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
-  rc = retain_capture (provider, journal, row->old_provisioning_uuid,
+  rc = retain_capture (provider, journal, provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &retained);
   if (rc != WYRELOG_E_OK)
@@ -6160,7 +6163,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -6173,6 +6176,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
   WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
+  GraphProvenance provenance = { 0 };
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
@@ -6215,6 +6219,8 @@ wyl_fact_offline_restore_graph_commit_retain_run
     rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
   if (rc == WYRELOG_E_OK)
     rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -6288,7 +6294,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
       WylPolicyOfflineRestoreRecord completed = pending;
       completed.revision = desired.revision;
       completed.journal_blob = desired_bytes;
-      RetainEffectContext context = { provider, &journal };
+      RetainEffectContext context = { provider, &journal, &provenance };
       WylPolicyOfflineRestoreStoreResult result =
           WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
       rc = wyl_policy_store_graph_restore_retain_with_effect (policy,
@@ -6326,11 +6332,13 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     gpointer user_data)
 {
   SyncRetainedEffectContext *context = user_data;
+  /* Linux only: the companion link named by the row proves the old main. */
+  const GraphProvenance provenance = { .uuid = row->old_provisioning_uuid };
   WylFactArtifactMainTransitionRequest request = { 0 };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
   wyrelog_error_t rc = retain_capture (context->provider, context->journal,
-          row->old_provisioning_uuid,
+          &provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
@@ -6382,7 +6390,7 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
     WylFactArtifactMainTransitionObservation after = { 0 };
     rc = retain_capture (context->provider, context->journal,
-            row->old_provisioning_uuid,
+            &provenance,
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
             &request, &snapshot, &after);
     if (rc != WYRELOG_E_OK)
@@ -6401,7 +6409,7 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     return WYRELOG_E_POLICY;
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   rc = retain_capture (context->provider, context->journal,
-          row->old_provisioning_uuid,
+          &provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
@@ -6602,8 +6610,10 @@ publish_capture (PublishEffectContext *context,
     WylFactArtifactInventorySnapshot **snapshot,
     WylFactArtifactMainTransitionObservation *observation)
 {
+  /* Linux only: the companion link named by the row proves the old main. */
+  const GraphProvenance provenance = { .uuid = row->old_provisioning_uuid };
   return retain_capture (context->provider, context->journal,
-             row->old_provisioning_uuid,
+             &provenance,
              WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
              request, snapshot, observation);
 }
