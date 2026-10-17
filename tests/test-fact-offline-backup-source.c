@@ -15979,6 +15979,200 @@ test_graph_bind_windows (gconstpointer data)
 #endif
 }
 
+#ifdef G_OS_WIN32
+static wyrelog_error_t
+windows_commit_proof_holds (gpointer user_data)
+{
+  (void) user_data;
+  return WYRELOG_E_OK;
+}
+
+/* Begin, import, a recorded preflight, the bind, the replacement
+ * reservation and the COMMIT decision.  Commit admission refuses on
+ * Windows, so the decision goes through the journal store directly, with a
+ * proof that holds.  Returns the decided revision and its journal bytes. */
+static guint64
+windows_graph_commit_decided (BackupFixture *fixture,
+    DestinationCapture *capture, WylFactOfflineBackupBundle *bundle,
+    const gchar *operation, GBytes **out_decided)
+{
+  WylFactOfflineRestoreJournal journal = { 0 };
+  WylFactOfflineRestoreJournal next = { 0 };
+  WylFactOfflineRestoreStoreResult result;
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture->policy,
+      fixture->root, fixture->runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", operation, TRUE, 0,
+      &journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  windows_graph_import (fixture, capture, operation);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture->policy, operation, &journal), ==, WYRELOG_E_OK);
+  const guint64 imported = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight (&journal,
+      "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (fixture->policy, imported, &journal, &result, &next), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, "zeta",
+      next.revision, 0, &journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&next);
+  WylPolicyGraphRestoreReplacementRecord *reserved = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture->policy, &journal, &result, &reserved), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (reserved->phase, ==, "reserved");
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_decide_graph_commit
+        (fixture->policy, &journal, windows_commit_proof_holds, NULL,
+      &result, &next), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpint (next.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  const guint64 decided = next.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&next,
+      out_decided), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  wyl_fact_offline_restore_journal_clear (&next);
+  return decided;
+}
+#endif
+
+/* On a COMMIT journal bound to the ACTIVE provisioning operation, the first
+ * commit step flushes the restore stage on the evidenced main and leaves the
+ * graph READY for RETAIN.  A run stopped after journaling its attempt
+ * resumes from the UNKNOWN attempt, and a failed flush on the way leaves that
+ * journal alone.  A main replaced by a same-bytes object, and a record
+ * without evidence, are refused before any journal change. */
+static void
+test_graph_commit_sync_staged_windows (gconstpointer data)
+{
+#ifndef G_OS_WIN32
+  (void) data;
+  g_test_skip ("Windows graph restore stage sync by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0042";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-sync-win-XXXXXX", &capture, &bundle_root, &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = windows_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  guint64 revision = decided;
+  WylFactOfflineRestoreJournal committed = { 0 };
+  if (g_str_equal (mode, "foreign-main")
+      || g_str_equal (mode, "missing-evidence")) {
+    /* The replaced main is refused by the provider's capture, the record
+     * without a tuple by the provenance read before the provider opens. */
+    if (g_str_equal (mode, "foreign-main")) {
+      g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+              "facts.duckdb");
+      windows_replace_with_same_bytes (main_path);
+    } else {
+      windows_rewrite_graph_evidence (&fixture,
+          "UPDATE fact_graph_provisioning SET "
+          "windows_operation_evidence_version=NULL,"
+          "windows_graph_volume_serial=NULL,windows_graph_file_id=NULL,"
+          "windows_artifact_volume_serial=NULL,windows_artifact_file_id=NULL "
+          "WHERE tenant_id='tenant-a' AND graph_id='zeta';");
+    }
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        decided, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        decided_journal, decided);
+  } else {
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (g_str_equal (mode, "unknown-retry")) {
+      gboolean began = FALSE;
+      wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+        (fail_sync_staged_after_begin_once, &began);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          decided, 0, &committed), ==, WYRELOG_E_IO);
+      wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+        (NULL, NULL);
+      g_assert_true (began);
+      g_assert_null (committed.operation_uuid);
+      WylFactOfflineRestoreJournal pending = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (pending.revision, ==, decided + 1);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (pending.graphs, 0))->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (pending.graphs, 0))->pending_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED);
+      g_autoptr (GBytes) pending_journal = NULL;
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&pending,
+          &pending_journal), ==, WYRELOG_E_OK);
+      revision = pending.revision;
+      wyl_fact_offline_restore_journal_clear (&pending);
+      /* A failed flush of the resumed attempt leaves it journaled as it
+       * was. */
+      wyl_fact_artifact_transition_windows_set_test_fault
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_BUSY);
+      g_assert_true (wyl_fact_artifact_transition_windows_test_fault_was_consumed
+            (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC));
+      wyl_fact_artifact_transition_windows_set_test_fault
+        (WYL_FACT_ARTIFACT_TRANSITION_WINDOWS_TEST_FAULT_NONE);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, revision);
+    }
+#endif
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    /* The attempt is begun and then completed: two revisions either way. */
+    g_assert_cmpuint (committed.revision, ==, decided + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+    g_assert_cmpint (graph->next_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
+    g_assert_cmpint (graph->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+    g_assert_cmpint (graph->pending_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+    g_autoptr (GBytes) synced_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &synced_journal), ==, WYRELOG_E_OK);
+    const guint64 synced = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        synced_journal, synced);
+    /* The completed step does not run again, neither from the revision it
+     * left nor from the one it wrote, whose next step is RETAIN. */
+    const guint64 reruns[] = { revision, synced };
+    for (guint i = 0; i < G_N_ELEMENTS (reruns); i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          reruns[i], 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          synced_journal, synced);
+    }
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -16621,6 +16815,14 @@ main (int argc, char **argv)
       "unbound", test_graph_rollback_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged",
+      "applied", test_graph_commit_sync_staged_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged-foreign-main",
+      "foreign-main", test_graph_commit_sync_staged_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged-missing-evidence",
+      "missing-evidence", test_graph_commit_sync_staged_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-sync-staged-unknown-retry",
+      "unknown-retry", test_graph_commit_sync_staged_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/graph-bind",
       "bind", test_graph_bind_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/graph-bind-foreign-main",
