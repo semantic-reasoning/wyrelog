@@ -16299,6 +16299,235 @@ test_graph_commit_retain_windows (gconstpointer data)
 #endif
 }
 
+#ifdef G_OS_WIN32
+/* Runs a decided Windows graph commit through the stage sync, RETAIN and
+ * both rollback-side syncs, leaving it RETAINED with PUBLISH next. */
+static guint64
+windows_graph_commit_publishable (BackupFixture *fixture,
+    const gchar *operation, guint64 decided)
+{
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, decided,
+      0, &committed), ==, WYRELOG_E_OK);
+  guint64 revision = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      revision, 0, &committed), ==, WYRELOG_E_OK);
+  revision = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  const WylFactArtifactMainTransitionOp next[] = {
+    WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+    WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (next); i++) {
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+          (fixture->policy, fixture->root, fixture->runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, revision + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+    g_assert_cmpint (graph->next_op, ==, next[i]);
+    revision = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+  }
+  return revision;
+}
+
+/* The journal is PUBLISHED_DURABLE with FINALIZE next; the staged object,
+ * by FileId, holds the main name and the old main the rollback name. */
+static void
+assert_windows_published_durable (const WylFactOfflineRestoreJournal *journal,
+    const gchar *main_path, const gchar *rollback_path,
+    const WylFactArtifactInventoryIdentity *old_main)
+{
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal->graphs, 0);
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE);
+  g_assert_cmpint (graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+  g_assert_cmpint (graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  const WylFactArtifactInventoryIdentity at_main =
+      windows_file_identity (main_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&at_main,
+      &graph->staged_main_identity));
+  const WylFactArtifactInventoryIdentity at_rollback =
+      windows_file_identity (rollback_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&at_rollback,
+      old_main));
+}
+#endif
+
+/* After RETAIN the rollback-side syncs, PUBLISH and the directory flush
+ * leave the staged object at the main name and the old main at the rollback
+ * name, journaled PUBLISHED_DURABLE; the resume dispatcher reaches the same
+ * point from the stage sync, and the post-publish selection stays refused on
+ * Windows.  A published main that is not the staged object is refused with
+ * the flush left pending, and a run stopped after the publish rename resumes
+ * to PUBLISHED_DURABLE. */
+static void
+test_graph_commit_publish_windows (gconstpointer data)
+{
+#ifndef G_OS_WIN32
+  (void) data;
+  g_test_skip ("Windows graph restore publish by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0044";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  windows_restore_fixture_init (&fixture,
+      "wyl-offline-restore-publish-win-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = windows_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  const WylFactArtifactInventoryIdentity old_main =
+      windows_file_identity (main_path);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  if (g_str_equal (mode, "resume") || g_str_equal (mode, "select-refused")) {
+    /* Six steps, each a begin and a completion. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, decided,
+        0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, decided + 12);
+    assert_windows_published_durable (&committed, main_path, rollback_path,
+        &old_main);
+    g_autoptr (GBytes) published_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &published_journal), ==, WYRELOG_E_OK);
+    const guint64 published = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    if (g_str_equal (mode, "select-refused")) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_select_resume_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          published, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+    }
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        published_journal, published);
+  } else {
+    const guint64 publishable = windows_graph_commit_publishable (&fixture,
+            operation, decided);
+    guint64 revision = publishable;
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (g_str_equal (mode, "crash-after-publish")) {
+      const gchar *failure = "restore-publish-after-rename";
+      wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+        (fail_retain_once, &failure);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_IO);
+      wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+        (NULL, NULL);
+      g_assert_null (failure);
+      g_assert_null (committed.operation_uuid);
+      WylFactOfflineRestoreJournal pending = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (pending.revision, ==, publishable + 1);
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (pending.graphs, 0);
+      g_assert_cmpint (graph->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+      g_assert_cmpint (graph->pending_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
+      /* The rename happened; the completion did not. */
+      const WylFactArtifactInventoryIdentity at_main =
+          windows_file_identity (main_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&at_main,
+          &graph->staged_main_identity));
+      revision = pending.revision;
+      wyl_fact_offline_restore_journal_clear (&pending);
+      /* The resumed PUBLISH and the directory flush, two completions. */
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, revision + 3);
+      assert_windows_published_durable (&committed, main_path,
+          rollback_path, &old_main);
+      wyl_fact_offline_restore_journal_clear (&committed);
+    }
+#endif
+    if (g_str_equal (mode, "published")
+        || g_str_equal (mode, "new-main-mismatch")) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, publishable + 2);
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (committed.graphs, 0);
+      g_assert_cmpint (graph->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED);
+      g_assert_cmpint (graph->next_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR);
+      revision = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+      if (g_str_equal (mode, "new-main-mismatch")) {
+        /* Same bytes at the main name, but not the staged object. */
+        windows_replace_with_same_bytes (main_path);
+        const WylFactArtifactInventoryIdentity substitute =
+            windows_file_identity (main_path);
+        g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            revision, 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        /* The run journals its attempt before the effect refuses, so the
+         * directory flush is left pending for a fresh run to classify. */
+        WylFactOfflineRestoreJournal pending = { 0 };
+        g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+              (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+        g_assert_cmpuint (pending.revision, ==, revision + 1);
+        const WylFactOfflineRestoreJournalGraph *refused =
+            g_ptr_array_index (pending.graphs, 0);
+        g_assert_cmpint (refused->transition_state, ==,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED);
+        g_assert_cmpint (refused->attempt, ==,
+            WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+        g_assert_cmpint (refused->pending_op, ==,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR);
+        wyl_fact_offline_restore_journal_clear (&pending);
+        const WylFactArtifactInventoryIdentity after =
+            windows_file_identity (main_path);
+        g_assert_true (wyl_fact_artifact_inventory_identity_equal
+              (&substitute, &after));
+      } else {
+        g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            revision, 0, &committed), ==, WYRELOG_E_OK);
+        g_assert_cmpuint (committed.revision, ==, revision + 2);
+        assert_windows_published_durable (&committed, main_path,
+            rollback_path, &old_main);
+        g_autoptr (GBytes) durable_journal = NULL;
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+            &durable_journal), ==, WYRELOG_E_OK);
+        const guint64 durable = committed.revision;
+        wyl_fact_offline_restore_journal_clear (&committed);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            durable_journal, durable);
+      }
+    }
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  windows_remove_bundle (bundle_root, &capture);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -16941,6 +17170,16 @@ main (int argc, char **argv)
       "unbound", test_graph_rollback_windows);
   g_test_add_func ("/fact-offline-backup-source/windows/restore-begin",
       test_restore_begin_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-publish",
+      "published", test_graph_commit_publish_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-publish-crash-after-rename",
+      "crash-after-publish", test_graph_commit_publish_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-publish-new-main-mismatch",
+      "new-main-mismatch", test_graph_commit_publish_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-published-select-refused",
+      "select-refused", test_graph_commit_publish_windows);
+  g_test_add_data_func ("/fact-offline-backup-source/windows/commit-resume-to-published",
+      "resume", test_graph_commit_publish_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/commit-retain",
       "retained", test_graph_commit_retain_windows);
   g_test_add_data_func ("/fact-offline-backup-source/windows/commit-retain-crash-after-rename",

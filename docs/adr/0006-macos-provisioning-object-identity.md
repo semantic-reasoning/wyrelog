@@ -250,7 +250,11 @@ that `RETAIN` was applied, and the journal, not the slot, is what records it.
 So the evidence form of the provisioned capture and execute admit
 `RETAINED_ROLLBACK` on Windows and authorize only the steps that follow
 `RETAIN` (`SYNC_ROLLBACK_FILE`, `SYNC_RETAIN_DIR`, `PUBLISH`,
-`SYNC_PUBLISH_DIR`, `ROLLBACK`). Every one of them renames onto an absent name
+`SYNC_PUBLISH_DIR`, `ROLLBACK`) and `SYNC_STAGED`. The transition machine
+holds durability only in memory, so a transition admitted afresh after
+`RETAIN`, as each restarted commit step's is, flushes the stage again before
+the steps that follow; the stage it flushes must be the request's staged main.
+Every one of them renames onto an absent name
 or flushes; `FINALIZE`, the only delete, stays refused for a provisioned main
 until the provisioning record's cleanup is journaled. `PUBLISH` re-pins the
 stage it moves, not the object at the rollback name, so a caller must

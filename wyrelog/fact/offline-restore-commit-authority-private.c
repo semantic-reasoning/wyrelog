@@ -5636,7 +5636,7 @@ wyl_fact_offline_restore_graph_commit_resume_run
       || expected_revision == 0 || expected_revision >= G_MAXINT64
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -6319,11 +6319,12 @@ wyl_fact_offline_restore_graph_commit_retain_run
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
+  const GraphProvenance *provenance;
   WylFactArtifactMainTransitionOp target;
 } SyncRetainedEffectContext;
 
@@ -6332,13 +6333,16 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     gpointer user_data)
 {
   SyncRetainedEffectContext *context = user_data;
-  /* Linux only: the companion link named by the row proves the old main. */
-  const GraphProvenance provenance = { .uuid = row->old_provisioning_uuid };
+  /* The provenance was read before the transaction; the row is the one
+   * the transaction holds. */
+  if (g_strcmp0 (row->old_provisioning_uuid,
+      context->provenance->uuid) != 0)
+    return WYRELOG_E_BUSY;
   WylFactArtifactMainTransitionRequest request = { 0 };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
   wyrelog_error_t rc = retain_capture (context->provider, context->journal,
-          &provenance,
+          context->provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
@@ -6369,9 +6373,9 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_transition_posix_execute_provisioned
-            (context->provider, row->old_provisioning_uuid, &request,
-              &observation, operation, &effect, &durability);
+      rc = graph_execute_provisioned (context->provider,
+              context->provenance, &request, &observation, operation,
+              &effect, &durability);
     WylFactArtifactMainTransitionDurability proven = i == 0
       ? durability.staged_file : i == 1
       ? durability.rollback_file : durability.directory_after_retain;
@@ -6390,7 +6394,7 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
     WylFactArtifactMainTransitionObservation after = { 0 };
     rc = retain_capture (context->provider, context->journal,
-            &provenance,
+            context->provenance,
             WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
             &request, &snapshot, &after);
     if (rc != WYRELOG_E_OK)
@@ -6409,7 +6413,7 @@ sync_retained_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     return WYRELOG_E_POLICY;
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   rc = retain_capture (context->provider, context->journal,
-          &provenance,
+          context->provenance,
           WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
           &request, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
@@ -6438,7 +6442,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -6451,6 +6455,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
   WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
+  GraphProvenance provenance = { 0 };
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
@@ -6494,6 +6499,8 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
     rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
   if (rc == WYRELOG_E_OK)
     rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -6569,7 +6576,9 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
       WylPolicyOfflineRestoreRecord completed = pending;
       completed.revision = desired.revision;
       completed.journal_blob = desired_bytes;
-      SyncRetainedEffectContext context = { provider, &journal, operation };
+      SyncRetainedEffectContext context = {
+        provider, &journal, &provenance, operation,
+      };
       WylPolicyOfflineRestoreStoreResult result =
           WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
       rc = wyl_policy_store_graph_restore_sync_retained_with_effect
@@ -6595,25 +6604,23 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
 #endif
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactArtifactTransition *provider;
   const WylFactOfflineRestoreJournal *journal;
+  const GraphProvenance *provenance;
   WylFactArtifactMainTransitionOp target;
 } PublishEffectContext;
 
 static wyrelog_error_t
 publish_capture (PublishEffectContext *context,
-    const WylPolicyGraphRestoreReplacementRecord *row,
     WylFactArtifactMainTransitionRequest *request,
     WylFactArtifactInventorySnapshot **snapshot,
     WylFactArtifactMainTransitionObservation *observation)
 {
-  /* Linux only: the companion link named by the row proves the old main. */
-  const GraphProvenance provenance = { .uuid = row->old_provisioning_uuid };
   return retain_capture (context->provider, context->journal,
-             &provenance,
+             context->provenance,
              WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
              request, snapshot, observation);
 }
@@ -6623,10 +6630,15 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
     gpointer user_data)
 {
   PublishEffectContext *context = user_data;
+  /* The provenance was read before the transaction; the row is the one
+   * the transaction holds. */
+  if (g_strcmp0 (row->old_provisioning_uuid,
+      context->provenance->uuid) != 0)
+    return WYRELOG_E_BUSY;
   WylFactArtifactMainTransitionRequest request = { 0 };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
-  wyrelog_error_t rc = publish_capture (context, row, &request,
+  wyrelog_error_t rc = publish_capture (context, &request,
           &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -6654,8 +6666,8 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
           WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
       WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
       if (rc == WYRELOG_E_OK)
-        rc = wyl_fact_artifact_transition_posix_execute_provisioned
-              (context->provider, row->old_provisioning_uuid, &request,
+        rc = graph_execute_provisioned
+              (context->provider, context->provenance, &request,
                 &observation, operation, &effect, &durability);
       WylFactArtifactMainTransitionDurability proven = i == 0
         ? durability.staged_file : i == 1
@@ -6666,7 +6678,7 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
         return rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : rc;
       g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
       WylFactArtifactMainTransitionObservation after = { 0 };
-      rc = publish_capture (context, row, &request, &snapshot, &after);
+      rc = publish_capture (context, &request, &snapshot, &after);
       if (rc != WYRELOG_E_OK)
         return rc;
       after.durability = durability;
@@ -6686,8 +6698,8 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
         WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
     WylFactArtifactMainTransitionDurabilityEvidence rename_durability = { 0 };
     if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_transition_posix_execute_provisioned
-            (context->provider, row->old_provisioning_uuid, &request,
+      rc = graph_execute_provisioned
+            (context->provider, context->provenance, &request,
               &observation, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
               &rename_effect, &rename_durability);
     if (rc != WYRELOG_E_OK || rename_effect !=
@@ -6703,7 +6715,7 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
 #endif
     g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
     WylFactArtifactMainTransitionObservation after = { 0 };
-    rc = publish_capture (context, row, &request, &snapshot, &after);
+    rc = publish_capture (context, &request, &snapshot, &after);
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_artifact_main_transition_record (transition,
               WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH, rename_effect,
@@ -6726,8 +6738,8 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   WylFactArtifactMainTransitionDurabilityEvidence sync_durability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_execute_provisioned
-          (context->provider, row->old_provisioning_uuid, &request,
+    rc = graph_execute_provisioned
+          (context->provider, context->provenance, &request,
             &observation,
             WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
             &sync_effect, &sync_durability);
@@ -6746,7 +6758,7 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
 #endif
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   WylFactArtifactMainTransitionObservation after_sync = { 0 };
-  rc = publish_capture (context, row, &request, &snapshot, &after_sync);
+  rc = publish_capture (context, &request, &snapshot, &after_sync);
   if (rc != WYRELOG_E_OK)
     return rc;
   after_sync.durability = sync_durability;
@@ -6757,7 +6769,7 @@ publish_effect (const WylPolicyGraphRestoreReplacementRecord *row,
       WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE)
     return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
-  rc = publish_capture (context, row, &request, &snapshot, &observation);
+  rc = publish_capture (context, &request, &snapshot, &observation);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autoptr (WylFactArtifactMainTransition) verified = NULL;
@@ -6783,7 +6795,7 @@ wyl_fact_offline_restore_graph_commit_publish_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifndef __linux__
+#if !defined(__linux__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -6796,6 +6808,7 @@ wyl_fact_offline_restore_graph_commit_publish_run
   WylFactArtifactTransition *provider = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) encoded = NULL;
+  GraphProvenance provenance = { 0 };
   wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
@@ -6840,6 +6853,8 @@ wyl_fact_offline_restore_graph_commit_publish_run
     rc = wyl_fact_offline_restore_journal_encode (&journal, &encoded);
   if (rc == WYRELOG_E_OK)
     rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -6917,7 +6932,9 @@ wyl_fact_offline_restore_graph_commit_publish_run
       WylPolicyOfflineRestoreRecord completed = pending;
       completed.revision = desired.revision;
       completed.journal_blob = desired_bytes;
-      PublishEffectContext context = { provider, &journal, operation };
+      PublishEffectContext context = {
+        provider, &journal, &provenance, operation,
+      };
       WylPolicyOfflineRestoreStoreResult result =
           WYL_POLICY_OFFLINE_RESTORE_STORE_CONFLICT;
       rc = wyl_policy_store_graph_restore_publish_with_effect

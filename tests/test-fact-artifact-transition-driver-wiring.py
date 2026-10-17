@@ -192,7 +192,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-posix.c":
         "44f314b3666522480971d9e3b8d6b22dfdd8f2d97373f47505f32d13697684ba",
     "tests/test-fact-artifact-transition-windows.c":
-        "2bc408d5e2b1eb4dc0f2ccdca00f51ddefd2abcd1bf07b6e886035e0fdac00bc",
+        "72453fde83d4bd1571efb26e69cafe36b751c290516884be8c84b9651dc02561",
 }
 
 WINDOWS_AUTHORITY_BODY_SHA256 = (
