@@ -1644,17 +1644,20 @@ wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
           provisioning_uuid, evidence, request, authorized, &slot);
   if (rc != WYRELOG_E_OK)
     return rc;
-  /* Each slot admits only the steps that can follow from it.  FINALIZE is
-   * in neither list, as on POSIX, until the provisioning record's cleanup
-   * is journaled. */
-  gboolean allowed = slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
-      ? op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
-      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+  /* Each slot admits only the steps that can follow from it.  SYNC_STAGED
+   * is in both: a transition admitted afresh after RETAIN, as each
+   * restarted commit step's is, holds no durability and re-flushes the
+   * stage first, which the evidence check above has bound to the request's
+   * staged main.  FINALIZE is in neither list, as on POSIX, until the
+   * provisioning record's cleanup is journaled. */
+  gboolean allowed = op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      || (slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      ? op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
       : op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
       || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
       || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
       || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
-      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK;
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK);
   if (!allowed)
     return WYRELOG_E_POLICY;
   /* The public execute revalidates authority, binds the authorization, and

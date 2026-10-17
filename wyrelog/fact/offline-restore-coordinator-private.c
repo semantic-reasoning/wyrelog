@@ -405,7 +405,6 @@ wyl_fact_offline_restore_import_set_checkpoint_for_test
 }
 #endif
 
-#ifndef G_OS_WIN32
 static wyrelog_error_t
 import_check_destination (wyl_policy_store_t *policy,
     WylFactGraphRuntimeManager *runtime, const WylFactGraphKey *key,
@@ -481,7 +480,6 @@ import_copy (const WylFactOfflineRestoreInput *input, gpointer data,
   wyrelog_error_t rc = input->read_at (offset, buffer, 1, &received, data);
   return rc != WYRELOG_E_OK ? rc : received == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
-#endif
 
 wyrelog_error_t
 wyl_fact_offline_restore_graph_import_run
@@ -502,11 +500,6 @@ wyl_fact_offline_restore_graph_import_run
       || input == NULL || input->read_at == NULL || input->revalidate == NULL
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  (void) drain_timeout_us;
-  (void) input_data;
-  return WYRELOG_E_POLICY;
-#else
   g_autoptr (WylFactRootWriterLease) lease = NULL;
   g_auto (WylFactOfflineRestoreJournal) journal = { 0 };
   g_autoptr (GBytes) journal_bytes = NULL;
@@ -592,7 +585,6 @@ wyl_fact_offline_restore_graph_import_run
   wyl_fact_graph_quiescence_token_release (quiescence);
   wyl_fact_graph_key_clear (&key);
   return rc;
-#endif
 }
 
 #if defined(__linux__) || defined(__APPLE__)

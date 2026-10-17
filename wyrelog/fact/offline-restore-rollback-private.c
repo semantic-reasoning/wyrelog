@@ -3,7 +3,7 @@
 
 #include <string.h>
 
-#include "fact/graph-artifact-transition-posix-private.h"
+#include "fact/graph-artifact-transition-platform-private.h"
 #ifdef __APPLE__
 #include "fact/graph-locator-darwin-private.h"
 #endif
@@ -11,7 +11,6 @@
 #include "fact/offline-restore-stage-private.h"
 #include "fact/root-writer-lease-private.h"
 
-#ifndef G_OS_WIN32
 #ifdef WYL_TEST_HANDLE_SEAMS
 static wyrelog_error_t (*rollback_checkpoint)
   (WylFactOfflineRestoreRollbackCheckpoint, gpointer);
@@ -47,7 +46,7 @@ typedef struct
   WylFactGraphDirectory directory;
   WylFactGraphProvisionedPair *pair;
   gchar *provisioning_uuid;
-  WylFactArtifactTransitionPosix *provider;
+  WylFactArtifactTransition *provider;
   guint selected_index;
   /* Set only for ROLLBACK_ADMIT_ORPHAN, after the orphan proof. */
   WylFactArtifactInventoryIdentity orphan_identity;
@@ -62,7 +61,7 @@ selected_graph (GraphRollback *rollback)
 static void
 rollback_graph_resources_clear (GraphRollback *rollback)
 {
-  g_clear_pointer (&rollback->provider, wyl_fact_artifact_transition_posix_free);
+  g_clear_pointer (&rollback->provider, wyl_fact_artifact_transition_free);
   g_clear_pointer (&rollback->pair, wyl_fact_graph_provisioned_pair_free);
   g_clear_pointer (&rollback->provisioning_uuid, g_free);
   wyl_fact_graph_directory_clear (&rollback->directory);
@@ -186,6 +185,14 @@ open_active_pair (GraphRollback *rollback)
     rc = wyl_fact_graph_directory_open_darwin_provisioned_pair_exact_with_evidence
           (&rollback->directory, selected->op_uuid, &evidence,
             &rollback->pair);
+#elif defined(G_OS_WIN32)
+  /* As the Windows backup source and restore begin do: the pair is opened
+   * from the operation evidence on the ACTIVE record, never by name. */
+  if (!selected->has_windows_evidence)
+    return WYRELOG_E_POLICY;
+  rc = wyl_fact_graph_directory_open_provisioned_pair_exact_with_evidence
+        (&rollback->directory, selected->op_uuid, &selected->windows_evidence,
+          &rollback->pair);
 #else
   rc = wyl_fact_graph_directory_open_provisioned_pair_exact
         (&rollback->directory, selected->op_uuid, &rollback->pair);
@@ -391,12 +398,12 @@ recover_unbound_callback (gpointer user_data)
 static wyrelog_error_t
 open_provider (GraphRollback *rollback)
 {
-  WylFactArtifactTransitionPosixCapability capability = { 0 };
-  wyrelog_error_t rc = wyl_fact_artifact_transition_posix_probe_capability
+  WylFactArtifactTransitionCapability capability = { 0 };
+  wyrelog_error_t rc = wyl_fact_artifact_transition_probe_capability
         (&rollback->directory, rollback->journal.operation_uuid,
           &capability);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_open (&rollback->resolver,
+    rc = wyl_fact_artifact_transition_open (&rollback->resolver,
             &rollback->directory, rollback->lease,
             rollback->journal.operation_uuid, &capability,
             &rollback->provider);
@@ -446,12 +453,12 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
 {
   *out_admitted = FALSE;
   wyrelog_error_t rc = open_provider (rollback);
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   WylFactArtifactMainTransitionObservation observation = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
+    rc = wyl_fact_artifact_transition_observe (rollback->provider,
             &lifecycle, &observation);
   const WylFactArtifactMainTransitionEntryEvidence *stage
     = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
@@ -463,7 +470,7 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
   if (rc == WYRELOG_E_OK) {
     WylFactArtifactMainTransitionRequest request = request_for (rollback,
             &observation);
-    rc = wyl_fact_artifact_transition_posix_with_unbound_absence
+    rc = wyl_fact_artifact_transition_with_unbound_absence
           (rollback->provider, rollback->pair, &request, &lifecycle,
             recover_unbound_callback, rollback);
   }
@@ -473,20 +480,22 @@ recover_unbound (GraphRollback *rollback, gboolean *out_admitted)
 static wyrelog_error_t
 retire_stage (GraphRollback *rollback)
 {
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation before = { 0 };
   wyrelog_error_t rc = check_current (rollback);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_capture (rollback->provider,
+    rc = wyl_fact_artifact_transition_capture (rollback->provider,
             &lifecycle, &snapshot, &before);
   if (rc != WYRELOG_E_OK)
     return rc;
   WylFactArtifactMainTransitionRequest request = request_for (rollback,
           &before);
-#ifndef __APPLE__
+  /* A macOS or Windows provisioned main has one link, so the link-two
+   * companion retire has no meaning there; the ordinary path below runs. */
+#if !defined(__APPLE__) && !defined(G_OS_WIN32)
   if (rollback->pair != NULL) {
     WylFactArtifactMainTransitionEffect effect
       = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
@@ -502,7 +511,7 @@ retire_stage (GraphRollback *rollback)
   }
 #endif
   if (!before.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE].present)
-    return wyl_fact_artifact_transition_posix_with_retired_stage_recovery
+    return wyl_fact_artifact_transition_with_retired_stage_recovery
              (rollback->provider, &request, &lifecycle,
                recover_absent_callback, rollback);
 
@@ -524,7 +533,7 @@ retire_stage (GraphRollback *rollback)
     = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
   WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_execute (rollback->provider,
+    rc = wyl_fact_artifact_transition_execute (rollback->provider,
             &before, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETIRE_STAGE,
             &effect, &durability);
   if (rc != WYRELOG_E_OK)
@@ -535,7 +544,7 @@ retire_stage (GraphRollback *rollback)
     return WYRELOG_E_BUSY;
 
   WylFactArtifactMainTransitionObservation after = { 0 };
-  rc = wyl_fact_artifact_transition_posix_observe (rollback->provider,
+  rc = wyl_fact_artifact_transition_observe (rollback->provider,
           &lifecycle, &after);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_main_transition_record (transition,
@@ -562,13 +571,13 @@ verify_completed_stage_absent (GraphRollback *rollback)
 {
   wyrelog_error_t rc = rollback->provider == NULL
     ? open_provider (rollback) : WYRELOG_E_OK;
-  WylFactArtifactTransitionPosixLifecycle lifecycle = {
+  WylFactArtifactTransitionLifecycle lifecycle = {
     .sealed = TRUE, .main_binding_live = FALSE,
   };
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_transition_posix_capture (rollback->provider,
+    rc = wyl_fact_artifact_transition_capture (rollback->provider,
             &lifecycle, &snapshot, &observation);
   if (rc == WYRELOG_E_OK)
     rc = check_current (rollback);
@@ -585,7 +594,6 @@ verify_completed_stage_absent (GraphRollback *rollback)
   }
   return rc;
 }
-#endif
 
 static wyrelog_error_t
 rollback_one_run
@@ -602,10 +610,6 @@ rollback_one_run
       || *operation_uuid == '\0' || expected_revision == 0
       || expected_revision >= G_MAXINT64 || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   GraphRollback rollback = {
     .policy = policy, .runtime = runtime_manager,
     .selected_index = selected_index,
@@ -733,7 +737,6 @@ rollback_one_run
   }
   rollback_clear (&rollback);
   return rc;
-#endif
 }
 
 wyrelog_error_t
@@ -842,10 +845,6 @@ wyl_fact_offline_restore_rollback_release_run
       || *operation_uuid == '\0' || expected_revision == 0
       || expected_revision >= G_MAXINT64)
     return WYRELOG_E_INVALID;
-#ifdef G_OS_WIN32
-  (void) drain_timeout_us;
-  return WYRELOG_E_POLICY;
-#else
   WylFactRootWriterLease *lease = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactOfflineRestoreJournal journal = { 0 };
@@ -869,6 +868,12 @@ wyl_fact_offline_restore_rollback_release_run
       || wyl_fact_offline_restore_journal_recovery (&journal)
       != WYL_FACT_OFFLINE_RESTORE_RECOVERY_COMPLETE))
     rc = WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+  /* Tenant rollback is not ported to Windows, so no tenant journal can have
+   * reached a releasable state through it. */
+  if (rc == WYRELOG_E_OK && journal.scope != WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH)
+    rc = WYRELOG_E_POLICY;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc == WYRELOG_E_OK)
@@ -940,5 +945,4 @@ wyl_fact_offline_restore_rollback_release_run
   g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
   wyl_fact_offline_restore_journal_clear (&journal);
   return rc;
-#endif
 }

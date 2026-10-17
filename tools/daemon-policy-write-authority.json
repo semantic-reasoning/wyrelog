@@ -1,8 +1,8 @@
 {
-  "aggregate": "79119a6a24cb9a0cae0054dbb2cfe8f46f313f33f642a43dd0dfac6e0f1b2b18",
+  "aggregate": "a5f55a09dd354d16c38527f2dda8c2cd8e17c91ce4385ad89aa7138f8961b7e9",
   "directives": {
     "count": 567,
-    "sha256": "7fec80d2846fe5dd251fe4d0f1eeb88b6d52a2cda74c28573b97bb53a8c344bb"
+    "sha256": "2d3dd1da5fdffdada05d0e383ce121c9fd168130ab183bb8568dca5b2451c8ae"
   },
   "functions": {
     "direct_permission_mutation_handler": "96a5a83b20c41cb6c2aef671c721d732730956cf2026d7308b0442c045c18e31",
@@ -11,7 +11,7 @@
     "facts_graph_update_commit": "b73502378cee3065442503769dadd2c701bf60a377de15c0ee29932a08e7f687",
     "facts_graph_update_handler": "2241a4bf751534bc4388bba06b143fb40d0175fc88c2f20d8ca5f806b31a9c3e",
     "facts_quota_handler": "9ff4f019e3007fcf028c21f19e292a2d877c2110fd66291b514c05c3807a181f",
-    "facts_route_handler": "a32b7ebff753a1edf9a961bb2705c6cb769b86515f5ec9c700649afbf653f6e6",
+    "facts_route_handler": "e590802138eede42865d0bff5df27d69e0136b8fc55560964a39b421f5c56146",
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
     "graph_seal_handler": "d05b56e29f9dd57178b0615664422bbfa5e095428beb1f608ed97769b88d99b5",
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
