@@ -278,6 +278,65 @@ local_invalid_principal_list (WylClient *client)
 }
 
 static wyrelog_error_t
+local_invalid_management_arm (WylClient *client)
+{
+  return wyl_client_service_management_authority_arm (client, 123,
+             "not-a-class", 10);
+}
+
+/* #1269: a success answer must carry "ok":true, the request carries no body,
+ * and a refusal keeps the daemon's error code. */
+static void
+check_service_management_arm (TestHttpServer *http, WylClient *client)
+{
+  http->status = 0;
+  http->body = "{\"ok\":true}";
+  g_assert_cmpint (wyl_client_service_management_authority_arm (client, 123,
+      "trusted", 29), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (http->last_method, ==, "POST");
+  g_assert_cmpstr (http->last_path, ==, "/service-management-authority/arm");
+  g_assert_cmpstr (http->last_guard_timestamp, ==, "123");
+  g_assert_cmpstr (http->last_guard_loc_class, ==, "trusted");
+  g_assert_cmpstr (http->last_guard_risk, ==, "29");
+  g_assert_true (http->last_body == NULL || http->last_body[0] == '\0');
+  g_assert_true (client_last_response_is (client, 200, NULL));
+
+  static const gchar *const not_ok[] = {
+    "{\"ok\":false}", "{}", "not json",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (not_ok); i++) {
+    http->body = not_ok[i];
+    g_assert_cmpint (wyl_client_service_management_authority_arm (client,
+        123, "trusted", 29), ==, WYRELOG_E_IO);
+  }
+
+  static const struct
+  {
+    guint status;
+    const gchar *code;
+    wyrelog_error_t rc;
+  } refusals[] = {
+    {400, "invalid_service_authority_request", WYRELOG_E_INVALID},
+    {401, "service_authority_auth_required", WYRELOG_E_AUTH},
+    {403, "service_authority_denied", WYRELOG_E_POLICY},
+    {500, "service_authority_failed", WYRELOG_E_IO},
+    {503, "service_authority_failed", WYRELOG_E_IO},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (refusals); i++) {
+    g_autofree gchar *body = g_strdup_printf ("{\"error\":\"%s\"}",
+            refusals[i].code);
+    http->status = refusals[i].status;
+    http->body = body;
+    g_assert_cmpint (wyl_client_service_management_authority_arm (client,
+        123, "trusted", 29), ==, refusals[i].rc);
+    g_assert_true (client_last_response_is (client, refusals[i].status,
+        refusals[i].code));
+  }
+  http->status = 0;
+  http->body = "{\"ok\":true}";
+}
+
+static wyrelog_error_t
 local_invalid_principal_disable (WylClient *client)
 {
   return wyl_client_service_principal_disable (client, "invalid", 123,
@@ -2266,6 +2325,7 @@ main (void)
   static const LocalInvalidServiceManagementCall local_invalid_calls[] = {
     local_invalid_principal_create,
     local_invalid_principal_list,
+    local_invalid_management_arm,
     local_invalid_principal_disable,
     local_invalid_credential_get,
     local_invalid_credential_get_for_tenant,
@@ -2406,6 +2466,7 @@ main (void)
       || g_strcmp0 (http.last_path, "/service-principals") != 0
       || !client_last_response_is (management_client, 200, NULL))
     return wyl_test_normalize_exit_status (233);
+  check_service_management_arm (&http, management_client);
   guint principal_success_request_count = http.request_count;
   if (wyl_client_service_principal_list (management_client, 123, "public", 49,
       NULL) != WYRELOG_E_INVALID
