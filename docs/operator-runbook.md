@@ -2416,10 +2416,16 @@ answers every tenant create, seal and unseal, for any tenant, with `503
 tenant_mutation_unavailable`, and wyctl says so. The failed command may be the
 one that just got that answer: a seal that fails after its own commit installs
 the repair and answers the same way. The same answer can also mean the daemon
-was momentarily busy, so repeating is safe either way. Create and unseal are
-safe to repeat: once done they answer `changed=false`. So after a 5xx or no
-answer, repeat the same command before anything else. A seal can also answer
+was momentarily busy, so repeating is safe either way. Create is safe to
+repeat: once done it answers `changed=false`. So after a 5xx or no answer,
+repeat the same command before anything else. A seal can also answer
 `503 tenant_lifecycle_coordination_required`; repeat it the same way.
+
+An unseal whose outcome is unknown needs one check first. Repeating it
+reopens the tenant even if another operator sealed it in the meantime, for an
+incident say, so wyctl does not call the repeat safe. Run `wyctl tenant list`
+and repeat the unseal only if the tenant is still sealed and you know nobody
+has sealed it since.
 
 Unsealing clears the recorded seal capacity and reopens the tenant; it does
 not unseal its graphs. Use a default-tenant session even when the target is

@@ -7710,6 +7710,12 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   else if (sealing && unknown && !pending)
     g_printerr ("wyctl: the seal outcome is unknown; repeat it with "
         "--request-id %s, not a new id\n", request_id);
+  /* A repeated unseal is not harmless: if another operator sealed the
+   * tenant in the meantime, for an incident say, it reopens it (#1274). */
+  else if (!pending && unknown && g_strcmp0 (action, "unseal") == 0)
+    g_printerr ("wyctl: the unseal outcome is unknown; check `wyctl tenant "
+        "list` before repeating it: a repeat reopens the tenant even if "
+        "another operator sealed it since\n");
   else if (!pending && unknown)
     g_printerr ("wyctl: the outcome is unknown; repeating the same tenant %s "
         "is safe\n", action);
