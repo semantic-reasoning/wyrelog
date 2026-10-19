@@ -4560,6 +4560,56 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   wyl_fact_graph_runtime_status_clear (&aborted_status);
 #endif
 
+  /* A graph still provisioning cannot be sealed.  The store refuses before
+   * any durable write and the seal reopens admission, so the answer is a
+   * definite refusal: 409, never the 500 that tells an operator the outcome
+   * is unknown (#1274). */
+  {
+    const wyl_policy_fact_graph_column_t pending_columns[] = {
+      {"order_id", "symbol"},
+    };
+    const wyl_policy_fact_graph_relation_t pending_relations[] = {
+      {"pending-rel", pending_columns, G_N_ELEMENTS (pending_columns)},
+    };
+    const wyl_policy_fact_graph_create_options_t pending_opts = {
+      .tenant_id = WYL_TENANT_DEFAULT,
+      .graph_id = "pending-seal",
+      .fact_root = fact_root,
+      .schema_version = 1,
+      .owner_scope = WYL_TENANT_DEFAULT,
+      .relations = pending_relations,
+      .n_relations = G_N_ELEMENTS (pending_relations),
+    };
+    gchar pending_op[WYL_ID_STRING_BUF] = { 0 };
+    if (wyl_policy_store_create_fact_graph_provisioning
+          (wyl_handle_get_policy_store (handle), &pending_opts, NULL,
+        pending_op) != WYRELOG_E_OK)
+      return 123;
+    g_autofree gchar *pending_query =
+        g_strdup_printf ("tenant=%s&graph=pending-seal&%s",
+            WYL_TENANT_DEFAULT, FACT_GUARD);
+    g_clear_pointer (&body, g_free);
+    rc = send_raw (session, "POST", base_url, "/graphs/seal", pending_query,
+            admin_token, NULL, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 409
+        || g_strcmp0 (body, "{\"error\":\"graph_not_sealable\"}") != 0) {
+      g_printerr ("provisioning seal returned HTTP %u: %s\n", status, body);
+      return 124;
+    }
+    WylPolicyGraphAuthorityRecord *pending_authority = NULL;
+    if (wyl_policy_store_read_graph_authority
+          (wyl_handle_get_policy_store (handle), WYL_TENANT_DEFAULT,
+        "pending-seal", &pending_authority) != WYRELOG_E_OK
+        || pending_authority->lifecycle_state
+        != WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING) {
+      wyl_policy_graph_authority_record_free (pending_authority);
+      return 125;
+    }
+    wyl_policy_graph_authority_record_free (pending_authority);
+  }
+
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url, "/graphs/seal", seal_query,
           admin_token, NULL, &status, &body);

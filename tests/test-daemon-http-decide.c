@@ -24168,9 +24168,10 @@ check_skip_mfa_zero_event_audit_paths (WylHandle *handle,
  * the build silences the resulting -Wunused-function warnings.
  */
 static void
-tenant_ownership_request (ServiceDenialEnv *env, const gchar *token,
-    const gchar *action, const gchar *target, const gchar *request,
-    guint expected_status)
+tenant_ownership_request_named (ServiceDenialEnv *env, const gchar *token,
+    const gchar *name, const gchar *action, const gchar *target,
+    const gchar *request, guint expected_status,
+    const gchar *expected_body)
 {
   gchar minted[WYL_REQUEST_ID_STRING_BUF];
   if (request == NULL) {
@@ -24178,8 +24179,8 @@ tenant_ownership_request (ServiceDenialEnv *env, const gchar *token,
     request = minted;
   }
   g_autofree gchar *query = g_strdup_printf (
-    "tenant=__wr_default&name=owner-1339&to=%s&request_id=%s&guard_timestamp=123&guard_loc_class=public&guard_risk=99",
-    target != NULL ? target : "unused", request);
+    "tenant=__wr_default&name=%s&to=%s&request_id=%s&guard_timestamp=123&guard_loc_class=public&guard_risk=99",
+    name, target != NULL ? target : "unused", request);
   g_autofree gchar *path = g_strdup_printf ("/tenants/%s", action);
   g_autofree gchar *json = g_strdup_printf ("{\"version\":\"1\",\"request_id\":\"%s\"}", request);
   g_autofree gchar *body = NULL;
@@ -24190,6 +24191,17 @@ tenant_ownership_request (ServiceDenialEnv *env, const gchar *token,
   if (status != expected_status)
     g_printerr ("tenant ownership %s: status=%u body=%s\n", action, status, body);
   g_assert_cmpuint (status, ==, expected_status);
+  if (expected_body != NULL)
+    g_assert_cmpstr (body, ==, expected_body);
+}
+
+static void
+tenant_ownership_request (ServiceDenialEnv *env, const gchar *token,
+    const gchar *action, const gchar *target, const gchar *request,
+    guint expected_status)
+{
+  tenant_ownership_request_named (env, token, "owner-1339", action, target,
+      request, expected_status, NULL);
 }
 
 static wyrelog_error_t
@@ -24270,6 +24282,18 @@ check_tenant_ownership_contract (void)
   g_assert_cmpstr (record->owner_subject_id, ==, "human-principal-admin");
   g_assert_null (record->sealed_by_capacity);
   wyl_policy_tenant_authority_record_free (record);
+  /* A tenant that does not exist is a definite answer, not an unknown
+   * outcome: an administrator is told it is missing, and every repeat gets
+   * the same 404 (#1274).  A caller acting only as an owner is refused as it
+   * would be for any tenant it does not own, so the answer does not reveal
+   * which tenants exist. */
+  static const gchar *const missing_actions[] = { "seal", "unseal" };
+  for (gsize i = 0; i < G_N_ELEMENTS (missing_actions); i++) {
+    tenant_ownership_request_named (&env, env.access_token, "missing-1274",
+        missing_actions[i], NULL, NULL, 404, "{\"error\":\"tenant_not_found\"}");
+    tenant_ownership_request_named (&env, bob, "missing-1274",
+        missing_actions[i], NULL, NULL, 403, "{\"error\":\"tenant_denied\"}");
+  }
 #ifdef WYL_HAS_AUDIT
   /* An unavailable administrator decision audit is an operational failure,
    * not evidence that this dual-role caller should fall back to ownership.
