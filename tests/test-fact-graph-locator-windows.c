@@ -2835,10 +2835,97 @@ test_restore_inventory_roundtrip_and_attacks (void)
   pre_stage_fixture_clear (&fixture);
 }
 
+static wyrelog_error_t
+tenant_delete_fault (const gchar *point, gpointer data)
+{
+  guint *remaining = data;
+  if (g_str_equal (point, "after_unlink") && --*remaining == 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static void
+test_tenant_delete_resume (void)
+{
+  for (guint fault = 1; fault <= 3; fault++) {
+    g_autofree gchar *root = make_root ();
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+    WylFactGraphLocator locator = {0};
+    init_locator (&locator, "tenant", "graph");
+    open_graph (root, &locator, &resolver, &graph);
+    g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path (&graph);
+    g_autofree gchar *file = g_build_filename (path, "facts.duckdb", NULL);
+    g_assert_true (create_private_file (file, "facts"));
+    wyl_fact_graph_directory_clear (&graph);
+    g_autoptr (WylFactRootWriterLease) lease = NULL;
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+    g_autofree gchar *manifest = NULL;
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_prepare (&resolver, lease, "tenant", &manifest), ==, WYRELOG_E_OK);
+    guint remaining = fault;
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, tenant_delete_fault, &remaining), ==, WYRELOG_E_IO);
+    wyl_fact_graph_resolver_clear (&resolver);
+    g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+    g_assert_false (native_directory_exists (path));
+    wyl_fact_graph_resolver_clear (&resolver);
+    g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+    wyl_fact_graph_locator_clear (&locator);
+    remove_tree_no_follow (root);
+  }
+}
+
+static void
+test_tenant_delete_multiple_listing_batches (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = {0};
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *suffix = g_strnfill (96, 'x');
+  /* Names alone exceed a 64 KiB UTF-16 listing batch. Child validation
+   * restarts parent enumeration, so opening children during the scan loses
+   * the later batches and leaves an unrecoverable incomplete manifest. */
+  for (guint i = 0; i < 512; i++) {
+    g_autofree gchar *name = g_strdup_printf ("part-%04u-%s", i, suffix);
+    g_autofree gchar *file = g_build_filename (path, name, NULL);
+    g_assert_true (create_private_file (file, "facts"));
+  }
+  wyl_fact_graph_directory_clear (&graph);
+  g_autoptr (WylFactRootWriterLease) lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+  g_autofree gchar *manifest = NULL;
+  g_assert_cmpint (wyl_fact_tenant_delete_manifest_prepare (&resolver, lease, "tenant", &manifest), ==, WYRELOG_E_OK);
+  g_autoptr (GKeyFile) key = g_key_file_new ();
+  g_assert_true (g_key_file_load_from_data (key, manifest, -1, G_KEY_FILE_NONE, NULL));
+  g_assert_cmpint (g_key_file_get_integer (key, "root", "count", NULL), ==, 514);
+  guint remaining = 257;
+  g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, tenant_delete_fault, &remaining), ==, WYRELOG_E_IO);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+  g_assert_false (native_directory_exists (path));
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-graph-locator/windows/tenant-delete-resume", test_tenant_delete_resume);
+  g_test_add_func ("/fact-graph-locator/windows/tenant-delete-multiple-listing-batches", test_tenant_delete_multiple_listing_batches);
   g_test_add_func ("/fact-graph-locator/windows/create-revalidate-lengths",
       test_create_revalidate_and_component_lengths);
   g_test_add_func ("/fact-graph-locator/windows/reserved-case-alias",

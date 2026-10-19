@@ -2508,7 +2508,7 @@ wyrelog_error_t wyl_policy_store_seal_tenant_keyed_precheck_core
   (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
-    guint32 receipt_version, gboolean * out_found,
+    guint32 receipt_version, gboolean classify_empty, gboolean * out_found,
     WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
 wyrelog_error_t wyl_policy_store_tenant_exists (wyl_policy_store_t * store,
@@ -4024,5 +4024,36 @@ wyrelog_error_t wyl_policy_store_graph_restore_publish_with_effect
     guint operation,
     WylPolicyGraphRestoreRetainEffectFunc effect, gpointer effect_data,
     WylPolicyOfflineRestoreStoreResult *out_result);
+
+/* Permanent deletion receipts are also tenant-id tombstones. */
+typedef struct
+{
+  gchar *tenant;
+  gchar *actor;
+  gchar *owner;
+  gchar *request_id;
+  gchar *manifest;
+  gchar *audit_id;
+  gchar *capacity;
+  gchar *error_code;
+  gchar *blockers;
+  guint64 removed_rows;
+  gint64 created_at_us;
+  gboolean complete;
+} WylTenantDeleteRecord;
+void wyl_tenant_delete_record_clear (WylTenantDeleteRecord *record);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylTenantDeleteRecord, wyl_tenant_delete_record_clear)
+wyrelog_error_t wyl_policy_store_tenant_delete_read (wyl_policy_store_t *store,
+    const gchar *tenant, WylTenantDeleteRecord *record);
+wyrelog_error_t wyl_policy_store_tenant_delete_precheck (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, gboolean system_admin, WylTenantDeleteRecord *out);
+/* Caller retains WRITE and owns a policy transaction. No filesystem effects. */
+wyrelog_error_t wyl_policy_store_tenant_delete_commit (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, const gchar *request_id,
+    gboolean system_admin, const gchar *manifest, WylTenantDeleteRecord *record);
+wyrelog_error_t wyl_policy_store_tenant_delete_complete (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *request_id);
+wyrelog_error_t wyl_policy_store_tenant_delete_pending (wyl_policy_store_t *store,
+    GPtrArray **tenants);
 
 G_END_DECLS;

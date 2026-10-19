@@ -2589,6 +2589,80 @@ test_posix_resolver_checkpoint_replacements_fail_closed (void)
 }
 #endif
 
+#ifndef G_OS_WIN32
+static wyrelog_error_t
+delete_fail_after_unlink (const gchar *point, gpointer data)
+{
+  guint *remaining = data;
+  if (g_str_equal (point, "after_unlink") && --*remaining == 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static void
+test_tenant_delete_manifest (void)
+{
+  for (guint fault = 1; fault <= 3; fault++) {
+    g_autofree gchar *root = make_root ();
+    g_autofree gchar *encoded = NULL;
+    g_assert_cmpint (wyl_fact_graph_component_encode ("delete-tenant", &encoded), ==, WYRELOG_E_OK);
+    g_autofree gchar *tenant = g_build_filename (root, encoded, NULL);
+    g_autofree gchar *graph = g_build_filename (tenant, "graph", NULL);
+    g_autofree gchar *file = g_build_filename (graph, "facts.duckdb", NULL);
+    g_assert_cmpint (g_mkdir_with_parents (graph, 0700), ==, 0);
+    g_assert_true (g_file_set_contents (file, "facts", -1, NULL));
+    /* Keep both directories alive to guarantee distinct inodes: mkdir after
+     * deleting the original may immediately reuse its inode. */
+    g_autofree gchar *replacement = g_build_filename (root, "replacement", NULL);
+    g_assert_cmpint (g_mkdir (replacement, 0700), ==, 0);
+    struct stat original_stat = { 0 }, replacement_stat = { 0 };
+    g_assert_cmpint (stat (tenant, &original_stat), ==, 0);
+    g_assert_cmpint (stat (replacement, &replacement_stat), ==, 0);
+    g_assert_true (original_stat.st_dev == replacement_stat.st_dev);
+    g_assert_true (original_stat.st_ino != replacement_stat.st_ino);
+    g_autofree gchar *sentinel = g_build_filename (replacement, "sentinel", NULL);
+    g_assert_true (g_file_set_contents (sentinel, "preserve", -1, NULL));
+    g_autoptr (WylFactRootWriterLease) lease = NULL;
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==, WYRELOG_E_OK);
+    g_autofree gchar *manifest = NULL;
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_prepare (&resolver, lease, "delete-tenant", &manifest), ==, WYRELOG_E_OK);
+    g_autofree gchar *saved = g_build_filename (root, "saved-tenant", NULL);
+    g_assert_cmpint (g_rename (tenant, saved), ==, 0);
+    g_assert_cmpint (g_mkdir (tenant, 0700), ==, 0);
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (g_rmdir (tenant), ==, 0);
+    g_assert_cmpint (g_rename (saved, tenant), ==, 0);
+    g_autofree gchar *link_path = g_build_filename (graph, "unsafe-link", NULL);
+    g_assert_cmpint (symlink (root, link_path), ==, 0);
+    g_autofree gchar *unsafe_manifest = NULL;
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_prepare (&resolver, lease, "delete-tenant", &unsafe_manifest), ==, WYRELOG_E_POLICY);
+    g_assert_null (unsafe_manifest);
+    g_assert_cmpint (g_unlink (link_path), ==, 0);
+    guint remaining = fault;
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, delete_fail_after_unlink, &remaining), ==, WYRELOG_E_IO);
+    wyl_fact_graph_resolver_clear (&resolver);
+    g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+    g_assert_cmpint (wyl_fact_root_writer_lease_acquire (root, &lease), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+    g_assert_false (g_file_test (tenant, G_FILE_TEST_EXISTS));
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_OK);
+    g_assert_cmpint (g_rename (replacement, tenant), ==, 0);
+    g_assert_cmpint (wyl_fact_tenant_delete_manifest_resume (&resolver, lease, manifest, NULL, NULL), ==, WYRELOG_E_POLICY);
+    g_assert_true (g_file_test (tenant, G_FILE_TEST_IS_DIR));
+    g_autofree gchar *moved_sentinel = g_build_filename (tenant, "sentinel", NULL);
+    g_autofree gchar *contents = NULL;
+    g_assert_true (g_file_get_contents (moved_sentinel, &contents, NULL, NULL));
+    g_assert_cmpstr (contents, ==, "preserve");
+    wyl_fact_graph_resolver_clear (&resolver);
+    g_clear_pointer (&lease, wyl_fact_root_writer_lease_release);
+    remove_tree (root);
+  }
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -2613,6 +2687,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-graph-locator/locator/reject-tampered",
       test_locator_rejects_manually_tampered_components);
 #ifndef G_OS_WIN32
+  g_test_add_func ("/fact-graph-locator/posix/tenant-delete", test_tenant_delete_manifest);
   g_test_add_func ("/fact-graph-locator/posix/create",
       test_posix_resolver_creates_validated_graph);
   g_test_add_func ("/fact-graph-locator/posix/symlinks",

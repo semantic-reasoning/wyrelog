@@ -2391,6 +2391,36 @@ losing ownership, without applying the transfer again. Reusing an id for a
 different intent is refused. User-registry active-user checks are deferred to
 #1337.
 
+Delete a sealed tenant permanently with:
+
+```sh
+wyctl --daemon-url "$BASE_URL" tenant delete --tenant acme \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+The current owner or a SYSTEM administrator needs a live MFA session. The
+lifecycle must be `sealed`; `tenant_not_sealed` also refuses transitional and
+unclassified legacy tenants. A fresh seal request classifies an empty legacy
+tenant. Graph-bearing legacy tenants require fact lifecycle reconciliation.
+Any role, direct permission, or permission state held by another subject,
+including a service principal, causes `tenant_delete_in_use`; the response and
+CLI diagnostics list the holders. Revoke those grants explicitly before retrying.
+The owner's grants are removed with the tenant.
+
+Deletion removes scoped policy, graph/schema metadata, quota and restore state,
+credentials, and canonical tenant fact directories. Global principal identities
+and audit records remain. A permanent tombstone prevents reusing the tenant id.
+The deletion audit records the removed categories, row count, and disk manifest.
+
+The command prints `tenant=<tenant> deleted=true request_id=<id>`. Save its
+request id and retry with `--request-id <id>` after an uncertain outcome. Only
+the original actor and exact request may replay that result. After the policy
+commit the tenant is unknown to ordinary routes while journaled disk cleanup
+finishes. Startup resumes pending cleanup before serving requests. A cleanup
+identity mismatch fails closed; preserve the journal and investigate the root
+rather than replacing files under the deleted tenant's name.
+
 The seal records whether the actor acted as `owner` or `system_admin`.
 Administrator capacity takes precedence when both apply. An owner seal may be
 lifted by the current owner or an administrator; an administrator seal may be

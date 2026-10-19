@@ -11916,6 +11916,8 @@ tenant_list_handler (SoupServer *server, SoupServerMessage *msg,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+static void tenant_delete_execute (SoupServer *, SoupServerMessage *, GHashTable *, WylDaemonHttpContext *, const gchar *);
+
 static void
 tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data,
@@ -11935,7 +11937,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   if (g_strcmp0 (action, "delete") == 0) {
-    set_json_error (msg, 501, "tenant_delete_unsupported");
+    tenant_delete_execute (server, msg, query, user_data, tenant);
     return;
   }
 
@@ -12288,6 +12290,75 @@ tenant_actor_authenticate (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   }
   return TRUE;
+}
+
+static wyrelog_error_t
+tenant_delete_authorize (gpointer data, const gchar *actor, gboolean *admin)
+{
+  WylManagementReauthorization *authorization = data;
+  WylDaemonHttpContext *ctx = authorization->ctx;
+  g_mutex_lock (&ctx->lock);
+  gboolean pending = ctx->tenant_recovery != NULL;
+  g_mutex_unlock (&ctx->lock);
+  if (pending) return WYRELOG_E_BUSY;
+  authorization->ownership_replay = TRUE;
+  wyrelog_error_t rc = management_reauthorize_inside_write (authorization, actor);
+  if (rc == WYRELOG_E_OK) *admin = g_strcmp0 (authorization->acting_capacity, "system_admin") == 0;
+  return rc;
+}
+
+static wyrelog_error_t
+tenant_delete_validate (gpointer data)
+{
+  WylManagementReauthorization *a = data;
+  return management_session_matches_live (a->session, a->session_id, a->actor,
+             WYL_TENANT_DEFAULT, TRUE) ? WYRELOG_E_OK : WYRELOG_E_AUTH;
+}
+
+static void
+tenant_delete_execute (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, const gchar *tenant)
+{
+  const gchar *request = lookup_required_query_string (query, "request_id");
+  if (!wyl_request_id_is_canonical (request)) {
+    set_json_error (msg, 400, "invalid_tenant_request"); return;
+  }
+  g_auto (WylDaemonAuthContext) auth = {0};
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!tenant_actor_authenticate (server, msg, query, ctx, tenant, &auth,
+      &actor, &session, &loc, &authorization)) return;
+  WylTenantDeleteRuntime runtime = {.authorize=tenant_delete_authorize,
+                                    .validate=tenant_delete_validate,.data=&authorization};
+  g_auto (WylTenantDeleteRecord) result = {0};
+  wyrelog_error_t rc = wyl_handle_delete_tenant (ctx->handle, tenant, actor,
+          request, &runtime, &result);
+  if (rc != WYRELOG_E_OK) {
+    const gchar *code = result.error_code != NULL ? result.error_code
+        : result.tenant != NULL ? "tenant_delete_pending"
+        : rc == WYRELOG_E_AUTH ? "tenant_denied"
+        : rc == WYRELOG_E_NOT_FOUND ? "unknown_tenant"
+        : rc == WYRELOG_E_CONFLICT ? "tenant_delete_conflict" : "tenant_delete_failed";
+    guint status = rc == WYRELOG_E_AUTH ? 403 : rc == WYRELOG_E_NOT_FOUND ? 404
+        : result.error_code != NULL || rc == WYRELOG_E_CONFLICT ? 409 : 503;
+    if (result.blockers != NULL) {
+      attach_request_id_header (msg);
+      g_autoptr (GString) body = g_string_new ("{\"error\":");
+      append_json_string (body, code); g_string_append (body, ",\"holders\":");
+      append_json_string (body, result.blockers); g_string_append_c (body, '}');
+      soup_server_message_set_status (msg, status, NULL);
+      soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
+    } else set_json_error (msg, status, code);
+    return;
+  }
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"deleted\":true,\"request_id\":");
+  append_json_string (body, request); g_string_append_c (body, '}');
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
 }
 
 static void

@@ -15095,6 +15095,94 @@ migrate_graph_authority_predecessor (wyl_policy_store_t *store,
   return rc;
 }
 
+static const gchar tenant_delete_journal_sql[] =
+    "CREATE TABLE IF NOT EXISTS tenant_delete_journals ("
+    "tenant_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,"
+    "actor TEXT NOT NULL,owner TEXT NOT NULL,capacity TEXT NOT NULL "
+    "CHECK(capacity IN ('owner','system_admin')),manifest TEXT NOT NULL,"
+    "audit_id TEXT NOT NULL UNIQUE,removed_rows INTEGER NOT NULL DEFAULT 0 "
+    "CHECK(removed_rows>=0),phase TEXT NOT NULL "
+    "CHECK(phase IN ('purging','cleanup','complete')),created_at_us INTEGER NOT NULL)";
+static const gchar tenant_delete_no_reuse_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_delete_no_reuse BEFORE INSERT ON tenants "
+    "WHEN EXISTS(SELECT 1 FROM tenant_delete_journals WHERE tenant_id=NEW.tenant_id) "
+    "BEGIN SELECT RAISE(ABORT,'tenant id permanently deleted'); END";
+static const gchar tenant_delete_immutable_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_delete_immutable BEFORE UPDATE ON tenant_delete_journals "
+    "WHEN NEW.tenant_id IS NOT OLD.tenant_id OR NEW.request_id IS NOT OLD.request_id OR "
+    "NEW.actor IS NOT OLD.actor OR NEW.owner IS NOT OLD.owner OR NEW.capacity IS NOT OLD.capacity OR "
+    "NEW.manifest IS NOT OLD.manifest OR NEW.audit_id IS NOT OLD.audit_id OR "
+    "NEW.created_at_us IS NOT OLD.created_at_us OR NOT ((OLD.phase='purging' AND NEW.phase='cleanup') "
+    "OR (OLD.phase='cleanup' AND NEW.phase='complete' AND NEW.removed_rows=OLD.removed_rows)) "
+    "BEGIN SELECT RAISE(ABORT,'immutable tenant deletion'); END";
+static const gchar tenant_delete_permanent_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_delete_permanent BEFORE DELETE ON tenant_delete_journals "
+    "BEGIN SELECT RAISE(ABORT,'permanent tenant tombstone'); END";
+
+static const gchar tenant_delete_insert_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_delete_insert BEFORE INSERT ON tenant_delete_journals "
+    "WHEN EXISTS(SELECT 1 FROM tenant_delete_journals WHERE tenant_id=NEW.tenant_id OR request_id=NEW.request_id OR audit_id=NEW.audit_id) "
+    "BEGIN SELECT RAISE(ABORT,'permanent tenant tombstone'); END";
+static const gchar tenant_delete_no_rename_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_delete_no_rename BEFORE UPDATE OF tenant_id ON tenants "
+    "WHEN EXISTS(SELECT 1 FROM tenant_delete_journals WHERE tenant_id=NEW.tenant_id) "
+    "BEGIN SELECT RAISE(ABORT,'tenant id permanently deleted'); END";
+
+static const gchar tenant_delete_rows_sql[] =
+    "CREATE TABLE IF NOT EXISTS tenant_delete_rows (tenant_id TEXT NOT NULL,table_name TEXT NOT NULL,row_id INTEGER NOT NULL,PRIMARY KEY(tenant_id,table_name,row_id),FOREIGN KEY(tenant_id) REFERENCES tenant_delete_journals(tenant_id))";
+
+static wyrelog_error_t
+tenant_delete_schema_object (sqlite3 *db, const gchar *name, const gchar *sql)
+{
+  wyrelog_error_t rc = exec_sql (db, sql);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (db, "SELECT sql FROM sqlite_schema WHERE name=?", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, name);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_ROW) rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    g_autofree gchar *actual = graph_authority_normalize_sql ((const gchar *) sqlite3_column_text (stmt, 0));
+    g_autofree gchar *expected = graph_authority_canonical_sql (sql);
+    if (g_strcmp0 (actual, expected) != 0) rc = WYRELOG_E_POLICY;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+migrate_tenant_delete_schema (sqlite3 *db)
+{
+  wyrelog_error_t rc = exec_sql (db, "SAVEPOINT tenant_delete_schema");
+  const gchar *definitions[] = {tenant_delete_journal_sql, tenant_delete_rows_sql, tenant_delete_no_reuse_sql,
+                                tenant_delete_immutable_sql, tenant_delete_permanent_sql, tenant_delete_insert_sql, tenant_delete_no_rename_sql};
+  const gchar *names[] = {"tenant_delete_journals", "tenant_delete_rows", "tenant_delete_no_reuse",
+                          "tenant_delete_immutable", "tenant_delete_permanent", "tenant_delete_insert", "tenant_delete_no_rename"};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (definitions); i++)
+    rc = tenant_delete_schema_object (db, names[i], definitions[i]);
+  /* A losing grant must not resurrect authority after the deletion commits. */
+  const gchar *scoped[] = {"role_memberships", "direct_permissions", "permission_states"};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (scoped); i++) {
+    const gchar *operations[] = {"INSERT", "UPDATE"};
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < G_N_ELEMENTS (operations); j++) {
+      g_autofree gchar *sql = g_strdup_printf (
+        "CREATE TRIGGER IF NOT EXISTS tenant_deleted_%s_%s BEFORE %s ON %s "
+        "WHEN EXISTS(SELECT 1 FROM tenant_delete_journals WHERE tenant_id=NEW.scope) "
+        "BEGIN SELECT RAISE(ABORT,'tenant id permanently deleted'); END",
+        scoped[i], operations[j], operations[j], scoped[i]);
+      g_autofree gchar *name = g_strdup_printf ("tenant_deleted_%s_%s", scoped[i], operations[j]);
+      rc = tenant_delete_schema_object (db, name, sql);
+    }
+  }
+  sqlite3_stmt *check = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (db,
+            "SELECT EXISTS(SELECT 1 FROM tenant_delete_journals j LEFT JOIN tenants t ON t.tenant_id=j.tenant_id "
+            "WHERE j.phase='purging' OR t.tenant_id IS NOT NULL) OR EXISTS(SELECT 1 FROM tenant_delete_rows)", &check);
+  if (rc == WYRELOG_E_OK && (sqlite3_step (check) != SQLITE_ROW || sqlite3_column_int (check, 0))) rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (check);
+  if (rc != WYRELOG_E_OK) (void) exec_sql (db, "ROLLBACK TO tenant_delete_schema");
+  wyrelog_error_t end = exec_sql (db, "RELEASE tenant_delete_schema");
+  return rc == WYRELOG_E_OK ? end : rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
@@ -16123,7 +16211,7 @@ graph_authority_schema_ready:
   if (rc == WYRELOG_E_OK) {
     wyrelog_error_t release_rc =
         exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
-    return release_rc;
+    return release_rc == WYRELOG_E_OK ? migrate_tenant_delete_schema (store->db) : release_rc;
   }
   (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_service_schema;");
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
@@ -16363,6 +16451,51 @@ wyl_policy_store_create_tenant (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+/* Empty tenants have no runtime roots to reconcile. The caller's transaction
+ * prevents a graph from appearing between this check and the transition. */
+static wyrelog_error_t
+tenant_empty_lifecycle (wyl_policy_store_t *store, const gchar *tenant,
+    gboolean sealed, gboolean *handled, gboolean *changed)
+{
+  *handled = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT EXISTS(SELECT 1 FROM fact_graphs WHERE tenant_id=?)", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, tenant);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  gboolean graphs = step == SQLITE_ROW && sqlite3_column_int (stmt, 0);
+  if (rc == WYRELOG_E_OK && step != SQLITE_ROW) rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || graphs) return rc;
+  WylPolicyTenantAuthorityRecord *a = NULL;
+  rc = wyl_policy_store_read_tenant_authority (store, tenant, &a);
+  if (rc != WYRELOG_E_OK) return rc;
+  WylPolicyTenantLifecycleState target = sealed ? WYL_POLICY_TENANT_LIFECYCLE_SEALED : WYL_POLICY_TENANT_LIFECYCLE_ACTIVE;
+  WylPolicyAuthorityMutationResult result;
+  if (a->lifecycle_state == target) *handled = TRUE;
+  else if (a->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED) {
+    rc = wyl_policy_store_reconcile_tenant_authority (store, tenant, target,
+            a->lifecycle_generation, a->reconciliation_generation, &result);
+    if (rc == WYRELOG_E_OK && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) rc = WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK) {
+      *handled = TRUE; *changed = a->sealed_compatibility != sealed;
+    }
+  } else if (a->lifecycle_state == (sealed ? WYL_POLICY_TENANT_LIFECYCLE_ACTIVE : WYL_POLICY_TENANT_LIFECYCLE_SEALED)) {
+    WylPolicyTenantLifecycleState intermediate = sealed ? WYL_POLICY_TENANT_LIFECYCLE_SEALING : WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
+    rc = wyl_policy_store_transition_tenant_authority (store, tenant, a->lifecycle_state, intermediate,
+            a->lifecycle_generation, a->reconciliation_generation, &result);
+    if (rc == WYRELOG_E_OK && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) rc = WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK) rc = wyl_policy_store_transition_tenant_authority (store, tenant, intermediate, target,
+              a->lifecycle_generation + 1, a->reconciliation_generation, &result);
+    if (rc == WYRELOG_E_OK && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) rc = WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK) {
+      *handled = TRUE; *changed = a->sealed_compatibility != sealed;
+    }
+  }
+  wyl_policy_tenant_authority_record_free (a);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_set_tenant_sealed_full (wyl_policy_store_t *store,
     const gchar *tenant_id, gboolean sealed, gboolean *out_changed)
@@ -16377,6 +16510,12 @@ wyl_policy_store_set_tenant_sealed_full (wyl_policy_store_t *store,
     return WYRELOG_E_POLICY;
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
+
+  if (!sealed && wyl_policy_store_transaction_owned_by_caller (store)) {
+    gboolean handled = FALSE;
+    wyrelog_error_t empty_rc = tenant_empty_lifecycle (store, tenant_id, FALSE, &handled, out_changed);
+    if (empty_rc != WYRELOG_E_OK || handled) return empty_rc;
+  }
 
   static const gchar *sql =
       "UPDATE tenants SET sealed=?,sealed_by_capacity=CASE WHEN ?1=1 THEN 'system_admin' ELSE NULL END,"
@@ -27086,11 +27225,21 @@ service_retirement_tenant_outcome_from_receipt (const ServiceRetirementReceipt
 }
 
 static gboolean
-service_retirement_tenant_requires_lifecycle_coordination (const
-    ServiceRetirementTenantState *current)
+service_retirement_tenant_requires_lifecycle_coordination (wyl_policy_store_t *store, const
+    ServiceRetirementTenantState *current, gboolean classify_empty)
 {
-  return current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
-         || current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+  if (current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE) {
+    if (!classify_empty) return TRUE;
+    sqlite3_stmt *stmt = NULL;
+    wyrelog_error_t rc = prepare_stmt (store->db,
+            "SELECT EXISTS(SELECT 1 FROM fact_graphs WHERE tenant_id=?)", &stmt);
+    if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, current->tenant_id);
+    gboolean needs = rc != WYRELOG_E_OK || sqlite3_step (stmt) != SQLITE_ROW
+        || sqlite3_column_int (stmt, 0) != 0;
+    sqlite3_finalize (stmt);
+    return needs;
+  }
+  return current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALING
          || current->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
 }
 
@@ -27274,11 +27423,11 @@ service_retirement_namespace_collision (wyl_policy_store_t *store,
       " UNION ALL SELECT 1 FROM service_credential_handoff_retirement_receipts"
       " WHERE original_request_id=?"
       " UNION ALL SELECT 1 FROM service_credential_handoff_dispositions"
-      " WHERE original_request_id=? UNION ALL SELECT 1 FROM tenant_ownership_events WHERE request_id=? LIMIT 1;";
+      " WHERE original_request_id=? UNION ALL SELECT 1 FROM tenant_ownership_events WHERE request_id=? UNION ALL SELECT 1 FROM tenant_delete_journals WHERE request_id=? LIMIT 1;";
   sqlite3_stmt *stmt = NULL;
   *out_found = FALSE;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
-  for (int i = 1; rc == WYRELOG_E_OK && i <= 9; i++)
+  for (int i = 1; rc == WYRELOG_E_OK && i <= 10; i++)
     rc = bind_text (stmt, i, request_id);
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
@@ -27525,7 +27674,7 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
   (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
-    guint32 receipt_version, gboolean * out_found,
+    guint32 receipt_version, gboolean classify_empty, gboolean * out_found,
     WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
@@ -27575,7 +27724,7 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
       rc = service_retirement_read_tenant_state (store, tenant_id, &current);
     if (rc == WYRELOG_E_OK
         && service_retirement_tenant_requires_lifecycle_coordination
-          (&current)) {
+          (store, &current, classify_empty)) {
       service_retirement_tenant_coordination_outcome (&current, retirement);
       rc = WYRELOG_E_BUSY;
     }
@@ -27676,12 +27825,18 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
             actor_subject_id, fingerprint);
   if (rc == WYRELOG_E_OK && !found)
     rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+  gboolean transitioned = FALSE;
+  if (rc == WYRELOG_E_OK && !found && acting_capacity != NULL) {
+    gboolean handled = FALSE;
+    rc = tenant_empty_lifecycle (store, tenant_id, TRUE, &handled, &transitioned);
+    if (rc == WYRELOG_E_OK && handled)
+      rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+  }
   if (rc == WYRELOG_E_OK && !found
-      && service_retirement_tenant_requires_lifecycle_coordination (&current)) {
+      && service_retirement_tenant_requires_lifecycle_coordination (store, &current, acting_capacity != NULL)) {
     service_retirement_tenant_coordination_outcome (&current, retirement);
     rc = WYRELOG_E_BUSY;
   }
-  gboolean transitioned = FALSE;
   if (rc == WYRELOG_E_OK && !found && !current.sealed) {
     if (current.sealed_generation >= G_MAXINT64) {
       rc = WYRELOG_E_POLICY;
@@ -46502,4 +46657,343 @@ wyl_policy_store_graph_restore_publish_with_effect
     return WYRELOG_E_INVALID;
   return graph_restore_early_commit_with_effect (store, expected, pending,
              completed, operation, effect, effect_data, out_result);
+}
+
+void
+wyl_tenant_delete_record_clear (WylTenantDeleteRecord *r)
+{
+  if (r == NULL) return;
+  g_free (r->tenant); g_free (r->actor); g_free (r->owner);
+  g_free (r->request_id); g_free (r->manifest); g_free (r->audit_id);
+  g_free (r->capacity); g_free (r->error_code); g_free (r->blockers);
+  memset (r, 0, sizeof *r);
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_delete_read (wyl_policy_store_t *store,
+    const gchar *tenant, WylTenantDeleteRecord *r)
+{
+  if (store == NULL || r == NULL || !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT tenant_id,actor,owner,request_id,manifest,audit_id,capacity,removed_rows,phase,created_at_us "
+          "FROM tenant_delete_journals WHERE tenant_id=?", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, tenant);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (s) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    r->tenant = g_strdup ((const gchar *) sqlite3_column_text (s, 0));
+    r->actor = g_strdup ((const gchar *) sqlite3_column_text (s, 1));
+    r->owner = g_strdup ((const gchar *) sqlite3_column_text (s, 2));
+    r->request_id = g_strdup ((const gchar *) sqlite3_column_text (s, 3));
+    r->manifest = g_strdup ((const gchar *) sqlite3_column_text (s, 4));
+    r->audit_id = g_strdup ((const gchar *) sqlite3_column_text (s, 5));
+    r->capacity = g_strdup ((const gchar *) sqlite3_column_text (s, 6));
+    r->removed_rows = sqlite3_column_int64 (s, 7);
+    r->created_at_us = sqlite3_column_int64 (s, 9);
+    r->complete = g_strcmp0 ((const gchar *) sqlite3_column_text (s, 8), "complete") == 0;
+  } else if (rc == WYRELOG_E_OK) rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (s);
+  return rc;
+}
+
+/* Explicit inventory: all rows with tenant authority, including indirect
+ * children. The audit ledger and global principal identities are retained.
+ * No caller supplies SQL or a table name. */
+typedef struct { const gchar *table; const gchar *predicate; } TenantDeleteTable;
+#define TD_CREDENTIALS "SELECT credential_id FROM service_credentials WHERE tenant_id=?1"
+#define TD_OPERATIONS "SELECT request_id FROM service_domain_requests WHERE operation LIKE 'credential_%' AND resource_id IN (" TD_CREDENTIALS ")"
+#define TD_SCOPE(t) {t, "scope=?1"}
+#define TD_TENANT(t) {t, "tenant_id=?1"}
+static const TenantDeleteTable tenant_delete_tables[] = {
+  TD_SCOPE ("role_memberships"), TD_SCOPE ("role_membership_events"),
+  TD_SCOPE ("direct_permissions"), TD_SCOPE ("direct_permission_events"),
+  TD_SCOPE ("permission_states"), TD_SCOPE ("permission_state_events"),
+  TD_TENANT ("tenant_ownership_events"),
+  {"session_states", "session_id=?1"}, {"session_events", "session_id=?1"},
+  TD_TENANT ("fact_graphs"), TD_TENANT ("fact_graph_provisioning"),
+  TD_TENANT ("fact_graph_relations"), TD_TENANT ("fact_graph_relation_columns"),
+  TD_TENANT ("fact_graph_query_allowlist"), TD_TENANT ("fact_namespaces"),
+  TD_TENANT ("fact_relation_schemas"), TD_TENANT ("fact_relation_schema_columns"),
+  TD_TENANT ("fact_relation_query_allowlist"), TD_TENANT ("fact_relation_activation"),
+  TD_TENANT ("fact_rule_packs"), TD_TENANT ("fact_rule_pack_rules"),
+  TD_TENANT ("fact_reconcile_journal"), TD_TENANT ("fact_graph_create_reservations"),
+  TD_TENANT ("fact_tenant_quota_limits"), TD_TENANT ("fact_tenant_logical_quota_usage"),
+  TD_TENANT ("fact_logical_quota_operations"), TD_TENANT ("fact_tenant_physical_quota_limits"),
+  TD_TENANT ("fact_tenant_physical_quota_usage"), TD_TENANT ("fact_physical_quota_reservations"),
+  TD_TENANT ("fact_tenant_write_rate_state"), TD_TENANT ("fact_open_reservations"),
+  {"fact_open_settlements", "reservation_id IN (SELECT reservation_id FROM fact_open_reservations WHERE tenant_id=?1)"},
+  TD_TENANT ("fact_offline_restore_journals"), TD_TENANT ("fact_offline_restore_tenant_claims"),
+  TD_TENANT ("fact_offline_restore_graph_claims"), TD_TENANT ("fact_offline_restore_receipts"),
+  TD_TENANT ("fact_offline_restore_terminal_history"),
+  {"fact_offline_restore_terminal_guard", "operation_uuid IN (SELECT operation_uuid FROM fact_offline_restore_receipts WHERE tenant_id=?1)"},
+  TD_TENANT ("fact_graph_restore_replacements"), TD_TENANT ("fact_tenant_restore_replacements"),
+  TD_TENANT ("service_credentials"), TD_TENANT ("service_credential_events"),
+  TD_TENANT ("service_retirement_receipts"),
+  {"service_domain_requests", "operation LIKE 'credential_%' AND resource_id IN (" TD_CREDENTIALS ")"},
+  {"service_credential_handoff_escrows", "credential_id IN (" TD_CREDENTIALS ")"},
+  {"service_credential_handoff_dispositions", "original_request_id IN (" TD_OPERATIONS ")"},
+  {"service_credential_handoff_cancellation_claims", "original_request_id IN (" TD_OPERATIONS ")"},
+  {"service_credential_handoff_remediation_actions", "original_request_id IN (" TD_OPERATIONS ")"},
+  {"service_credential_handoff_retirement_receipts", "original_request_id IN (" TD_OPERATIONS ")"},
+  {"service_credential_operation_fences", "request_id IN (" TD_OPERATIONS ")"},
+};
+#undef TD_TENANT
+#undef TD_SCOPE
+#undef TD_OPERATIONS
+#undef TD_CREDENTIALS
+
+/* Only these append-only delete guards may receive a transaction-local
+ * exception. Every row must have been captured in the exact purge manifest.
+ * The original definitions are restored before COMMIT, including on success. */
+static const gchar *tenant_delete_guards[] = {
+  "tenant_ownership_delete_guard",
+  "trg_service_credential_events_no_delete", "trg_service_domain_requests_no_delete",
+  "trg_service_credential_operation_fences_no_delete",
+  "trg_service_handoff_dispositions_no_delete", "trg_service_handoff_cancellation_no_delete",
+  "trg_service_handoff_remediation_no_delete", "trg_service_handoff_retirement_no_delete",
+  "trg_service_retirement_no_delete",
+  "fact_offline_restore_journal_delete_guard", "fact_offline_restore_terminal_history_no_delete",
+  "fact_graph_restore_replacement_delete_guard", "fact_tenant_restore_replacement_delete_guard",
+};
+
+typedef struct { gchar *table; sqlite3_int64 rowid; gboolean done; } TenantDeleteRow;
+static void tenant_delete_row_free (gpointer p)
+{
+  TenantDeleteRow *row = p; g_free (row->table); g_free (row);
+}
+
+typedef struct { gchar *name; gchar *sql; } TenantDeleteGuard;
+static void tenant_delete_guard_free (gpointer p)
+{
+  TenantDeleteGuard *g = p; g_free (g->name); g_free (g->sql); g_free (g);
+}
+
+static wyrelog_error_t
+tenant_delete_capture_rows (wyl_policy_store_t *store, const gchar *tenant,
+    GPtrArray *rows)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_delete_tables); i++) {
+    const TenantDeleteTable *t = &tenant_delete_tables[i];
+    g_autofree gchar *sql = g_strdup_printf ("SELECT rowid FROM %s WHERE %s ORDER BY rowid DESC", t->table, t->predicate);
+    sqlite3_stmt *s = NULL;
+    wyrelog_error_t rc = prepare_stmt (store->db, sql, &s);
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, tenant);
+    int step = SQLITE_DONE;
+    while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW) {
+      TenantDeleteRow *row = g_new0 (TenantDeleteRow, 1);
+      row->table = g_strdup (t->table); row->rowid = sqlite3_column_int64 (s, 0);
+      g_ptr_array_add (rows, row);
+    }
+    sqlite3_finalize (s);
+    if (rc != WYRELOG_E_OK || step != SQLITE_DONE) return rc != WYRELOG_E_OK ? rc : WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+tenant_delete_install_guards (wyl_policy_store_t *store, const gchar *tenant,
+    GPtrArray *guards)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_delete_guards); i++) {
+    sqlite3_stmt *s = NULL;
+    wyrelog_error_t rc = prepare_stmt (store->db,
+            "SELECT sql,tbl_name FROM sqlite_schema WHERE type='trigger' AND name=?", &s);
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, tenant_delete_guards[i]);
+    if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_ROW) rc = WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (s); return rc;
+    }
+    TenantDeleteGuard *g = g_new0 (TenantDeleteGuard, 1);
+    g->name = g_strdup (tenant_delete_guards[i]);
+    g->sql = g_strdup ((const gchar *) sqlite3_column_text (s, 0));
+    g_autofree gchar *table = g_strdup ((const gchar *) sqlite3_column_text (s, 1));
+    sqlite3_finalize (s);
+    g_ptr_array_add (guards, g);
+    const gchar *begin = strstr (g->sql, " BEGIN ");
+    const gchar *when = strstr (g->sql, " WHEN ");
+    if (begin == NULL || (when != NULL && when > begin)) return WYRELOG_E_POLICY;
+    g_autofree gchar *prefix = g_strndup (g->sql, (when != NULL ? when : begin) - g->sql);
+    g_autofree gchar *condition = when != NULL ? g_strndup (when + 6, begin - when - 6) : g_strdup ("1");
+    gchar *replacement = sqlite3_mprintf (
+      "DROP TRIGGER \"%w\"; %s WHEN (%s) AND NOT EXISTS(SELECT 1 "
+      "FROM tenant_delete_journals j JOIN tenant_delete_rows r ON r.tenant_id=j.tenant_id "
+      "WHERE j.tenant_id=%Q AND j.phase='purging' AND r.table_name=%Q AND r.row_id=OLD.rowid)%s",
+      g->name, prefix, condition, tenant, table, begin);
+    rc = exec_sql (store->db, replacement); sqlite3_free (replacement);
+    if (rc != WYRELOG_E_OK) return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_delete_precheck (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, gboolean system_admin,
+    WylTenantDeleteRecord *out)
+{
+  if (store == NULL || out == NULL || !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  if (g_str_equal (tenant, WYL_TENANT_DEFAULT)) {
+    out->error_code = g_strdup ("tenant_builtin"); return WYRELOG_E_POLICY;
+  }
+  WylPolicyTenantAuthorityRecord *authority = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (store, tenant, &authority);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *owner = g_strdup (authority->owner_subject_id);
+  gboolean sealed = authority->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED;
+  wyl_policy_tenant_authority_record_free (authority);
+  if (!system_admin && g_strcmp0 (owner, actor) != 0) return WYRELOG_E_AUTH;
+  if (!sealed) {
+    out->error_code = g_strdup ("tenant_not_sealed"); return WYRELOG_E_POLICY;
+  }
+  sqlite3_stmt *s = NULL;
+  rc = prepare_stmt (store->db,
+          "SELECT subject_id,'role',role_id FROM role_memberships WHERE scope=?1 AND subject_id<>?2 "
+          "UNION ALL SELECT subject_id,'permission',perm_id FROM direct_permissions WHERE scope=?1 AND subject_id<>?2 "
+          "UNION ALL SELECT subject_id,'state',perm_id FROM permission_states WHERE scope=?1 AND subject_id<>?2 "
+          "ORDER BY 1,2,3", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, tenant);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 2, owner);
+  g_autoptr (GString) blockers = g_string_new ("");
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW)
+    g_string_append_printf (blockers, "%s%s:%s:%s", blockers->len ? "," : "",
+        sqlite3_column_text (s, 0), sqlite3_column_text (s, 1), sqlite3_column_text (s, 2));
+  sqlite3_finalize (s); s = NULL;
+  if (rc != WYRELOG_E_OK || step != SQLITE_DONE) return rc != WYRELOG_E_OK ? rc : WYRELOG_E_IO;
+  if (blockers->len) {
+    out->error_code = g_strdup ("tenant_delete_in_use"); out->blockers = g_strdup (blockers->str);
+    return WYRELOG_E_BUSY;
+  }
+  out->owner = g_steal_pointer (&owner);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_delete_commit (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *actor, const gchar *request_id,
+    gboolean system_admin, const gchar *manifest, WylTenantDeleteRecord *out)
+{
+  if (store == NULL || out == NULL || !wyl_policy_store_transaction_owned_by_caller (store)
+      || !wyl_policy_store_tenant_id_is_valid (tenant) || !wyl_request_id_is_canonical (request_id)
+      || !wyl_policy_service_actor_subject_is_valid (actor) || manifest == NULL)
+    return WYRELOG_E_INVALID;
+  if (g_str_equal (tenant, WYL_TENANT_DEFAULT)) {
+    out->error_code = g_strdup ("tenant_builtin"); return WYRELOG_E_POLICY;
+  }
+  wyrelog_error_t rc = wyl_policy_store_tenant_delete_read (store, tenant, out);
+  if (rc == WYRELOG_E_OK)
+    return g_strcmp0 (out->actor, actor) == 0 && g_strcmp0 (out->request_id, request_id) == 0
+           ? WYRELOG_E_OK : WYRELOG_E_CONFLICT;
+  if (rc != WYRELOG_E_NOT_FOUND) return rc;
+  gboolean collision = FALSE;
+  rc = service_retirement_namespace_collision (store, request_id, &collision);
+  if (rc != WYRELOG_E_OK || collision) return rc == WYRELOG_E_OK ? WYRELOG_E_CONFLICT : rc;
+  sqlite3_stmt *receipt = NULL;
+  rc = prepare_stmt (store->db, "SELECT 1 FROM service_retirement_receipts WHERE request_id=?", &receipt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (receipt, 1, request_id);
+  int receipt_step = rc == WYRELOG_E_OK ? sqlite3_step (receipt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && receipt_step != SQLITE_DONE) rc = receipt_step == SQLITE_ROW ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
+  sqlite3_finalize (receipt);
+  if (rc != WYRELOG_E_OK) return rc;
+  rc = wyl_policy_store_tenant_delete_precheck (store, tenant, actor, system_admin, out);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *owner = g_steal_pointer (&out->owner);
+  sqlite3_stmt *s = NULL;
+  g_autoptr (GPtrArray) rows = g_ptr_array_new_with_free_func (tenant_delete_row_free);
+  g_autoptr (GPtrArray) guards = g_ptr_array_new_with_free_func (tenant_delete_guard_free);
+  rc = tenant_delete_capture_rows (store, tenant, rows);
+  if (rc != WYRELOG_E_OK) return rc;
+  gchar audit_id[WYL_ID_STRING_BUF] = {0};
+  rc = service_domain_new_audit_id (audit_id);
+  if (rc != WYRELOG_E_OK) return rc;
+  const gchar *capacity = system_admin ? "system_admin" : "owner";
+  gint64 now = g_get_real_time ();
+  rc = prepare_stmt (store->db,
+          "INSERT INTO tenant_delete_journals(tenant_id,request_id,actor,owner,capacity,manifest,audit_id,phase,created_at_us) "
+          "VALUES(?1,?2,?3,?4,?5,?6,?7,'purging',?8)", &s);
+  const gchar *values[] = {tenant,request_id,actor,owner,capacity,manifest,audit_id};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (values); i++) rc = bind_text (s, i + 1, values[i]);
+  if (rc == WYRELOG_E_OK) sqlite3_bind_int64 (s, 8, now);
+  if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_DONE) rc = WYRELOG_E_CONFLICT;
+  sqlite3_finalize (s); s = NULL;
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < rows->len; i++) {
+    TenantDeleteRow *row = g_ptr_array_index (rows, i);
+    gchar *sql = sqlite3_mprintf ("INSERT INTO tenant_delete_rows VALUES(%Q,%Q,%lld)", tenant, row->table, row->rowid);
+    rc = exec_sql (store->db, sql); sqlite3_free (sql);
+  }
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_install_guards (store, tenant, guards);
+  /* FK topology includes rotation self-edges. Only FK failures may be
+   * deferred to the next pass; all other failures abort the transaction. */
+  guint remaining = rows->len;
+  while (rc == WYRELOG_E_OK && remaining) {
+    guint before = remaining;
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < rows->len; i++) {
+      TenantDeleteRow *row = g_ptr_array_index (rows, i);
+      if (row->done) continue;
+      gchar *sql = sqlite3_mprintf ("DELETE FROM %s WHERE rowid=%lld", row->table, row->rowid);
+      int result = sqlite3_exec (store->db, sql, NULL, NULL, NULL); sqlite3_free (sql);
+      if (result == SQLITE_OK) {
+        row->done = TRUE; remaining--;
+      }else {
+        /* SQLite implements ON DELETE RESTRICT with an internal trigger:
+         * its extended code is CONSTRAINT_TRIGGER, not FOREIGNKEY. */
+        int extended = sqlite3_extended_errcode (store->db);
+        gboolean foreign_key = extended == SQLITE_CONSTRAINT_FOREIGNKEY
+            || (extended == SQLITE_CONSTRAINT_TRIGGER
+            && g_strcmp0 (sqlite3_errmsg (store->db), "FOREIGN KEY constraint failed") == 0);
+        if (!foreign_key) rc = WYRELOG_E_IO;
+      }
+    }
+    if (remaining == before) rc = WYRELOG_E_POLICY;
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < guards->len; i++) {
+    TenantDeleteGuard *g = g_ptr_array_index (guards, i);
+    gchar *sql = sqlite3_mprintf ("DROP TRIGGER \"%w\"; %s", g->name, g->sql);
+    rc = exec_sql (store->db, sql); sqlite3_free (sql);
+  }
+  if (rc == WYRELOG_E_OK) {
+    gchar *sql = sqlite3_mprintf ("DELETE FROM tenants WHERE tenant_id=%Q; DELETE FROM tenant_delete_rows WHERE tenant_id=%Q; "
+            "UPDATE tenant_delete_journals SET removed_rows=%u,phase='cleanup' WHERE tenant_id=%Q", tenant, tenant, rows->len, tenant);
+    rc = exec_sql (store->db, sql); sqlite3_free (sql);
+  }
+  g_autofree gchar *summary = g_strdup_printf ("owner=%s;capacity=%s;removed=tenant,policy,graphs,schemas,quota,restore,credentials;rows=%u", owner, capacity, rows->len);
+  gboolean inserted = FALSE;
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_append_audit_event_full (store, audit_id, now,
+            actor, "tenant_delete", tenant, summary, manifest, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_record_audit_intention_full (store, audit_id, now,
+            actor, "tenant_delete", tenant, summary, manifest, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_tenant_delete_read (store, tenant, out);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_delete_complete (wyl_policy_store_t *store,
+    const gchar *tenant, const gchar *request_id)
+{
+  if (store == NULL || !wyl_policy_store_transaction_owned_by_caller (store)) return WYRELOG_E_INVALID;
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "UPDATE tenant_delete_journals SET phase='complete' WHERE tenant_id=?1 AND request_id=?2 AND phase='cleanup'", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, tenant);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 2, request_id);
+  if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (s); return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_delete_pending (wyl_policy_store_t *store, GPtrArray **out)
+{
+  if (store == NULL || out == NULL) return WYRELOG_E_INVALID;
+  *out = g_ptr_array_new_with_free_func (g_free);
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT tenant_id FROM tenant_delete_journals WHERE phase<>'complete' ORDER BY tenant_id", &s);
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW)
+    g_ptr_array_add (*out, g_strdup ((const gchar *) sqlite3_column_text (s, 0)));
+  sqlite3_finalize (s);
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK) g_clear_pointer (out, g_ptr_array_unref);
+  return rc;
 }

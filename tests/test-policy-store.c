@@ -8018,9 +8018,185 @@ check_store_subject_has_human_identity (void)
   return 0;
 }
 
+typedef struct
+{
+  GMutex mutex;
+  GCond condition;
+  gboolean started;
+  const gchar *path;
+  const gchar *sql;
+  int result;
+  int changed;
+} TenantDeleteRace;
+
+static int
+tenant_delete_race_busy (void *data, int attempts)
+{
+  TenantDeleteRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->started = TRUE;
+  g_cond_signal (&race->condition);
+  g_mutex_unlock (&race->mutex);
+  g_usleep (1000);
+  return attempts < 10000;
+}
+
+static gpointer
+tenant_delete_race_writer (gpointer data)
+{
+  TenantDeleteRace *race = data;
+  sqlite3 *db = NULL;
+  g_assert_cmpint (sqlite3_open (race->path, &db), ==, SQLITE_OK);
+  sqlite3_busy_handler (db, tenant_delete_race_busy, race);
+  race->result = sqlite3_exec (db, race->sql, NULL, NULL, NULL);
+  race->changed = sqlite3_changes (db);
+  sqlite3_close (db);
+  return NULL;
+}
+
+static void
+check_tenant_delete_races (void)
+{
+  const gchar *writes[] = {
+    "INSERT INTO permission_states(subject_id,perm_id,scope,state) VALUES('late','site.test','race','armed')",
+    "UPDATE tenants SET lifecycle_state='unsealing',lifecycle_generation=lifecycle_generation+1 WHERE tenant_id='race' AND lifecycle_state='sealed'",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (writes); i++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-delete-race-XXXXXX", NULL);
+    g_autofree gchar *path = g_build_filename (dir, "policy.sqlite", NULL);
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    gboolean created = FALSE;
+    g_assert_cmpint (wyl_policy_store_create_tenant (store, "race", "alice", &created), ==, WYRELOG_E_OK);
+    WylPolicyAuthorityMutationResult result;
+    g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store, "race", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+    gchar request[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+    g_auto (WylTenantDeleteRecord) record = {0};
+    g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "race", "alice", request, FALSE, "none", &record), ==, WYRELOG_E_OK);
+    TenantDeleteRace race = {.path=path,.sql=writes[i]};
+    g_mutex_init (&race.mutex); g_cond_init (&race.condition);
+    GThread *writer = g_thread_new ("delete-race", tenant_delete_race_writer, &race);
+    g_mutex_lock (&race.mutex);
+    gint64 deadline = g_get_monotonic_time () + 10 * G_USEC_PER_SEC;
+    while (!race.started)
+      g_assert_true (g_cond_wait_until (&race.condition, &race.mutex, deadline));
+    g_mutex_unlock (&race.mutex);
+    g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+    g_thread_join (writer);
+    if (i == 0) g_assert_cmpint (race.result, ==, SQLITE_CONSTRAINT);
+    else g_assert_cmpint (race.result, ==, SQLITE_OK);
+    g_assert_cmpint (race.changed, ==, 0);
+    g_cond_clear (&race.condition); g_mutex_clear (&race.mutex);
+    g_clear_pointer (&store, wyl_policy_store_close);
+    g_remove (path); g_rmdir (dir);
+  }
+}
+
+static void
+check_tenant_delete_schema (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (":memory:", &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT tenant_id,request_id,actor,phase,manifest FROM tenant_delete_journals",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "delete-test", "alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "unrelated", "alice", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db,
+      "INSERT INTO service_principals(subject_id,display_name,state,created_by,created_at_us,updated_at_us) VALUES('svc:delete:identity','identity','active','alice',1,1);"
+      "INSERT INTO service_credentials(credential_id,credential_format_version,subject_id,tenant_id,state,verifier_version,salt,verifier,created_by,created_at_us,updated_at_us,revoked_by,revoked_at_us) SELECT tenant_id,1,'svc:delete:identity',tenant_id,'revoked',1,zeroblob(16),zeroblob(32),'alice',1,2,'alice',2 FROM tenants WHERE tenant_id IN ('delete-test','unrelated');"
+      "INSERT INTO service_credential_events(credential_id,subject_id,tenant_id,event,from_state,to_state,generation,actor_subject_id,created_at_us) SELECT credential_id,subject_id,tenant_id,'revoked','active','revoked',1,'alice',2 FROM service_credentials;"
+      "INSERT INTO fact_offline_restore_receipts(operation_uuid,tenant_id,scope,manifest_sha256,final_revision,terminal_state,completed_at) VALUES('restore-delete','delete-test','tenant',zeroblob(32),1,'aborted',1);"
+      "INSERT INTO fact_offline_restore_terminal_guard VALUES('restore-delete');",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "delete-test", TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db, "UPDATE tenants SET lifecycle_state='sealed',lifecycle_generation=lifecycle_generation+1,reconciliation_generation=reconciliation_generation+1 WHERE tenant_id='delete-test' AND lifecycle_state='legacy_unclassified'", NULL, NULL, NULL), ==, SQLITE_OK);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  g_auto (WylTenantDeleteRecord) record = {0};
+  g_assert_cmpint (wyl_policy_store_tenant_delete_precheck (store, "__wr_default", "alice", TRUE, &record), ==, WYRELOG_E_POLICY);
+  g_assert_cmpstr (record.error_code, ==, "tenant_builtin");
+  wyl_tenant_delete_record_clear (&record);
+  g_assert_cmpint (sqlite3_exec (db,
+      "INSERT INTO roles(role_id,role_name) VALUES('site.delete.role','delete-role');"
+      "INSERT INTO permissions(perm_id,perm_name,class) VALUES('site.delete.read','delete-read','basic');"
+      "INSERT INTO role_memberships(subject_id,role_id,scope) VALUES('human-holder','site.delete.role','delete-test');"
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope) VALUES('svc:delete:holder','site.delete.read','delete-test');"
+      "INSERT INTO permission_states(subject_id,perm_id,scope,state) VALUES('state-holder','site.delete.read','delete-test','dormant');",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_tenant_delete_precheck (store, "delete-test", "stranger", FALSE, &record), ==, WYRELOG_E_AUTH);
+  g_assert_cmpint (wyl_policy_store_tenant_delete_precheck (store, "delete-test", "admin", TRUE, &record), ==, WYRELOG_E_BUSY);
+  g_assert_cmpstr (record.error_code, ==, "tenant_delete_in_use");
+  g_assert_nonnull (strstr (record.blockers, "human-holder:role:site.delete.role"));
+  g_assert_nonnull (strstr (record.blockers, "svc:delete:holder:permission:site.delete.read"));
+  g_assert_nonnull (strstr (record.blockers, "state-holder:state:site.delete.read"));
+  wyl_tenant_delete_record_clear (&record);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DELETE FROM role_memberships WHERE scope='delete-test';"
+      "DELETE FROM direct_permissions WHERE scope='delete-test';"
+      "DELETE FROM permission_states WHERE scope='delete-test';"
+      "INSERT INTO role_memberships(subject_id,role_id,scope) VALUES('alice','site.delete.role','delete-test');"
+      "INSERT INTO role_memberships(subject_id,role_id,scope) VALUES('alice','site.delete.role','unrelated');"
+      "CREATE TEMP TRIGGER delete_fault BEFORE DELETE ON tenants BEGIN SELECT RAISE(ABORT,'injected'); END;",
+      NULL, NULL, NULL), ==, SQLITE_OK);
+  /* Fault after purge/guard restoration rolls back rows and tombstone. */
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "delete-test", "alice", request, FALSE, "none", &record), !=, WYRELOG_E_OK);
+  wyl_policy_store_rollback_mutation (store);
+  wyl_tenant_delete_record_clear (&record);
+  gboolean membership = FALSE;
+  g_assert_cmpint (wyl_policy_store_role_membership_exists (store, "alice", "site.delete.role", "delete-test", &membership), ==, WYRELOG_E_OK);
+  g_assert_true (membership);
+  g_assert_cmpint (wyl_policy_store_tenant_delete_read (store, "delete-test", &record), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (sqlite3_exec (db, "DROP TRIGGER delete_fault", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_tenant_delete_commit (store, "delete-test", "alice", request, FALSE, "none", &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_commit_mutation (store), ==, WYRELOG_E_OK);
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_tenant_exists (store, "delete-test", &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "SELECT (SELECT count(*) FROM service_principals WHERE subject_id='svc:delete:identity'),"
+      "(SELECT count(*) FROM service_credentials WHERE tenant_id='delete-test'),"
+      "(SELECT count(*) FROM service_credential_events WHERE tenant_id='delete-test'),"
+      "(SELECT count(*) FROM service_credentials WHERE tenant_id='unrelated'),"
+      "(SELECT count(*) FROM fact_offline_restore_receipts WHERE tenant_id='delete-test'),"
+      "(SELECT count(*) FROM audit_events WHERE action='tenant_delete' AND resource_id='delete-test')",
+      -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  const gint expected[] = {1,0,0,1,0,1};
+  for (guint j = 0; j < G_N_ELEMENTS (expected); j++)
+    g_assert_cmpint (sqlite3_column_int (stmt, j), ==, expected[j]);
+  sqlite3_finalize (stmt);
+  /* Successful purge restores ordinary append-only guards. */
+  g_assert_cmpint (sqlite3_exec (db, "DELETE FROM service_credential_events WHERE tenant_id='unrelated'", NULL, NULL, NULL), !=, SQLITE_OK);
+
+  g_assert_cmpint (wyl_policy_store_role_membership_exists (store, "alice", "site.delete.role", "unrelated", &membership), ==, WYRELOG_E_OK);
+  g_assert_true (membership);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "late-holder", "site.delete.role", "delete-test"), !=, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (db, "DELETE FROM tenant_delete_journals", NULL, NULL, NULL), !=, SQLITE_OK);
+  g_assert_cmpint (sqlite3_exec (db, "UPDATE tenant_delete_journals SET actor='other'", NULL, NULL, NULL), !=, SQLITE_OK);
+
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "delete-test", "alice", &created), !=, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+
+}
+
 int
 main (void)
 {
+  check_tenant_delete_schema ();
+  check_tenant_delete_races ();
   gint rc;
 
   if ((rc = check_store_creates_authority_schema ()) != 0)

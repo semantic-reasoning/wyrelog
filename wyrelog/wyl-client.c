@@ -3505,7 +3505,7 @@ wyl_client_request_id_is_canonical (const gchar *request_id)
 static wyrelog_error_t
 client_tenant_request_full (WylClient *client, const gchar *action,
     const gchar *name, const gchar *json_body, const gchar *extra_query, gint64 guard_timestamp,
-    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body)
+    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body, GBytes **out_error)
 {
   g_autofree gchar *base_url = NULL;
   g_autofree gchar *access_token = NULL;
@@ -3542,7 +3542,7 @@ client_tenant_request_full (WylClient *client, const gchar *action,
     soup_message_set_request_body_from_bytes (message, "application/json",
         request);
   }
-  rc = client_send_fact_message (client, message, out_body);
+  rc = client_send_fact_message_full (client, message, out_body, out_error);
   if (rc != WYRELOG_E_OK && client->last_http_status == 503)
     return WYRELOG_E_BUSY;
   return rc;
@@ -3554,7 +3554,35 @@ client_tenant_request (WylClient *client, const gchar *action,
     const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body)
 {
   return client_tenant_request_full (client, action, name, json_body, NULL,
-             guard_timestamp, guard_loc_class, guard_risk, out_body);
+             guard_timestamp, guard_loc_class, guard_risk, out_body, NULL);
+}
+
+wyrelog_error_t
+wyl_client_tenant_delete (WylClient *client, const gchar *name,
+    const gchar *request_id, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, gchar **out_holders)
+{
+  if (out_holders != NULL) *out_holders = NULL;
+  if (name == NULL || !wyl_request_id_is_canonical (request_id)) return WYRELOG_E_INVALID;
+  g_autofree gchar *extra = g_strdup_printf ("request_id=%s", request_id);
+  g_autoptr (GBytes) body = NULL, error = NULL;
+  wyrelog_error_t rc = client_tenant_request_full (client, "delete", name, NULL,
+          extra, guard_timestamp, guard_loc_class, guard_risk, &body, &error);
+  if (rc != WYRELOG_E_OK) {
+    if (out_holders != NULL && error != NULL) {
+      gsize size = 0; const gchar *data = g_bytes_get_data (error, &size);
+      *out_holders = parse_simple_json_string_member (data, size, "holders");
+    }
+    return rc;
+  }
+  gsize size = 0; const gchar *data = g_bytes_get_data (body, &size);
+  g_autofree gchar *returned_tenant = parse_simple_json_string_member (data, size, "tenant");
+  g_autofree gchar *returned_request = parse_simple_json_string_member (data, size, "request_id");
+  gboolean ok = FALSE, deleted = FALSE;
+  return parse_simple_json_bool_member (data, size, "ok", &ok) && ok
+         && parse_simple_json_bool_member (data, size, "deleted", &deleted) && deleted
+         && g_strcmp0 (returned_tenant, name) == 0 && g_strcmp0 (returned_request, request_id) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 wyrelog_error_t
@@ -3594,7 +3622,7 @@ wyl_client_tenant_transfer_owner (WylClient *client, const gchar *name,
   g_autofree gchar *extra = g_strdup_printf ("to=%s&request_id=%s", escaped, request_id);
   g_autoptr (GBytes) body = NULL;
   wyrelog_error_t rc = client_tenant_request_full (client, "transfer-owner", name,
-          NULL, extra, guard_timestamp, guard_loc_class, guard_risk, &body);
+          NULL, extra, guard_timestamp, guard_loc_class, guard_risk, &body, NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
   gsize size = 0;

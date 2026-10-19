@@ -1097,4 +1097,17 @@ wyrelog_error_t wyl_handle_replay_delta_insert (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 #endif
 
+typedef struct
+{
+  /* Called under authority WRITE, before the SQL transaction. */
+  wyrelog_error_t (*authorize)(gpointer data, const gchar *actor, gboolean *system_admin);
+  /* Must only recheck session liveness; called inside the transaction. */
+  wyrelog_error_t (*validate)(gpointer data);
+  wyrelog_error_t (*checkpoint)(const gchar *point, gpointer data);
+  gpointer data;
+} WylTenantDeleteRuntime;
+wyrelog_error_t wyl_handle_delete_tenant (WylHandle *self,
+    const gchar *tenant, const gchar *actor, const gchar *request_id,
+    const WylTenantDeleteRuntime *runtime, WylTenantDeleteRecord *out);
+
 G_END_DECLS;

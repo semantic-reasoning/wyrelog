@@ -604,4 +604,15 @@ wyrelog_error_t wyl_fact_graph_stage_abort (WylFactGraphDirectory * directory,
     WylFactGraphStage * stage);
 void wyl_fact_graph_stage_clear (WylFactGraphStage * stage);
 
+/* A manifest is captured under root writer authority and tenant quiescence.
+ * Cleanup only unlinks the exact captured identities, never follows links,
+ * and syncs parent directories before returning success. */
+wyrelog_error_t wyl_fact_tenant_delete_manifest_prepare (
+  WylFactGraphResolver *resolver, WylFactRootWriterLease *lease,
+  const gchar *tenant, gchar **out_manifest);
+wyrelog_error_t wyl_fact_tenant_delete_manifest_resume (
+  WylFactGraphResolver *resolver, WylFactRootWriterLease *lease,
+  const gchar *manifest,
+  wyrelog_error_t (*checkpoint)(const gchar *, gpointer), gpointer data);
+
 G_END_DECLS;

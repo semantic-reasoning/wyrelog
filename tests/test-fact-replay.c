@@ -16,6 +16,7 @@
 #include "wyrelog/fact/store-test-seams-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 #ifdef WYL_HAS_SECURE_DUCKDB_BRIDGE
 #include "wyrelog/fact/provisioning-run-private.h"
@@ -7118,10 +7119,133 @@ test_register_rule_pack_checks_then_stores (void)
   remove_tree (root);
 }
 
+static wyrelog_error_t
+delete_test_authorize (gpointer data, const gchar *actor, gboolean *admin)
+{
+  (void) data; (void) actor; *admin = FALSE; return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+delete_test_validate (gpointer data)
+{
+  (void) data; return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+delete_test_checkpoint (const gchar *point, gpointer data)
+{
+  return g_strcmp0 (point, data) == 0 ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
+static void
+test_tenant_delete_restart (void)
+{
+  const gchar *faults[] = {"before_policy_commit", "after_policy_commit",
+                           "before_unlink", "after_unlink", "before_journal_complete"};
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autofree gchar *root = wyl_test_make_secure_fact_root ("wyl-delete-XXXXXX", NULL);
+    g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite", NULL);
+    g_autofree gchar *storage = NULL;
+    {
+      g_autoptr (wyl_policy_store_t) policy = NULL;
+      g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+      create_graph_with_schema (policy, root, "tenant-a", "orders");
+      append_order_batches (policy, root, "tenant-a", "orders");
+      storage = lookup_graph_storage_path (policy, "tenant-a", "orders");
+      g_assert_cmpint (wyl_policy_store_set_tenant_sealed (policy, "tenant-a", TRUE), ==, WYRELOG_E_OK);
+      sqlite3 *db = wyl_policy_store_get_db (policy);
+      g_assert_cmpint (sqlite3_exec (db, "UPDATE tenants SET lifecycle_state='sealed',lifecycle_generation=lifecycle_generation+1,reconciliation_generation=reconciliation_generation+1 WHERE tenant_id='tenant-a' AND lifecycle_state='legacy_unclassified'", NULL, NULL, NULL), ==, SQLITE_OK);
+    }
+    WylHandleOpenOptions options = {.policy_store_path=policy_path,.fact_root=root};
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+    gchar request[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+    WylTenantDeleteRuntime runtime = {.authorize=delete_test_authorize,.validate=delete_test_validate,
+                                      .checkpoint=delete_test_checkpoint,.data=(gpointer) faults[i]};
+    g_auto (WylTenantDeleteRecord) record = {0};
+    g_assert_cmpint (wyl_handle_delete_tenant (handle, "tenant-a", "tenant-owner", request, &runtime, &record), ==, WYRELOG_E_IO);
+    g_clear_object (&handle);
+    g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+    gboolean exists = FALSE;
+    g_assert_cmpint (wyl_policy_store_tenant_exists (policy, "tenant-a", &exists), ==, WYRELOG_E_OK);
+    g_assert_cmpint (exists, ==, i == 0);
+    g_assert_cmpint (g_file_test (storage, G_FILE_TEST_IS_DIR), ==, i == 0);
+    wyl_tenant_delete_record_clear (&record);
+    if (i == 0) {
+      g_assert_cmpint (wyl_policy_store_tenant_delete_read (policy, "tenant-a", &record), ==, WYRELOG_E_NOT_FOUND);
+      runtime.checkpoint = NULL;
+      g_assert_cmpint (wyl_handle_delete_tenant (handle, "tenant-a", "tenant-owner", request, &runtime, &record), ==, WYRELOG_E_OK);
+    } else {
+      g_assert_cmpint (wyl_policy_store_tenant_delete_read (policy, "tenant-a", &record), ==, WYRELOG_E_OK);
+      g_assert_true (record.complete);
+    }
+    g_clear_object (&handle);
+    remove_tree (root);
+  }
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t result;
+} DeleteOrderProbe;
+
+static gpointer
+delete_order_worker (gpointer data)
+{
+  DeleteOrderProbe *probe = data;
+  WylTenantDeleteRuntime runtime = {.authorize=delete_test_authorize,.validate=delete_test_validate};
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  g_auto (WylTenantDeleteRecord) record = {0};
+  probe->result = wyl_handle_delete_tenant (probe->handle, "delete-order", "alice", request, &runtime, &record);
+  return NULL;
+}
+
+static void
+test_tenant_delete_lock_order (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  WylHandleOpenOptions options = {0};
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "delete-order", "alice", &created), ==, WYRELOG_E_OK);
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store, "delete-order", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  WylServiceAuthAuthority *authority = wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *write = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority, handle, NULL, &write), ==, WYRELOG_E_OK);
+  DeleteOrderProbe probe = {.handle=handle};
+  GThread *worker = g_thread_new ("delete-order", delete_order_worker, &probe);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_USEC_PER_SEC;
+  for (;;) {
+    WylServiceAuthAuthoritySnapshot snapshot = {0};
+    wyl_service_auth_authority_snapshot (authority, &snapshot);
+    if (snapshot.waiting_writers > 0) break;
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_usleep (1000);
+  }
+  /* A queued deletion must not hold admission while this WRITE owner could
+   * need it for graph lifecycle work (ADR 0002). */
+  WylFactTenantAdmissionState state;
+  g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (handle,
+      "delete-order", &state, NULL, NULL), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_service_auth_write_lease_release_terminal (&write), ==, WYRELOG_E_OK);
+  g_thread_join (worker);
+  g_assert_cmpint (probe.result, ==, WYRELOG_E_OK);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/fact-replay/tenant-delete-lock-order", test_tenant_delete_lock_order);
+  g_test_add_func ("/fact-replay/tenant-delete-restart", test_tenant_delete_restart);
   g_test_add_func ("/fact-replay/register-rule-pack",
       test_register_rule_pack_checks_then_stores);
   g_test_add_func ("/fact-replay/graph-program-pinned",

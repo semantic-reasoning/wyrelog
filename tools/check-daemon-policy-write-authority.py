@@ -45,7 +45,7 @@ FUNCTIONS = (
     "ensure_policy_permission_exists", "ensure_policy_role_exists",
     "mfa_enroll_subject_exists", "lookup_fact_graph",
     "tenant_create_handler", "tenant_seal_handler", "tenant_unseal_handler",
-    "tenant_delete_handler",
+    "tenant_delete_handler", "tenant_delete_execute", "tenant_delete_authorize", "tenant_delete_validate",
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
     "policy_role_grant_handler", "policy_role_revoke_handler",
     "service_credential_operation_reconcile_execute",
@@ -158,6 +158,8 @@ ALLOW_ACQUIRE = {
     "service_management_authority_arm_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
+    "tenant_delete_execute",  # reusable handle coordinator owns WRITE
+
     "mutate_tenant_lifecycle_publication", "mutate_tenant_transfer", "tenant_recovery_repair_with_write",
     "tenant_create_resolve_failed_publication",
     # The graph-level update's commit step (#1393) runs under the write its
@@ -179,6 +181,7 @@ PROTECTED_HANDLERS = {
     "wyl_daemon_http_configure_tenant_for_test",
 }
 MUTATORS = {
+    "wyl_handle_delete_tenant",
     "wyl_policy_store_transfer_tenant_owner",
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
     "wyl_policy_store_create_fact_graph", "wyl_policy_store_set_graph_quota_limit",
