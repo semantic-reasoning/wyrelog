@@ -1240,35 +1240,41 @@ credential row — not any request field — is the tenant authority.
 Three independent controls each leave zero usable and zero pending tokens. None
 of them has a refresh path that could resurrect access.
 
+Each command needs the usual guard options; without them wyctl exits 2
+before sending anything.
+
 Revoke a single credential:
 
-```
+```sh
 wyctl service-credential revoke \
   --credential-id <wlc_KSUID> \
   --tenant <tenant> \
   [--request-id <id>] \
-  --access-token-file <path>
+  --access-token-file <path> \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 # receipt: credential_id=<wlc_KSUID> state=revoked revoked_by=<actor> revoked_at_us=<ts>
 ```
 
 Disable the whole principal (management is global; `--tenant` is omitted or
 `__wr_default`):
 
-```
+```sh
 wyctl service-principal disable \
   --subject <svc:subject-id> \
   --tenant __wr_default \
   [--request-id <id>] \
-  --access-token-file <path>
+  --access-token-file <path> \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
 Seal the tenant (blocks the entire tenant surface; see "Tenants"):
 
-```
+```sh
 wyctl tenant seal \
   --name <tenant> --confirm \
   [--request-id <id>] \
-  --access-token-file <path>
+  --access-token-file <path> \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 # receipt: tenant=<tenant> changed=true request_id=<id>
 ```
 
@@ -1720,6 +1726,10 @@ are recorded with the erase as annotations; the audited actor is the subject
 of the access token. Erasing a retract batch removes its tombstones, so the
 rows it hid become visible again; erase the batch that wrote a row to remove
 the row itself.
+
+An older forget ignored the relation it was given, so a store it ran on may
+still hold rows of a batch it reported as erased. See "Repairing rows left by
+an old wrong-relation forget" below (#1273) to find and erase them.
 
 - Exit 4 with `graph_sealed`: the graph is sealed and nothing was erased.
 - Exit 5 with `fact_batch_not_found`: no batch with that id was recorded for
@@ -2849,8 +2859,9 @@ The daemon's error code is printed on stderr for every remote failure.
 
   Each prints `profile=<system|service> system_url=<url|none>
   event_spool_dir=<path|none> event_queue_limit=<n>`. The route needs no
-  credential; wyctl exits 1 when the daemon is unavailable or answers with an
-  error.
+  credential. wyctl exits 1 when the daemon is unavailable or answers with an
+  error, 2 when its own arguments are invalid, and 3 when the daemon's answer
+  is not a valid profile status.
 
   Service-profile event forwarding targets
   `http://127.0.0.1:8765/profile/events`. If the system profile is not
