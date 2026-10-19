@@ -237,6 +237,7 @@ typedef struct
 typedef struct
 {
   gchar *name;
+  gchar *delete_tenant;
   gchar *request_id;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
@@ -599,6 +600,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphSealOptions,
 static void
 wyctl_tenant_options_clear (WyctlTenantOptions *opts)
 {
+  g_clear_pointer (&opts->delete_tenant, g_free);
   g_clear_pointer (&opts->to, g_free);
   g_clear_pointer (&opts->name, g_free);
   g_clear_pointer (&opts->request_id, g_free);
@@ -7530,6 +7532,7 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   gboolean listing = g_strcmp0 (action, "list") == 0;
   gboolean showing = g_strcmp0 (action, "show") == 0;
   gboolean transferring = g_strcmp0 (action, "transfer-owner") == 0;
+  gboolean deleting = g_strcmp0 (action, "delete") == 0;
   gboolean sealing = g_strcmp0 (action, "seal") == 0;
   GOptionEntry name_entry[] = {
     {"name", 0, 0, G_OPTION_ARG_STRING, &opts.name, "Tenant name", "TENANT"},
@@ -7538,6 +7541,11 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   GOptionEntry transfer_entries[] = {
     {"to", 0, 0, G_OPTION_ARG_STRING, &opts.to, "New human owner", "SUBJECT"},
     {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id, "Transfer request id to repeat", "ID"},
+    {NULL}
+  };
+  GOptionEntry delete_entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.delete_tenant, "Tenant to permanently delete", "TENANT"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id, "Deletion request id to repeat", "ID"},
     {NULL}
   };
   GOptionEntry seal_entries[] = {
@@ -7565,6 +7573,8 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
     g_option_context_add_main_entries (context, name_entry, NULL);
   if (transferring)
     g_option_context_add_main_entries (context, transfer_entries, NULL);
+  if (deleting)
+    g_option_context_add_main_entries (context, delete_entries, NULL);
   if (sealing)
     g_option_context_add_main_entries (context, seal_entries, NULL);
   g_option_context_add_main_entries (context, entries, NULL);
@@ -7591,6 +7601,15 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
     g_printerr ("wyctl: tenant seal closes the whole tenant; pass --confirm\n");
     return 2;
   }
+  if (!deleting && opts.delete_tenant != NULL) {
+    g_printerr ("wyctl: --tenant is only valid for tenant delete\n"); return 2;
+  }
+  if (deleting && opts.delete_tenant != NULL) {
+    if (opts.name != NULL && g_strcmp0 (opts.name, opts.delete_tenant) != 0) {
+      g_printerr ("wyctl: conflicting --name and --tenant\n"); return 2;
+    }
+    g_free (opts.name); opts.name = g_steal_pointer (&opts.delete_tenant);
+  }
   if (!listing && (opts.name == NULL || opts.name[0] == '\0')) {
     g_printerr ("wyctl: missing --name\n");
     return 2;
@@ -7601,7 +7620,7 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   }
   gchar minted[WYL_REQUEST_ID_STRING_BUF] = "";
   const gchar *request_id = NULL;
-  if (sealing || transferring) {
+  if (sealing || transferring || deleting) {
     if (opts.request_id != NULL) {
       if (!wyl_request_id_is_canonical (opts.request_id)) {
         g_printerr ("wyctl: invalid --request-id\n");
@@ -7659,6 +7678,23 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
         info.sealed ? "true" : "false", info.sealed_by_capacity != NULL ? info.sealed_by_capacity : "none");
     return 0;
   }
+  if (deleting) {
+    g_autofree gchar *holders = NULL;
+    wyrelog_error_t result = wyl_client_tenant_delete (client, opts.name, request_id,
+            guard_timestamp, opts.guard_loc_class, guard_risk, &holders);
+    int exit_code = fact_remote_exit (client, command, result, "tenant_delete_failed");
+    if (holders != NULL) {
+      g_autofree gchar *escaped = g_uri_escape_string (holders, NULL, TRUE);
+      g_printerr ("wyctl: tenant deletion blocked by holders=%s\n", escaped);
+    }
+    if (exit_code == 0) {
+      g_autofree gchar *escaped = g_uri_escape_string (opts.name, NULL, TRUE);
+      g_print ("tenant=%s deleted=true request_id=%s\n", escaped, request_id);
+    } else {
+      g_printerr ("wyctl: tenant delete request_id=%s; repeat the same tenant and id after an uncertain outcome\n", request_id);
+    }
+    return exit_code;
+  }
   gboolean changed = FALSE;
   wyrelog_error_t rc;
   if (transferring)
@@ -7677,7 +7713,7 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   int exit_rc = fact_remote_exit (client, command, rc, fallback);
   g_autofree gchar *tenant = g_uri_escape_string (opts.name, NULL, TRUE);
   if (exit_rc == 0) {
-    if (sealing || transferring)
+    if (sealing || transferring || deleting)
       g_print ("tenant=%s changed=%s request_id=%s\n", tenant,
           changed ? "true" : "false", request_id);
     else
@@ -7886,6 +7922,8 @@ run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: missing tenant command\n");
     return 2;
   }
+  if (g_strcmp0 (argv[1], "delete") == 0)
+    return run_tenant_command (global_opts, argc - 1, argv + 1, "delete");
   if (g_strcmp0 (argv[1], "show") == 0)
     return run_tenant_command (global_opts, argc - 1, argv + 1, "show");
   if (g_strcmp0 (argv[1], "transfer-owner") == 0)

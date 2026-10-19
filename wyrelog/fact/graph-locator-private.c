@@ -4152,3 +4152,179 @@ wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile *file)
   file->size_bytes = 0;
 }
 #endif
+
+#ifndef G_OS_WIN32
+/* Tenant deletion manifests are immutable SQL-journal payloads. The root
+ * lease excludes cooperating processes; the handle drains tenant admission
+ * before preparing this snapshot. All walks remain descriptor-relative. */
+static void
+tenant_delete_manifest_stat (GKeyFile *key, const gchar *group,
+    const struct stat *st)
+{
+  g_key_file_set_uint64 (key, group, "device", (guint64) st->st_dev);
+  g_key_file_set_uint64 (key, group, "inode", (guint64) st->st_ino);
+  g_key_file_set_boolean (key, group, "directory", S_ISDIR (st->st_mode));
+}
+
+static gboolean
+tenant_delete_manifest_matches (GKeyFile *key, const gchar *group,
+    const struct stat *st)
+{
+  return g_key_file_get_uint64 (key, group, "device", NULL) == (guint64) st->st_dev
+         && g_key_file_get_uint64 (key, group, "inode", NULL) == (guint64) st->st_ino
+         && g_key_file_get_boolean (key, group, "directory", NULL) == S_ISDIR (st->st_mode)
+         && (S_ISREG (st->st_mode) || S_ISDIR (st->st_mode))
+         && st->st_uid == geteuid ();
+}
+
+static wyrelog_error_t
+tenant_delete_manifest_walk (int parent, const gchar *name, const gchar *path,
+    GKeyFile *key, guint *count, guint depth)
+{
+  if (!g_utf8_validate (name, -1, NULL)) return WYRELOG_E_POLICY;
+  for (const gchar *p = name; *p != '\0'; p++)
+    if ((guchar) *p < 0x20 || *p == 0x7f) return WYRELOG_E_POLICY;
+  if (*count >= 100000 || depth > 32 || strchr (name, '/') != NULL
+      || strchr (name, '\\') != NULL || strchr (name, '[') != NULL
+      || strchr (name, ']') != NULL || strchr (name, '\n') != NULL
+      || g_str_equal (name, ".") || g_str_equal (name, ".."))
+    return WYRELOG_E_POLICY;
+  struct stat st;
+  if (fstatat (parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+    return WYRELOG_E_IO;
+  if ((!S_ISDIR (st.st_mode) && !S_ISREG (st.st_mode)) || st.st_uid != geteuid ()
+      || (guint64) st.st_dev != g_key_file_get_uint64 (key, "root", "device", NULL))
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *group = g_strdup_printf ("entry%u", (*count)++);
+  g_key_file_set_string (key, group, "path", path);
+  tenant_delete_manifest_stat (key, group, &st);
+  /* Path-index groups let resume verify every parent as well as each leaf. */
+  tenant_delete_manifest_stat (key, path, &st);
+  if (!S_ISDIR (st.st_mode)) return WYRELOG_E_OK;
+  int fd = openat (parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return WYRELOG_E_IO;
+  struct stat opened;
+  if (fstat (fd, &opened) != 0 || st.st_dev != opened.st_dev || st.st_ino != opened.st_ino) {
+    close (fd); return WYRELOG_E_POLICY;
+  }
+  DIR *dir = fdopendir (fd);
+  if (dir == NULL) {
+    close (fd); return WYRELOG_E_IO;
+  }
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  struct dirent *entry;
+  errno = 0;
+  while ((entry = readdir (dir)) != NULL) {
+    if (g_str_equal (entry->d_name, ".") || g_str_equal (entry->d_name, "..")) continue;
+    g_autofree gchar *child = g_strconcat (path, "/", entry->d_name, NULL);
+    rc = tenant_delete_manifest_walk (fd, entry->d_name, child, key, count, depth + 1);
+    if (rc != WYRELOG_E_OK) break;
+    errno = 0;
+  }
+  if (rc == WYRELOG_E_OK && errno != 0) rc = WYRELOG_E_IO;
+  closedir (dir);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_tenant_delete_manifest_prepare (WylFactGraphResolver *resolver,
+    WylFactRootWriterLease *lease, const gchar *tenant, gchar **out)
+{
+  if (out == NULL || tenant == NULL) return WYRELOG_E_INVALID;
+  *out = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *component = NULL;
+  rc = wyl_fact_graph_component_encode (tenant, &component);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autoptr (GKeyFile) key = g_key_file_new ();
+  struct stat root;
+  if (fstat (resolver->fd, &root) != 0) return WYRELOG_E_IO;
+  tenant_delete_manifest_stat (key, "root", &root);
+  g_key_file_set_integer (key, "root", "version", 1);
+  g_key_file_set_string (key, "root", "tenant", component);
+  guint count = 0;
+  struct stat st;
+  if (fstatat (resolver->fd, component, &st, AT_SYMLINK_NOFOLLOW) == 0)
+    rc = tenant_delete_manifest_walk (resolver->fd, component, component, key, &count, 0);
+  else if (errno != ENOENT) rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    g_key_file_set_integer (key, "root", "count", count);
+    *out = g_key_file_to_data (key, NULL, NULL);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_tenant_delete_manifest_resume (WylFactGraphResolver *resolver,
+    WylFactRootWriterLease *lease, const gchar *manifest,
+    wyrelog_error_t (*checkpoint)(const gchar *, gpointer), gpointer data)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autoptr (GKeyFile) key = g_key_file_new ();
+  if (manifest == NULL || !g_key_file_load_from_data (key, manifest, -1, G_KEY_FILE_NONE, NULL)
+      || g_key_file_get_integer (key, "root", "version", NULL) != 1) return WYRELOG_E_POLICY;
+  struct stat root;
+  if (fstat (resolver->fd, &root) != 0 || !tenant_delete_manifest_matches (key, "root", &root)) return WYRELOG_E_POLICY;
+  gint count = g_key_file_get_integer (key, "root", "count", NULL);
+  if (count < 0 || count > 100000) return WYRELOG_E_POLICY;
+  g_autofree gchar *tenant = g_key_file_get_string (key, "root", "tenant", NULL);
+  if (tenant == NULL || !component_is_canonical (tenant)) return WYRELOG_E_POLICY;
+  for (gint i = count - 1; i >= 0 && rc == WYRELOG_E_OK; i--) {
+    g_autofree gchar *group = g_strdup_printf ("entry%d", i);
+    g_autofree gchar *path = g_key_file_get_string (key, group, "path", NULL);
+    if (path == NULL) return WYRELOG_E_POLICY;
+    g_auto (GStrv) parts = g_strsplit (path, "/", -1);
+    guint n = g_strv_length (parts);
+    if (n == 0 || n > 34 || g_strcmp0 (parts[0], tenant) != 0) return WYRELOG_E_POLICY;
+    int parent = dup (resolver->fd);
+    if (parent < 0) return WYRELOG_E_IO;
+    gboolean absent = FALSE;
+    g_autoptr (GString) prefix = g_string_new ("");
+    for (guint j = 0; j < n && rc == WYRELOG_E_OK; j++) {
+      if (*parts[j] == '\0' || g_str_equal (parts[j], ".") || g_str_equal (parts[j], "..")
+          || strchr (parts[j], '\\')) {
+        rc = WYRELOG_E_POLICY; break;
+      }
+      if (j) g_string_append_c (prefix, '/');
+      g_string_append (prefix, parts[j]);
+      struct stat st;
+      if (fstatat (parent, parts[j], &st, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) absent = TRUE; else rc = WYRELOG_E_IO;
+        break;
+      }
+      if (!tenant_delete_manifest_matches (key, prefix->str, &st)) {
+        rc = WYRELOG_E_POLICY; break;
+      }
+      if (j + 1 < n) {
+        int next = openat (parent, parts[j], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat opened;
+        if (next < 0 || fstat (next, &opened) != 0 || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino) {
+          if (next >= 0) close (next);
+          rc = WYRELOG_E_POLICY; break;
+        }
+        close (parent); parent = next;
+      } else {
+        if (checkpoint != NULL) rc = checkpoint ("before_unlink", data);
+        /* Recheck the name after an injected checkpoint, immediately before
+         * unlink; noncooperating renames are outside the secure-root contract. */
+        struct stat named;
+        if (rc == WYRELOG_E_OK && (fstatat (parent, parts[j], &named, AT_SYMLINK_NOFOLLOW) != 0
+            || named.st_dev != st.st_dev || named.st_ino != st.st_ino)) rc = WYRELOG_E_POLICY;
+        if (rc == WYRELOG_E_OK && unlinkat (parent, parts[j], S_ISDIR (st.st_mode) ? AT_REMOVEDIR : 0) != 0) rc = WYRELOG_E_IO;
+        if (rc == WYRELOG_E_OK && checkpoint != NULL) rc = checkpoint ("after_unlink", data);
+      }
+    }
+    if (rc == WYRELOG_E_OK && fsync (parent) != 0) rc = WYRELOG_E_IO;
+    close (parent);
+    (void) absent;
+  }
+  if (rc == WYRELOG_E_OK) {
+    struct stat st;
+    if (fstatat (resolver->fd, tenant, &st, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) rc = WYRELOG_E_POLICY;
+    else if (fsync (resolver->fd) != 0) rc = WYRELOG_E_IO;
+  }
+  return rc;
+}
+#endif

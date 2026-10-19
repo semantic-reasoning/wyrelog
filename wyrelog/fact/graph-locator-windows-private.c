@@ -444,8 +444,8 @@ validate_parent_entry (HANDLE parent, const WCHAR *wanted,
 }
 
 static wyrelog_error_t
-open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
-    gboolean create, gboolean secured_handle, HANDLE *out_handle,
+open_relative_directory_internal (HANDLE parent, const WCHAR *component, gsize units,
+    gboolean create, gboolean secured_handle, gboolean delete_access, HANDLE *out_handle,
     WylFactGraphWinIdentity *out_identity)
 {
   WylNtCreateFile nt_create = nt_create_file ();
@@ -485,6 +485,7 @@ open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
       | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE;
   if (secured_handle)
     access |= GENERIC_WRITE | FILE_ADD_SUBDIRECTORY | FILE_ADD_FILE;
+  if (delete_access) access |= DELETE;
   NTSTATUS status = nt_create (&handle, access,
           &attributes, &iosb, NULL, FILE_ATTRIBUTE_DIRECTORY,
           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -510,6 +511,15 @@ open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
   }
   *out_handle = handle;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
+    gboolean create, gboolean secured_handle, HANDLE *out_handle,
+    WylFactGraphWinIdentity *out_identity)
+{
+  return open_relative_directory_internal (parent, component, units, create,
+             secured_handle, FALSE, out_handle, out_identity);
 }
 
 static wyrelog_error_t
@@ -3475,5 +3485,208 @@ wyl_fact_graph_restore_stage_reader_free
     CloseHandle (reader->handle);
   g_free (reader->stage_basename);
   g_free (reader);
+}
+
+/* Like the POSIX manifest, this records identities before the SQL decision.
+ * Every removal uses a relative NT handle, never a reconstructed Win32 path. */
+static void
+tenant_delete_win_identity (GKeyFile *key, const gchar *group,
+    const WylFactGraphWinIdentity *id, gboolean directory)
+{
+  g_autofree gchar *file = g_base64_encode (id->file_id, sizeof id->file_id);
+  g_key_file_set_uint64 (key, group, "volume", id->volume_serial);
+  g_key_file_set_string (key, group, "file", file);
+  g_key_file_set_boolean (key, group, "directory", directory);
+}
+
+static gboolean
+tenant_delete_win_matches (GKeyFile *key, const gchar *group,
+    const WylFactGraphWinIdentity *id)
+{
+  g_autofree gchar *file = g_base64_encode (id->file_id, sizeof id->file_id);
+  g_autofree gchar *expected = g_key_file_get_string (key, group, "file", NULL);
+  return id->volume_serial == g_key_file_get_uint64 (key, group, "volume", NULL)
+         && g_strcmp0 (file, expected) == 0;
+}
+
+static wyrelog_error_t
+tenant_delete_win_open (HANDLE parent, const gchar *name, gboolean directory,
+    HANDLE *out, WylFactGraphWinIdentity *id)
+{
+  if (name == NULL || *name == '\0' || strpbrk (name, "/\\[]\n:") != NULL
+      || g_str_equal (name, ".") || g_str_equal (name, "..")) return WYRELOG_E_POLICY;
+  if (!directory) return open_relative_regular (parent, name,
+               GENERIC_READ | GENERIC_WRITE | DELETE, FALSE, TRUE, out, id);
+  glong units = 0;
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (name, -1, NULL, &units, NULL);
+  if (wide == NULL) return WYRELOG_E_POLICY;
+  return open_relative_directory_internal (parent, (WCHAR *) wide, units,
+             FALSE, TRUE, TRUE, out, id);
+}
+
+static wyrelog_error_t
+tenant_delete_win_walk (HANDLE parent, const gchar *name, const gchar *path,
+    gboolean directory, GKeyFile *key, guint *count, guint *remaining,
+    guint depth)
+{
+  if (*count >= 100000 || depth > 32) return WYRELOG_E_POLICY;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity id;
+  wyrelog_error_t rc = tenant_delete_win_open (parent, name, directory, &handle, &id);
+  if (rc != WYRELOG_E_OK) return rc;
+  if (id.volume_serial != g_key_file_get_uint64 (key, "root", "volume", NULL)) {
+    CloseHandle (handle); return WYRELOG_E_POLICY;
+  }
+  g_autofree gchar *group = g_strdup_printf ("entry%u", (*count)++);
+  g_key_file_set_string (key, group, "path", path);
+  tenant_delete_win_identity (key, path, &id, directory);
+  if (directory) {
+    const DWORD buffer_size = 64 * 1024;
+    g_autofree BYTE *buffer = g_malloc (buffer_size);
+    g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+    g_autoptr (GArray) directories = g_array_new (FALSE, FALSE, sizeof (gboolean));
+    /* Child opens validate their name by restarting and draining this
+     * parent's enumeration cursor. Finish the listing before any opens.
+     * Reserve a global budget for queued names as well as visited entries. */
+    gboolean restart = TRUE;
+    while (rc == WYRELOG_E_OK) {
+      FILE_INFO_BY_HANDLE_CLASS cls = (FILE_INFO_BY_HANDLE_CLASS)
+          (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO : WYL_FILE_ID_EXTD_DIRECTORY_INFO);
+      if (!GetFileInformationByHandleEx (handle, cls, buffer, buffer_size)) {
+        if (GetLastError () != ERROR_NO_MORE_FILES) rc = WYRELOG_E_IO;
+        break;
+      }
+      restart = FALSE;
+      WylFileIdExtdDirInfo *entry = (WylFileIdExtdDirInfo *) buffer;
+      for (;;) {
+        if (!pre_stage_entry_bounds_valid (buffer, buffer_size, entry)) {
+          rc = WYRELOG_E_POLICY; break;
+        }
+        gsize units = entry->file_name_length / sizeof (WCHAR);
+        g_autofree gchar *child = g_utf16_to_utf8 ((gunichar2 *) entry->file_name, units, NULL, NULL, NULL);
+        if (child == NULL || (entry->file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+          rc = WYRELOG_E_POLICY; break;
+        }
+        if (!g_str_equal (child, ".") && !g_str_equal (child, "..")) {
+          if (*remaining == 0) {
+            rc = WYRELOG_E_POLICY; break;
+          }
+          (*remaining)--;
+          gboolean child_directory = (entry->file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+          g_ptr_array_add (names, g_steal_pointer (&child));
+          g_array_append_val (directories, child_directory);
+        }
+        if (entry->next_entry_offset == 0) break;
+        entry = (WylFileIdExtdDirInfo *) ((BYTE *) entry + entry->next_entry_offset);
+      }
+    }
+    for (guint i = 0; rc == WYRELOG_E_OK && i < names->len; i++) {
+      const gchar *child = g_ptr_array_index (names, i);
+      g_autofree gchar *child_path = g_strconcat (path, "/", child, NULL);
+      rc = tenant_delete_win_walk (handle, child, child_path,
+              g_array_index (directories, gboolean, i), key, count, remaining,
+              depth + 1);
+    }
+  }
+  CloseHandle (handle);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_tenant_delete_manifest_prepare (WylFactGraphResolver *resolver,
+    WylFactRootWriterLease *lease, const gchar *tenant, gchar **out)
+{
+  if (out == NULL || tenant == NULL) return WYRELOG_E_INVALID;
+  *out = NULL;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *component = NULL;
+  rc = wyl_fact_graph_component_encode (tenant, &component);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autoptr (GKeyFile) key = g_key_file_new ();
+  tenant_delete_win_identity (key, "root", &resolver->identity, TRUE);
+  g_key_file_set_integer (key, "root", "version", 2);
+  g_key_file_set_string (key, "root", "tenant", component);
+  guint count = 0;
+  guint remaining = 99999; /* The tenant directory consumes the first entry. */
+  rc = tenant_delete_win_walk (resolver->handle, component, component, TRUE,
+          key, &count, &remaining, 0);
+  if (rc == WYRELOG_E_NOT_FOUND && count == 0) rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    g_key_file_set_integer (key, "root", "count", count);
+    *out = g_key_file_to_data (key, NULL, NULL);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_tenant_delete_manifest_resume (WylFactGraphResolver *resolver,
+    WylFactRootWriterLease *lease, const gchar *manifest,
+    wyrelog_error_t (*checkpoint)(const gchar *, gpointer), gpointer data)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, resolver);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autoptr (GKeyFile) key = g_key_file_new ();
+  if (manifest == NULL || !g_key_file_load_from_data (key, manifest, -1, G_KEY_FILE_NONE, NULL)
+      || g_key_file_get_integer (key, "root", "version", NULL) != 2
+      || !tenant_delete_win_matches (key, "root", &resolver->identity)) return WYRELOG_E_POLICY;
+  gint count = g_key_file_get_integer (key, "root", "count", NULL);
+  if (count < 0 || count > 100000) return WYRELOG_E_POLICY;
+  g_autofree gchar *tenant = g_key_file_get_string (key, "root", "tenant", NULL);
+  g_autofree gchar *decoded = NULL;
+  if (tenant == NULL || wyl_fact_graph_component_decode (tenant, &decoded) != WYRELOG_E_OK) return WYRELOG_E_POLICY;
+  for (gint i = count - 1; rc == WYRELOG_E_OK && i >= 0; i--) {
+    g_autofree gchar *group = g_strdup_printf ("entry%d", i);
+    g_autofree gchar *path = g_key_file_get_string (key, group, "path", NULL);
+    if (path == NULL) return WYRELOG_E_POLICY;
+    g_auto (GStrv) parts = g_strsplit (path, "/", -1);
+    guint n = g_strv_length (parts);
+    if (n == 0 || n > 34 || g_strcmp0 (parts[0], tenant) != 0) return WYRELOG_E_POLICY;
+    HANDLE handles[34];
+    guint opened = 0;
+    HANDLE parent = resolver->handle;
+    g_autoptr (GString) prefix = g_string_new ("");
+    for (guint j = 0; j < n && rc == WYRELOG_E_OK; j++) {
+      if (j) g_string_append_c (prefix, '/');
+      g_string_append (prefix, parts[j]);
+      gboolean dir = g_key_file_get_boolean (key, prefix->str, "directory", NULL);
+      HANDLE child = INVALID_HANDLE_VALUE;
+      WylFactGraphWinIdentity id;
+      rc = tenant_delete_win_open (parent, parts[j], dir, &child, &id);
+      if (rc == WYRELOG_E_NOT_FOUND) {
+        rc = WYRELOG_E_OK; break;
+      }
+      if (rc != WYRELOG_E_OK) break;
+      handles[opened++] = child;
+      if (!tenant_delete_win_matches (key, prefix->str, &id)) {
+        rc = WYRELOG_E_POLICY; break;
+      }
+      if (j + 1 == n) {
+        if (checkpoint != NULL) rc = checkpoint ("before_unlink", data);
+        if (rc == WYRELOG_E_OK) {
+          HANDLE named = INVALID_HANDLE_VALUE;
+          WylFactGraphWinIdentity named_id;
+          rc = tenant_delete_win_open (parent, parts[j], dir, &named, &named_id);
+          if (rc == WYRELOG_E_OK) {
+            if (!tenant_delete_win_matches (key, prefix->str, &named_id)) rc = WYRELOG_E_POLICY;
+            CloseHandle (named);
+          }
+        }
+        if (rc == WYRELOG_E_OK) rc = set_delete_disposition (child);
+        CloseHandle (child); opened--;
+        if (rc == WYRELOG_E_OK && checkpoint != NULL) rc = checkpoint ("after_unlink", data);
+        if (rc == WYRELOG_E_OK) rc = flush_directory (parent);
+      } else parent = child;
+    }
+    while (opened) CloseHandle (handles[--opened]);
+  }
+  if (rc == WYRELOG_E_OK) {
+    HANDLE child = INVALID_HANDLE_VALUE;
+    WylFactGraphWinIdentity id;
+    wyrelog_error_t absent = tenant_delete_win_open (resolver->handle, tenant, TRUE, &child, &id);
+    if (absent == WYRELOG_E_OK) CloseHandle (child);
+    rc = absent == WYRELOG_E_NOT_FOUND ? flush_directory (resolver->handle) : WYRELOG_E_POLICY;
+  }
+  return rc;
 }
 #endif

@@ -11242,7 +11242,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
           "/tenants/delete", "name=tenant-a", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 501 || strstr (body, "\"tenant_delete_unsupported\"") == NULL)
+  if (status != 400 || strstr (body, "\"invalid_tenant_request\"") == NULL)
     return 204;
   g_clear_pointer (&body, g_free);
 
@@ -12188,9 +12188,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return rc;
   if (status != 409 || body == NULL
       || strstr (body, "\"error\":\"tenant_seal_superseded\"") == NULL
-      || strstr (body, "\"recorded_lifecycle_generation\":0") == NULL
+      || strstr (body, "\"recorded_lifecycle_generation\":1") == NULL
       || strstr (body, "\"recorded_sealed_generation\":1") == NULL
-      || strstr (body, "\"current_lifecycle_generation\":0") == NULL
+      || strstr (body, "\"current_lifecycle_generation\":3") == NULL
       || strstr (body, "\"current_sealed_generation\":2") == NULL)
     return 2023;
   g_clear_pointer (&body, g_free);
@@ -12216,23 +12216,19 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2022;
   g_clear_pointer (&body, g_free);
 
-  WylPolicyAuthorityMutationResult tenant_promoted =
-      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
-  if (wyl_policy_store_reconcile_tenant_authority
-        (wyl_handle_get_policy_store (handle), "tenant-a",
-      WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0,
-      &tenant_promoted) != WYRELOG_E_OK
-      || tenant_promoted != WYL_POLICY_AUTHORITY_MUTATION_APPLIED)
-    return 2024;
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
           "/tenants/seal", implicit_tenant_seal_query,
           "{\"version\":\"1\",\"request_id\":"
           "\"000000000000000000000000227\"}", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 503 || body == NULL
-      || strstr (body, "tenant_lifecycle_coordination_required") == NULL)
+  if (status != 200)
     return 2025;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+          "/tenants/unseal", implicit_tenant_seal_query, &status, &body);
+  if (rc != 0 || status != 200) return 2024;
   g_clear_pointer (&body, g_free);
 
   /* tenant-b is deliberately legacy/test-configured and has no creator
@@ -24186,6 +24182,41 @@ tenant_ownership_close_before_write (WylHandle *handle, const gchar *actor,
 }
 
 static void
+check_tenant_delete_contract (void)
+{
+  ServiceDenialEnv env = {0};
+  g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "owner-1339",
+      "human-principal-admin", &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store, "owner-1339", "active"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_reload_engine_pair (env.handle), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "delete", NULL, NULL, 409);
+  /* Classifying a previously administrator-sealed empty legacy tenant
+   * must preserve the original seal capacity. Its owner may still delete. */
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "owner-1339", TRUE), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
+  WylPolicyTenantAuthorityRecord *authority = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &authority), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (authority->sealed_by_capacity, ==, "system_admin");
+  wyl_policy_tenant_authority_record_free (authority);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "other-holder", "wr.system_admin", "owner-1339"), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "delete", NULL, NULL, 409);
+  g_assert_cmpint (wyl_policy_store_revoke_role_membership (store, "other-holder", "wr.system_admin", "owner-1339"), ==, WYRELOG_E_OK);
+  gchar request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+  tenant_ownership_request (&env, env.access_token, "delete", NULL, request, 200);
+  tenant_ownership_request (&env, env.access_token, "delete", NULL, request, 200);
+  tenant_ownership_request (&env, env.access_token, "delete", NULL, NULL, 409);
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_tenant_exists (store, "owner-1339", &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+  g_assert_cmpint (wyl_policy_store_create_tenant (store, "owner-1339", "human-principal-admin", &created), !=, WYRELOG_E_OK);
+  service_denial_env_clear (&env);
+}
+
+static void
 check_tenant_ownership_contract (void)
 {
   ServiceDenialEnv env = { 0 };
@@ -24219,6 +24250,8 @@ check_tenant_ownership_contract (void)
   tenant_ownership_request (&env, env.access_token, "show", NULL, NULL, 200);
   tenant_ownership_request (&env, other, "transfer-owner", "owner-bob", NULL, 403);
   tenant_ownership_request (&env, nonmfa, "transfer-owner", "owner-bob", NULL, 403);
+  tenant_ownership_request (&env, other, "delete", NULL, NULL, 403);
+  tenant_ownership_request (&env, nonmfa, "delete", NULL, NULL, 403);
   tenant_ownership_request (&env, env.access_token, "transfer-owner", "svc:bad", NULL, 400);
   tenant_ownership_request (&env, env.access_token, "transfer-owner", "wr.system", NULL, 400);
   tenant_ownership_request (&env, env.access_token, "seal", NULL, NULL, 200);
@@ -25388,6 +25421,7 @@ int
 main (void)
 {
   check_tenant_ownership_contract ();
+  check_tenant_delete_contract ();
   gint rc = default_variant_checks ();
   if (rc != 0)
     g_printerr ("WYRELOG_TEST_DIAG default_variant result=%d\n", rc);

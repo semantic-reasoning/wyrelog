@@ -2166,6 +2166,18 @@ main (void)
       "tenant=wyctl-t1 owner=new-owner sealed=false sealed_by_capacity=none\n");
   assert_wyctl_stdout_contains (tenant_list_argv,
       "tenant=wyctl-t1 owner=new-owner sealed=false sealed_by_capacity=none\n");
+  assert_wyctl_stdout_contains (tenant_seal_argv, "tenant=wyctl-t1 changed=true request_id=");
+  gchar delete_request[WYL_CLIENT_REQUEST_ID_BUF];
+  g_assert_cmpint (wyl_client_request_id_new (delete_request, sizeof delete_request), ==, WYRELOG_E_OK);
+  gchar *tenant_delete_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH, "--daemon-url", (gchar *) base_url,
+    "tenant", "delete", "--tenant", "wyctl-t1", "--request-id", delete_request,
+    "--access-token-file", token_path, "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted", "--guard-risk", "29", NULL,
+  };
+  g_assert_cmpint (wyl_policy_store_revoke_role_membership (store, "wyctl-policy-admin", "wr.system_admin", "wyctl-t1"), ==, WYRELOG_E_OK);
+  assert_wyctl_stdout_contains (tenant_delete_argv, "tenant=wyctl-t1 deleted=true request_id=");
+  assert_wyctl_stdout_contains (tenant_delete_argv, "tenant=wyctl-t1 deleted=true request_id=");
 
   /* #1238: the unauthenticated profile report. */
   gchar *profile_status_argv[] = {

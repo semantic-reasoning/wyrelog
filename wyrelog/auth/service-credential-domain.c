@@ -803,7 +803,7 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_seal_tenant_keyed_precheck_core
           (mutation.transaction, mutation.store, tenant_id, actor_subject_id,
-            request_id, receipt_version, &receipt_found, &stored_retirement,
+            request_id, receipt_version, runtime->acting_capacity != NULL, &receipt_found, &stored_retirement,
             stored_tenant);
   if (rc == WYRELOG_E_OK && !receipt_found)
     rc = service_mutation_prepare_commit_evidence (&mutation);

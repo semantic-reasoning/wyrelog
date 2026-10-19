@@ -862,6 +862,12 @@ void wyl_client_tenant_list_clear (WylClientTenantList * value);
 wyrelog_error_t wyl_client_tenant_list (WylClient * client,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientTenantList * out_tenants);
+/* Requires a live MFA owner or SYSTEM-admin session. On in-use refusal,
+ * out_holders receives an allocated diagnostic listing subject/kind/grant.
+ * Repeat the same request id after an interrupted or uncertain deletion. */
+wyrelog_error_t wyl_client_tenant_delete (WylClient *client, const gchar *name,
+    const gchar *request_id, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk, gchar **out_holders);
 wyrelog_error_t wyl_client_tenant_show (WylClient *client, const gchar *name,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     WylClientTenant *out_tenant);
