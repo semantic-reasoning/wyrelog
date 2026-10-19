@@ -1962,7 +1962,9 @@ wyctl --daemon-url "$BASE_URL" graph seal \
 
 It prints `tenant=<tenant> graph=<graph> sealed=true`, also when the graph
 was already sealed, so a re-run is safe. Exit 5 with
-`graph_not_found` means no such graph. On no response or another 5xx the
+`graph_not_found` means no such graph. Exit 4 with `409 graph_not_sealable`
+means the graph is still provisioning or is degraded; nothing changed, and the
+graph can be sealed once it is active. On no response or another 5xx the
 outcome is unknown, and wyctl says so; `wyctl graph list` then shows whether
 the graph is sealed.
 
@@ -2353,6 +2355,9 @@ wyctl --daemon-url "$BASE_URL" tenant create --name acme \
 `tenant list` includes `tenant`, `owner`, `sealed` and `sealed_by_capacity`
 on each output line. `tenant show --name acme` reports those fields for one
 tenant. An active tenant reports `sealed_by_capacity=none`.
+Seal and unseal of a tenant that does not exist answer `404 tenant_not_found`
+to an administrator, and every repeat gets the same answer; a caller acting
+only as an owner gets `403 tenant_denied`, as for any tenant it does not own.
 `tenant create` prints `tenant=<tenant> changed=<bool>`; creating a tenant that
 already exists succeeds with `changed=false`. Creating a tenant grants the
 caller the `wr.system_admin` role in it and records the caller as the tenant's

@@ -6145,6 +6145,7 @@ test_graph_seal (void)
     {401, "graph_auth_required", 6, FALSE},
     {403, "graph_denied", 4, FALSE},
     {404, "graph_not_found", 5, FALSE},
+    {409, "graph_not_sealable", 4, FALSE},
     {500, "graph_mutation_failed", 5, TRUE},
     {503, "graph_mutation_unavailable", 5, TRUE},
   };

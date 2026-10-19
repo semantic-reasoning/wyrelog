@@ -12228,6 +12228,17 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 403, sealing ? "tenant_seal_denied" : "tenant_unseal_denied");
     return;
   }
+  /* A missing tenant is a definite answer that every repeat gets again, not
+   * an unknown outcome (#1274).  Only a caller acting as an administrator
+   * learns it is missing; one acting as an owner is refused as for any
+   * tenant it does not own, so the answer does not reveal which exist. */
+  if (rc == WYRELOG_E_NOT_FOUND && !creating) {
+    if (g_strcmp0 (reauthorization.acting_capacity, "system_admin") == 0)
+      set_json_error (msg, 404, "tenant_not_found");
+    else
+      set_json_error (msg, 403, "tenant_denied");
+    return;
+  }
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "tenant_mutation_failed");
     return;
@@ -13018,6 +13029,13 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc == WYRELOG_E_BUSY) {
     set_json_error (msg, 503, "graph_mutation_unavailable");
+    return;
+  }
+  /* The store refuses a graph that is provisioning or degraded before any
+   * durable write, and the seal reopens admission, so this is a definite
+   * refusal rather than an unknown outcome (#1274). */
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, "graph_not_sealable");
     return;
   }
   if (rc != WYRELOG_E_OK) {
