@@ -343,6 +343,30 @@ test_proxy_schema_environment (gconstpointer data)
                         "http://127.0.0.1:1", "mfa", "enroll", "--subject", "alice",
                         "--access-token-file", token, NULL };
   gchar *version_argv[] = { WYL_TEST_WYCTL_PATH, "--version", NULL };
+  /* These commands use exit 1 for a remote answer, so a proxy setup failure
+   * exits 2 there (#1274). */
+  gchar *fact_status_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                                "http://127.0.0.1:1", "fact", "status", "--tenant", "t",
+                                "--access-token-file", token, NULL };
+  gchar *fact_verify_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                                "http://127.0.0.1:1", "fact", "verify", "--tenant", "t",
+                                "--graph", "g", "--access-token-file", token,
+                                "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+                                "--guard-risk", "29", NULL };
+  gchar *graph_list_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                               "http://127.0.0.1:1", "graph", "list", "--tenant", "t",
+                               "--access-token-file", token, "--guard-timestamp", "123",
+                               "--guard-loc-class", "trusted", "--guard-risk", "29", NULL };
+  gchar *graph_seal_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                               "http://127.0.0.1:1", "graph", "seal", "--tenant", "t",
+                               "--graph", "g", "--confirm", "--access-token-file", token,
+                               "--guard-timestamp", "123", "--guard-loc-class", "trusted",
+                               "--guard-risk", "29", NULL };
+  gchar *tenant_list_argv[] = { WYL_TEST_WYCTL_PATH, "--daemon-url",
+                                "http://127.0.0.1:1", "tenant", "list",
+                                "--access-token-file", token, "--guard-timestamp", "123",
+                                "--guard-loc-class", "trusted", "--guard-risk", "29", NULL };
+  gchar **local_exit_argv = NULL;
   gchar **argv = status_argv;
   if (g_str_equal (mode, "policy") || g_str_equal (mode, "invalid-token"))
     argv = policy_argv;
@@ -350,6 +374,18 @@ test_proxy_schema_environment (gconstpointer data)
     argv = mfa_argv;
   else if (g_str_equal (mode, "version"))
     argv = version_argv;
+  else if (g_str_equal (mode, "fact-status"))
+    local_exit_argv = fact_status_argv;
+  else if (g_str_equal (mode, "fact-verify"))
+    local_exit_argv = fact_verify_argv;
+  else if (g_str_equal (mode, "graph-list"))
+    local_exit_argv = graph_list_argv;
+  else if (g_str_equal (mode, "graph-seal"))
+    local_exit_argv = graph_seal_argv;
+  else if (g_str_equal (mode, "tenant-list"))
+    local_exit_argv = tenant_list_argv;
+  if (local_exit_argv != NULL)
+    argv = local_exit_argv;
   if (g_str_equal (mode, "invalid-token"))
     g_assert_cmpint (g_unlink (token), ==, 0);
 
@@ -368,7 +404,8 @@ test_proxy_schema_environment (gconstpointer data)
     g_assert_nonnull (strstr (stderr_buf, "access token file"));
     g_assert_null (strstr (stderr_buf, "proxy settings unavailable"));
   } else {
-    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==,
+        local_exit_argv != NULL ? 2 : 1);
     g_assert_cmpstr (stdout_buf, ==, "");
     if (dummy || normal) {
       g_assert_nonnull (strstr (stderr_buf, "wyctl: daemon unavailable:"));
@@ -6566,7 +6603,8 @@ main (int argc, char **argv)
 
   static const gchar *proxy_cases[] = {
     "status", "policy", "mfa", "automatic", "dummy", "version",
-    "invalid-token", "partial", "normal",
+    "invalid-token", "partial", "normal", "fact-status", "fact-verify",
+    "graph-list", "graph-seal", "tenant-list",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (proxy_cases); i++) {
     g_autofree gchar *path = g_strdup_printf ("/wyctl/proxy-schema/%s",
