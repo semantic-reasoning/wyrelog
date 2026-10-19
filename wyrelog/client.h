@@ -462,6 +462,12 @@ wyrelog_error_t wyl_client_service_principal_create (WylClient * client,
 wyrelog_error_t wyl_client_service_principal_list (WylClient * client,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServicePrincipalList * out_principals);
+/* Arm the service-management authority (wr.service_principal.manage and
+ * wr.service_credential.manage) for the bearer's own session (#1269).
+ * WYRELOG_E_OK only for a success answer carrying "ok":true. */
+wyrelog_error_t wyl_client_service_management_authority_arm (WylClient *
+    client, gint64 guard_timestamp, const gchar * guard_loc_class,
+    gint64 guard_risk);
 wyrelog_error_t wyl_client_service_principal_disable (WylClient * client,
     const gchar * subject_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk);

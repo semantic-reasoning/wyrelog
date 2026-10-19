@@ -78,6 +78,8 @@ static gboolean parse_login_response_json (const gchar * data, gsize size,
     gchar ** out_access_token, gchar ** out_refresh_token,
     gchar ** out_username, gchar ** out_tenant, gchar ** out_principal_state,
     gchar ** out_session_state);
+static gboolean parse_simple_json_bool_member (const gchar * data,
+    gsize size, const gchar * member, gboolean * out_value);
 
 static void
 append_json_string (GString *json, const gchar *value)
@@ -1324,6 +1326,26 @@ wyl_client_service_principal_list (WylClient *client, gint64 guard_timestamp,
   body_data = g_bytes_get_data (body, &body_size);
   return wyl_client_service_principal_list_decode (body_data, body_size,
              out_principals);
+}
+
+wyrelog_error_t
+wyl_client_service_management_authority_arm (WylClient *client,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk)
+{
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  if (!client_service_management_begin (client))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = client_service_management_request (client, "POST",
+          "/service-management-authority/arm", NULL, guard_timestamp,
+          guard_loc_class, guard_risk, &body, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  const gchar *body_data = g_bytes_get_data (body, &body_size);
+  gboolean ok = FALSE;
+  if (!parse_simple_json_bool_member (body_data, body_size, "ok", &ok) || !ok)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
