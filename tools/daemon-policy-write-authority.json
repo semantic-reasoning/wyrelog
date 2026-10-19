@@ -1,5 +1,5 @@
 {
-  "aggregate": "1d4c6295a43f6709934ccaca7cce0a536991455de28c5ff6245b04554e2aad60",
+  "aggregate": "b44debb404ba6a5bc3c84c5c4619e6a098120aa329ddb69b1b3132abd7a86ea8",
   "directives": {
     "count": 567,
     "sha256": "2d3dd1da5fdffdada05d0e383ce121c9fd168130ab183bb8568dca5b2451c8ae"
@@ -46,8 +46,8 @@
     "tenant_create_handler": "46772d7892d18662bde4f9427e1c87385c24866ff69b7407e4ce09dc6a2115b1",
     "tenant_create_resolve_failed_publication": "1cba13e791cfd419bcd859b6cca89cea428873245f83f55128f2e8cf2d29c2c1",
     "tenant_delete_handler": "3322ba825e54b5e9a9711aceccb0f089162fd496df668a6bc8037161dc1c8783",
-    "tenant_mutation_handler": "18e71fbc4d2a49f05567f393c76ed96b7b412e27189773e59cf33397368b4147",
-    "tenant_recovery_attempt_before_authorization": "b28359d9888ae938ba8f566eb21c7f90ca5cb9aca9d8c3455f442ece6e0cae5c",
+    "tenant_mutation_handler": "16c30c65f16636f0f3b1f4297bec935e927dafd23a2c2ac886864e9d8f3ba8aa",
+    "tenant_recovery_attempt_before_authorization": "c9e12fa28b50ad75040e4465e83b330662caef11f5f12653873add3b2ac02483",
     "tenant_recovery_finish_claim": "fa04e2d1c3164dbf1a6a89ad56f0aa0961b73077f4e33e2732cf0ce09c479429",
     "tenant_recovery_install": "6ed6d5761708ffdd4356d5c78d1b295a1337ac519379f8796bc05614770ec138",
     "tenant_recovery_repair_with_write": "99c441529bad90ab68ba6721825b4f921ab1d72c316c26a9addfd9899c3e200b",

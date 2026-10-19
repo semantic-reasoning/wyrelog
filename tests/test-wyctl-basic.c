@@ -6295,16 +6295,38 @@ test_tenant_list_and_create (void)
   g_assert_cmpstr (missing.err, ==, "wyctl: tenant unseal failed: "
       "tenant_not_found\n");
 
-  /* A pending repair from an earlier failure blocks every tenant change. */
+  /* A pending repair for another change blocks every tenant change.  The
+   * daemon names it, so the advice is exact and the outcome is not unknown
+   * (#1274). */
   g_auto (FactForgetRun) pending = { 0 };
-  run_fake_daemon_case (503, "{\"error\":\"tenant_mutation_unavailable\"}",
+  run_fake_daemon_case (503, "{\"error\":\"tenant_repair_pending\"}",
       NULL, unseal, FALSE, &pending);
   assert_fact_forget_exit (&pending, 5);
   g_assert_cmpstr (pending.err, ==, "wyctl: tenant unseal failed: "
+      "tenant_repair_pending\n"
+      "wyctl: another tenant change failed after its commit and its repair "
+      "is pending; repeat that change first (a seal with the --request-id "
+      "it printed), then this one\n");
+
+  /* This change's own repair is running in another request. */
+  g_auto (FactForgetRun) repairing = { 0 };
+  run_fake_daemon_case (503, "{\"error\":\"tenant_repair_in_progress\"}",
+      NULL, unseal, FALSE, &repairing);
+  assert_fact_forget_exit (&repairing, 5);
+  g_assert_cmpstr (repairing.err, ==, "wyctl: tenant unseal failed: "
+      "tenant_repair_in_progress\n"
+      "wyctl: another request is completing this change's pending repair; "
+      "repeat the same command once it finishes\n");
+
+  /* A busy daemon is an ordinary unknown outcome. */
+  g_auto (FactForgetRun) busy = { 0 };
+  run_fake_daemon_case (503, "{\"error\":\"tenant_mutation_unavailable\"}",
+      NULL, create, FALSE, &busy);
+  assert_fact_forget_exit (&busy, 5);
+  g_assert_cmpstr (busy.err, ==, "wyctl: tenant create failed: "
       "tenant_mutation_unavailable\n"
-      "wyctl: a tenant change that failed, this one or an earlier one, may "
-      "be pending; repeat it (a seal with its --request-id) before other "
-      "tenant changes\n");
+      "wyctl: the outcome is unknown; repeating the same tenant create is "
+      "safe\n");
 }
 
 /* Return the request_id the seal request carried in its JSON body. */
@@ -6350,9 +6372,8 @@ test_tenant_seal (void)
   g_autofree gchar *hint = g_strdup_printf ("wyctl: tenant seal failed: "
           "tenant_mutation_unavailable\n"
           "wyctl: tenant seal request_id=%s\n"
-          "wyctl: a tenant change that failed, this one or an earlier one, "
-          "may be pending; repeat it (a seal with its --request-id) before "
-          "other tenant changes\n", sent);
+          "wyctl: the seal outcome is unknown; repeat it with --request-id "
+          "%s, not a new id\n", sent, sent);
   g_assert_cmpstr (busy.err, ==, hint);
 
   /* --request-id repeats that exact seal. */
