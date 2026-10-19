@@ -11768,11 +11768,14 @@ tenant_recovery_repair_with_write (WylDaemonHttpContext *ctx,
 static wyrelog_error_t
 tenant_recovery_attempt_before_authorization (WylDaemonHttpContext *ctx,
     WylTenantRecoveryOperation operation, const gchar *tenant,
-    guint32 receipt_version, const gchar *receipt_request_id)
+    guint32 receipt_version, const gchar *receipt_request_id,
+    WylTenantRecoveryClaimResult *out_claim)
 {
   WylTenantRecoveryDescriptor *descriptor = NULL;
   WylTenantRecoveryClaimResult claim = tenant_recovery_claim (ctx, operation,
           tenant, receipt_version, receipt_request_id, &descriptor);
+  if (out_claim != NULL)
+    *out_claim = claim;
   if (claim == WYL_TENANT_RECOVERY_CLAIM_NONE)
     return WYRELOG_E_OK;
   if (claim != WYL_TENANT_RECOVERY_CLAIM_MATCHED)
@@ -11815,7 +11818,7 @@ wyl_daemon_http_attempt_seal_tenant_recovery_for_test (SoupServer *server,
     return WYRELOG_E_INVALID;
   return tenant_recovery_attempt_before_authorization (ctx,
              WYL_TENANT_RECOVERY_SEAL, tenant,
-             WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, request_id);
+             WYL_SERVICE_RETIREMENT_RECEIPT_VERSION, request_id, NULL);
 }
 #endif
 
@@ -11966,14 +11969,24 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   WylTenantRecoveryOperation recovery_operation = sealing
       ? WYL_TENANT_RECOVERY_SEAL
       : (creating ? WYL_TENANT_RECOVERY_CREATE : WYL_TENANT_RECOVERY_UNSEAL);
+  WylTenantRecoveryClaimResult recovery_claim = WYL_TENANT_RECOVERY_CLAIM_NONE;
   wyrelog_error_t recovery_rc = tenant_recovery_attempt_before_authorization
         (ctx, recovery_operation, tenant,
           sealing ? WYL_SERVICE_RETIREMENT_RECEIPT_VERSION : 0,
-          sealing ? retirement_values[1] : NULL);
+          sealing ? retirement_values[1] : NULL, &recovery_claim);
+  /* The pending repair blocks every tenant change, and wyctl can say what
+   * to do only when the cause is named (#1274): a different change's repair
+   * is pending, or this change's repair is running in another request.  A
+   * plain busy answer stays tenant_mutation_unavailable. */
   if (recovery_rc != WYRELOG_E_OK) {
-    set_json_error (msg, recovery_rc == WYRELOG_E_BUSY ? 503 : 500,
-        recovery_rc == WYRELOG_E_BUSY ? "tenant_mutation_unavailable" :
-        "tenant_mutation_failed");
+    const gchar *code = "tenant_mutation_failed";
+    if (recovery_claim == WYL_TENANT_RECOVERY_CLAIM_MISMATCH)
+      code = "tenant_repair_pending";
+    else if (recovery_claim == WYL_TENANT_RECOVERY_CLAIM_BUSY)
+      code = "tenant_repair_in_progress";
+    else if (recovery_rc == WYRELOG_E_BUSY)
+      code = "tenant_mutation_unavailable";
+    set_json_error (msg, recovery_rc == WYRELOG_E_BUSY ? 503 : 500, code);
     return;
   }
 

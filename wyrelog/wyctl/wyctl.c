@@ -7688,9 +7688,13 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
   g_autofree gchar *error_code = wyl_client_dup_last_error_code (client);
   /* The daemon keeps one pending repair for all tenants: after a tenant
    * change fails past its commit, every tenant change is refused until
-   * that same change is repeated. */
-  gboolean pending = g_strcmp0 (error_code,
-          "tenant_mutation_unavailable") == 0;
+   * that same change is repeated.  It names which case refused this one,
+   * and either way this request changed nothing (#1274). */
+  gboolean repair_pending = g_strcmp0 (error_code,
+          "tenant_repair_pending") == 0;
+  gboolean repair_running = g_strcmp0 (error_code,
+          "tenant_repair_in_progress") == 0;
+  gboolean pending = repair_pending || repair_running;
   gboolean unknown = wyctl_remote_outcome_unknown (client, rc);
   /* A seal's own id is the key to its repair, whatever the failure: print
    * it as a fact before any advice. */
@@ -7698,10 +7702,13 @@ run_tenant_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
     g_printerr ("wyctl: tenant seal request_id=%s\n", request_id);
   if (transferring)
     g_printerr ("wyctl: tenant transfer-owner request_id=%s; retry the same intent with this id\n", request_id);
-  if (pending)
-    g_printerr ("wyctl: a tenant change that failed, this one or an earlier "
-        "one, may be pending; repeat it (a seal with its --request-id) "
-        "before other tenant changes\n");
+  if (repair_pending)
+    g_printerr ("wyctl: another tenant change failed after its commit and "
+        "its repair is pending; repeat that change first (a seal with the "
+        "--request-id it printed), then this one\n");
+  if (repair_running)
+    g_printerr ("wyctl: another request is completing this change's pending "
+        "repair; repeat the same command once it finishes\n");
   if (sealing && status == 409)
     g_printerr ("wyctl: seal request_id=%s cannot apply: the tenant changed "
         "after it was recorded, or the id belongs to another request; "

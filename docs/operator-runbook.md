@@ -2412,11 +2412,13 @@ still needs sealing, seal it again without `--request-id`.
 A create, seal or unseal that fails after the daemon committed it leaves a
 pending repair, and the daemon holds one for all tenants. Until the same
 command is repeated -- a seal with the same `--request-id` -- the daemon
-answers every tenant create, seal and unseal, for any tenant, with `503
-tenant_mutation_unavailable`, and wyctl says so. The failed command may be the
-one that just got that answer: a seal that fails after its own commit installs
-the repair and answers the same way. The same answer can also mean the daemon
-was momentarily busy, so repeating is safe either way. Create is safe to
+answers every other tenant create, seal and unseal, for any tenant, with `503
+tenant_repair_pending`, and wyctl says so. That includes a seal of the same
+tenant under a new request id, so repeat a failed seal with the id it printed.
+While one request is completing the repair, a repeat of that same change
+answers `503 tenant_repair_in_progress`; repeat it once the other finishes.
+Neither answer changed anything. `503 tenant_mutation_unavailable` means the
+daemon was momentarily busy, an ordinary unknown outcome. Create is safe to
 repeat: once done it answers `changed=false`. So after a 5xx or no answer,
 repeat the same command before anything else. A seal can also answer
 `503 tenant_lifecycle_coordination_required`; repeat it the same way.

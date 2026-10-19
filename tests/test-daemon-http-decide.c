@@ -7575,16 +7575,6 @@ typedef struct
 
 typedef struct
 {
-  const gchar *base_url;
-  const gchar *query;
-  const gchar *body;
-  gint rc;
-  guint status;
-  gchar *response;
-} TenantRecoveryRequest;
-
-typedef struct
-{
   SoupServer *server;
   const gchar *tenant;
   const gchar *request_id;
@@ -7640,17 +7630,6 @@ tenant_recovery_barrier_clear (TenantRecoveryBarrier *barrier)
 {
   g_cond_clear (&barrier->changed);
   g_mutex_clear (&barrier->mutex);
-}
-
-static gpointer
-tenant_recovery_request_thread (gpointer data)
-{
-  TenantRecoveryRequest *request = data;
-  g_autoptr (SoupSession) session = soup_session_new ();
-  request->rc = send_raw_policy_mutation_body (session, "POST",
-          request->base_url, "/tenants/seal", request->query, request->body,
-          &request->status, &request->response);
-  return NULL;
 }
 
 static gpointer
@@ -12010,7 +11989,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
           "\"000000000000000000000000229\"}", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+  if (status != 503 || strstr (body, "\"tenant_repair_pending\"") == NULL
       || !wyl_handle_engine_pair_is_poisoned (handle))
     return 2245;
   g_clear_pointer (&body, g_free);
@@ -12018,7 +11997,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
           "/tenants/unseal", tenant_seal_query, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+  if (status != 503 || strstr (body, "\"tenant_repair_pending\"") == NULL
       || !wyl_handle_engine_pair_is_poisoned (handle))
     return 2246;
   g_clear_pointer (&body, g_free);
@@ -12030,65 +12009,51 @@ check_policy_permission_mutation_contract (SoupServer *server,
           "/tenants/create", wrong_recovery_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 503 || strstr (body, "tenant_mutation_unavailable") == NULL
+  if (status != 503 || strstr (body, "\"tenant_repair_pending\"") == NULL
       || !wyl_handle_engine_pair_is_poisoned (handle))
     return 2247;
   g_clear_pointer (&body, g_free);
 
-  /* The audit fixture serializes route dispatch, so the default fixture owns
-   * the concurrent CLAIMED observation.  Audit still exercises the same
-   * exact-request recovery synchronously below. */
-#ifndef WYL_HAS_AUDIT
+  /* While one request is repairing this seal, an exact repeat is told the
+   * repair is running rather than that some change may be pending (#1274).
+   * The audit fixture serializes route dispatch, so the claimant enters
+   * through the recovery seam rather than over HTTP; otherwise the repeat
+   * would wait for it instead of observing the claim. */
   TenantRecoveryBarrier recovery_barrier = { 0 };
-  g_mutex_init (&recovery_barrier.mutex);
-  g_cond_init (&recovery_barrier.changed);
-  TenantRecoveryRequest recovery_request = {
-    .base_url = base_url,
-    .query = tenant_seal_query,
-    .body = tenant_seal_body,
+  tenant_recovery_barrier_init (&recovery_barrier);
+  TenantRecoveryOwnerRequest recovery_request = {
+    .server = server,
+    .tenant = "tenant-a",
+    .request_id = "000000000000000000000000222",
   };
   wyl_daemon_http_set_tenant_recovery_claim_checkpoint_for_test (server,
       tenant_recovery_checkpoint, &recovery_barrier);
   g_autoptr (GThread) recovery_thread = g_thread_new ("tenant-recovery",
-          tenant_recovery_request_thread, &recovery_request);
-  g_mutex_lock (&recovery_barrier.mutex);
-  while (!recovery_barrier.entered)
-    g_cond_wait (&recovery_barrier.changed, &recovery_barrier.mutex);
-  g_mutex_unlock (&recovery_barrier.mutex);
+          tenant_recovery_claim_request_thread, &recovery_request);
+  if (!tenant_recovery_barrier_wait_entered (&recovery_barrier)) {
+    tenant_recovery_barrier_release (&recovery_barrier);
+    g_thread_join (g_steal_pointer (&recovery_thread));
+    tenant_recovery_barrier_clear (&recovery_barrier);
+    return 22494;
+  }
   rc = send_raw_policy_mutation_body (session, "POST", base_url,
           "/tenants/seal", tenant_seal_query, tenant_seal_body, &status, &body);
-  if (rc != 0 || status != 503
-      || strstr (body, "tenant_mutation_unavailable") == NULL
-      || !wyl_handle_engine_pair_is_poisoned (handle)) {
-    g_mutex_lock (&recovery_barrier.mutex);
-    recovery_barrier.released = TRUE;
-    g_cond_broadcast (&recovery_barrier.changed);
-    g_mutex_unlock (&recovery_barrier.mutex);
-    g_thread_join (g_steal_pointer (&recovery_thread));
-    g_free (recovery_request.response);
-    g_cond_clear (&recovery_barrier.changed);
-    g_mutex_clear (&recovery_barrier.mutex);
+  tenant_recovery_barrier_release (&recovery_barrier);
+  g_thread_join (g_steal_pointer (&recovery_thread));
+  tenant_recovery_barrier_clear (&recovery_barrier);
+  if (rc != 0 || status != 503 || body == NULL
+      || strstr (body, "\"tenant_repair_in_progress\"") == NULL) {
+    g_printerr ("WYRELOG_TEST_DIAG tenant_repair_in_progress status=%u "
+        "body=%s\n", status, body != NULL ? body : "(null)");
     return 2248;
   }
   g_clear_pointer (&body, g_free);
-  g_mutex_lock (&recovery_barrier.mutex);
-  recovery_barrier.released = TRUE;
-  g_cond_broadcast (&recovery_barrier.changed);
-  g_mutex_unlock (&recovery_barrier.mutex);
-  g_thread_join (g_steal_pointer (&recovery_thread));
-  if (recovery_request.rc != 0 || recovery_request.status != 200
-      || recovery_request.response == NULL
-      || strstr (recovery_request.response, "\"changed\":true") == NULL
+  if (recovery_request.rc != WYRELOG_E_OK
       || wyl_handle_engine_pair_is_poisoned (handle)) {
-    g_free (recovery_request.response);
-    g_cond_clear (&recovery_barrier.changed);
-    g_mutex_clear (&recovery_barrier.mutex);
+    g_printerr ("WYRELOG_TEST_DIAG tenant_repair_claimant rc=%d\n",
+        recovery_request.rc);
     return 2249;
   }
-  g_free (recovery_request.response);
-  g_cond_clear (&recovery_barrier.changed);
-  g_mutex_clear (&recovery_barrier.mutex);
-#endif
 
   g_autofree gchar *tenant_seal_correlation = NULL;
   rc = send_raw_policy_mutation_body_full (session, "POST", base_url,
