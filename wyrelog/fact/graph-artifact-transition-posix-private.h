@@ -206,7 +206,9 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_capture_provisioned
     WylFactArtifactMainTransitionObservation *out_observation);
 #ifdef __APPLE__
 /* The Darwin form of the capture above, proved by ADR 0006 evidence instead
- * of a companion link; READY_MAIN only.  The observation's old_main_witness
+ * of a companion link: READY_MAIN at `facts.duckdb`, or RETAINED_ROLLBACK at
+ * this operation's rollback name (ADR 0006, "Restore witness").  Which slot
+ * applies is the caller's to choose.  The observation's old_main_witness
  * stays NONE, because the marker licenses a two-link entry and a Darwin
  * main has one, so no later step may read the marker as proof that the
  * witness ran: the proof is the successful return of this call. */

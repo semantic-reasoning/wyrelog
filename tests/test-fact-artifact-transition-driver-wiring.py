@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "44f314b3666522480971d9e3b8d6b22dfdd8f2d97373f47505f32d13697684ba",
+        "3ea62eb629a7793fe6f612f412e1d8e2ab65a570fa5361349900cf9b16a6c230",
     "tests/test-fact-artifact-transition-windows.c":
         "72453fde83d4bd1571efb26e69cafe36b751c290516884be8c84b9651dc02561",
 }

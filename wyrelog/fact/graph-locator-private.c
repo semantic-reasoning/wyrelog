@@ -2373,8 +2373,9 @@ struct WylFactGraphProvisionedRestoreWitness
   /* Linux proves the old provisioned object through its second name, the
    * companion `provision-<uuid>.sqlite` at nlink 2.  A Darwin witness reuses
    * the fields above with these meanings: companion_name is the legacy stage
-   * name, which must stay absent; old_name is the canonical `facts.duckdb`;
-   * companion_fd holds the read-only descriptor on that final, at nlink 1,
+   * name, which must stay absent; old_name is `facts.duckdb` for READY_MAIN
+   * or this restore's rollback name for RETAINED_ROLLBACK; companion_fd holds
+   * the read-only descriptor on the old object at that name, at nlink 1,
    * through which this evidence is compared on every revalidation. */
   gchar *operation_uuid;
   WylFactGraphDarwinOperationEvidence evidence;
@@ -2382,10 +2383,15 @@ struct WylFactGraphProvisionedRestoreWitness
 };
 #ifdef __APPLE__
 
-/* One pass of the Darwin READY_MAIN proof: the held descriptor is still the
+/* One pass of the Darwin proof: the held descriptor is still the
  * journal-pinned regular one-link 0600 object owned by this user, the legacy
- * stage name is absent, the canonical name binds that same object, and the
- * descriptor-derived evidence equals the provisioning evidence. */
+ * stage name is absent, old_name binds that same object, and the
+ * descriptor-derived evidence equals the provisioning evidence.  For
+ * RETAINED_ROLLBACK, `facts.duckdb` is absent or a different one-link 0600
+ * file this user owns.  The dev/ino inequality there is load-bearing, not a
+ * belt: a rename of the rollback name onto `facts.duckdb` between the two
+ * name lookups keeps one link, and within a pass only that comparison
+ * refuses it. */
 static wyrelog_error_t
 darwin_restore_witness_pass (WylFactGraphProvisionedRestoreWitness *witness)
 {
@@ -2408,6 +2414,19 @@ darwin_restore_witness_pass (WylFactGraphProvisionedRestoreWitness *witness)
   if (!stat_matches (&named, witness->expected_device,
       witness->expected_inode, FALSE, 0600) || named.st_nlink != 1)
     return WYRELOG_E_POLICY;
+  if (witness->slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK) {
+    struct stat main = { 0 };
+    if (fstatat (witness->directory.graph_fd,
+        WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, &main,
+        AT_SYMLINK_NOFOLLOW) == 0) {
+      if (!S_ISREG (main.st_mode) || main.st_nlink != 1
+          || (main.st_mode & 07777) != 0600 || main.st_uid != geteuid ()
+          || ((guint64) main.st_dev == witness->expected_device
+          && (guint64) main.st_ino == witness->expected_inode))
+        return WYRELOG_E_POLICY;
+    } else if (errno != ENOENT)
+      return errno_to_resolver_error (errno);
+  }
   return wyl_fact_graph_darwin_evidence_compare (witness->directory.graph_fd,
              witness->companion_fd, witness->operation_uuid,
              &witness->evidence);
@@ -2475,7 +2494,8 @@ wyl_fact_graph_provisioned_restore_witness_revalidate
   if (witness == NULL || directory == NULL)
     return WYRELOG_E_INVALID;
 #ifdef __APPLE__
-  if (witness->slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+  if ((witness->slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      && witness->slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK)
       || witness->operation_uuid == NULL || witness->companion_fd < 0)
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = directory_revalidate (&witness->directory);
@@ -2688,13 +2708,9 @@ wyl_fact_graph_provisioned_restore_witness_open_with_evidence
       || !wyl_fact_artifact_inventory_identity_equal (expected_old_main,
       expected_old_main))
     return WYRELOG_E_INVALID;
-  /* RETAINED_ROLLBACK would prove the object under the rollback name.  ADR
-   * 0006 never accepts a different name that happens to expose the expected
-   * evidence, so this witness proves the canonical READY_MAIN only; the
-   * commit and resume port (#1303 U5) decides the rollback slot under that
-   * rule, and it is refused until then. */
-  if (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN)
-    return WYRELOG_E_POLICY;
+  /* RETAINED_ROLLBACK proves the old object at this restore's
+   * operation-derived rollback name, never at a name found by its ID (ADR
+   * 0006, "Restore witness"). */
   WylFactGraphDarwinOperationEvidence decoded = { 0 };
   wyrelog_error_t rc = wyl_fact_graph_darwin_evidence_decode (
     expected_evidence->bytes, sizeof expected_evidence->bytes,
@@ -2706,18 +2722,24 @@ wyl_fact_graph_provisioned_restore_witness_open_with_evidence
   WylFactArtifactTransitionNames names = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
-  wyl_fact_artifact_transition_names_clear (&names);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_transition_names_clear (&names);
     return rc;
+  }
   WylFactGraphProvisionedRestoreWitness *witness = g_try_new0
         (WylFactGraphProvisionedRestoreWitness, 1);
-  if (witness == NULL)
+  if (witness == NULL) {
+    wyl_fact_artifact_transition_names_clear (&names);
     return WYRELOG_E_NOMEM;
+  }
   witness->directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
   witness->companion_fd = -1;
   witness->new_companion_fd = -1;
   witness->companion_name = g_steal_pointer (&companion);
-  witness->old_name = g_strdup (WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME);
+  witness->old_name = slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+    ? g_strdup (WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME)
+    : g_steal_pointer (&names.rollback);
+  wyl_fact_artifact_transition_names_clear (&names);
   witness->operation_uuid = try_strdup (provisioning_uuid);
   witness->evidence = decoded;
   witness->expected_device = expected_old_main->domain;

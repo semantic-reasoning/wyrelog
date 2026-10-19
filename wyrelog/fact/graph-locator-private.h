@@ -465,15 +465,15 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_revalidate
 void wyl_fact_graph_provisioned_restore_witness_free
   (WylFactGraphProvisionedRestoreWitness *witness);
 #ifdef __APPLE__
-/* The Darwin READY_MAIN witness.  A provisioned macOS main has one link
- * under the canonical name, so the proof is the ADR 0006 evidence recorded
- * at provisioning, compared on a held descriptor of `facts.duckdb` together
- * with the journal-pinned dev/ino, mode 0600, the caller's uid and the
- * absence of the legacy stage name.  Only READY_MAIN is proved: the
- * rollback name would expose the evidenced object under a different name,
- * which the ADR forbids, so RETAINED_ROLLBACK is refused here until the
- * commit and resume port (#1303 U5) decides that slot under the same rule.
- * The same caller obligations as the name-only opener apply. */
+/* The Darwin restore witness.  A provisioned macOS main has one link, so
+ * the proof is the ADR 0006 evidence recorded at provisioning, compared on a
+ * held descriptor together with the journal-pinned dev/ino, mode 0600, the
+ * caller's uid and the absence of the legacy stage name.  READY_MAIN
+ * witnesses `facts.duckdb`.  RETAINED_ROLLBACK witnesses the old main at
+ * this restore's operation-derived rollback name, never at a name found by
+ * its ID, and requires `facts.duckdb` to be absent or a different one-link
+ * 0600 file the caller owns (ADR 0006, "Restore witness").  DUAL_COMPANION
+ * is INVALID.  The same caller obligations as the name-only opener apply. */
 wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_open_with_evidence
   (WylFactGraphDirectory *directory, const gchar *provisioning_uuid,
     const WylFactGraphDarwinOperationEvidence *expected_evidence,

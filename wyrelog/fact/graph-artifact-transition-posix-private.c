@@ -856,8 +856,6 @@ wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
       || (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
       && slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK))
     return WYRELOG_E_INVALID;
-  if (slot != WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN)
-    return WYRELOG_E_POLICY;
   wyl_id_t id = { 0 };
   if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
       || memcmp (id.bytes, provider->operation_uuid,
@@ -871,8 +869,9 @@ wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
           slot, &witness);
   g_autoptr (WylFactArtifactInventorySnapshot) snapshot = NULL;
   WylFactArtifactMainTransitionObservation observation = { 0 };
-  /* The Darwin main is an ordinary one-link regular file, so the inventory
-   * sees it without an old-pair exception. */
+  /* The Darwin old main is an ordinary one-link regular file under the final
+   * or the rollback name, so the inventory sees it without an old-pair
+   * exception. */
   if (rc == WYRELOG_E_OK)
     rc = capture_internal (provider, lifecycle, NULL, &snapshot,
             &observation);
@@ -882,7 +881,7 @@ wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
   if (rc != WYRELOG_E_OK)
     return rc;
   const WylFactArtifactMainTransitionEntryEvidence *old
-    = &observation.entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+    = &observation.entries[old_witness_entry_slot (slot)];
   if (!old->present || old->reparse || old->link_count != 1
       || old->owner_state
       != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
