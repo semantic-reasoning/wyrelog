@@ -215,6 +215,25 @@ check_fact_projection_batch_rows (WylHandle *handle, const gchar *batch_id,
   return rows == expected_rows ? 0 : 103;
 }
 
+/* Run SQL directly against the orders graph's fact store. */
+static gint
+exec_orders_store_sql (WylHandle *handle, const gchar *sql)
+{
+  GraphPathProbe probe = {
+    .graph_id = "orders",
+  };
+  if (wyl_policy_store_foreach_fact_graph (wyl_handle_get_policy_store
+        (handle), WYL_TENANT_DEFAULT, graph_path_cb, &probe) != WYRELOG_E_OK
+      || probe.storage_path == NULL)
+    return 120;
+  g_autofree gchar *path = probe.storage_path;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 121;
+  return wyl_fact_store_test_exec_sql (store, sql) == WYRELOG_E_OK ? 0 : 122;
+}
+
 /* Leave BATCH_ID in the shape an old wrong-relation forget produced (#1273):
  * its rows stay in the orders projection while its batch and event rows are
  * gone, one completed zero-purge forget intent names another projection, and
@@ -1768,6 +1787,56 @@ main (void)
       "orphan_repair_candidate_batches=0 orphan_repair_candidate_rows=0\n");
   assert_wyctl_failed (fact_verify_missing_argv, 5,
       "wyctl: fact verify failed: graph_not_found\n");
+  /* #1274: a token without wr.fact.read is refused verification. */
+  g_autoptr (WylClient) no_read_client = NULL;
+  g_assert_cmpint (wyl_client_new (base_url, &no_read_client), ==,
+      WYRELOG_E_OK);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyrelog_error_t no_read_login = wyl_client_login_skip_mfa (no_read_client,
+          "wyctl-no-fact-read");
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_assert_cmpint (no_read_login, ==, WYRELOG_E_OK);
+  g_autofree gchar *no_read_token =
+      wyl_client_dup_access_token (no_read_client);
+  g_autofree gchar *no_read_token_path = write_token_file (no_read_token);
+  gchar *fact_verify_no_read_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "verify",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--access-token-file", no_read_token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_failed (fact_verify_no_read_argv, 4,
+      "wyctl: fact verify failed: fact_verify_denied\n");
+  g_unlink (no_read_token_path);
+
+  /* #1274: a store whose identity does not match its graph fails
+   * verification with 409, which wyctl reports as verified=false and exit 1.
+   * The store is put back so the steps below see a sound graph. */
+  g_assert_cmpint (exec_orders_store_sql (handle, "UPDATE fact_store_metadata "
+      "SET value = 'other-graph' WHERE key = 'graph_id';"), ==, 0);
+  {
+    g_autofree gchar *stdout_buf = NULL;
+    g_autofree gchar *stderr_buf = NULL;
+    gint wait_status = 0;
+    run_wyctl (fact_verify_argv, &stdout_buf, &stderr_buf, &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+    g_assert_cmpstr (stdout_buf, ==,
+        "tenant=__wr_default graph=orders verified=false\n");
+    g_assert_cmpstr (stderr_buf, ==,
+        "wyctl: fact verify failed: fact_graph_verification_failed\n");
+  }
+  g_assert_cmpint (exec_orders_store_sql (handle, "UPDATE fact_store_metadata "
+      "SET value = 'orders' WHERE key = 'graph_id';"), ==, 0);
+  assert_wyctl_stdout (fact_verify_argv,
+      "tenant=__wr_default graph=orders verified=true "
+      "orphan_repair_candidate_batches=0 orphan_repair_candidate_rows=0\n");
 
   /* #1280: rows an old wrong-relation forget left behind show up in fact
    * verify as repair candidates, and fact repair erases exactly them. */
@@ -1929,6 +1998,61 @@ main (void)
   g_unlink (missing_input_path);
   g_unlink (seam_input_path);
   g_unlink (input_path);
+#else
+  /* #1274: a fact-off daemon reports the subsystem disabled, in every scope,
+   * and wyctl exits 1 rather than reading that as ready. */
+  gchar *fact_off_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "status",
+    NULL,
+  };
+  gchar *fact_off_tenant_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    NULL,
+  };
+  gchar *fact_off_graph_status_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "status",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    "--graph", "orders",
+    NULL,
+  };
+  static const gchar fact_off_counts[] = "status=disabled graphs_total=0 "
+      "graphs_ready=0 graphs_degraded=0 graphs_provisioned=0 "
+      "graphs_sealed=0\n";
+  g_autofree gchar *fact_off_anonymous =
+      g_strconcat ("scope=anonymous ", fact_off_counts, NULL);
+  g_autofree gchar *fact_off_tenant =
+      g_strconcat ("scope=tenant tenant=__wr_default ", fact_off_counts, NULL);
+  g_autofree gchar *fact_off_graph =
+      g_strconcat (fact_off_tenant, "graph=orders state=absent\n", NULL);
+  struct
+  {
+    gchar **argv;
+    const gchar *stdout_expected;
+  } fact_off_cases[] = {
+    {fact_off_status_argv, fact_off_anonymous},
+    {fact_off_tenant_status_argv, fact_off_tenant},
+    {fact_off_graph_status_argv, fact_off_graph},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_off_cases); i++) {
+    g_autofree gchar *stdout_buf = NULL;
+    g_autofree gchar *stderr_buf = NULL;
+    gint wait_status = 0;
+    run_wyctl (fact_off_cases[i].argv, &stdout_buf, &stderr_buf,
+        &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 1);
+    g_assert_cmpstr (stdout_buf, ==, fact_off_cases[i].stdout_expected);
+    g_assert_cmpstr (stderr_buf, ==, "");
+  }
 #endif
 
   g_assert_cmpint (wyl_client_logout (admin_client), ==, WYRELOG_E_OK);
