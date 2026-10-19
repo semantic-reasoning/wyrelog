@@ -3845,7 +3845,14 @@ assert_persistent_database_trace_language (const RecorderState &recorder,
  * interleaving of DuckDB spill children is allocator dependent, but each
  * child is still a finite state machine: open, zero or more I/O operations,
  * close, then retire.  Keeping that nondeterminism local prevents a broad
- * "under tmp" whitelist from hiding a new VFS token. */
+ * "under tmp" whitelist from hiding a new VFS token.
+ *
+ * Teardown of a pre-existing directory lists it, joins the directory with
+ * every listed non-directory "duckdb_temp_" name, and only then removes them
+ * all in one RemoveFiles call.  The suffix therefore holds one separator per
+ * such entry, then one remove-many per entry in listing order.  How many
+ * entries survive to the listing depends on which buffer classes the adaptive
+ * compressor picked, so the count is taken from the listing, not fixed. */
 static void
 assert_temporary_spill_trace_language (const RecorderState &recorder,
     const fs::path &root, const fs::path &database, const fs::path &temp,
@@ -3936,6 +3943,8 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
   std::string pending_list_callback_path;
   guint pending_list_callback_type = 0;
   gboolean saw_foreign_entry = FALSE, saw_broad_entry = FALSE, saw_broad_remove = FALSE;
+  std::vector<std::string> cleanup_targets;
+  size_t cleanup_separators = 0, cleanup_removed = 0;
 
   g_assert_cmpuint (recorder.events.size (), >, 0);
   g_assert_cmpuint (recorder.events.size (), >, prefix.size ());
@@ -3980,10 +3989,15 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       } else if (event.operation == "separator") {
         g_assert_false (separator_pending);
         g_assert_true (saw_directory_exists);
-        if (suffix_started)
-          g_assert_true (saw_list_complete);
         g_assert_cmpint (event.outcome, ==, -1);
-        separator_pending = TRUE;
+        if (suffix_started) {
+          g_assert_true (saw_list_complete && !list_active);
+          g_assert_cmpuint (cleanup_removed, ==, 0);
+          g_assert_cmpuint (cleanup_separators, <, cleanup_targets.size ());
+          cleanup_separators++;
+        } else {
+          separator_pending = TRUE;
+        }
       } else if (event.operation == "list") {
         g_assert_true (seeded_foreign_entries && suffix_started && !list_active);
         g_assert_cmpint (event.outcome, ==, -1);
@@ -4027,6 +4041,8 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       } else {
         g_assert_true (std::regex_match (filename, storage_name));
       }
+      if (event.flags == 0 && g_str_has_prefix (filename.c_str (), "duckdb_temp_"))
+        cleanup_targets.push_back (event.path);
       pending_list_callback_path = event.path;
       pending_list_callback_type = event.flags;
       list_callback_pending = TRUE;
@@ -4041,15 +4057,19 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       list_callback_pending = FALSE;
       continue;
     }
-    if (event.path == broad_prefix) {
-      /* This observes DuckDB's broad cleanup prefix; it is evidence, not a
-       * capability grant for #629's bounded temporary authority. */
-      g_assert_true (seeded_foreign_entries && suffix_started && saw_list_complete
-          && event.operation == "remove-many");
-      g_assert_true (separator_pending);
+    if (event.operation == "remove-many") {
+      /* This observes DuckDB's broad "duckdb_temp_" cleanup prefix; it is
+       * evidence, not a capability grant for #629's bounded temporary
+       * authority. */
+      g_assert_true (seeded_foreign_entries && suffix_started && saw_list_complete);
+      g_assert_false (separator_pending);
+      g_assert_cmpuint (cleanup_separators, ==, cleanup_targets.size ());
+      g_assert_cmpuint (cleanup_removed, <, cleanup_targets.size ());
+      g_assert_cmpstr (event.path.c_str (), ==,
+          cleanup_targets[cleanup_removed].c_str ());
       g_assert_cmpint (event.outcome, ==, -1);
-      saw_broad_remove = TRUE;
-      separator_pending = FALSE;
+      saw_broad_remove = saw_broad_remove || event.path == broad_prefix;
+      cleanup_removed++;
       continue;
     }
     if (std::regex_match (filename, block_name)) {
@@ -4122,6 +4142,8 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
 #endif
   g_assert_false (list_active);
   g_assert_false (list_callback_pending);
+  g_assert_cmpuint (cleanup_separators, ==, cleanup_targets.size ());
+  g_assert_cmpuint (cleanup_removed, ==, cleanup_targets.size ());
   if (seeded_foreign_entries)
     g_assert_true (saw_list && saw_list_complete && saw_foreign_entry && saw_broad_entry && saw_broad_remove);
   else
@@ -4308,12 +4330,20 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   recorder->events.clear ();
   recorder->controls.clear ();
   const fs::path stale_storage = temp / "duckdb_temp_storage_S32K-0.tmp";
+  /* DuckDB 1.5.5 has no S16K buffer class, so the workload never opens or
+   * retires this name and teardown always finds it in the listing.  The
+   * S32K seed above survives only when the adaptive compressor never picks
+   * that class, which is timing dependent. */
+  const fs::path unused_storage = temp / "duckdb_temp_storage_S16K-0.tmp";
   const fs::path broad_prefix = temp / "duckdb_temp_foreign";
   const fs::path foreign = temp / "foreign";
   const std::string stale_storage_utf8 = path_to_utf8 (stale_storage);
+  const std::string unused_storage_utf8 = path_to_utf8 (unused_storage);
   const std::string broad_prefix_utf8 = path_to_utf8 (broad_prefix);
   const std::string foreign_utf8 = path_to_utf8 (foreign);
   g_assert_true (g_file_set_contents (stale_storage_utf8.c_str (), "stale", -1, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_file_set_contents (unused_storage_utf8.c_str (), "stale", -1, &error));
   g_assert_no_error (error);
   g_assert_true (g_file_set_contents (broad_prefix_utf8.c_str (), "foreign", -1, &error));
   g_assert_no_error (error);
@@ -4343,6 +4373,7 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   /* The recorder must survive DuckDB teardown and observe the temporary
    * directory empty only after all injected-VFS owners have been destroyed. */
   g_assert_false (fs::exists (stale_storage));
+  g_assert_false (fs::exists (unused_storage));
   g_assert_false (fs::exists (broad_prefix));
   g_assert_true (fs::exists (foreign));
   remove_tree (sandbox);

@@ -505,28 +505,28 @@
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 5981,
+    "line": 6012,
     "api": "_exit",
     "expression": "120",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 5993,
+    "line": 6024,
     "api": "_exit",
     "expression": "121",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6002,
+    "line": 6033,
     "api": "_exit",
     "expression": "122",
     "platform": "posix-normalized-wrapper"
   },
   {
     "path": "tests/test-secure-duckdb-recording-filesystem.cc",
-    "line": 6006,
+    "line": 6037,
     "api": "_exit",
     "expression": "0",
     "platform": "posix-normalized-wrapper"
