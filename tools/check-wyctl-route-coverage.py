@@ -178,11 +178,23 @@ def strip_comments(source: str) -> str:
                        else " ", source)
 
 
+C_LITERAL = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
+
+
+def blank_literals(source: str) -> str:
+    """Blank the inside of every string and character literal, keeping every
+    offset, so a brace in "}" or '{' is not counted as one."""
+    return C_LITERAL.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2)
+                         + m.group(0)[-1], source)
+
+
 def function_body(source: str, name: str) -> str:
     """Return the body of the one definition of NAME, GNU style: the name
     at column 0 and the opening brace on its own line after the parameters.
-    A prototype, which ends in ';', never matches."""
+    A prototype, which ends in ';', never matches.  Braces are counted
+    outside string and character literals only."""
     source = strip_comments(source)
+    braces = blank_literals(source)
     matches = list(re.finditer(
         r"^" + re.escape(name) + r" \([^;{]*?\)\s*\n\{", source,
         re.MULTILINE))
@@ -194,9 +206,9 @@ def function_body(source: str, name: str) -> str:
     opening = matches[0].end() - 1
     depth = 0
     for index in range(opening, len(source)):
-        if source[index] == "{":
+        if braces[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif braces[index] == "}":
             depth -= 1
             if depth == 0:
                 return source[opening:index + 1]
@@ -504,6 +516,20 @@ def self_test(root: Path) -> None:
                            '    g_printerr ("wyctl: missing graph command\\n");',
                            '    g_printerr ("wyctl: missing graph /* command'
                            '\\n");'),
+            "/graphs: wyctl already dispatches graph create",
+            pending=with_entry(PENDING, "/graphs", ("graph", "create")))
+    mutated("closing brace inside a string",
+            lambda t: edit(t, "wyrelog/wyctl/wyctl.c",
+                           '    g_printerr ("wyctl: missing graph command\\n");',
+                           '    g_printerr ("wyctl: missing graph command }'
+                           '\\n");'),
+            "/graphs: wyctl already dispatches graph create",
+            pending=with_entry(PENDING, "/graphs", ("graph", "create")))
+    mutated("closing brace in a character literal",
+            lambda t: edit(t, "wyrelog/wyctl/wyctl.c",
+                           '    g_printerr ("wyctl: missing graph command\\n");',
+                           '    g_printerr ("wyctl: missing graph command\\n");'
+                           "\n    (void) '}';"),
             "/graphs: wyctl already dispatches graph create",
             pending=with_entry(PENDING, "/graphs", ("graph", "create")))
     mutated("dispatcher renamed",
