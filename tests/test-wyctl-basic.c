@@ -6510,6 +6510,24 @@ test_profile_status (void)
     "\"event_queue_limit\":0,\"extra\":1}",
     "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
     "\"event_queue_limit\":4294967296}",
+    /* A repeated key is refused rather than resolved either way (#1274). */
+    "{\"profile\":\"system\",\"profile\":\"service\",\"system_url\":null,"
+    "\"event_spool_dir\":null,\"event_queue_limit\":0}",
+    "{\"profile\":\"system\",\"system_url\":null,\"system_url\":null,"
+    "\"event_spool_dir\":null,\"event_queue_limit\":0}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_spool_dir\":null,\"event_queue_limit\":0}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":0,\"event_queue_limit\":0}",
+    /* profile is printed as a key=value token, so it must be one. */
+    "{\"profile\":null,\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":0}",
+    "{\"profile\":\"\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":0}",
+    "{\"profile\":\"sys tem\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":0}",
+    "{\"profile\":\"system\",\"system_url\":null,\"event_spool_dir\":null,"
+    "\"event_queue_limit\":\"64\"}",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (invalid_bodies); i++) {
     g_auto (FactForgetRun) invalid = { 0 };
