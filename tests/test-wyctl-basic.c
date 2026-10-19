@@ -6274,6 +6274,27 @@ test_tenant_list_and_create (void)
       "wyctl: the outcome is unknown; repeating the same tenant create is "
       "safe\n");
 
+  /* A repeated unseal reopens a tenant that another operator sealed in the
+   * meantime, so after an unknown outcome wyctl does not call it safe
+   * (#1274). */
+  g_auto (FactForgetRun) unseal_failed = { 0 };
+  run_fake_daemon_case (500, "{\"error\":\"tenant_mutation_failed\"}", NULL,
+      unseal, FALSE, &unseal_failed);
+  assert_fact_forget_exit (&unseal_failed, 5);
+  g_assert_cmpstr (unseal_failed.err, ==, "wyctl: tenant unseal failed: "
+      "tenant_mutation_failed\n"
+      "wyctl: the unseal outcome is unknown; check `wyctl tenant list` "
+      "before repeating it: a repeat reopens the tenant even if another "
+      "operator sealed it since\n");
+
+  /* A missing tenant is a definite answer, not an unknown outcome. */
+  g_auto (FactForgetRun) missing = { 0 };
+  run_fake_daemon_case (404, "{\"error\":\"tenant_not_found\"}", NULL,
+      unseal, FALSE, &missing);
+  assert_fact_forget_exit (&missing, 5);
+  g_assert_cmpstr (missing.err, ==, "wyctl: tenant unseal failed: "
+      "tenant_not_found\n");
+
   /* A pending repair from an earlier failure blocks every tenant change. */
   g_auto (FactForgetRun) pending = { 0 };
   run_fake_daemon_case (503, "{\"error\":\"tenant_mutation_unavailable\"}",
