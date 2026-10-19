@@ -787,11 +787,11 @@ static const gchar darwin_replacement_uuid[] =
  * as READY_MAIN.  On macOS the name-only witness opener refuses it for
  * good: a Darwin main is proved by ADR 0006 evidence through
  * wyl_fact_graph_provisioned_restore_witness_open_with_evidence, which
- * test-fact-graph-locator-macos covers (#1303 U3).  The RETAINED_ROLLBACK
- * witness, the dual witness and the post-publish shapes wait for the commit
- * and resume port (#1303 U5), which decides the rollback slot under the ADR
- * 0006 name rule; their refusals below fail when that lands and should give
- * way to the Linux bodies or to a Darwin decision. */
+ * test-fact-graph-locator-macos covers for both READY_MAIN and
+ * RETAINED_ROLLBACK (#1303 U3, U5-1).  The dual witness and the post-publish
+ * shapes have no Darwin form yet and wait for later U5 units; their refusals
+ * below fail when that lands and should give way to the Linux bodies or to a
+ * Darwin decision. */
 typedef struct
 {
   gchar *root;
@@ -1328,8 +1328,8 @@ test_posix_provisioned_restore_witness (void)
       WYRELOG_E_POLICY);
   g_assert_null (witness);
   darwin_restore_fixture_clear (&f);
-  g_test_skip ("the evidence witness is covered by fact-graph-locator-macos; "
-      "RETAINED_ROLLBACK waits for #1303 U5");
+  g_test_skip ("the evidence witness, both slots, is covered by "
+      "fact-graph-locator-macos");
 #else
   const gchar *restore_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
   g_autofree gchar *root = make_root ();

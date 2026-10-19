@@ -1851,8 +1851,8 @@ test_provisioned_old_main_transition (void)
 #ifdef __APPLE__
   /* The Darwin main is an ADR 0006 final: one link under the canonical name,
    * proved by the evidence captured at provisioning.  The capture half of
-   * the provisioned transition is ported (#1303 U3); execute_provisioned and
-   * everything after it stay refused until U5, hence the skip at the end. */
+   * the provisioned transition is ported for both slots (#1303 U3, U5-1);
+   * execute_provisioned waits for U5-2, hence the skip at the end. */
   const gchar *provisioning_uuid =
       "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
   Fixture fixture;
@@ -1917,8 +1917,7 @@ test_provisioned_old_main_transition (void)
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "facts.duckdb.wal",
       0), ==, 0);
-  /* Wrong evidence, a second link, and the rollback slot (decided by #1303
-   * U5 under the ADR 0006 name rule) each refuse. */
+  /* Wrong evidence and a second link each refuse. */
   WylFactGraphDarwinOperationEvidence flipped = evidence;
   flipped.bytes[55] ^= 0x01u;
   g_assert_cmpint
@@ -1937,12 +1936,84 @@ test_provisioned_old_main_transition (void)
       &observation), ==, WYRELOG_E_POLICY);
   g_assert_null (snapshot);
   g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "extra", 0), ==, 0);
+  /* Before RETAIN nothing sits at this operation's rollback name. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (snapshot);
+  /* After RETAIN the old main sits at the operation-derived rollback name
+   * with one link: the evidence proves RETAINED_ROLLBACK, the marker stays
+   * NONE, and the model admits RETAINED. */
+  g_assert_cmpint (renameat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, fixture.directory.graph_fd,
+      fixture.names.rollback), ==, 0);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_nonnull (snapshot);
+  g_assert_cmpint (observation.old_main_witness, ==, MT (OLD_WITNESS_NONE));
+  g_assert_cmpuint (observation.entries[SLOT_ROLLBACK].link_count, ==, 1);
+  g_assert_false (observation.entries[SLOT_MAIN].present);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  /* READY_MAIN has nothing at the canonical name; wrong evidence refuses,
+   * and so does a second name for the old object, `extra` or the canonical
+   * name, on its link count. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (snapshot);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &flipped, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (linkat (fixture.directory.graph_fd, fixture.names.rollback,
+      fixture.directory.graph_fd, "extra", 0), ==, 0);
   g_assert_cmpint
     (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
         (provider, provisioning_uuid, &evidence, &request,
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
       &snapshot, &observation), ==, WYRELOG_E_POLICY);
   g_assert_null (snapshot);
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "extra", 0), ==, 0);
+  g_assert_cmpint (linkat (fixture.directory.graph_fd, fixture.names.rollback,
+      fixture.directory.graph_fd, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 0),
+      ==, 0);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_POLICY);
+  g_assert_null (snapshot);
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 0), ==, 0);
+  /* After PUBLISH the staged main sits at the canonical name and the old
+   * main stays at the rollback name: the model admits PUBLISHED. */
+  g_assert_cmpint (renameat (fixture.directory.graph_fd, fixture.names.stage,
+      fixture.directory.graph_fd, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME),
+      ==, 0);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_true (observation.entries[SLOT_MAIN].present);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_PUBLISHED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   fixture_clear (&fixture);
   g_test_skip ("provisioned restore is not yet ported to macOS");
 #else

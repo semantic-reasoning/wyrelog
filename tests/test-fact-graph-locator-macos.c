@@ -812,13 +812,12 @@ test_provisioned_restore_witness_evidence (void)
       WYRELOG_E_POLICY);
   g_assert_null (witness);
 
-  /* Only READY_MAIN is proved on Darwin.  RETAINED_ROLLBACK would accept a
-   * different name exposing the evidenced object, which ADR 0006 forbids;
-   * the commit and resume port (#1303 U5) decides that slot, and it is
-   * refused until then.  DUAL_COMPANION is never a single-witness slot. */
+  /* Before any RETAIN nothing sits at this restore's rollback name, so the
+   * rollback slot has no object to witness.  DUAL_COMPANION is never a
+   * single-witness slot. */
   assert_witness_open_refused (&f, &f.evidence, &f.old_main,
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_NOT_FOUND);
   assert_witness_open_refused (&f, &f.evidence, &f.old_main,
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_DUAL_COMPANION, WYRELOG_E_INVALID);
   assert_witness_open_refused (&f, NULL, &f.old_main,
@@ -969,6 +968,174 @@ test_provisioned_restore_witness_evidence (void)
   witness_fixture_clear (&f);
 }
 
+/* The old main after RETAIN: the same ADR 0006 final, renamed to this
+ * restore's operation-derived rollback name (#1303 U5-1). */
+static void
+witness_rename (WitnessFixture *fixture, const gchar *from, const gchar *to)
+{
+  g_assert_cmpint (renameat (fixture->graph.graph_fd, from,
+      fixture->graph.graph_fd, to), ==, 0);
+}
+
+static void
+assert_rollback_revalidate (WitnessFixture *fixture,
+    WylFactGraphProvisionedRestoreWitness *witness, wyrelog_error_t expected)
+{
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &fixture->graph), ==, expected);
+}
+
+static void
+test_provisioned_restore_witness_rollback (void)
+{
+  const WylFactGraphProvisionedRestoreSlot rollback_slot =
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
+  WitnessFixture f;
+  witness_fixture_init (&f, "graph-rollback", operation_uuid);
+  g_autofree gchar *rollback = g_strdup_printf ("restore-%s.duckdb.superseded",
+          witness_restore_uuid);
+  g_autofree gchar *other_rollback =
+      g_strdup_printf ("restore-%s.duckdb.superseded",
+          witness_other_operation_uuid);
+  witness_rename (&f, "facts.duckdb", rollback);
+
+  /* READY_MAIN has nothing at the canonical name any more. */
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, WYRELOG_E_NOT_FOUND);
+
+  /* Positive with the main absent: open, revalidate twice, free. */
+  WylFactGraphProvisionedRestoreWitness *witness = NULL;
+  g_assert_cmpint (witness_open (&f, &f.evidence, &f.old_main, rollback_slot,
+      &witness), ==, WYRELOG_E_OK);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+
+  /* A different one-link main appearing later, as PUBLISH makes it, keeps
+   * the witness valid. */
+  witness_create_extra_file (&f, "facts.duckdb", 0600);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+  witness = NULL;
+  g_assert_cmpint (witness_open (&f, &f.evidence, &f.old_main, rollback_slot,
+      &witness), ==, WYRELOG_E_OK);
+
+  /* The main must be a one-link 0600 regular file. */
+  g_assert_cmpint (linkat (f.graph.graph_fd, "facts.duckdb", f.graph.graph_fd,
+      "main-link", 0), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "main-link", 0), ==, 0);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (symlinkat (rollback, f.graph.graph_fd, "facts.duckdb"),
+      ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  g_assert_cmpint (mkdirat (f.graph.graph_fd, "facts.duckdb", 0700), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", AT_REMOVEDIR),
+      ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+
+  /* The main must not be the old object: a second name for it refuses on
+   * the held link count, and moving it back to the canonical name leaves
+   * nothing at the rollback name. */
+  g_assert_cmpint (linkat (f.graph.graph_fd, rollback, f.graph.graph_fd,
+      "facts.duckdb", 0), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "facts.duckdb", 0), ==, 0);
+  witness_rename (&f, rollback, "facts.duckdb");
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_NOT_FOUND);
+  witness_rename (&f, "facts.duckdb", rollback);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+
+  /* Only this restore's rollback name is witnessed: the same object under
+   * another restore's rollback name is not looked up. */
+  witness_rename (&f, rollback, other_rollback);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_NOT_FOUND);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_NOT_FOUND);
+  witness_rename (&f, other_rollback, rollback);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+
+  /* A second link on the old object, the legacy stage name, and mode 0644
+   * each refuse at open and after open. */
+  g_assert_cmpint (linkat (f.graph.graph_fd, rollback, f.graph.graph_fd,
+      "extra", 0), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, "extra", 0), ==, 0);
+  witness_create_extra_file (&f, f.legacy_stage, 0600);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, f.legacy_stage, 0), ==, 0);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, rollback, 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, rollback, 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+
+  /* A substituted object at the rollback name refuses whichever identity
+   * the caller pins: the journal pin by dev/ino, its own by evidence. */
+  witness_rename (&f, rollback, "parked");
+  witness_create_extra_file (&f, rollback, 0600);
+  struct stat substitute;
+  g_assert_cmpint (fstatat (f.graph.graph_fd, rollback, &substitute,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  WylFactArtifactInventoryIdentity substitute_identity = {
+    .domain = (guint64) substitute.st_dev,
+    .object = (guint64) substitute.st_ino,
+  };
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  assert_witness_open_refused (&f, &f.evidence, &substitute_identity,
+      rollback_slot, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlinkat (f.graph.graph_fd, rollback, 0), ==, 0);
+  witness_rename (&f, "parked", rollback);
+  assert_rollback_revalidate (&f, witness, WYRELOG_E_OK);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+
+  /* Evidence and pins that do not describe this object. */
+  WylFactGraphDarwinOperationEvidence flipped = f.evidence;
+  flipped.bytes[55] ^= 0x01u;
+  assert_witness_open_refused (&f, &flipped, &f.old_main, rollback_slot,
+      WYRELOG_E_POLICY);
+  WylFactArtifactInventoryIdentity shifted = f.old_main;
+  shifted.object += 1;
+  assert_witness_open_refused (&f, &f.evidence, &shifted, rollback_slot,
+      WYRELOG_E_POLICY);
+  WitnessFixture foreign;
+  witness_fixture_init (&foreign, "graph-rollback-foreign", operation_uuid);
+  assert_witness_open_refused (&f, &foreign.evidence, &f.old_main,
+      rollback_slot, WYRELOG_E_POLICY);
+  witness = NULL;
+  g_assert_cmpint (witness_open (&f, &f.evidence, &f.old_main, rollback_slot,
+      &witness), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_provisioned_restore_witness_revalidate
+        (witness, &foreign.graph), ==, WYRELOG_E_POLICY);
+  wyl_fact_graph_provisioned_restore_witness_free (witness);
+  witness_fixture_clear (&foreign);
+  /* An owner mismatch is not testable without privileges; the same check
+   * covers it. */
+  witness_fixture_clear (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -987,5 +1154,8 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/provisioned-restore-witness",
     test_provisioned_restore_witness_evidence);
+  g_test_add_func (
+    "/fact/macos-object-identity/provisioned-restore-witness-rollback",
+    test_provisioned_restore_witness_rollback);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

@@ -118,10 +118,11 @@ The future implementation must maintain these boundaries:
 - Capture the graph and artifact IDs from held descriptors with
   `fgetattrlist`. Revalidate the full root, tenant, and graph chain around each
   irreversible step.
-- On recovery, reopen the canonical graph chain and `facts.duckdb`; compare
-  descriptor-derived volume, graph, and artifact evidence. Never search for an
-  object by ID and never accept a different name which happens to expose the
-  expected ID.
+- On recovery, reopen the canonical graph chain and `facts.duckdb` or, after
+  a restore's `RETAIN`, that restore's operation-derived rollback name (see
+  "Restore witness"); compare descriptor-derived volume, graph, and artifact
+  evidence. Never search for an object by ID and never accept any other name
+  which happens to expose the expected ID.
 - Require exact owner, type, mode, chain identity, operation UUID, evidence,
   and secure DuckDB identity together. Evidence is necessary but not
   sufficient authority.
@@ -208,22 +209,51 @@ so the restore witness holds a descriptor on `facts.duckdb` opened through
 the validated graph chain and, on every revalidation, compares the
 descriptor-derived evidence with the provisioning evidence together with the
 journal-pinned device and inode, mode, owner, link count one and the absence
-of the legacy stage name. Only the canonical name is witnessed. The rollback
-name would expose the evidenced object under a different name, which the
-comparison protocol above forbids, so a `RETAINED_ROLLBACK` witness is refused
-on macOS until the commit and resume port decides that slot under the same
-rule. The transition model is not told that the witness ran: a one-link main
-is its ordinary shape, and the proof is the successful witness call in the
-restore path, which must therefore use the evidence form of the capture.
+of the legacy stage name.
+
+Before `RETAIN` the witness holds `facts.duckdb`. After it, the witness holds
+the old main at the restore operation's rollback name,
+`restore-<operation>.duckdb.superseded`. Three of the reasons given under
+"Windows rollback name" transfer unchanged. The name is derived from the
+restore's canonical UUID, and nothing is looked up by its ID. The object has
+one link, so while it is at the rollback name it is at no other name, and a
+second link anywhere refuses the witness. Identity is compared through a held
+descriptor, whose volume, graph and artifact evidence a rename cannot change.
+Every revalidation runs the descriptor evidence, device, inode, mode, owner
+and legacy-stage checks twice, and requires `facts.duckdb` to be absent or a
+different one-link regular file with mode 0600 and the effective owner. The
+inequality with the old object is load-bearing: a rename of the rollback name
+onto `facts.duckdb` between the two name lookups keeps one link, and within a
+pass only that comparison refuses it.
+
+One Windows reason does not transfer. macOS checks the rollback name by a
+lookup of that name, not by a correlated capture of the whole directory, and
+the restore volume is usually case-insensitive. A case variant of the rollback
+name is therefore the same directory entry the volume's own lookup resolves,
+exactly as for the restore stage; it cannot name a different object, because
+the entry and the held descriptor are the same object.
+
+As on Windows, acceptance does not prove that `RETAIN` moved the object. The
+owner, or root, can rename the evidenced main to that name under the
+owner-only graph directory. That moves nothing the evidence does not already
+name, so it grants no integrity the owner lacks, and the journal, not the
+slot, records that `RETAIN` ran. The dual-companion witness has no macOS
+meaning and stays refused.
+
+The transition model is not told that the witness ran: a one-link old main,
+at either name, is its ordinary shape, and the proof is the successful witness
+call in the restore path, which must therefore use the evidence form of the
+capture.
 
 ## Windows rollback name
 
-Windows accepts the `RETAINED_ROLLBACK` slot that macOS still refuses. Like a
-macOS main, a provisioned Windows main has one link and is proved by its
-operation evidence, so the same comparison rule applies: the evidenced object
-is never found by its ID, and a name merely exposing the expected ID is not
-proof. The rollback name is accepted because acceptance rests on the object
-and on a name the operation fixes, not on a name that was searched for:
+Windows accepts the `RETAINED_ROLLBACK` slot, and macOS accepts it under the
+reasons that transfer (see "Restore witness"). Like a macOS main, a provisioned
+Windows main has one link and is proved by its operation evidence, so the same
+comparison rule applies: the evidenced object is never found by its ID, and a
+name merely exposing the expected ID is not proof. The rollback name is
+accepted because acceptance rests on the object and on a name the operation
+fixes, not on a name that was searched for:
 
 - The name is `restore-<operation>.duckdb.superseded`, derived from the
   restore operation's canonical UUID. The transition provider opens nothing
@@ -259,9 +289,9 @@ or flushes; `FINALIZE`, the only delete, stays refused for a provisioned main
 until the provisioning record's cleanup is journaled. `PUBLISH` re-pins the
 stage it moves, not the object at the rollback name, so a caller must
 recapture and reauthorize before each step rather than reuse an authorization
-across a restart. macOS keeps refusing the slot; its commit and
-resume port may adopt this reasoning, which depends on nothing
-Windows-specific beyond the one-link main.
+across a restart. macOS adopts this reasoning for its restore witness and
+capture; its evidence execute, which authorizes the steps after `RETAIN`, is
+decided with the rest of its commit and resume port.
 
 A committed Windows graph restore therefore runs from the stage sync through
 `RETAIN`, the rollback-side flushes, `PUBLISH` and the directory flush, and
@@ -306,11 +336,12 @@ checksum re-read goes through the same descriptor whose identity is compared.
 The re-read costs one full read of the main.
 
 The device number is not durable identity: it only has to match within the
-restore that recorded it. A remount or reboot between `PUBLISH` and capture
-can change it; capture then refuses rather than weakening the comparison, and
-the restore is an operator wedge, not a retry. Once captured, the volume UUID
-and `ATTR_CMN_FILEID` pair is the durable identity, under the same capability
-gate as provisioning.
+restore that recorded it. A remount or reboot after the restore binds its
+journal can change it. Every later step compares the journal's device and
+inode, both the restore witness on each revalidation and this capture, so each
+refuses rather than weakening the comparison, and the restore is an operator
+wedge, not a retry. Once captured, the volume UUID and `ATTR_CMN_FILEID` pair
+is the durable identity, under the same capability gate as provisioning.
 
 The evidence commits write-once to the `reserved` replacement row and is
 re-read before the row advances. The schema cannot require evidence, because
