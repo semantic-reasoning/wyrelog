@@ -1884,8 +1884,8 @@ if host_machine.system() != 'windows'
     c_args : fact_test_support_c_args,
     dependencies : [wyrelog_dep] + fact_test_support_deps,
   )
-  # TAP for the same reason as fact-graph-locator: provisioned-old-main
-  # calls g_test_skip on macOS.
+  # TAP, as for fact-graph-locator, so meson records each case and would
+  # show a host skip as SKIP rather than a pass.
   test('fact-artifact-transition-posix', test_fact_artifact_transition_posix,
     args : ['--tap'],
     protocol : 'tap',

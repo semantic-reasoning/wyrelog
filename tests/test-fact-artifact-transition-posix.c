@@ -1850,9 +1850,10 @@ test_provisioned_old_main_transition (void)
 {
 #ifdef __APPLE__
   /* The Darwin main is an ADR 0006 final: one link under the canonical name,
-   * proved by the evidence captured at provisioning.  The capture half of
-   * the provisioned transition is ported for both slots (#1303 U3, U5-1);
-   * execute_provisioned waits for U5-2, hence the skip at the end. */
+   * proved by the evidence captured at provisioning.  The capture proves
+   * both slots (#1303 U3, U5-1).  The evidence execute runs every step
+   * through PUBLISHED_DURABLE and through ROLLED_BACK, and refuses FINALIZE
+   * and RETIRE_STAGE (#1303 U5-2). */
   const gchar *provisioning_uuid =
       "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
   Fixture fixture;
@@ -1943,12 +1944,166 @@ test_provisioned_old_main_transition (void)
       WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
       &snapshot, &observation), ==, WYRELOG_E_NOT_FOUND);
   g_assert_null (snapshot);
+  /* A second graph whose final was provisioned under the same UUID: its
+   * evidence is foreign here, and it carries the ROLLBACK path below. */
+  Fixture other;
+  fixture_init (&other, "u5-2-rollback-XXXXXX");
+  WylFactGraphDarwinOperationEvidence other_evidence = { 0 };
+  WylFactGraphRegularFile other_final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_create_darwin_provisioned_final
+        (&other.directory, provisioning_uuid, &other_evidence, &other_final),
+      ==, WYRELOG_E_OK);
+  for (gsize written = 0; written < 100; written++)
+    g_assert_cmpint (write (other_final.fd, "x", 1), ==, 1);
+  wyl_fact_graph_regular_file_clear (&other_final);
+  make_conforming (&other, other.names.stage, 200);
+  /* Each refusal below touches nothing, reports UNKNOWN and leaves the
+   * public execute's lease seam armed: the call never reached it. */
+  struct DarwinRefusal
+  {
+    const gchar *label;
+    WylFactArtifactMainTransitionOp op;
+    const Observation *authorized;
+    const Request *request;
+    const gchar *provisioning_uuid;
+    const WylFactGraphDarwinOperationEvidence *evidence;
+    wyrelog_error_t expected;
+  };
+  WylFactArtifactMainTransitionEffect effect = MT (EFFECT_UNKNOWN);
+  WylFactArtifactMainTransitionDurabilityEvidence durability = { 0 };
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  /* The public execute refuses a marked observation before its lease seam,
+   * so for that row the armed seam proves nothing; the row stays for the
+   * result. */
+  Observation forged_marker = observation;
+  forged_marker.old_main_witness = MT (OLD_WITNESS_MAIN);
+  Observation forged_stage = observation;
+  forged_stage.entries[SLOT_STAGE].identity = main_id;
+  Observation forged_links = observation;
+  forged_links.entries[SLOT_MAIN].link_count = 2;
+  Observation forged_reparse = observation;
+  forged_reparse.entries[SLOT_MAIN].reparse = TRUE;
+  Observation forged_owner = observation;
+  forged_owner.entries[SLOT_MAIN].owner_state = MT (OWNER_WRONG_MODE);
+  Observation forged_directory = observation;
+  forged_directory.directory_identity.object += 1;
+  Observation forged_lease = observation;
+  forged_lease.lease_identity.object += 1;
+  Request other_operation = request;
+  other_operation.operation_uuid = "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5c";
+  Request main_absent = request;
+  main_absent.expected_main_absent = TRUE;
+  const struct DarwinRefusal ready_refusals[] = {
+    { "retire-stage", MT (OP_RETIRE_STAGE), &observation, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "publish", MT (OP_PUBLISH), &observation, &request, provisioning_uuid,
+      &evidence, WYRELOG_E_POLICY },
+    { "sync-rollback-file", MT (OP_SYNC_ROLLBACK_FILE), &observation,
+      &request, provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "rollback", MT (OP_ROLLBACK), &observation, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "finalize", MT (OP_FINALIZE), &observation, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "flipped-evidence", MT (OP_RETAIN), &observation, &request,
+      provisioning_uuid, &flipped, WYRELOG_E_POLICY },
+    { "other-provisioning-uuid", MT (OP_RETAIN), &observation, &request,
+      "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &evidence, WYRELOG_E_POLICY },
+    { "foreign-graph-evidence", MT (OP_RETAIN), &observation, &request,
+      provisioning_uuid, &other_evidence, WYRELOG_E_POLICY },
+    { "marked-observation", MT (OP_RETAIN), &forged_marker, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "stage-is-old-main", MT (OP_SYNC_STAGED), &forged_stage, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "two-link-main", MT (OP_RETAIN), &forged_links, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "reparse-main", MT (OP_RETAIN), &forged_reparse, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "nonconforming-owner", MT (OP_RETAIN), &forged_owner, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "other-directory", MT (OP_RETAIN), &forged_directory, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "other-lease", MT (OP_RETAIN), &forged_lease, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "other-operation", MT (OP_RETAIN), &observation, &other_operation,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "expected-main-absent", MT (OP_RETAIN), &observation, &main_absent,
+      provisioning_uuid, &evidence, WYRELOG_E_INVALID },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (ready_refusals); i++) {
+    const struct DarwinRefusal *refusal = &ready_refusals[i];
+    g_test_message ("READY refusal: %s", refusal->label);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_LEASE_VERIFY));
+    effect = MT (EFFECT_APPLIED);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+          (provider, refusal->provisioning_uuid, refusal->evidence,
+        refusal->request, refusal->authorized, refusal->op, &effect,
+        &durability), ==, refusal->expected);
+    g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+    g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (EXECUTE_LEASE_VERIFY)));
+    wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  }
+  /* A second name appearing after the capture refuses on the witness's
+   * held link count. */
+  g_assert_cmpint (linkat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+      fixture.directory.graph_fd, "extra", 0), ==, 0);
+  effect = MT (EFFECT_APPLIED);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &observation,
+      MT (OP_RETAIN), &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd, "extra", 0), ==, 0);
+  /* SYNC_STAGED and RETAIN run through the evidence execute. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  for (guint step = 0; step < 2; step++) {
+    WylFactArtifactMainTransitionOp op = step == 0 ? MT (OP_SYNC_STAGED)
+        : MT (OP_RETAIN);
+    g_assert_cmpint (result.next_op, ==, op);
+    g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+        op, &observation, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+          (provider, provisioning_uuid, &evidence, &request, &observation, op,
+        &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+          (provider, provisioning_uuid, &evidence, &request,
+        op == MT (OP_RETAIN)
+        ? WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK
+        : WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
+        &snapshot, &observation), ==, WYRELOG_E_OK);
+    observation.durability = durability;
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+        op, effect, &observation, &result), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   /* After RETAIN the old main sits at the operation-derived rollback name
    * with one link: the evidence proves RETAINED_ROLLBACK, the marker stays
    * NONE, and the model admits RETAINED. */
-  g_assert_cmpint (renameat (fixture.directory.graph_fd,
-      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, fixture.directory.graph_fd,
-      fixture.names.rollback), ==, 0);
   g_assert_cmpint
     (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
         (provider, provisioning_uuid, &evidence, &request,
@@ -1998,11 +2153,136 @@ test_provisioned_old_main_transition (void)
   g_assert_null (snapshot);
   g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
       WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 0), ==, 0);
+  /* Refusals on a RETAINED observation. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  const struct DarwinRefusal retained_refusals[] = {
+    { "retain", MT (OP_RETAIN), &observation, &request, provisioning_uuid,
+      &evidence, WYRELOG_E_POLICY },
+    { "finalize", MT (OP_FINALIZE), &observation, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "retire-stage", MT (OP_RETIRE_STAGE), &observation, &request,
+      provisioning_uuid, &evidence, WYRELOG_E_POLICY },
+    { "flipped-evidence", MT (OP_SYNC_ROLLBACK_FILE), &observation,
+      &request, provisioning_uuid, &flipped, WYRELOG_E_POLICY },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (retained_refusals); i++) {
+    const struct DarwinRefusal *refusal = &retained_refusals[i];
+    g_test_message ("RETAINED refusal: %s", refusal->label);
+    wyl_fact_artifact_transition_posix_set_test_fault
+      (PF (EXECUTE_LEASE_VERIFY));
+    effect = MT (EFFECT_APPLIED);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+          (provider, refusal->provisioning_uuid, refusal->evidence,
+        refusal->request, refusal->authorized, refusal->op, &effect,
+        &durability), ==, refusal->expected);
+    g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+    g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+          (PF (EXECUTE_LEASE_VERIFY)));
+    wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  }
+  /* A1: the RETAINED capture accepts a foreign one-link 0600 main, and the
+   * execute refuses it because it is not the staged main. */
+  make_conforming (&fixture, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 10);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  effect = MT (EFFECT_APPLIED);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &observation,
+      MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
+      WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, 0), ==, 0);
+  /* A rollback substituted after authorize: the public execute alone would
+   * report NOT_APPLIED; the reopened witness refuses before it. */
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      MT (OP_SYNC_ROLLBACK_FILE), &observation, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (renameat (fixture.directory.graph_fd,
+      fixture.names.rollback, fixture.directory.graph_fd, "saved"), ==, 0);
+  make_conforming (&fixture, fixture.names.rollback, 100);
+  effect = MT (EFFECT_APPLIED);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &observation,
+      MT (OP_SYNC_ROLLBACK_FILE), &effect, &durability), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  g_assert_cmpint (unlinkat (fixture.directory.graph_fd,
+      fixture.names.rollback, 0), ==, 0);
+  g_assert_cmpint (renameat (fixture.directory.graph_fd, "saved",
+      fixture.directory.graph_fd, fixture.names.rollback), ==, 0);
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  /* A restarted step admits RETAINED afresh and re-flushes the stage, then
+   * runs through PUBLISH. */
+  g_clear_pointer (&provider, wyl_fact_artifact_transition_posix_free);
+  provider = open_provider (&fixture);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
+  g_assert_cmpint (result.next_op, ==, MT (OP_SYNC_STAGED));
+  const WylFactArtifactMainTransitionOp retained_ops[] = {
+    MT (OP_SYNC_STAGED), MT (OP_SYNC_ROLLBACK_FILE), MT (OP_SYNC_RETAIN_DIR),
+    MT (OP_PUBLISH),
+  };
+  for (guint step = 0; step < G_N_ELEMENTS (retained_ops); step++) {
+    WylFactArtifactMainTransitionOp op = result.next_op;
+    g_assert_cmpint (op, ==, retained_ops[step]);
+    g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+        op, &observation, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+          (provider, provisioning_uuid, &evidence, &request, &observation, op,
+        &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+          (provider, provisioning_uuid, &evidence, &request,
+        WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+        &snapshot, &observation), ==, WYRELOG_E_OK);
+    observation.durability = durability;
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+        op, effect, &observation, &result), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (result.state, ==, MT (STATE_PUBLISHED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
   /* After PUBLISH the staged main sits at the canonical name and the old
    * main stays at the rollback name: the model admits PUBLISHED. */
-  g_assert_cmpint (renameat (fixture.directory.graph_fd, fixture.names.stage,
-      fixture.directory.graph_fd, WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME),
-      ==, 0);
   g_assert_cmpint
     (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
         (provider, provisioning_uuid, &evidence, &request,
@@ -2012,10 +2292,139 @@ test_provisioned_old_main_transition (void)
   g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
       &observation, &result, &transition), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==, MT (STATE_PUBLISHED));
+  /* A1 after PUBLISH: a main that is not the staged main refuses. */
+  Observation forged_main = observation;
+  forged_main.entries[SLOT_MAIN].identity = stage_id;
+  forged_main.entries[SLOT_MAIN].identity.object += 1;
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &forged_main,
+      MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      MT (OP_SYNC_PUBLISH_DIR), &observation, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &observation,
+      MT (OP_SYNC_PUBLISH_DIR), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  observation.durability = durability;
+  g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+      MT (OP_SYNC_PUBLISH_DIR), effect, &observation, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_PUBLISHED_DURABLE));
+  g_assert_cmpint (result.next_op, ==, MT (OP_FINALIZE));
+  /* The evidence execute stops at PUBLISHED_DURABLE. */
+  effect = MT (EFFECT_APPLIED);
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &evidence, &request, &observation,
+      MT (OP_FINALIZE), &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
   g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
   g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_clear_pointer (&provider, wyl_fact_artifact_transition_posix_free);
   fixture_clear (&fixture);
-  g_test_skip ("provisioned restore is not yet ported to macOS");
+
+  /* ROLLBACK on the second graph: SYNC_STAGED and RETAIN, then a re-admit
+   * under resume_forbidden.  The rolled-back main is READY again, and
+   * RETIRE_STAGE stays refused. */
+  provider = open_provider (&other);
+  g_assert_cmpint (wyl_fact_artifact_transition_posix_capture (provider,
+      &lifecycle, &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  request = request_for (&observation, real_identity (&other,
+          WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME), real_identity (&other,
+          other.names.stage), FALSE);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &other_evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  for (guint step = 0; step < 2; step++) {
+    WylFactArtifactMainTransitionOp op = step == 0 ? MT (OP_SYNC_STAGED)
+        : MT (OP_RETAIN);
+    g_assert_cmpint (result.next_op, ==, op);
+    g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+        op, &observation, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+          (provider, provisioning_uuid, &other_evidence, &request,
+        &observation, op, &effect, &durability), ==, WYRELOG_E_OK);
+    g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+    g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+    g_assert_cmpint
+      (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+          (provider, provisioning_uuid, &other_evidence, &request,
+        op == MT (OP_RETAIN)
+        ? WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK
+        : WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle,
+        &snapshot, &observation), ==, WYRELOG_E_OK);
+    observation.durability = durability;
+    g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+        op, effect, &observation, &result), ==, WYRELOG_E_OK);
+  }
+  g_assert_cmpint (result.state, ==, MT (STATE_RETAINED));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  request.resume_forbidden = TRUE;
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &other_evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &lifecycle,
+      &snapshot, &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_admit (&request, snapshot,
+      &observation, &result, &transition), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.next_op, ==, MT (OP_ROLLBACK));
+  g_assert_cmpint (wyl_fact_artifact_main_transition_authorize (transition,
+      MT (OP_ROLLBACK), &observation, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &other_evidence, &request, &observation,
+      MT (OP_ROLLBACK), &effect, &durability), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, MT (EFFECT_APPLIED));
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+        (provider, provisioning_uuid, &other_evidence, &request,
+      WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN, &lifecycle, &snapshot,
+      &observation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_transition_record (transition,
+      MT (OP_ROLLBACK), effect, &observation, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==, MT (STATE_ROLLED_BACK));
+  g_assert_cmpint (result.next_op, ==, MT (OP_RETIRE_STAGE));
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (PF (EXECUTE_LEASE_VERIFY));
+  g_assert_cmpint
+    (wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+        (provider, provisioning_uuid, &other_evidence, &request, &observation,
+      MT (OP_RETIRE_STAGE), &effect, &durability), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, MT (EFFECT_UNKNOWN));
+  g_assert_false (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (PF (EXECUTE_LEASE_VERIFY)));
+  wyl_fact_artifact_transition_posix_set_test_fault (PF (NONE));
+  g_clear_pointer (&transition, wyl_fact_artifact_main_transition_free);
+  g_clear_pointer (&snapshot, wyl_fact_artifact_inventory_snapshot_free);
+  g_clear_pointer (&provider, wyl_fact_artifact_transition_posix_free);
+  fixture_clear (&other);
 #else
   const gchar *provisioning_uuid =
       "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
