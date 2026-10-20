@@ -332,10 +332,23 @@ directory flushes pin no file at the rollback name; the witness pass just
 before is what covers it, the residual Windows also accepts.
 
 The public execute accepts the same unmarked one-link observation without
-that proof, so the commit path must call the evidence form; that wiring, and
-the guard for it, come with the commit and resume port. Like Windows, the
-evidence execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE`
-stay refused. None of it is reachable while macOS commit admission refuses.
+that proof, so the commit path must call the evidence form. Each commit step
+names the provisioned capture and execute only through two helpers of the
+commit authority, which on macOS call the evidence capture and the evidence
+execute with the step's provenance: the operation UUID of the graph's single
+`ACTIVE` provisioning record, which must be the journal's old provisioning
+operation on the row's store, and that record's stored evidence, decoded
+against the same UUID. Missing or malformed evidence, and evidence bound to
+another operation, are refused before the provider opens; evidence that names
+another object is refused by the evidence witness in the provider's capture,
+before any journal change. `tests/test-darwin-restore-bind-wiring.py` pins the
+bind, both helpers, the provenance decode and the routing of each ported step
+through the helpers. The stage sync, the first commit step, runs on macOS from
+a decided journal; `RETAIN`, the steps after it and the resume dispatcher
+still refuse there and are ported the same way. Like Windows, the evidence
+execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE` stay
+refused. None of it is reachable while macOS commit admission refuses; the
+stage sync is proved by tests that reach the decision directly.
 
 ## Restore replacement evidence
 

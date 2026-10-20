@@ -5365,13 +5365,18 @@ wyl_fact_offline_restore_graph_commit_select_resume_run
 #endif
 }
 
-#if defined(__linux__) || defined(G_OS_WIN32)
+#if defined(__linux__) || defined(__APPLE__) || defined(G_OS_WIN32)
 /* What proves the old provisioned main to a commit step: its provisioning
  * operation, which on Linux names the companion link, and on Windows also
  * the operation evidence its ACTIVE record carries. */
 typedef struct
 {
   const gchar *uuid;
+#ifdef __APPLE__
+  /* The ACTIVE record's ADR 0006 evidence, decoded against its
+   * operation. */
+  WylFactGraphDarwinOperationEvidence evidence;
+#endif
 #ifdef G_OS_WIN32
   WylFactGraphWinOperationEvidence evidence;
 #endif
@@ -5388,6 +5393,39 @@ graph_provenance_load (wyl_policy_store_t *policy,
     GraphProvenance *out_provenance)
 {
   memset (out_provenance, 0, sizeof *out_provenance);
+#ifdef __APPLE__
+  /* As the bind reads it: the evidence is written once, while the record is
+   * reserved, and binds to the record's own operation, so a decode against
+   * op_uuid refuses evidence minted for another one. */
+  g_autoptr (GPtrArray) records = NULL;
+  wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list_for_graph
+        (policy, journal->tenant_id, journal->selected_graph_id, &records);
+  guint found = 0;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < records->len; i++) {
+    const WylPolicyGraphProvisioningRecord *record =
+        g_ptr_array_index (records, i);
+    if (record->phase != WYL_POLICY_GRAPH_PROVISIONING_ACTIVE)
+      continue;
+    found++;
+    gsize evidence_length = 0;
+    gconstpointer evidence_bytes = record->darwin_operation_evidence == NULL
+      ? NULL : g_bytes_get_data (record->darwin_operation_evidence,
+            &evidence_length);
+    if (g_strcmp0 (record->op_uuid, row->old_provisioning_uuid) != 0
+        || g_strcmp0 (record->store_uuid, row->store_uuid) != 0
+        || evidence_bytes == NULL
+        || evidence_length
+        != WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = wyl_fact_graph_darwin_evidence_decode (evidence_bytes,
+              evidence_length, record->op_uuid, &out_provenance->evidence);
+  }
+  if (rc == WYRELOG_E_OK && found != 1)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#else
 #ifdef G_OS_WIN32
   g_autoptr (GPtrArray) records = NULL;
   wyrelog_error_t rc = wyl_policy_store_graph_provisioning_list_for_graph
@@ -5416,6 +5454,7 @@ graph_provenance_load (wyl_policy_store_t *policy,
   (void) policy;
   (void) journal;
 #endif
+#endif
   out_provenance->uuid = row->old_provisioning_uuid;
   return WYRELOG_E_OK;
 }
@@ -5429,6 +5468,13 @@ graph_capture_provisioned (WylFactArtifactTransition *provider,
     WylFactArtifactInventorySnapshot **out_snapshot,
     WylFactArtifactMainTransitionObservation *out_observation)
 {
+#ifdef __APPLE__
+  /* The record's evidence, not a companion link, proves the one-link
+   * Darwin main (ADR 0006, "Restore witness"). */
+  return wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence
+           (provider, provenance->uuid, &provenance->evidence, request, slot,
+             lifecycle, out_snapshot, out_observation);
+#else
 #ifdef G_OS_WIN32
   return wyl_fact_artifact_transition_windows_capture_provisioned_with_evidence
            (provider, provenance->uuid, &provenance->evidence, request, slot,
@@ -5437,6 +5483,7 @@ graph_capture_provisioned (WylFactArtifactTransition *provider,
   return wyl_fact_artifact_transition_posix_capture_provisioned (provider,
              provenance->uuid, request, slot, lifecycle, out_snapshot,
              out_observation);
+#endif
 #endif
 }
 
@@ -5451,6 +5498,13 @@ graph_execute_provisioned (WylFactArtifactTransition *provider,
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
 {
+#ifdef __APPLE__
+  /* As on Windows the Darwin execute infers the slot; it also reopens the
+   * evidence witness for it before the public execute. */
+  return wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+           (provider, provenance->uuid, &provenance->evidence, request,
+             authorized, op, out_effect, out_durability);
+#else
 #ifdef G_OS_WIN32
   return wyl_fact_artifact_transition_windows_execute_provisioned_with_evidence
            (provider, provenance->uuid, &provenance->evidence, request,
@@ -5459,6 +5513,7 @@ graph_execute_provisioned (WylFactArtifactTransition *provider,
   return wyl_fact_artifact_transition_posix_execute_provisioned (provider,
              provenance->uuid, request, authorized, op, out_effect,
              out_durability);
+#endif
 #endif
 }
 
@@ -5766,7 +5821,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#if !defined(__linux__) && !defined(G_OS_WIN32)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else

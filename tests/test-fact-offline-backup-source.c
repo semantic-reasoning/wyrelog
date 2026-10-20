@@ -16173,6 +16173,346 @@ test_graph_commit_sync_staged_windows (gconstpointer data)
 #endif
 }
 
+#ifdef __APPLE__
+static wyrelog_error_t
+darwin_commit_proof_holds (gpointer user_data)
+{
+  (void) user_data;
+  return WYRELOG_E_OK;
+}
+
+/* Two sealed graphs provisioned through the real path, so each ACTIVE
+ * record carries ADR 0006 evidence, backed up into a bundle.  The runtime
+ * is then swapped for one that knows no graph, the state the macOS begin and
+ * bind cases run from. */
+static void
+darwin_restore_fixture_init (BackupFixture *fixture, const gchar *name,
+    DestinationCapture *capture, gchar **out_bundle_root,
+    WylFactOfflineBackupBundle **out_bundle)
+{
+  fixture_init (fixture, name);
+  create_tenant (fixture);
+  create_graph (fixture, "alpha");
+  create_graph (fixture, "zeta");
+  seal_graph (fixture, "alpha");
+  seal_graph (fixture, "zeta");
+  seal_tenant (fixture);
+  const gchar *graphs[] = { "alpha", "zeta" };
+  for (guint i = 0; i < G_N_ELEMENTS (graphs); i++) {
+    WylFactGraphKey key = { 0 };
+    g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-a", graphs[i]),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh
+          (fixture->runtime, &key, session_build_engine, NULL, NULL), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_close_admission
+          (fixture->runtime, &key), ==, WYRELOG_E_OK);
+    wyl_fact_graph_key_clear (&key);
+  }
+  g_autoptr (WylFactOfflineBackupSource) source = NULL;
+  g_assert_cmpint (wyl_fact_offline_backup_source_new (fixture->policy,
+      fixture->root, fixture->runtime, "tenant-a", 0, &source), ==,
+      WYRELOG_E_OK);
+  destination_capture_init (capture, fixture, DESTINATION_FAIL_NONE);
+  g_assert_cmpint (wyl_fact_offline_backup_generate (source,
+      &capture_destination, capture), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (capture->completed_graphs->len, ==, 2);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
+  g_autoptr (GError) error = NULL;
+  *out_bundle_root = wyl_test_make_secure_fact_root
+        ("wyl-offline-restore-mac-bundle-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (*out_bundle_root);
+  guint8 digest[32];
+  write_bundle_from_capture (*out_bundle_root, capture, digest);
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_open (*out_bundle_root,
+      digest, out_bundle), ==, WYRELOG_E_OK);
+  g_clear_pointer (&fixture->runtime, wyl_fact_graph_runtime_manager_unref);
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_new (&fixture->runtime),
+      ==, WYRELOG_E_OK);
+}
+
+/* Bypass only the fixture's immutable-record guards and replace zeta's
+ * stored evidence, NULL for none, so the commit step's read of it is what
+ * refuses. */
+static void
+darwin_rewrite_graph_evidence (BackupFixture *fixture, GBytes *evidence)
+{
+  sqlite3 *db = wyl_policy_store_get_db (fixture->policy);
+  g_assert_cmpint (sqlite3_exec (db,
+      "DROP TRIGGER fact_graph_provisioning_immutable;"
+      "DROP TRIGGER fact_graph_provisioning_update_guard;", NULL, NULL,
+      NULL), ==, SQLITE_OK);
+  sqlite3_stmt *update = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+      "UPDATE fact_graph_provisioning SET darwin_operation_evidence=?1 "
+      "WHERE tenant_id='tenant-a' AND graph_id='zeta';", -1, &update, NULL),
+      ==, SQLITE_OK);
+  gsize length = 0;
+  gconstpointer bytes = evidence == NULL ? NULL
+    : g_bytes_get_data (evidence, &length);
+  g_assert_cmpint (bytes == NULL ? sqlite3_bind_null (update, 1)
+      : sqlite3_bind_blob (update, 1, bytes, (int) length, SQLITE_TRANSIENT),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (update), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  g_assert_cmpint (sqlite3_finalize (update), ==, SQLITE_OK);
+}
+
+/* Begin, the graph import from the bundle, a recorded preflight, the bind
+ * through the evidence witness, the replacement reservation and the COMMIT
+ * decision.  Commit admission refuses on macOS, so the decision goes through
+ * the journal store directly, with a proof that holds.  Returns the decided
+ * revision and its journal bytes. */
+static guint64
+darwin_graph_commit_decided (BackupFixture *fixture,
+    DestinationCapture *capture, WylFactOfflineBackupBundle *bundle,
+    const gchar *operation, GBytes **out_decided)
+{
+  WylFactOfflineRestoreJournal journal = { 0 };
+  WylFactOfflineRestoreJournal next = { 0 };
+  WylFactOfflineRestoreStoreResult result;
+  g_assert_cmpint (wyl_fact_offline_restore_begin_run (fixture->policy,
+      fixture->root, fixture->runtime, bundle,
+      WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH, "zeta", operation, TRUE, 0,
+      &journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  WylFactOfflineBackupGraphView view = { 0 };
+  g_assert_cmpint (wyl_fact_offline_backup_bundle_graph_view (bundle, "zeta",
+      &view), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_import_run
+        (fixture->policy, fixture->root, fixture->runtime, "tenant-a",
+      "zeta", capture->manifest, operation, 1, 0,
+      wyl_fact_offline_backup_bundle_graph_input (), &view, &journal), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (journal.revision, ==, 2);
+  const guint64 imported = journal.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_mark_preflight (&journal,
+      "zeta"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_cas
+        (fixture->policy, imported, &journal, &result, &next), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_bind_provisioned_old_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, "zeta",
+      next.revision, 0, &journal), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&next);
+  WylPolicyGraphRestoreReplacementRecord *reserved = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_replacement_reserve
+        (fixture->policy, &journal, &result, &reserved), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpstr (reserved->phase, ==, "reserved");
+  wyl_policy_graph_restore_replacement_record_free (reserved);
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_decide_graph_commit
+        (fixture->policy, &journal, darwin_commit_proof_holds, NULL,
+      &result, &next), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_FACT_OFFLINE_RESTORE_STORE_APPLIED);
+  g_assert_cmpint (next.decision, ==,
+      WYL_FACT_OFFLINE_RESTORE_DECISION_COMMIT);
+  const guint64 decided = next.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&next,
+      out_decided), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&journal);
+  wyl_fact_offline_restore_journal_clear (&next);
+  return decided;
+}
+#endif
+
+/* macOS (#1303): on a COMMIT journal bound to the ACTIVE provisioning
+ * operation, the first commit step proves the old main by that record's
+ * ADR 0006 evidence, flushes the restore stage and leaves the graph READY
+ * for RETAIN.  A run stopped after journaling its attempt resumes from the
+ * UNKNOWN attempt, and a failed flush on the way leaves that journal alone.
+ * A main replaced by a same-bytes copy, a record without evidence and a
+ * record whose evidence names another volume are refused before any journal
+ * change.  The later steps and the resume dispatcher still refuse on macOS,
+ * each with the journal byte-identical. */
+static void
+test_graph_commit_sync_staged_macos (gconstpointer data)
+{
+#ifndef __APPLE__
+  (void) data;
+  g_test_skip ("macOS graph restore stage sync by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0052";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-sync-mac-XXXXXX", &capture, &bundle_root, &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  guint64 revision = decided;
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  if (g_str_equal (mode, "foreign-main")
+      || g_str_equal (mode, "missing-evidence")
+      || g_str_equal (mode, "wrong-evidence")) {
+    /* The replaced main and the evidence naming another volume are refused
+     * by the evidence witness in the provider's capture, the record without
+     * evidence by the provenance read before the provider opens. */
+    if (g_str_equal (mode, "foreign-main")) {
+      g_autofree gchar *swap = graph_file_path (&fixture, "zeta",
+              "facts.duckdb.swap");
+      copy_artifact_secure (main_path, swap);
+      g_assert_cmpint (g_rename (swap, main_path), ==, 0);
+    } else if (g_str_equal (mode, "missing-evidence")) {
+      darwin_rewrite_graph_evidence (&fixture, NULL);
+    } else {
+      g_autoptr (GPtrArray) records = NULL;
+      g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+            (fixture.policy, "tenant-a", "zeta", &records), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpuint (records->len, ==, 1);
+      const WylPolicyGraphProvisioningRecord *record =
+          g_ptr_array_index (records, 0);
+      g_assert_cmpint (record->phase, ==,
+          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+      g_assert_nonnull (record->darwin_operation_evidence);
+      gsize length = 0;
+      const guint8 *stored =
+          g_bytes_get_data (record->darwin_operation_evidence, &length);
+      g_assert_cmpuint (length, ==,
+          WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
+      guint8 wrong[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
+      memcpy (wrong, stored, sizeof wrong);
+      /* The first byte of the volume UUID (ADR 0006 layout): still
+       * decodable against the operation, so only the witness's comparison
+       * with the descriptor's evidence can refuse it. */
+      wrong[24] ^= 0xff;
+      WylFactGraphDarwinOperationEvidence decoded = { 0 };
+      g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (wrong,
+          sizeof wrong, record->op_uuid, &decoded), ==, WYRELOG_E_OK);
+      g_autoptr (GBytes) replaced = g_bytes_new (wrong, sizeof wrong);
+      darwin_rewrite_graph_evidence (&fixture, replaced);
+    }
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        decided, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        decided_journal, decided);
+  } else {
+    if (g_str_equal (mode, "applied")) {
+      /* U5-3 boundary: the dispatcher stays closed on macOS until every
+       * step it dispatches runs there.  Widened, it would sync the stage
+       * first, so only a call before the step can see it. */
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          decided, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          decided_journal, decided);
+    }
+#ifdef WYL_TEST_HANDLE_SEAMS
+    if (g_str_equal (mode, "unknown-retry")) {
+      gboolean began = FALSE;
+      wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+        (fail_sync_staged_after_begin_once, &began);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          decided, 0, &committed), ==, WYRELOG_E_IO);
+      wyl_fact_offline_restore_graph_commit_sync_staged_set_checkpoint_for_test
+        (NULL, NULL);
+      g_assert_true (began);
+      g_assert_null (committed.operation_uuid);
+      WylFactOfflineRestoreJournal pending = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &pending), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (pending.revision, ==, decided + 1);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (pending.graphs, 0))->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (pending.graphs, 0))->pending_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED);
+      g_autoptr (GBytes) pending_journal = NULL;
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&pending,
+          &pending_journal), ==, WYRELOG_E_OK);
+      revision = pending.revision;
+      wyl_fact_offline_restore_journal_clear (&pending);
+      /* A failed flush of the resumed attempt leaves it journaled as it
+       * was. */
+      wyl_fact_artifact_transition_posix_set_test_fault
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_BUSY);
+      g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+            (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_STAGED_FSYNC));
+      wyl_fact_artifact_transition_posix_set_test_fault
+        (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, revision);
+    }
+#endif
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    /* The attempt is begun and then completed: two revisions either way. */
+    g_assert_cmpuint (committed.revision, ==, decided + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_READY);
+    g_assert_cmpint (graph->next_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
+    g_assert_cmpint (graph->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+    g_assert_cmpint (graph->pending_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+    /* SYNC_STAGED moves no name: the old main still holds facts.duckdb and
+     * the stage is still there. */
+    GStatBuf main_stat;
+    g_assert_cmpint (g_stat (main_path, &main_stat), ==, 0);
+    g_assert_cmpuint ((guint64) main_stat.st_dev, ==,
+        graph->expected_main_identity.domain);
+    g_assert_cmpuint ((guint64) main_stat.st_ino, ==,
+        graph->expected_main_identity.object);
+    g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+            operation);
+    g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+            stage_name);
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    g_autoptr (GBytes) synced_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &synced_journal), ==, WYRELOG_E_OK);
+    const guint64 synced = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        synced_journal, synced);
+    /* The completed step does not run again, neither from the revision it
+     * left nor from the one it wrote, whose next step is RETAIN. */
+    const guint64 reruns[] = { revision, synced };
+    for (guint i = 0; i < G_N_ELEMENTS (reruns); i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          reruns[i], 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          synced_journal, synced);
+    }
+    /* U5-3 boundary: RETAIN still refuses on macOS. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        synced, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        synced_journal, synced);
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
 /* After the stage sync, RETAIN moves the evidenced old main to the
  * operation's rollback name and leaves the main name empty, journaled
  * RETAINED with SYNC_ROLLBACK_FILE next.  A run that renamed and then
@@ -17216,6 +17556,21 @@ main (int argc, char **argv)
   g_test_add_func
     ("/fact-offline-backup-source/windows/graph-source-evidence-drift",
       test_graph_source_windows_evidence_drift);
+  /* macOS ports of the graph commit steps; each case skips off macOS. */
+  g_test_add_data_func ("/fact-offline-backup-source/macos/commit-sync-staged",
+      "applied", test_graph_commit_sync_staged_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-staged-foreign-main",
+      "foreign-main", test_graph_commit_sync_staged_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-staged-missing-evidence",
+      "missing-evidence", test_graph_commit_sync_staged_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-staged-unknown-retry",
+      "unknown-retry", test_graph_commit_sync_staged_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-staged-wrong-evidence",
+      "wrong-evidence", test_graph_commit_sync_staged_macos);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",

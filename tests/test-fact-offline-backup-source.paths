@@ -84,6 +84,11 @@
 /fact-offline-backup-source/import/wrong-graph
 /fact-offline-backup-source/import/wrong-inode
 /fact-offline-backup-source/import/wrong-manifest
+/fact-offline-backup-source/macos/commit-sync-staged
+/fact-offline-backup-source/macos/commit-sync-staged-foreign-main
+/fact-offline-backup-source/macos/commit-sync-staged-missing-evidence
+/fact-offline-backup-source/macos/commit-sync-staged-unknown-retry
+/fact-offline-backup-source/macos/commit-sync-staged-wrong-evidence
 /fact-offline-backup-source/multi-graph-copy
 /fact-offline-backup-source/publication-authority/corrupt
 /fact-offline-backup-source/publication-authority/policy
