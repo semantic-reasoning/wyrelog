@@ -2391,9 +2391,11 @@ struct WylFactGraphProvisionedRestoreWitness
  * file this user owns.  The dev/ino inequality there is load-bearing, not a
  * belt: a rename of the rollback name onto `facts.duckdb` between the two
  * name lookups keeps one link, and within a pass only that comparison
- * refuses it. */
+ * refuses it.  The caller-supplied directory's checkpoint, NULL outside
+ * tests, sits between those lookups so a test can drive that rename. */
 static wyrelog_error_t
-darwin_restore_witness_pass (WylFactGraphProvisionedRestoreWitness *witness)
+darwin_restore_witness_pass (WylFactGraphProvisionedRestoreWitness *witness,
+    const WylFactGraphDirectory *directory)
 {
   struct stat held = { 0 }, named = { 0 };
   if (fstat (witness->companion_fd, &held) != 0)
@@ -2415,6 +2417,13 @@ darwin_restore_witness_pass (WylFactGraphProvisionedRestoreWitness *witness)
       witness->expected_inode, FALSE, 0600) || named.st_nlink != 1)
     return WYRELOG_E_POLICY;
   if (witness->slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK) {
+    if (directory->checkpoint != NULL) {
+      wyrelog_error_t rc =
+          directory->checkpoint ("darwin-restore-witness-rollback-bound",
+              directory->checkpoint_data);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
     struct stat main = { 0 };
     if (fstatat (witness->directory.graph_fd,
         WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME, &main,
@@ -2511,7 +2520,7 @@ wyl_fact_graph_provisioned_restore_witness_revalidate
       || held_graph.st_ino != supplied_graph.st_ino))
     rc = WYRELOG_E_POLICY;
   for (guint pass = 0; rc == WYRELOG_E_OK && pass < 2; pass++) {
-    rc = darwin_restore_witness_pass (witness);
+    rc = darwin_restore_witness_pass (witness, directory);
     if (rc == WYRELOG_E_OK)
       rc = directory_revalidate (&witness->directory);
   }
