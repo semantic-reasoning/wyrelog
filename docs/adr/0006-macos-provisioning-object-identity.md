@@ -243,7 +243,7 @@ meaning and stays refused.
 The transition model is not told that the witness ran: a one-link old main,
 at either name, is its ordinary shape, and the proof is the successful witness
 call in the restore path, which must therefore use the evidence form of the
-capture.
+capture and of the execute.
 
 ## Windows rollback name
 
@@ -289,9 +289,8 @@ or flushes; `FINALIZE`, the only delete, stays refused for a provisioned main
 until the provisioning record's cleanup is journaled. `PUBLISH` re-pins the
 stage it moves, not the object at the rollback name, so a caller must
 recapture and reauthorize before each step rather than reuse an authorization
-across a restart. macOS adopts this reasoning for its restore witness and
-capture; its evidence execute, which authorizes the steps after `RETAIN`, is
-decided with the rest of its commit and resume port.
+across a restart. macOS adopts this reasoning for its restore witness,
+capture and evidence execute (see "macOS evidence execute").
 
 A committed Windows graph restore therefore runs from the stage sync through
 `RETAIN`, the rollback-side flushes, `PUBLISH` and the directory flush, and
@@ -308,6 +307,35 @@ decided restore is left with no way to finish. Until then a Windows graph
 restore can be rolled back before commit but not committed, and the committed
 steps above are proved by tests that reach the decision directly; tenant-scope
 restores stay refused throughout.
+
+## macOS evidence execute
+
+The macOS evidence execute takes the active provisioning UUID and its stored
+evidence, the pair the capture took. It infers the slot from where the
+request's expected main sits in the authorized observation: one link under
+`facts.duckdb` is `READY_MAIN`, and one link under this restore's rollback
+name is `RETAINED_ROLLBACK`. The step list for each slot and the provenance
+rule are the Windows ones: the observation is unmarked, directory and lease
+are the request's, any stage is the request's staged main, and after `RETAIN`
+any main is the request's staged main too.
+
+Unlike Windows, which reopens no witness, the macOS execute reopens the
+evidence witness for that slot and revalidates it before the public execute.
+Darwin evidence is compared through a held descriptor and name lookups, not as
+a value from a correlated directory capture, so the observation alone does not
+bind the object. The public execute then revalidates authority and re-pins the
+source by device, inode, link count one, mode and owner. The witness stays open
+across that call, so its held descriptor keeps the old inode from being
+recycled and a reused inode cannot satisfy the re-pin. A call refused before
+the public execute touches nothing and reports `UNKNOWN`. `PUBLISH` and the
+directory flushes pin no file at the rollback name; the witness pass just
+before is what covers it, the residual Windows also accepts.
+
+The public execute accepts the same unmarked one-link observation without
+that proof, so the commit path must call the evidence form; that wiring, and
+the guard for it, come with the commit and resume port. Like Windows, the
+evidence execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE`
+stay refused. None of it is reachable while macOS commit admission refuses.
 
 ## Restore replacement evidence
 

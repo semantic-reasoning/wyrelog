@@ -1416,6 +1416,107 @@ wyl_fact_artifact_transition_posix_execute_provisioned
   return execute_verified (provider, authorized, op, out_effect,
              out_durability, witness);
 }
+#ifdef __APPLE__
+
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability)
+{
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_MAIN_TRANSITION_EFFECT_UNKNOWN;
+  if (out_durability != NULL)
+    *out_durability = (WylFactArtifactMainTransitionDurabilityEvidence) { 0 };
+  if (provider == NULL || provisioning_uuid == NULL || evidence == NULL
+      || request == NULL || request->operation_uuid == NULL
+      || request->expected_main_absent || authorized == NULL
+      || out_effect == NULL || out_durability == NULL)
+    return WYRELOG_E_INVALID;
+  /* The witness derives the rollback name from the request's operation and
+   * the public execute from the provider's, so this bind makes them one. */
+  wyl_id_t id = { 0 };
+  if (wyl_id_parse (request->operation_uuid, &id) != WYRELOG_E_OK
+      || memcmp (id.bytes, provider->operation_uuid,
+      sizeof provider->operation_uuid) != 0)
+    return WYRELOG_E_POLICY;
+  /* The slot is where the expected main sits in the authorized observation;
+   * a one-link object cannot be under both names, and the witness below
+   * binds that name to the evidenced object. */
+  const WylFactArtifactMainTransitionEntryEvidence *main
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_MAIN];
+  const WylFactArtifactMainTransitionEntryEvidence *stage
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_STAGE];
+  const WylFactArtifactMainTransitionEntryEvidence *rollback
+    = &authorized->entries[WYL_FACT_ARTIFACT_MAIN_TRANSITION_SLOT_ROLLBACK];
+  gboolean ready = main->present
+      && wyl_fact_artifact_inventory_identity_equal (&main->identity,
+          &request->expected_main_identity);
+  gboolean retained = !ready && rollback->present
+      && wyl_fact_artifact_inventory_identity_equal (&rollback->identity,
+          &request->expected_main_identity);
+  const WylFactArtifactMainTransitionEntryEvidence *old
+    = ready ? main : rollback;
+  if (authorized->old_main_witness
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OLD_WITNESS_NONE
+      || (!ready && !retained) || old->reparse || old->link_count != 1
+      || old->owner_state
+      != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OWNER_CONFORMING
+      || (retained && main->present
+      && !wyl_fact_artifact_inventory_identity_equal (&main->identity,
+      &request->staged_main_identity))
+      || (stage->present
+      && !wyl_fact_artifact_inventory_identity_equal (&stage->identity,
+      &request->staged_main_identity))
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->directory_identity, &request->directory_identity)
+      || !wyl_fact_artifact_inventory_identity_equal
+        (&authorized->lease_identity, &request->lease_identity))
+    return WYRELOG_E_POLICY;
+  WylFactGraphProvisionedRestoreSlot slot = ready
+      ? WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      : WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK;
+  /* Each slot admits only the steps that can follow from it.  SYNC_STAGED
+   * is in both: a transition admitted afresh after RETAIN, as each
+   * restarted commit step's is, holds no durability and re-flushes the
+   * stage first, which the evidence check above has bound to the request's
+   * staged main.  FINALIZE is in neither list, as on POSIX, until the
+   * provisioning record's cleanup is journaled. */
+  gboolean allowed = op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_STAGED
+      || (slot == WYL_FACT_GRAPH_PROVISIONED_RESTORE_READY_MAIN
+      ? op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN
+      : op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR
+      || op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_ROLLBACK);
+  if (!allowed)
+    return WYRELOG_E_POLICY;
+  /* The witness is reopened and revalidated against the evidence before the
+   * public execute, which then revalidates authority and re-pins the source
+   * by dev/ino, one link, mode and owner.  It stays open across that call:
+   * its held descriptor keeps the old inode from being recycled, so a reused
+   * inode cannot satisfy the re-pin of a step whose source is the old object
+   * (RETAIN, SYNC_ROLLBACK_FILE, ROLLBACK).  For SYNC_STAGED, PUBLISH and the
+   * directory flushes the witness covers the old object only at its
+   * revalidation, the residual the ADR records. */
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  wyrelog_error_t rc =
+      wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+        ((WylFactGraphDirectory *) provider->directory, provisioning_uuid,
+          evidence, request->operation_uuid, &request->expected_main_identity,
+          slot, &witness);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_fact_artifact_transition_posix_execute (provider, authorized, op,
+             out_effect, out_durability);
+}
+#endif
 
 wyrelog_error_t
 wyl_fact_artifact_transition_posix_with_retired_stage_recovery

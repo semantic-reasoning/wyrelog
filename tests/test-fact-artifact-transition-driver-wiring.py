@@ -190,7 +190,7 @@ TEST_REGISTERED_BODY_SHA256 = {
     "tests/test-fact-artifact-transition-driver.c":
         "30618d210f824fd80d688dcd6174350fc432660ea47d9e82154e50a75f96d5da",
     "tests/test-fact-artifact-transition-posix.c":
-        "3ea62eb629a7793fe6f612f412e1d8e2ab65a570fa5361349900cf9b16a6c230",
+        "d05527d115accd59a0a1c29ad03ff52ccc57920d0a3c645b8f6026cfeec3b062",
     "tests/test-fact-artifact-transition-windows.c":
         "72453fde83d4bd1571efb26e69cafe36b751c290516884be8c84b9651dc02561",
 }
@@ -227,7 +227,6 @@ POSIX_AUTHORITY_BODY_SHA256 = (
 
 TERMINATION_PROFILES = {
     "tests/test-fact-artifact-transition-posix.c": (
-        'g_test_skip ("provisioned restore is not yet ported to macOS")',
         "WYL_TEST_EXIT(77)",
         "WYL_TEST_EXIT(78)",
     ),

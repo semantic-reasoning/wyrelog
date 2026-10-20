@@ -267,6 +267,33 @@ wyrelog_error_t wyl_fact_artifact_transition_posix_execute_provisioned
     WylFactArtifactMainTransitionOp op,
     WylFactArtifactMainTransitionEffect *out_effect,
     WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
+#ifdef __APPLE__
+/*
+ * Executes a restore step on a provisioned Darwin main whose authorized
+ * observation came from the evidence capture above: unmarked, holding the
+ * request's expected main at one link under the final name (SYNC_STAGED,
+ * RETAIN) or under the rollback name (SYNC_ROLLBACK_FILE, SYNC_RETAIN_DIR,
+ * PUBLISH, SYNC_PUBLISH_DIR, ROLLBACK), under the request's directory and
+ * lease, with any stage -- and after RETAIN any main -- the request's staged
+ * main.  The caller passes the ACTIVE provisioning UUID and its stored
+ * evidence, the pair the capture took.  The evidence witness for the
+ * inferred slot is reopened and revalidated before the public execute, which
+ * then revalidates authority and re-pins the source.  FINALIZE, RETIRE_STAGE
+ * and every step outside its slot are E_POLICY.  A call refused before the
+ * public execute touches nothing and reports UNKNOWN; past that point the
+ * result is the ordinary execute's.
+ */
+wyrelog_error_t
+wyl_fact_artifact_transition_posix_execute_provisioned_with_evidence
+  (WylFactArtifactTransitionPosix *provider,
+    const gchar *provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *evidence,
+    const WylFactArtifactMainTransitionRequest *request,
+    const WylFactArtifactMainTransitionObservation *authorized,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactMainTransitionEffect *out_effect,
+    WylFactArtifactMainTransitionDurabilityEvidence *out_durability);
+#endif
 
 /* Recovery of an already absent stage after an interrupted RETIRE_STAGE.
  * Under the caller's retained root lease and selected graph quiescence,
