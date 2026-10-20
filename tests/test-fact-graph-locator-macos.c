@@ -1136,6 +1136,57 @@ test_provisioned_restore_witness_rollback (void)
   witness_fixture_clear (&f);
 }
 
+typedef struct
+{
+  gint graph_fd;
+  const gchar *rollback;
+  guint acted;
+} RollbackRace;
+
+static wyrelog_error_t
+rollback_race_checkpoint (const gchar *point, gpointer user_data)
+{
+  RollbackRace *race = user_data;
+  if (g_strcmp0 (point, "darwin-restore-witness-rollback-bound") == 0
+      && race->acted++ == 0)
+    g_assert_cmpint (renameat (race->graph_fd, race->rollback, race->graph_fd,
+        "facts.duckdb"), ==, 0);
+  return WYRELOG_E_OK;
+}
+
+/* The rollback name moving onto an absent or staged `facts.duckdb` between
+ * the pass's two name lookups keeps one link; only the pass's dev/ino
+ * inequality refuses it (#1303 U5-2, ADR 0006 "Restore witness"). */
+static void
+test_provisioned_restore_witness_rollback_race (void)
+{
+  g_autofree gchar *rollback = g_strdup_printf ("restore-%s.duckdb.superseded",
+          witness_restore_uuid);
+  for (guint staged = 0; staged < 2; staged++) {
+    WitnessFixture f;
+    witness_fixture_init (&f, "graph-rollback-race", operation_uuid);
+    witness_rename (&f, "facts.duckdb", rollback);
+    if (staged)
+      witness_create_extra_file (&f, "facts.duckdb", 0600);
+    WylFactGraphProvisionedRestoreWitness *witness = NULL;
+    g_assert_cmpint (witness_open (&f, &f.evidence, &f.old_main,
+        WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness), ==,
+        WYRELOG_E_OK);
+    RollbackRace race = {
+      .graph_fd = f.graph.graph_fd,
+      .rollback = rollback,
+    };
+    f.graph.checkpoint = rollback_race_checkpoint;
+    f.graph.checkpoint_data = &race;
+    assert_rollback_revalidate (&f, witness, WYRELOG_E_POLICY);
+    g_assert_cmpuint (race.acted, ==, 1);
+    f.graph.checkpoint = NULL;
+    f.graph.checkpoint_data = NULL;
+    wyl_fact_graph_provisioned_restore_witness_free (witness);
+    witness_fixture_clear (&f);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1157,5 +1208,8 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/provisioned-restore-witness-rollback",
     test_provisioned_restore_witness_rollback);
+  g_test_add_func (
+    "/fact/macos-object-identity/provisioned-restore-witness-rollback-race",
+    test_provisioned_restore_witness_rollback_race);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
