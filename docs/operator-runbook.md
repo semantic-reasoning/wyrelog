@@ -1012,10 +1012,11 @@ wyctl service-credential rotate \
 `--subject` identifies the service principal and does not encode or establish
 the target tenant; rotate names the credential to supersede with
 `--credential-id` instead. The daemon requires the issue body's tenant and the
-selected target to match exactly. For rotate, list, revoke, status, and recover,
-it derives the authoritative tenant from stored credential or operation state
-and rejects a different selected target without revealing whether the object
-exists. `--destination` is the escrow publication
+selected target to match exactly, and so does `reconcile` for an issue. For
+rotate, list, revoke, status, recover, and reconcile of a rotate, it derives
+the authoritative tenant from stored credential or operation state and rejects
+a different selected target without revealing whether the object exists.
+`--destination` is the escrow publication
 file and `--expires-at-us` is the absolute publication expiry in epoch
 microseconds and must be greater than zero. Both are mandatory. The
 `--access-token-file` bearer token may instead come from `wyctl`
@@ -1343,6 +1344,84 @@ packaged-runtime-proven on Linux by
 `service-credential-publication-fault-e2e`
 (`tests/check-service-credential-publication-fault-e2e.sh`, #754).
 
+### Reconcile versus recover (#1270)
+
+`recover` and `reconcile` both answer for one issue or rotate request id, but
+only `reconcile` decides it:
+
+- `recover` reports what the operation journal under `--operation-root`
+  recorded for the id, checked against the authority store, as `recovery=`. It
+  may move the journal record forward to `server_committed`, but it never
+  closes the id. An attempt it reports as `pending`, `server_committed` or
+  `server_committed_replay` can still be finished by re-running the original
+  command with the same `--request-id`; `terminal_no_commit` means the id is
+  already closed and needs a new one, and `conflict` means the id belongs to
+  other inputs.
+- `reconcile` asks the authority store for a final verdict on the id and its
+  exact target. If the id never committed, the store records it as closed for
+  good, and every later issue or rotate with that id is refused.
+
+Use `recover` first, and re-run the original command with the same id to
+finish an attempt; only that re-run can deliver the secret. Use `reconcile`
+when you are giving the attempt up, or when you can no longer repeat its inputs
+(the destination or the expiry), since it needs only the id and the target.
+Never reconcile an attempt that may still be running, such as one whose command
+has not returned or has just timed out, since the daemon may still be working
+on it: if the reconcile wins, the attempt fails.
+
+Reconcile an issue with the subject it named, or a rotate with the credential
+it superseded:
+
+```sh
+wyctl --daemon-url "$BASE_URL" service-credential reconcile \
+  --operation issue --request-id "$REQUEST_ID" \
+  --subject "$SUBJECT" --tenant "$TENANT" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+```sh
+wyctl --daemon-url "$BASE_URL" service-credential reconcile \
+  --operation rotate --request-id "$REQUEST_ID" \
+  --credential-id "$OLD_CREDENTIAL_ID" --tenant "$TENANT" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+`--request-id` is required and never minted, because reconciling an id nobody
+used would only close it. An issue's target tenant is `--tenant`, which must be
+the tenant the issue named; a rotate's comes from the stored credential, and a
+credential the tenant does not hold is not found. The verdict is one line on
+stdout:
+
+```
+request_id=<R> operation=<issue|rotate> result=<committed|not_committed_terminal> credential_id=<wlc_KSUID|-> generation=<n>
+```
+
+- `result=committed`: the credential exists and is named. Reconcile writes
+  nothing and cannot undo it. Use `recover` or `status` to see whether the
+  secret was delivered; if it was not, revoke the credential as described in
+  "Publication failure and orphan recovery".
+- `result=not_committed_terminal`: the attempt never committed and the id is
+  now closed; `wyctl` says so on stderr. Start a new attempt with a new
+  `--request-id`; do not re-run the original command with the old one.
+
+Repeating a reconcile with the same id and target is safe and returns the same
+verdict. Reconcile exits:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | A verdict was printed: `committed` or `not_committed_terminal`. |
+| 2 | Local usage or validation error; nothing was sent. |
+| 3 | The daemon refused the request as invalid (HTTP 400), or answered with a verdict for another request. |
+| 4 | The id is bound to a different operation or target (HTTP 409 `operation_request_conflict`), or the caller is not authorized (HTTP 403). Do not reuse the id for other inputs. |
+| 5 | Not found (HTTP 404: an unknown credential, or a daemon built without the fact store), or another remote failure. |
+| 6 | Authentication required (HTTP 401). |
+
+When the outcome is unknown (a timeout, a server error, or an answer `wyctl`
+could not read), `wyctl` says to repeat the same command with the same
+`--request-id` and target; the line it then prints is the verdict.
+
 ### File custody and local-only transport
 
 The service-credential surface is loopback-only and file-mediated:
@@ -1368,8 +1447,9 @@ The service-credential surface is loopback-only and file-mediated:
   drwx------ 2 wyrelog wyrelog  ...  /var/lib/wyrelog/system/operations
   ```
 
-- **Loopback only.** Management (issue/rotate/revoke/list/status/recover,
-  principal create/disable) and the `/auth/service-token` exchange are validated
+- **Loopback only.** Management
+  (issue/rotate/revoke/list/status/recover/reconcile, principal
+  create/disable) and the `/auth/service-token` exchange are validated
   against the actual listener and peer address and accept a canonical literal
   loopback URL only. There is no remote, proxy, TLS/mTLS, or Unix-socket
   transport in v1, and the `Forwarded` / `X-Forwarded-*` headers are never
@@ -3907,13 +3987,13 @@ request that runs out of time exits like any other transport failure, and the
 daemon may still have completed it. For policy grants, revokes and
 transitions, fact put and retract, fact forget, fact schema register, fact
 rule-pack register, fact quota configure, graph create and seal, tenant create, seal and unseal,
-service-principal create and disable, and service-credential issue, rotate and
-revoke, wyctl adds a line saying that the outcome is unknown and how to find
-out; the online `mfa enroll` says whether a re-run is safe (see "First-Install
-Bootstrap"); `auth logout` says how to settle the retained token files (see
-"HTTP API Summary" under "TOTP Multi-Factor Authentication (MFA)"); other
-commands report only the failure, so check the daemon's state before repeating
-them.
+service-principal create and disable, and service-credential issue, rotate,
+revoke and reconcile, wyctl adds a line saying that the outcome is unknown and
+how to find out; the online `mfa enroll` says whether a re-run is safe (see
+"First-Install Bootstrap"); `auth logout` says how to settle the retained token
+files (see "HTTP API Summary" under "TOTP Multi-Factor Authentication (MFA)");
+other commands report only the failure, so check the daemon's state before
+repeating them.
 
 Example: configure the operator workstation once and let wyctl invocations
 in that same account and settings-backend environment pick up the defaults.
