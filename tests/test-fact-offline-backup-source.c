@@ -16446,6 +16446,71 @@ darwin_pending_journal (BackupFixture *fixture, const gchar *operation,
   wyl_fact_offline_restore_journal_clear (&pending);
   return bytes;
 }
+
+/* Runs a decided macOS graph commit through RETAIN and both rollback-side
+ * syncs, leaving it RETAINED with PUBLISH next.  Returns the publishable
+ * revision, its journal bytes and the old main's identity. */
+static guint64
+darwin_graph_commit_publishable (BackupFixture *fixture,
+    const gchar *operation, guint64 decided, GBytes **out_publishable,
+    WylFactArtifactInventoryIdentity *out_old_main)
+{
+  g_autoptr (GBytes) retained_journal = NULL;
+  guint64 revision = darwin_graph_commit_retained (fixture, operation,
+          decided, &retained_journal, out_old_main);
+  const WylFactArtifactMainTransitionOp next[] = {
+    WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+    WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+  };
+  WylFactOfflineRestoreJournal committed = { 0 };
+  for (guint i = 0; i < G_N_ELEMENTS (next); i++) {
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+          (fixture->policy, fixture->root, fixture->runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, revision + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+    g_assert_cmpint (graph->next_op, ==, next[i]);
+    revision = committed.revision;
+    if (i + 1 == G_N_ELEMENTS (next))
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+          out_publishable), ==, WYRELOG_E_OK);
+    wyl_fact_offline_restore_journal_clear (&committed);
+  }
+  return revision;
+}
+
+/* The journal is PUBLISHED_DURABLE with FINALIZE next; the staged object,
+ * by dev/ino, holds the main name, the stage name is empty and the old main
+ * holds the rollback name. */
+static void
+assert_darwin_published_durable (const WylFactOfflineRestoreJournal *journal,
+    const gchar *main_path, const gchar *stage_path,
+    const gchar *rollback_path,
+    const WylFactArtifactInventoryIdentity *old_main)
+{
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (journal->graphs, 0);
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE);
+  g_assert_cmpint (graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE);
+  g_assert_cmpint (graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+  g_assert_cmpint (graph->pending_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+  const WylFactArtifactInventoryIdentity at_main =
+      darwin_file_identity (main_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&at_main,
+      &graph->staged_main_identity));
+  g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+  const WylFactArtifactInventoryIdentity at_rollback =
+      darwin_file_identity (rollback_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (&at_rollback,
+      old_main));
+}
 #endif
 
 /* macOS (#1303): on a COMMIT journal bound to the ACTIVE provisioning
@@ -16455,8 +16520,7 @@ darwin_pending_journal (BackupFixture *fixture, const gchar *operation,
  * UNKNOWN attempt, and a failed flush on the way leaves that journal alone.
  * A main replaced by a same-bytes copy, a record without evidence and a
  * record whose evidence names another volume are refused before any journal
- * change.  The resume dispatcher still refuses on macOS, with the journal
- * byte-identical. */
+ * change. */
 static void
 test_graph_commit_sync_staged_macos (gconstpointer data)
 {
@@ -16502,17 +16566,6 @@ test_graph_commit_sync_staged_macos (gconstpointer data)
     assert_restore_journal_unchanged (fixture.policy, operation,
         decided_journal, decided);
   } else {
-    if (g_str_equal (mode, "applied")) {
-      /* U5-3 boundary: the dispatcher stays closed on macOS until every
-       * step it dispatches runs there.  Widened, it would sync the stage
-       * first, so only a call before the step can see it. */
-      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
-            (fixture.policy, fixture.root, fixture.runtime, operation,
-          decided, 0, &committed), ==, WYRELOG_E_POLICY);
-      g_assert_null (committed.operation_uuid);
-      assert_restore_journal_unchanged (fixture.policy, operation,
-          decided_journal, decided);
-    }
 #ifdef WYL_TEST_HANDLE_SEAMS
     if (g_str_equal (mode, "unknown-retry")) {
       gboolean began = FALSE;
@@ -16616,7 +16669,7 @@ test_graph_commit_sync_staged_macos (gconstpointer data)
  * stopped resumes from the UNKNOWN attempt with the main already absent,
  * proving the old main at the rollback name; a rollback name holding a
  * same-bytes object instead is refused with the journal unchanged.  The
- * resume dispatcher still refuses on macOS. */
+ * resume dispatcher then runs the remaining steps to PUBLISHED_DURABLE. */
 static void
 test_graph_commit_retain_macos (gconstpointer data)
 {
@@ -16741,14 +16794,16 @@ test_graph_commit_retain_macos (gconstpointer data)
       assert_restore_journal_unchanged (fixture.policy, operation,
           retained_journal, retained);
     }
-    /* Boundary until the dispatcher is ported: widened, it would run both
-     * rollback-side syncs from here and move the journal. */
+    /* From the middle of the chain the dispatcher runs both rollback-side
+     * syncs, PUBLISH and the directory flush, each a begin and a
+     * completion. */
     g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
           (fixture.policy, fixture.root, fixture.runtime, operation,
-        retained, 0, &committed), ==, WYRELOG_E_POLICY);
-    g_assert_null (committed.operation_uuid);
-    assert_restore_journal_unchanged (fixture.policy, operation,
-        retained_journal, retained);
+        retained, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, retained + 8);
+    assert_darwin_published_durable (&committed, main_path, stage_path,
+        rollback_path, &old_main);
+    wyl_fact_offline_restore_journal_clear (&committed);
   }
   g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
   remove_tree (bundle_root);
@@ -16814,7 +16869,7 @@ darwin_sync_retained_interrupted (BackupFixture *fixture,
  * without evidence is refused before any journal change; evidence naming
  * another volume and a same-bytes object at the rollback name are refused
  * by the witness after the run has journaled its attempt, which then
- * refuses the same way.  PUBLISH still refuses on macOS. */
+ * refuses the same way. */
 static void
 test_graph_commit_sync_retained_macos (gconstpointer data)
 {
@@ -16860,8 +16915,9 @@ test_graph_commit_sync_retained_macos (gconstpointer data)
         retained_journal, retained);
   } else if (g_str_equal (mode, "wrong-evidence")
       || g_str_equal (mode, "substituted-rollback")) {
-    /* Both keep the journal's dev/ino at the rollback name or the stored
-     * evidence's, so the witness is what refuses, after the run's begin. */
+    /* Refused after the run's begin: evidence naming another volume by the
+     * witness, and a same-bytes substitute first by the witness and also
+     * by the journal-pinned identity. */
     WylFactArtifactInventoryIdentity expected = old_main;
     if (g_str_equal (mode, "wrong-evidence")) {
       darwin_flip_graph_evidence_volume (&fixture);
@@ -16967,14 +17023,412 @@ test_graph_commit_sync_retained_macos (gconstpointer data)
     g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
         &at_rollback));
     g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
-    /* Boundary until PUBLISH is ported: widened, it would journal its
-     * attempt before anything else. */
-    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+    /* Nor from the one it wrote: PUBLISH is next. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
           (fixture.policy, fixture.root, fixture.runtime, operation,
         revision, 0, &committed), ==, WYRELOG_E_POLICY);
     g_assert_null (committed.operation_uuid);
     assert_restore_journal_unchanged (fixture.policy, operation,
         synced_journal, revision);
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+/* Interrupts PUBLISH or the directory flush of a macOS graph commit three
+ * ways: a stop after its attempt is journaled, a failed rename or flush and
+ * a stop after the flush.  The first leaves the attempt UNKNOWN at revision
+ * + 1; the other two run inside the policy transaction and leave that
+ * journal alone.  The failed rename moves nothing.  Returns the UNKNOWN
+ * revision. */
+static guint64
+darwin_publish_interrupted (BackupFixture *fixture, const gchar *operation,
+    guint64 revision, WylFactArtifactMainTransitionOp op,
+    WylFactArtifactTransitionPosixTestFault fault)
+{
+  g_autofree gchar *main_path = graph_file_path (fixture, "zeta",
+          "facts.duckdb");
+  WylFactOfflineRestoreJournal committed = { 0 };
+  const gchar *failure = "restore-publish-after-begin";
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (fail_retain_once, &failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      revision, 0, &committed), ==, WYRELOG_E_IO);
+  g_assert_null (failure);
+  g_assert_null (committed.operation_uuid);
+  const guint64 pending = revision + 1;
+  g_autoptr (GBytes) pending_journal = darwin_pending_journal (fixture,
+          operation, pending, op);
+  wyl_fact_artifact_transition_posix_set_test_fault (fault);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      pending, 0, &committed), ==, WYRELOG_E_BUSY);
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (fault));
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  g_assert_null (committed.operation_uuid);
+  assert_restore_journal_unchanged (fixture->policy, operation,
+      pending_journal, pending);
+  /* The injected rename failure is the EEXIST a RENAME_EXCL collision would
+   * produce: not applied, so the main name is still empty. */
+  g_assert_true (g_file_test (main_path, G_FILE_TEST_EXISTS)
+      == (op != WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH));
+  failure = "restore-publish-after-fsync";
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      pending, 0, &committed), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_null (failure);
+  g_assert_null (committed.operation_uuid);
+  assert_restore_journal_unchanged (fixture->policy, operation,
+      pending_journal, pending);
+  g_assert_true (g_file_test (main_path, G_FILE_TEST_EXISTS));
+  return pending;
+}
+#endif
+
+/* macOS (#1303): from RETAINED with PUBLISH next, PUBLISH renames the
+ * staged object onto the main name and journals PUBLISHED; the directory
+ * flush then journals PUBLISHED_DURABLE with FINALIZE next, where a macOS
+ * graph restore stops: selection, finalize and promotion still refuse.  The
+ * resume dispatcher reaches the same point from the decision, and a run
+ * stopped after the rename resumes there.  Each step resumes from an UNKNOWN
+ * attempt, and a failed rename or flush leaves that journal alone.  A record
+ * without evidence is refused before any journal change; evidence naming
+ * another volume, a same-bytes object at the rollback name and a foreign
+ * object at the main name are refused after the run has journaled its
+ * attempt, which then refuses the same way.  No evidence names the new main
+ * yet, so a same-bytes substitute for it is refused by the journal-pinned
+ * staged identity. */
+static void
+test_graph_commit_publish_macos (gconstpointer data)
+{
+#ifndef __APPLE__
+  (void) data;
+  g_test_skip ("macOS graph restore publish by evidence");
+#else
+  const gchar *mode = data;
+#ifndef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "crash-after-rename")
+      || g_str_equal (mode, "unknown-retry")) {
+    g_test_skip ("needs the test handle seams");
+    return;
+  }
+#endif
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0055";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-publish-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+          stage_name);
+  const WylFactArtifactInventoryIdentity stage =
+      darwin_file_identity (stage_path);
+  if (g_str_equal (mode, "resume")) {
+    const WylFactArtifactInventoryIdentity old_main =
+        darwin_file_identity (main_path);
+    /* Six steps, each a begin and a completion. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, decided,
+        0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, decided + 12);
+    assert_darwin_published_durable (&committed, main_path, stage_path,
+        rollback_path, &old_main);
+    const WylFactArtifactInventoryIdentity at_main =
+        darwin_file_identity (main_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&stage,
+        &at_main));
+    g_autoptr (GBytes) durable_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &durable_journal), ==, WYRELOG_E_OK);
+    const guint64 durable = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    /* Where a macOS graph restore stops: nothing after PUBLISHED_DURABLE
+     * runs there yet. */
+    wyrelog_error_t (*const refused[]) (wyl_policy_store_t *,
+        const gchar *, WylFactGraphRuntimeManager *, const gchar *, guint64,
+        gint64, WylFactOfflineRestoreJournal *) = {
+      wyl_fact_offline_restore_graph_commit_select_replacement_run,
+      wyl_fact_offline_restore_graph_commit_select_resume_run,
+      wyl_fact_offline_restore_graph_commit_finalize_run,
+      wyl_fact_offline_restore_graph_commit_promote_run,
+    };
+    for (guint i = 0; i < G_N_ELEMENTS (refused); i++) {
+      g_assert_cmpint (refused[i] (fixture.policy, fixture.root,
+          fixture.runtime, operation, durable, 0, &committed), ==,
+          WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          durable_journal, durable);
+    }
+  } else {
+    g_autoptr (GBytes) publishable_journal = NULL;
+    WylFactArtifactInventoryIdentity old_main = { 0 };
+    const guint64 publishable = darwin_graph_commit_publishable (&fixture,
+            operation, decided, &publishable_journal, &old_main);
+    if (g_str_equal (mode, "missing-evidence")) {
+      /* The provenance read refuses before the run journals anything. */
+      darwin_rewrite_graph_evidence (&fixture, NULL);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          publishable_journal, publishable);
+      g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+      const WylFactArtifactInventoryIdentity at_stage =
+          darwin_file_identity (stage_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&stage,
+          &at_stage));
+    } else if (g_str_equal (mode, "wrong-evidence")
+        || g_str_equal (mode, "substituted-rollback")
+        || g_str_equal (mode, "foreign-main")) {
+      /* Refused after the run's begin, before any rename: evidence naming
+       * another volume by the witness; a same-bytes substitute at the
+       * rollback name first by the witness and also by the journal-pinned
+       * identity; and a copy of the stage at the main name by the
+       * transition model, which never lets the no-replace rename see it. */
+      WylFactArtifactInventoryIdentity at_rollback = old_main;
+      WylFactArtifactInventoryIdentity foreign = { 0 };
+      if (g_str_equal (mode, "wrong-evidence")) {
+        darwin_flip_graph_evidence_volume (&fixture);
+      } else if (g_str_equal (mode, "substituted-rollback")) {
+        darwin_replace_with_same_bytes (rollback_path);
+        at_rollback = darwin_file_identity (rollback_path);
+        g_assert_false (wyl_fact_artifact_inventory_identity_equal
+              (&old_main, &at_rollback));
+      } else {
+        copy_artifact_secure (stage_path, main_path);
+        foreign = darwin_file_identity (main_path);
+        g_assert_false (wyl_fact_artifact_inventory_identity_equal (&stage,
+            &foreign));
+      }
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      const guint64 pending = publishable + 1;
+      g_autoptr (GBytes) pending_journal = darwin_pending_journal (&fixture,
+              operation, pending,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          pending, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, pending);
+      if (g_str_equal (mode, "foreign-main")) {
+        const WylFactArtifactInventoryIdentity at_main =
+            darwin_file_identity (main_path);
+        g_assert_true (wyl_fact_artifact_inventory_identity_equal (&foreign,
+            &at_main));
+      } else {
+        g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+      }
+      const WylFactArtifactInventoryIdentity at_stage =
+          darwin_file_identity (stage_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&stage,
+          &at_stage));
+      const WylFactArtifactInventoryIdentity after =
+          darwin_file_identity (rollback_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal
+            (&at_rollback, &after));
+#ifdef WYL_TEST_HANDLE_SEAMS
+    } else if (g_str_equal (mode, "crash-after-rename")) {
+      const gchar *failure = "restore-publish-after-rename";
+      wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+        (fail_retain_once, &failure);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_IO);
+      wyl_fact_offline_restore_graph_commit_publish_set_checkpoint_for_test
+        (NULL, NULL);
+      g_assert_null (failure);
+      g_assert_null (committed.operation_uuid);
+      const guint64 pending = publishable + 1;
+      g_autoptr (GBytes) pending_journal = darwin_pending_journal (&fixture,
+              operation, pending,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH);
+      /* The rename happened; the completion did not. */
+      const WylFactArtifactInventoryIdentity at_main =
+          darwin_file_identity (main_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&stage,
+          &at_main));
+      g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+      /* The resumed PUBLISH, then the directory flush's begin and
+       * completion. */
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          pending, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, pending + 3);
+      assert_darwin_published_durable (&committed, main_path, stage_path,
+          rollback_path, &old_main);
+      wyl_fact_offline_restore_journal_clear (&committed);
+#endif
+    } else if (g_str_equal (mode, "new-main-mismatch")) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          publishable, 0, &committed), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (committed.revision, ==, publishable + 2);
+      const guint64 published = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+      /* Same bytes at the main name, but not the staged object.  The
+       * witness accepts it, as no evidence names the new main yet; the
+       * journal-pinned staged identity refuses it, after the run's begin. */
+      darwin_replace_with_same_bytes (main_path);
+      const WylFactArtifactInventoryIdentity substitute =
+          darwin_file_identity (main_path);
+      g_assert_false (wyl_fact_artifact_inventory_identity_equal (&stage,
+          &substitute));
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          published, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      const guint64 pending = published + 1;
+      g_autoptr (GBytes) pending_journal = darwin_pending_journal (&fixture,
+              operation, pending,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR);
+      WylFactOfflineRestoreJournal loaded = { 0 };
+      g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+            (fixture.policy, operation, &loaded), ==, WYRELOG_E_OK);
+      g_assert_cmpint (((const WylFactOfflineRestoreJournalGraph *)
+          g_ptr_array_index (loaded.graphs, 0))->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED);
+      wyl_fact_offline_restore_journal_clear (&loaded);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          pending, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, pending);
+      const WylFactArtifactInventoryIdentity after =
+          darwin_file_identity (main_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal
+            (&substitute, &after));
+    } else {
+      const WylFactArtifactMainTransitionOp steps[] = {
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
+      };
+      guint64 revision = publishable;
+      g_autoptr (GBytes) step_journal = NULL;
+      for (guint i = 0; i < G_N_ELEMENTS (steps); i++) {
+        const guint64 from = revision;
+#ifdef WYL_TEST_HANDLE_SEAMS
+        const gboolean interrupted = g_str_equal (mode, "unknown-retry");
+        if (interrupted)
+          revision = darwin_publish_interrupted (&fixture, operation,
+                  revision, steps[i], i == 0
+                  ? WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME
+                  : WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_PUBLISH_DIR_FSYNC);
+        /* A sanity check, not a discriminator: the stage name is empty by
+         * now, so the directory flush has no rename left to attempt. */
+        if (interrupted && i == 1)
+          wyl_fact_artifact_transition_posix_set_test_fault
+            (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME);
+#endif
+        g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            revision, 0, &committed), ==, WYRELOG_E_OK);
+#ifdef WYL_TEST_HANDLE_SEAMS
+        if (interrupted && i == 1) {
+          g_assert_false
+            (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+                (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_PUBLISH_RENAME));
+          wyl_fact_artifact_transition_posix_set_test_fault
+            (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+        }
+#endif
+        /* The attempt is begun and then completed: two revisions either
+         * way. */
+        g_assert_cmpuint (committed.revision, ==, from + 2);
+        if (i == 0) {
+          const WylFactOfflineRestoreJournalGraph *graph =
+              g_ptr_array_index (committed.graphs, 0);
+          g_assert_cmpint (graph->transition_state, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED);
+          g_assert_cmpint (graph->next_op, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR);
+          g_assert_cmpint (graph->attempt, ==,
+              WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+          g_assert_cmpint (graph->pending_op, ==,
+              WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+          /* The staged object, by dev/ino, now holds the main name and
+           * the old main still holds the rollback name. */
+          const WylFactArtifactInventoryIdentity at_main =
+              darwin_file_identity (main_path);
+          g_assert_true (wyl_fact_artifact_inventory_identity_equal (&stage,
+              &at_main));
+          g_assert_true (wyl_fact_artifact_inventory_identity_equal
+                (&at_main, &graph->staged_main_identity));
+          g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+          const WylFactArtifactInventoryIdentity at_rollback =
+              darwin_file_identity (rollback_path);
+          g_assert_true (wyl_fact_artifact_inventory_identity_equal
+                (&old_main, &at_rollback));
+        } else {
+          assert_darwin_published_durable (&committed, main_path,
+              stage_path, rollback_path, &old_main);
+        }
+        g_clear_pointer (&step_journal, g_bytes_unref);
+        g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+            &step_journal), ==, WYRELOG_E_OK);
+        const guint64 completed = committed.revision;
+        wyl_fact_offline_restore_journal_clear (&committed);
+        /* The completed step does not run again from the revisions it
+         * left. */
+        const guint64 reruns[] = { from, revision };
+        for (guint j = 0; j < G_N_ELEMENTS (reruns); j++) {
+          g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+                (fixture.policy, fixture.root, fixture.runtime, operation,
+              reruns[j], 0, &committed), ==, WYRELOG_E_POLICY);
+          g_assert_null (committed.operation_uuid);
+          assert_restore_journal_unchanged (fixture.policy, operation,
+              step_journal, completed);
+        }
+        revision = completed;
+      }
+      /* Nor from the one it wrote, and the dispatcher finds nothing left
+       * to run there. */
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          step_journal, revision);
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_OK);
+      g_autoptr (GBytes) resumed = NULL;
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+          &resumed), ==, WYRELOG_E_OK);
+      g_assert_true (g_bytes_equal (resumed, step_journal));
+      wyl_fact_offline_restore_journal_clear (&committed);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          step_journal, revision);
+    }
   }
   g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
   remove_tree (bundle_root);
@@ -18064,6 +18518,32 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-sync-retained-wrong-evidence",
       "wrong-evidence", test_graph_commit_sync_retained_macos);
+  g_test_add_data_func ("/fact-offline-backup-source/macos/commit-publish",
+      "published", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-crash-after-rename",
+      "crash-after-rename", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-foreign-main",
+      "foreign-main", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-missing-evidence",
+      "missing-evidence", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-new-main-mismatch",
+      "new-main-mismatch", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-substituted-rollback",
+      "substituted-rollback", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-unknown-retry",
+      "unknown-retry", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-publish-wrong-evidence",
+      "wrong-evidence", test_graph_commit_publish_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-resume-to-published",
+      "resume", test_graph_commit_publish_macos);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",
