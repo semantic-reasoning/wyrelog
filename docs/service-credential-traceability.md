@@ -124,6 +124,7 @@ The packaged e2e drivers use a stdlib-only test harness,
 `escrow-extract`). It is **test-only**: it lives under `tests/`, is never
 installed or packaged, and is not a shipped operator tool. The operator-facing
 equivalents are the `wyctl` subcommands and HTTP routes documented in
-`docs/operator-runbook.md`; the harness's `arm` helper corresponds to the
-`POST /service-management-authority/arm` self-arm route, and its `totp-admin`
-helper to the MFA-enrollment flow — both already documented in the runbook.
+`docs/operator-runbook.md`; the harness's `arm` helper corresponds to
+`wyctl service-management arm` (the `POST /service-management-authority/arm`
+self-arm route), and its `totp-admin` helper to the MFA-enrollment flow —
+both already documented in the runbook.

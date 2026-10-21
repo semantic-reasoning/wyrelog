@@ -27,6 +27,9 @@ typedef struct
   guint status;
   guint request_count;
   gchar *last_body;
+  gchar *last_method;
+  gchar *last_path;
+  gchar *last_guard;
 } TestHttpServer;
 
 static gpointer
@@ -42,12 +45,27 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *message,
     const gchar *path, GHashTable *query, gpointer user_data)
 {
   (void) server;
-  (void) path;
-  (void) query;
   TestHttpServer *http = user_data;
+  g_free (http->last_guard);
+  const gchar *guard[3] = { NULL, NULL, NULL };
+  static const gchar *const guard_keys[] = {
+    "guard_timestamp", "guard_loc_class", "guard_risk",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (guard_keys); i++) {
+    guard[i] = query != NULL ? g_hash_table_lookup (query, guard_keys[i])
+        : NULL;
+    if (guard[i] == NULL)
+      guard[i] = "-";
+  }
+  http->last_guard = g_strdup_printf ("%s/%s/%s", guard[0], guard[1],
+          guard[2]);
   http->request_count++;
   SoupMessageBody *request_body = soup_server_message_get_request_body
         (message);
+  g_free (http->last_method);
+  http->last_method = g_strdup (soup_server_message_get_method (message));
+  g_free (http->last_path);
+  http->last_path = g_strdup (path);
   g_free (http->last_body);
   http->last_body = request_body != NULL && request_body->data != NULL ?
       g_strndup (request_body->data, request_body->length) : NULL;
@@ -227,6 +245,9 @@ test_service_principal_local_and_remote_invalid (void)
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   g_clear_pointer (&http.last_body, g_free);
+  g_clear_pointer (&http.last_method, g_free);
+  g_clear_pointer (&http.last_path, g_free);
+  g_clear_pointer (&http.last_guard, g_free);
   g_assert_cmpint (g_unlink (token_path), ==, 0);
 }
 
@@ -406,6 +427,155 @@ test_service_principal_disable_help (void)
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--request-id"));
 }
 
+static void
+test_service_management_dispatch (void)
+{
+  gchar *no_verb_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "service-management",
+    NULL,
+  };
+  assert_exit_and_stderr (no_verb_argv, 2,
+      "wyctl: missing service-management command");
+
+  gchar *bogus_verb_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "service-management",
+    "bogus",
+    NULL,
+  };
+  assert_exit_and_stderr (bogus_verb_argv, 2,
+      "wyctl: unknown service-management command: bogus");
+
+  gchar *help_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "service-management", "arm", "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child (help_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  static const gchar *const options[] = {
+    "--access-token-file", "--guard-timestamp", "--guard-loc-class",
+    "--guard-risk",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (options); i++)
+    g_assert_nonnull (g_strstr_len (stdout_buf, -1, options[i]));
+  g_assert_null (g_strstr_len (stdout_buf, -1, "--tenant"));
+  g_assert_null (g_strstr_len (stdout_buf, -1, "--request-id"));
+}
+
+/* #1269: arm the service-management authority for the caller's session. */
+static void
+test_service_management_arm (void)
+{
+  g_autoptr (GError) error = NULL;
+  TestHttpServer http = {
+    .server = soup_server_new (NULL, NULL),
+    .loop = g_main_loop_new (NULL, FALSE),
+    .body = "{\"ok\":true}",
+    .status = 200,
+  };
+  soup_server_add_handler (http.server, NULL, test_http_server_handler, &http,
+      NULL);
+  g_assert_true (soup_server_listen_local (http.server, 0, 0, &error));
+  g_assert_no_error (error);
+  GSList *uris = soup_server_get_uris (http.server);
+  g_assert_nonnull (uris);
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  g_autoptr (GThread) thread = g_thread_new ("wyctl-management-http",
+          test_http_server_thread, &http);
+  g_autofree gchar *token_path = write_access_token_file ();
+
+  gchar *arm_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-management", "arm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "10",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child (arm_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_cmpstr (stdout_buf, ==, "service_management_authority=armed\n");
+  g_assert_cmpuint (http.request_count, ==, 1);
+  g_assert_cmpstr (http.last_method, ==, "POST");
+  g_assert_cmpstr (http.last_path, ==, "/service-management-authority/arm");
+  g_assert_cmpstr (http.last_guard, ==, "123/trusted/10");
+  g_assert_true (http.last_body == NULL || http.last_body[0] == '\0');
+
+  /* Missing guards are refused before any request. */
+  gchar *no_guard_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-management", "arm",
+    "--access-token-file", token_path,
+    NULL,
+  };
+  assert_exit_and_stderr (no_guard_argv, 2,
+      "wyctl: invalid --guard-timestamp");
+  g_assert_cmpuint (http.request_count, ==, 1);
+
+  /* A refusal is definite; an unknown outcome gets the repeat hint. */
+  static const struct
+  {
+    guint status;
+    const gchar *body;
+    gint exit_status;
+    const gchar *marker;
+    gboolean unknown;
+  } cases[] = {
+    {400, "{\"error\":\"invalid_service_authority_request\"}", 3,
+     "invalid_service_authority_request", FALSE},
+    {401, "{\"error\":\"service_authority_auth_required\"}", 6,
+     "service_authority_auth_required", FALSE},
+    {403, "{\"error\":\"service_authority_denied\"}", 4,
+     "service_authority_denied", FALSE},
+    /* A success status with an unreadable answer may have armed. */
+    {200, "{\"ok\":false}", 3, "service_management_arm_failed", TRUE},
+    {500, "{\"error\":\"service_authority_failed\"}", 5,
+     "service_authority_failed", TRUE},
+    {503, "{\"error\":\"service_authority_failed\"}", 5,
+     "service_authority_failed", TRUE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    http.status = cases[i].status;
+    http.body = cases[i].body;
+    g_clear_pointer (&stdout_buf, g_free);
+    g_clear_pointer (&stderr_buf, g_free);
+    run_child (arm_argv, &stdout_buf, &stderr_buf, &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, cases[i].exit_status);
+    g_assert_cmpstr (stdout_buf, ==, "");
+    g_autofree gchar *failed = g_strdup_printf
+          ("wyctl: service-management arm failed: %s\n", cases[i].marker);
+    g_assert_true (g_str_has_prefix (stderr_buf, failed));
+    g_assert_cmpint (g_strstr_len (stderr_buf, -1, "outcome is unknown")
+        != NULL, ==, cases[i].unknown);
+  }
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (g_steal_pointer (&thread));
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_pointer (&http.last_body, g_free);
+  g_clear_pointer (&http.last_method, g_free);
+  g_clear_pointer (&http.last_path, g_free);
+  g_clear_pointer (&http.last_guard, g_free);
+  g_assert_cmpint (g_unlink (token_path), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -426,5 +596,9 @@ main (int argc, char **argv)
       test_service_principal_disable_help);
   g_test_add_func ("/wyctl/service-principal/local-and-remote-invalid",
       test_service_principal_local_and_remote_invalid);
+  g_test_add_func ("/wyctl/service-management/dispatch",
+      test_service_management_dispatch);
+  g_test_add_func ("/wyctl/service-management/arm",
+      test_service_management_arm);
   return wyl_test_normalize_exit_status (g_test_run ());
 }
