@@ -84,6 +84,14 @@
 /fact-offline-backup-source/import/wrong-graph
 /fact-offline-backup-source/import/wrong-inode
 /fact-offline-backup-source/import/wrong-manifest
+/fact-offline-backup-source/macos/commit-retain
+/fact-offline-backup-source/macos/commit-retain-crash-after-rename
+/fact-offline-backup-source/macos/commit-retain-substituted-rollback
+/fact-offline-backup-source/macos/commit-sync-retained
+/fact-offline-backup-source/macos/commit-sync-retained-missing-evidence
+/fact-offline-backup-source/macos/commit-sync-retained-substituted-rollback
+/fact-offline-backup-source/macos/commit-sync-retained-unknown-retry
+/fact-offline-backup-source/macos/commit-sync-retained-wrong-evidence
 /fact-offline-backup-source/macos/commit-sync-staged
 /fact-offline-backup-source/macos/commit-sync-staged-foreign-main
 /fact-offline-backup-source/macos/commit-sync-staged-missing-evidence

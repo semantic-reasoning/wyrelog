@@ -339,16 +339,23 @@ execute with the step's provenance: the operation UUID of the graph's single
 `ACTIVE` provisioning record, which must be the journal's old provisioning
 operation on the row's store, and that record's stored evidence, decoded
 against the same UUID. Missing or malformed evidence, and evidence bound to
-another operation, are refused before the provider opens; evidence that names
-another object is refused by the evidence witness in the provider's capture,
-before any journal change. `tests/test-darwin-restore-bind-wiring.py` pins the
-bind, both helpers, the provenance decode and the routing of each ported step
-through the helpers. The stage sync, the first commit step, runs on macOS from
-a decided journal; `RETAIN`, the steps after it and the resume dispatcher
-still refuse there and are ported the same way. Like Windows, the evidence
-execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE` stay
-refused. None of it is reachable while macOS commit admission refuses; the
-stage sync is proved by tests that reach the decision directly.
+another operation, are refused before the provider opens and before any
+journal change. Evidence that names another object is refused by the evidence
+witness in the provider's capture, before the step's effect. The stage sync
+captures before it journals its attempt, so there the refusal comes before
+any journal change; `RETAIN` and the rollback-side syncs journal their attempt
+as `UNKNOWN` first, and that attempt then refuses the same way.
+`tests/test-darwin-restore-bind-wiring.py` pins the bind, both helpers, the
+provenance decode and the routing of each ported step through the helpers.
+The stage sync, `RETAIN` and the two rollback-side syncs (`SYNC_ROLLBACK_FILE`,
+then `SYNC_RETAIN_DIR`) run on macOS from a decided journal. After `RETAIN`
+each step re-proves the old main at this restore's rollback name through the
+same evidence witness, so a same-bytes object there, or evidence that names
+another volume, is refused. `PUBLISH`, its directory flush and the resume
+dispatcher still refuse there and are ported the same way. Like Windows, the
+evidence execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE`
+stay refused. None of it is reachable while macOS commit admission refuses;
+these steps are proved by tests that reach the decision directly.
 
 ## Restore replacement evidence
 

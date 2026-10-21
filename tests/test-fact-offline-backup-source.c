@@ -16317,6 +16317,135 @@ darwin_graph_commit_decided (BackupFixture *fixture,
   wyl_fact_offline_restore_journal_clear (&next);
   return decided;
 }
+
+static WylFactArtifactInventoryIdentity
+darwin_file_identity (const gchar *path)
+{
+  GStatBuf st;
+  g_assert_cmpint (g_stat (path, &st), ==, 0);
+  return (WylFactArtifactInventoryIdentity) {
+           .domain = (guint64) st.st_dev, .object = (guint64) st.st_ino,
+  };
+}
+
+/* Same bytes, same name, same owner and mode, but a new inode.  The
+ * original is parked outside the graph directory until the copy exists, so
+ * the copy cannot reuse its inode, and removed before the next
+ * observation. */
+static void
+darwin_replace_with_same_bytes (const gchar *path)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *contents = NULL;
+  gsize length = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &length, &error));
+  g_assert_no_error (error);
+  g_autofree gchar *directory = g_path_get_dirname (path);
+  g_autofree gchar *parked = g_build_filename (directory, "..",
+          "parked-main.duckdb", NULL);
+  g_assert_cmpint (g_rename (path, parked), ==, 0);
+  g_assert_true (g_file_set_contents (path, contents, (gssize) length,
+      &error));
+  g_assert_no_error (error);
+  g_assert_true (wyl_test_secure_regular_file (path, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_remove (parked), ==, 0);
+}
+
+/* Flips the first byte of the volume UUID (ADR 0006 layout) in zeta's
+ * stored evidence: still decodable against the operation, so only the
+ * witness's comparison with the descriptor's evidence can refuse it. */
+static void
+darwin_flip_graph_evidence_volume (BackupFixture *fixture)
+{
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
+        (fixture->policy, "tenant-a", "zeta", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  const WylPolicyGraphProvisioningRecord *record =
+      g_ptr_array_index (records, 0);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+  g_assert_nonnull (record->darwin_operation_evidence);
+  gsize length = 0;
+  const guint8 *stored =
+      g_bytes_get_data (record->darwin_operation_evidence, &length);
+  g_assert_cmpuint (length, ==,
+      WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
+  guint8 wrong[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
+  memcpy (wrong, stored, sizeof wrong);
+  wrong[24] ^= 0xff;
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (wrong,
+      sizeof wrong, record->op_uuid, &decoded), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) replaced = g_bytes_new (wrong, sizeof wrong);
+  darwin_rewrite_graph_evidence (fixture, replaced);
+}
+
+/* Runs a decided macOS graph commit through the stage sync and RETAIN,
+ * leaving it RETAINED with SYNC_ROLLBACK_FILE next and the old main, by
+ * dev/ino, at the rollback name.  Returns the retained revision, its journal
+ * bytes and the old main's identity. */
+static guint64
+darwin_graph_commit_retained (BackupFixture *fixture, const gchar *operation,
+    guint64 decided, GBytes **out_retained,
+    WylFactArtifactInventoryIdentity *out_old_main)
+{
+  g_autofree gchar *main_path = graph_file_path (fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (fixture, "zeta",
+          rollback_name);
+  *out_old_main = darwin_file_identity (main_path);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, decided,
+      0, &committed), ==, WYRELOG_E_OK);
+  const guint64 synced = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+        (fixture->policy, fixture->root, fixture->runtime, operation, synced,
+      0, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.revision, ==, synced + 2);
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (committed.graphs, 0);
+  g_assert_cmpint (graph->transition_state, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+  g_assert_cmpint (graph->next_op, ==,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+  g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+  const WylFactArtifactInventoryIdentity at_rollback =
+      darwin_file_identity (rollback_path);
+  g_assert_true (wyl_fact_artifact_inventory_identity_equal (out_old_main,
+      &at_rollback));
+  const guint64 retained = committed.revision;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+      out_retained), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&committed);
+  return retained;
+}
+
+/* Loads the journal, asserts it holds an UNKNOWN attempt of op at revision
+ * and returns its bytes. */
+static GBytes *
+darwin_pending_journal (BackupFixture *fixture, const gchar *operation,
+    guint64 revision, WylFactArtifactMainTransitionOp op)
+{
+  WylFactOfflineRestoreJournal pending = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_store_load
+        (fixture->policy, operation, &pending), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (pending.revision, ==, revision);
+  const WylFactOfflineRestoreJournalGraph *graph =
+      g_ptr_array_index (pending.graphs, 0);
+  g_assert_cmpint (graph->attempt, ==,
+      WYL_FACT_OFFLINE_RESTORE_ATTEMPT_UNKNOWN);
+  g_assert_cmpint (graph->pending_op, ==, op);
+  GBytes *bytes = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&pending,
+      &bytes), ==, WYRELOG_E_OK);
+  wyl_fact_offline_restore_journal_clear (&pending);
+  return bytes;
+}
 #endif
 
 /* macOS (#1303): on a COMMIT journal bound to the ACTIVE provisioning
@@ -16326,8 +16455,8 @@ darwin_graph_commit_decided (BackupFixture *fixture,
  * UNKNOWN attempt, and a failed flush on the way leaves that journal alone.
  * A main replaced by a same-bytes copy, a record without evidence and a
  * record whose evidence names another volume are refused before any journal
- * change.  The later steps and the resume dispatcher still refuse on macOS,
- * each with the journal byte-identical. */
+ * change.  The resume dispatcher still refuses on macOS, with the journal
+ * byte-identical. */
 static void
 test_graph_commit_sync_staged_macos (gconstpointer data)
 {
@@ -16364,32 +16493,7 @@ test_graph_commit_sync_staged_macos (gconstpointer data)
     } else if (g_str_equal (mode, "missing-evidence")) {
       darwin_rewrite_graph_evidence (&fixture, NULL);
     } else {
-      g_autoptr (GPtrArray) records = NULL;
-      g_assert_cmpint (wyl_policy_store_graph_provisioning_list_for_graph
-            (fixture.policy, "tenant-a", "zeta", &records), ==,
-          WYRELOG_E_OK);
-      g_assert_cmpuint (records->len, ==, 1);
-      const WylPolicyGraphProvisioningRecord *record =
-          g_ptr_array_index (records, 0);
-      g_assert_cmpint (record->phase, ==,
-          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
-      g_assert_nonnull (record->darwin_operation_evidence);
-      gsize length = 0;
-      const guint8 *stored =
-          g_bytes_get_data (record->darwin_operation_evidence, &length);
-      g_assert_cmpuint (length, ==,
-          WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE);
-      guint8 wrong[WYL_FACT_GRAPH_DARWIN_OPERATION_EVIDENCE_SIZE];
-      memcpy (wrong, stored, sizeof wrong);
-      /* The first byte of the volume UUID (ADR 0006 layout): still
-       * decodable against the operation, so only the witness's comparison
-       * with the descriptor's evidence can refuse it. */
-      wrong[24] ^= 0xff;
-      WylFactGraphDarwinOperationEvidence decoded = { 0 };
-      g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (wrong,
-          sizeof wrong, record->op_uuid, &decoded), ==, WYRELOG_E_OK);
-      g_autoptr (GBytes) replaced = g_bytes_new (wrong, sizeof wrong);
-      darwin_rewrite_graph_evidence (&fixture, replaced);
+      darwin_flip_graph_evidence_volume (&fixture);
     }
     g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
           (fixture.policy, fixture.root, fixture.runtime, operation,
@@ -16498,13 +16602,379 @@ test_graph_commit_sync_staged_macos (gconstpointer data)
       assert_restore_journal_unchanged (fixture.policy, operation,
           synced_journal, synced);
     }
-    /* U5-3 boundary: RETAIN still refuses on macOS. */
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+/* macOS (#1303): after the stage sync, RETAIN moves the evidenced old main
+ * to the operation's rollback name and leaves the main name empty, journaled
+ * RETAINED with SYNC_ROLLBACK_FILE next.  A run that renamed and then
+ * stopped resumes from the UNKNOWN attempt with the main already absent,
+ * proving the old main at the rollback name; a rollback name holding a
+ * same-bytes object instead is refused with the journal unchanged.  The
+ * resume dispatcher still refuses on macOS. */
+static void
+test_graph_commit_retain_macos (gconstpointer data)
+{
+#ifndef __APPLE__
+  (void) data;
+  g_test_skip ("macOS graph restore retain by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0053";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-retain-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_staged_run
+        (fixture.policy, fixture.root, fixture.runtime, operation, decided, 0,
+      &committed), ==, WYRELOG_E_OK);
+  const guint64 synced = committed.revision;
+  wyl_fact_offline_restore_journal_clear (&committed);
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+          stage_name);
+  const WylFactArtifactInventoryIdentity old_main =
+      darwin_file_identity (main_path);
+  guint64 revision = synced;
+#ifdef WYL_TEST_HANDLE_SEAMS
+  if (g_str_equal (mode, "crash-after-rename")
+      || g_str_equal (mode, "substituted-rollback")) {
+    const gchar *failure = "restore-retain-after-rename";
+    wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
+      (fail_retain_once, &failure);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+          (fixture.policy, fixture.root, fixture.runtime, operation, synced,
+        0, &committed), ==, WYRELOG_E_IO);
+    wyl_fact_offline_restore_graph_commit_retain_set_checkpoint_for_test
+      (NULL, NULL);
+    g_assert_null (failure);
+    g_assert_null (committed.operation_uuid);
+    /* The rename happened; the completion did not. */
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    const WylFactArtifactInventoryIdentity renamed =
+        darwin_file_identity (rollback_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &renamed));
+    revision = synced + 1;
+    g_autoptr (GBytes) pending_journal = darwin_pending_journal (&fixture,
+            operation, revision,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN);
+    if (g_str_equal (mode, "substituted-rollback")) {
+      darwin_replace_with_same_bytes (rollback_path);
+      const WylFactArtifactInventoryIdentity substitute =
+          darwin_file_identity (rollback_path);
+      g_assert_false (wyl_fact_artifact_inventory_identity_equal (&old_main,
+          &substitute));
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      /* Refused with nothing moved: the main name is still empty and the
+       * substitute still holds the rollback name. */
+      g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+      const WylFactArtifactInventoryIdentity after =
+          darwin_file_identity (rollback_path);
+      g_assert_true (wyl_fact_artifact_inventory_identity_equal (&substitute,
+          &after));
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          pending_journal, revision);
+    }
+  }
+#endif
+  if (!g_str_equal (mode, "substituted-rollback")) {
     g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
           (fixture.policy, fixture.root, fixture.runtime, operation,
-        synced, 0, &committed), ==, WYRELOG_E_POLICY);
+        revision, 0, &committed), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (committed.revision, ==, synced + 2);
+    const WylFactOfflineRestoreJournalGraph *graph =
+        g_ptr_array_index (committed.graphs, 0);
+    g_assert_cmpint (graph->transition_state, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+    g_assert_cmpint (graph->next_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+    g_assert_cmpint (graph->attempt, ==,
+        WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+    g_assert_cmpint (graph->pending_op, ==,
+        WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+    g_autoptr (GBytes) retained_journal = NULL;
+    g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+        &retained_journal), ==, WYRELOG_E_OK);
+    const guint64 retained = committed.revision;
+    wyl_fact_offline_restore_journal_clear (&committed);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        retained_journal, retained);
+    /* The old main object, not a copy, now holds the rollback name; the
+     * stage is untouched. */
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    const WylFactArtifactInventoryIdentity at_rollback =
+        darwin_file_identity (rollback_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &at_rollback));
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    /* The completed step does not run again, neither from the revisions
+     * it left nor from the one it wrote. */
+    const guint64 reruns[] = { synced, revision, retained };
+    for (guint i = 0; i < G_N_ELEMENTS (reruns); i++) {
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_retain_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          reruns[i], 0, &committed), ==, WYRELOG_E_POLICY);
+      g_assert_null (committed.operation_uuid);
+      assert_restore_journal_unchanged (fixture.policy, operation,
+          retained_journal, retained);
+    }
+    /* Boundary until the dispatcher is ported: widened, it would run both
+     * rollback-side syncs from here and move the journal. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_resume_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        retained, 0, &committed), ==, WYRELOG_E_POLICY);
     g_assert_null (committed.operation_uuid);
     assert_restore_journal_unchanged (fixture.policy, operation,
-        synced_journal, synced);
+        retained_journal, retained);
+  }
+  g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
+  remove_tree (bundle_root);
+  destination_capture_clear (&capture);
+  fixture_clear (&fixture);
+#endif
+}
+
+#if defined(__APPLE__) && defined(WYL_TEST_HANDLE_SEAMS)
+/* Interrupts one rollback-side sync of a macOS graph commit three ways: a
+ * stop after its attempt is journaled, a failed flush and a stop after the
+ * flush.  The first leaves the attempt UNKNOWN at revision + 1; the other
+ * two run inside the policy transaction and leave that journal alone.
+ * Returns the UNKNOWN revision. */
+static guint64
+darwin_sync_retained_interrupted (BackupFixture *fixture,
+    const gchar *operation, guint64 revision,
+    WylFactArtifactMainTransitionOp op,
+    WylFactArtifactTransitionPosixTestFault fault)
+{
+  WylFactOfflineRestoreJournal committed = { 0 };
+  const gchar *failure = "restore-sync-retained-after-begin";
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (fail_retain_once, &failure);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      revision, 0, &committed), ==, WYRELOG_E_IO);
+  g_assert_null (failure);
+  g_assert_null (committed.operation_uuid);
+  const guint64 pending = revision + 1;
+  g_autoptr (GBytes) pending_journal = darwin_pending_journal (fixture,
+          operation, pending, op);
+  wyl_fact_artifact_transition_posix_set_test_fault (fault);
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      pending, 0, &committed), ==, WYRELOG_E_BUSY);
+  g_assert_true (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+        (fault));
+  wyl_fact_artifact_transition_posix_set_test_fault
+    (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+  g_assert_null (committed.operation_uuid);
+  assert_restore_journal_unchanged (fixture->policy, operation,
+      pending_journal, pending);
+  failure = "restore-sync-retained-after-fsync";
+  g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+        (fixture->policy, fixture->root, fixture->runtime, operation,
+      pending, 0, &committed), ==, WYRELOG_E_IO);
+  wyl_fact_offline_restore_graph_commit_sync_retained_set_checkpoint_for_test
+    (NULL, NULL);
+  g_assert_null (failure);
+  g_assert_null (committed.operation_uuid);
+  assert_restore_journal_unchanged (fixture->policy, operation,
+      pending_journal, pending);
+  return pending;
+}
+#endif
+
+/* macOS (#1303): from RETAINED, the two rollback-side syncs flush the old
+ * main at the rollback name and then the graph directory, each re-proving
+ * that object by the ACTIVE record's evidence, and leave the graph RETAINED
+ * with PUBLISH next.  Each sync resumes from an UNKNOWN attempt, and a
+ * failed flush or a stop after it leaves that journal alone.  A record
+ * without evidence is refused before any journal change; evidence naming
+ * another volume and a same-bytes object at the rollback name are refused
+ * by the witness after the run has journaled its attempt, which then
+ * refuses the same way.  PUBLISH still refuses on macOS. */
+static void
+test_graph_commit_sync_retained_macos (gconstpointer data)
+{
+#ifndef __APPLE__
+  (void) data;
+  g_test_skip ("macOS graph restore rollback syncs by evidence");
+#else
+  const gchar *mode = data;
+  const gchar *operation = "018f22d0-7b6d-7a5b-8c31-1234567a0054";
+  BackupFixture fixture = { 0 };
+  DestinationCapture capture;
+  g_autofree gchar *bundle_root = NULL;
+  g_autoptr (WylFactOfflineBackupBundle) bundle = NULL;
+  darwin_restore_fixture_init (&fixture,
+      "wyl-offline-restore-rsync-mac-XXXXXX", &capture, &bundle_root,
+      &bundle);
+  g_autoptr (GBytes) decided_journal = NULL;
+  const guint64 decided = darwin_graph_commit_decided (&fixture, &capture,
+          bundle, operation, &decided_journal);
+  g_autoptr (GBytes) retained_journal = NULL;
+  WylFactArtifactInventoryIdentity old_main = { 0 };
+  const guint64 retained = darwin_graph_commit_retained (&fixture, operation,
+          decided, &retained_journal, &old_main);
+  WylFactOfflineRestoreJournal committed = { 0 };
+  g_autofree gchar *main_path = graph_file_path (&fixture, "zeta",
+          "facts.duckdb");
+  g_autofree gchar *rollback_name = g_strdup_printf
+        ("restore-%s.duckdb.superseded", operation);
+  g_autofree gchar *rollback_path = graph_file_path (&fixture, "zeta",
+          rollback_name);
+  g_autofree gchar *stage_name = g_strdup_printf ("restore-%s.duckdb",
+          operation);
+  g_autofree gchar *stage_path = graph_file_path (&fixture, "zeta",
+          stage_name);
+  if (g_str_equal (mode, "missing-evidence")) {
+    /* The provenance read refuses before the run journals anything. */
+    darwin_rewrite_graph_evidence (&fixture, NULL);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        retained, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        retained_journal, retained);
+  } else if (g_str_equal (mode, "wrong-evidence")
+      || g_str_equal (mode, "substituted-rollback")) {
+    /* Both keep the journal's dev/ino at the rollback name or the stored
+     * evidence's, so the witness is what refuses, after the run's begin. */
+    WylFactArtifactInventoryIdentity expected = old_main;
+    if (g_str_equal (mode, "wrong-evidence")) {
+      darwin_flip_graph_evidence_volume (&fixture);
+    } else {
+      darwin_replace_with_same_bytes (rollback_path);
+      expected = darwin_file_identity (rollback_path);
+      g_assert_false (wyl_fact_artifact_inventory_identity_equal (&old_main,
+          &expected));
+    }
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        retained, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    const guint64 pending = retained + 1;
+    g_autoptr (GBytes) pending_journal = darwin_pending_journal (&fixture,
+            operation, pending,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE);
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        pending, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        pending_journal, pending);
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    const WylFactArtifactInventoryIdentity after =
+        darwin_file_identity (rollback_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&expected,
+        &after));
+  } else {
+    const WylFactArtifactMainTransitionOp steps[] = {
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_ROLLBACK_FILE,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+    };
+    const WylFactArtifactMainTransitionOp next[] = {
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+      WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+    };
+    guint64 revision = retained;
+    g_autoptr (GBytes) synced_journal = NULL;
+    for (guint i = 0; i < G_N_ELEMENTS (steps); i++) {
+      const guint64 from = revision;
+#ifdef WYL_TEST_HANDLE_SEAMS
+      const gboolean interrupted = g_str_equal (mode, "unknown-retry");
+      if (interrupted)
+        revision = darwin_sync_retained_interrupted (&fixture, operation,
+                revision, steps[i], i == 0
+                ? WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_ROLLBACK_FSYNC
+                : WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC);
+      /* The rollback-file sync stops before the directory flush: armed
+       * for it, the directory fault is left unconsumed. */
+      if (interrupted && i == 0)
+        wyl_fact_artifact_transition_posix_set_test_fault
+          (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC);
+#endif
+      g_assert_cmpint (wyl_fact_offline_restore_graph_commit_sync_retained_run
+            (fixture.policy, fixture.root, fixture.runtime, operation,
+          revision, 0, &committed), ==, WYRELOG_E_OK);
+#ifdef WYL_TEST_HANDLE_SEAMS
+      if (interrupted && i == 0) {
+        g_assert_false
+          (wyl_fact_artifact_transition_posix_test_fault_was_consumed
+              (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_EXECUTE_SYNC_RETAIN_DIR_FSYNC));
+        wyl_fact_artifact_transition_posix_set_test_fault
+          (WYL_FACT_ARTIFACT_TRANSITION_POSIX_TEST_FAULT_NONE);
+      }
+#endif
+      /* The attempt is begun and then completed: two revisions either
+       * way. */
+      g_assert_cmpuint (committed.revision, ==, from + 2);
+      const WylFactOfflineRestoreJournalGraph *graph =
+          g_ptr_array_index (committed.graphs, 0);
+      g_assert_cmpint (graph->transition_state, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_RETAINED);
+      g_assert_cmpint (graph->next_op, ==, next[i]);
+      g_assert_cmpint (graph->attempt, ==,
+          WYL_FACT_OFFLINE_RESTORE_ATTEMPT_COMPLETED);
+      g_assert_cmpint (graph->pending_op, ==,
+          WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_NONE);
+      g_clear_pointer (&synced_journal, g_bytes_unref);
+      g_assert_cmpint (wyl_fact_offline_restore_journal_encode (&committed,
+          &synced_journal), ==, WYRELOG_E_OK);
+      const guint64 synced = committed.revision;
+      wyl_fact_offline_restore_journal_clear (&committed);
+      /* The completed sync does not run again from the revisions it
+       * left. */
+      const guint64 reruns[] = { from, revision };
+      for (guint j = 0; j < G_N_ELEMENTS (reruns); j++) {
+        g_assert_cmpint
+          (wyl_fact_offline_restore_graph_commit_sync_retained_run
+              (fixture.policy, fixture.root, fixture.runtime, operation,
+            reruns[j], 0, &committed), ==, WYRELOG_E_POLICY);
+        g_assert_null (committed.operation_uuid);
+        assert_restore_journal_unchanged (fixture.policy, operation,
+            synced_journal, synced);
+      }
+      revision = synced;
+    }
+    /* The syncs move no name: the main name is empty, the old main holds
+     * the rollback name and the stage is still there. */
+    g_assert_false (g_file_test (main_path, G_FILE_TEST_EXISTS));
+    const WylFactArtifactInventoryIdentity at_rollback =
+        darwin_file_identity (rollback_path);
+    g_assert_true (wyl_fact_artifact_inventory_identity_equal (&old_main,
+        &at_rollback));
+    g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    /* Boundary until PUBLISH is ported: widened, it would journal its
+     * attempt before anything else. */
+    g_assert_cmpint (wyl_fact_offline_restore_graph_commit_publish_run
+          (fixture.policy, fixture.root, fixture.runtime, operation,
+        revision, 0, &committed), ==, WYRELOG_E_POLICY);
+    g_assert_null (committed.operation_uuid);
+    assert_restore_journal_unchanged (fixture.policy, operation,
+        synced_journal, revision);
   }
   g_clear_pointer (&bundle, wyl_fact_offline_backup_bundle_free);
   remove_tree (bundle_root);
@@ -17571,6 +18041,29 @@ main (int argc, char **argv)
   g_test_add_data_func
     ("/fact-offline-backup-source/macos/commit-sync-staged-wrong-evidence",
       "wrong-evidence", test_graph_commit_sync_staged_macos);
+  g_test_add_data_func ("/fact-offline-backup-source/macos/commit-retain",
+      "retained", test_graph_commit_retain_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-retain-crash-after-rename",
+      "crash-after-rename", test_graph_commit_retain_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-retain-substituted-rollback",
+      "substituted-rollback", test_graph_commit_retain_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-retained", "synced",
+      test_graph_commit_sync_retained_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-retained-missing-evidence",
+      "missing-evidence", test_graph_commit_sync_retained_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-retained-substituted-rollback",
+      "substituted-rollback", test_graph_commit_sync_retained_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-retained-unknown-retry",
+      "unknown-retry", test_graph_commit_sync_retained_macos);
+  g_test_add_data_func
+    ("/fact-offline-backup-source/macos/commit-sync-retained-wrong-evidence",
+      "wrong-evidence", test_graph_commit_sync_retained_macos);
   const gchar *begin_reject_modes[] = {
     "none", "missing-evidence", "corrupt-evidence", "substituted-main",
     "hard-link", "symlink-main", "bad-mode", "sidecar",
