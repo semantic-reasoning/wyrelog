@@ -102,14 +102,13 @@ COVERAGE = {
     "/service-credential-operations/recover": ("service-credential",
                                                "recover"),
     "/auth/service-token": ("auth", "service-token"),
+    "/service-management-authority/arm": ("service-management", "arm"),
 }
 
 HTTP_ONLY = {
     "/profile/events":
         "machine-to-machine event forwarding from the service profile to "
         "the system profile; not an operator action",
-    "/service-management-authority/arm":
-        "no wyctl command yet; arm through the HTTP route (#1269)",
     "/service-credential-operations/reconcile":
         "no wyctl command yet; the client library exposes it (#1270)",
 }
@@ -137,6 +136,7 @@ DISPATCHERS = {
     ("key",): "run_key",
     ("mfa",): "run_mfa",
     ("auth",): "run_auth",
+    ("service-management",): "run_service_management",
     ("service-principal",): "run_service_principal",
     ("service-credential",): "run_service_credential",
     ("service-permission-closure",): "run_service_permission_closure",

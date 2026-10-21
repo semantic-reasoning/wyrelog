@@ -929,14 +929,24 @@ human must have a live MFA-assured session and the armed
 Before `service-principal create`, `service-credential issue`, or any other
 service-management verb will authorize, the acting admin must first arm the two
 management permissions (`wr.service_principal.manage`,
-`wr.service_credential.manage`) for its own session. Arm them with a single
-loopback call using the same live, MFA-assured human bearer and guard context:
+`wr.service_credential.manage`) for its own session. Arm them with
+`wyctl service-management arm`, using the same live, MFA-assured human bearer
+and guard context as the commands that follow:
 
+```sh
+wyctl --daemon-url "$BASE_URL" service-management arm \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
-POST /service-management-authority/arm
-  Authorization: Bearer <access-token>
-  ?guard-timestamp=<ts>&guard-loc-class=<class>&guard-risk=<risk>
-```
+
+It prints `service_management_authority=armed`. The command takes no
+`--tenant` and no `--request-id`: the authority is always armed for the
+caller's own session. Exit 4 with `service_authority_denied` means the caller
+is not eligible (see below); exit 6 means the bearer was not accepted. After no
+answer or a 5xx the outcome is unknown, and repeating the command is safe: an
+armed authority is verified, not armed again. If a repeat fails the same way,
+check the daemon log. The command drives
+`POST /service-management-authority/arm`.
 
 Semantics:
 
@@ -1152,8 +1162,8 @@ Management authority is asymmetric by design:
   `__wr_default` under the SYSTEM profile, holding `wr.service_principal.manage`
   / `wr.service_credential.manage`. Those two permissions are not granted by any
   role; the admin arms them for its own session with the self-arm call
-  documented under "Arming the service-management authority" above (the
-  `POST /service-management-authority/arm` route, #729), which requires the
+  documented under "Arming the service-management authority" above
+  (`wyctl service-management arm`, #729), which requires the
   `wr.system_admin` role's `wr.service.self_authorize` eligibility, a real
   loopback transport, and a live human MFA-assured session. Service tokens can
   never arm this authority.
@@ -2914,9 +2924,6 @@ These routes are reached only over HTTP:
 
 - `/profile/events`: event forwarding from the service profile to the system
   profile. It is traffic between the two daemons, not an operator action.
-- `/service-management-authority/arm`: arms the service-management authority
-  for the caller's session (see "Arming the service-management authority").
-  There is no `wyctl` command for it yet (#1269).
 - `/service-credential-operations/reconcile`: reconciles a stalled
   service-credential operation. The client library exposes it; `wyctl` does
   not yet (#1270).

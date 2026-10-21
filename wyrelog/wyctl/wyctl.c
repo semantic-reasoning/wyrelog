@@ -6864,6 +6864,95 @@ run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/*
+ * wyctl service-management arm (#1269): arm wr.service_principal.manage and
+ * wr.service_credential.manage for the bearer's own session, which every
+ * service-principal and service-credential command needs first.  The scope
+ * is always the caller's own session, so the command takes no tenant and no
+ * request id.
+ */
+static int
+run_service_management_arm (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlServicePrincipalOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-management arm");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-management arm argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg,
+          WYL_TENANT_DEFAULT, access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  wyrelog_error_t rc = wyl_client_service_management_authority_arm (client,
+          guard_timestamp, opts.guard_loc_class, guard_risk);
+  int exit_rc = fact_remote_exit (client, "service-management arm", rc,
+          "service_management_arm_failed");
+  if (exit_rc == 0) {
+    g_print ("service_management_authority=armed\n");
+    return 0;
+  }
+  /* An armed authority is verified, not written again, so a repeat is
+   * harmless. */
+  if (wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the arm outcome is unknown; repeating the same "
+        "command is safe; if it fails again, check the daemon log\n");
+  return exit_rc;
+}
+
+static int
+run_service_management (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing service-management command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "arm") == 0)
+    return run_service_management_arm (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown service-management command: %s\n", argv[1]);
+  return 2;
+}
+
 /* Print one non-secret service credential row as a single key=value line.
  * String DTO fields (credential_id / subject_id / state / rotated_from_id)
  * can be NULL, so guard each %s with a "-" placeholder; the numeric fields
@@ -8078,6 +8167,7 @@ main (int argc, char **argv)
       "  key                        Inspect and rotate policy keys\n"
       "  mfa                        Enroll or reset TOTP factors\n"
       "  auth                       Exchange service credentials for tokens\n"
+      "  service-management         Arm the service-management authority\n"
       "  service-principal          Manage service principals\n"
       "  service-credential         Manage service credentials\n"
       "  service-permission-closure Inspect or apply permission closures");
@@ -8130,6 +8220,8 @@ main (int argc, char **argv)
     return run_mfa (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "auth") == 0)
     return run_auth (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "service-management") == 0)
+    return run_service_management (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-principal") == 0)
     return run_service_principal (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-credential") == 0)

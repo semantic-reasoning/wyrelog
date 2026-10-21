@@ -201,6 +201,91 @@ assert_wyctl_exit_no_secret (gchar **argv, const int *ok_exits, gsize n_ok)
   g_assert_null (strstr (stderr_buf, "secret="));
 }
 
+/* Run wyctl and return its exit code; the caller owns both streams. */
+static int
+run_wyctl (gchar **argv, gchar **stdout_buf, gchar **stderr_buf)
+{
+  gint wait_status = 0;
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (g_spawn_sync (NULL, argv, NULL, G_SPAWN_DEFAULT, NULL, NULL,
+      stdout_buf, stderr_buf, &wait_status, &error));
+  g_assert_no_error (error);
+  g_assert_true (WIFEXITED (wait_status));
+  return WEXITSTATUS (wait_status);
+}
+
+/*
+ * #1269: an operator armed only through wyctl.  Eligibility comes from the
+ * wr.system_admin role, never a direct grant; the session_state anchor at
+ * __wr_default is what bootstrap-admin provisioning seeds.  Before the arm,
+ * service-principal create is refused; after `wyctl service-management arm`
+ * the same command succeeds, with no direct HTTP call in between.
+ */
+static void
+check_service_management_arm (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
+      "human-svc-armer", "wr.system_admin", WYL_TENANT_DEFAULT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_session_state (store,
+      WYL_TENANT_DEFAULT, "active"), ==, WYRELOG_E_OK);
+  g_autofree gchar *token_path = seed_bearer_operator (server, handle,
+          "human-svc-armer", FALSE);
+
+  gchar *create_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "service-principal", "create",
+    "--subject", "svc:svc-app",
+    "--display-name", "svc app",
+    "--tenant", WYL_TENANT_DEFAULT,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "0",
+    NULL,
+  };
+  gchar *arm_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "service-management", "arm",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "0",
+    NULL,
+  };
+
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  g_assert_cmpint (run_wyctl (create_argv, &out, &err), ==, 4);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_nonnull (strstr (err,
+      "wyctl: service-principal create failed: service_principal_denied\n"));
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+
+  int arm_exit = run_wyctl (arm_argv, &out, &err);
+  if (arm_exit != 0)
+    g_printerr ("wyctl service-management arm exited %d: %s\n", arm_exit,
+        err);
+  g_assert_cmpint (arm_exit, ==, 0);
+  g_assert_cmpstr (out, ==, "service_management_authority=armed\n");
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+
+  int create_exit = run_wyctl (create_argv, &out, &err);
+  if (create_exit != 0)
+    g_printerr ("wyctl service-principal create exited %d: %s\n",
+        create_exit, err);
+  g_assert_cmpint (create_exit, ==, 0);
+  g_assert_nonnull (strstr (out, "subject_id=svc:svc-app"));
+  g_unlink (token_path);
+}
+
 int
 main (void)
 {
@@ -384,6 +469,8 @@ main (void)
 
   g_unlink (authorized_token_path);
   g_unlink (denied_token_path);
+
+  check_service_management_arm (http.server, handle, base_url);
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);

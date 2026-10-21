@@ -128,6 +128,7 @@ EXPECTED_PARSE_SITES = {
     "run_service_principal_create": "WyctlServicePrincipalOptions",
     "run_service_principal_list": "WyctlServicePrincipalOptions",
     "run_service_principal_disable": "WyctlServicePrincipalOptions",
+    "run_service_management_arm": "WyctlServicePrincipalOptions",
     "run_service_credential_list": "WyctlServiceCredentialOptions",
     "run_service_credential_revoke": "WyctlServiceCredentialOptions",
     "run_service_credential_recover": "WyctlServiceCredentialOptions",
@@ -145,7 +146,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 260
+EXPECTED_STRING_DESTINATIONS = 264
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
