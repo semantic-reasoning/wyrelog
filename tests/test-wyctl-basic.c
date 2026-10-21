@@ -5950,6 +5950,143 @@ test_service_change_invalid_request_id (void)
   g_unlink (token_path);
 }
 
+#define RECONCILE_ID "222222222222222222222222222"
+#define RECONCILE_CREDENTIAL "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+#define RECONCILE_UNKNOWN \
+  "wyctl: the service-credential reconcile outcome is unknown; repeat the " \
+  "same command with the same --request-id and target, which is safe, and " \
+  "the line it then prints is the verdict\n"
+
+/* Run a reconcile against a fake daemon answering STATUS with BODY and
+ * check the exact request it sent: the route, the target tenant and guards
+ * in the query, and REQUEST_BODY. */
+static void
+run_reconcile_case (guint status, const gchar *body, guint delay_ms,
+    const gchar *const *args, const gchar *request_body, FactForgetRun *run)
+{
+  run_fake_daemon_case_full (status, body, delay_ms, FALSE, NULL, args, FALSE,
+      run);
+  g_assert_nonnull (run->request);
+  g_assert_true (g_str_has_prefix (run->request,
+      "POST /service-credential-operations/reconcile?"));
+  g_autofree gchar *line = g_strndup (run->request,
+          strcspn (run->request, "\r\n"));
+  g_assert_nonnull (strstr (line, "tenant=__wr_default"));
+  g_assert_nonnull (strstr (line, "guard_timestamp=123"));
+  g_assert_nonnull (strstr (line, "guard_loc_class=public"));
+  g_assert_nonnull (strstr (line, "guard_risk=10"));
+  const gchar *sent = strstr (run->request, "\r\n\r\n");
+  g_assert_nonnull (sent);
+  g_assert_cmpstr (sent + 4, ==, request_body);
+}
+
+static void
+test_service_credential_reconcile (void)
+{
+  static const gchar *const issue[] = {
+    "service-credential", "reconcile", "--operation", "issue",
+    "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+    "--tenant", "__wr_default", SERVICE_GUARDS, NULL,
+  };
+  static const gchar *const rotate[] = {
+    "service-credential", "reconcile", "--operation", "rotate",
+    "--request-id", RECONCILE_ID, "--credential-id", RECONCILE_CREDENTIAL,
+    "--tenant", "__wr_default", SERVICE_GUARDS, NULL,
+  };
+  const gchar *issue_body = "{\"version\":1,\"request_id\":\"" RECONCILE_ID
+      "\",\"operation\":\"issue\",\"target\":{\"subject\":"
+      "\"svc:tenant-a:worker\",\"tenant\":\"__wr_default\"}}";
+  const gchar *rotate_body = "{\"version\":1,\"request_id\":\""
+      RECONCILE_ID "\",\"operation\":\"rotate\",\"target\":"
+      "{\"old_credential_id\":\"" RECONCILE_CREDENTIAL "\"}}";
+
+  g_auto (FactForgetRun) committed = { 0 };
+  run_reconcile_case (200, "{\"version\":1,\"request_id\":\"" RECONCILE_ID
+      "\",\"operation\":\"issue\",\"target\":{\"subject\":"
+      "\"svc:tenant-a:worker\",\"tenant\":\"__wr_default\"},"
+      "\"status\":\"committed\",\"credential_id\":\""
+      RECONCILE_CREDENTIAL "\",\"generation\":2}", 0, issue, issue_body,
+      &committed);
+  assert_fact_forget_exit (&committed, 0);
+  g_assert_cmpstr (committed.out, ==, "request_id=" RECONCILE_ID
+      " operation=issue result=committed credential_id="
+      RECONCILE_CREDENTIAL " generation=2\n");
+  g_assert_cmpstr (committed.err, ==, "");
+
+  g_auto (FactForgetRun) closed = { 0 };
+  run_reconcile_case (200, "{\"version\":1,\"request_id\":\"" RECONCILE_ID
+      "\",\"operation\":\"rotate\",\"target\":{\"old_credential_id\":"
+      "\"" RECONCILE_CREDENTIAL "\"},\"status\":\"not_committed_terminal\"}",
+      0, rotate, rotate_body, &closed);
+  assert_fact_forget_exit (&closed, 0);
+  g_assert_cmpstr (closed.out, ==, "request_id=" RECONCILE_ID
+      " operation=rotate result=not_committed_terminal credential_id=- "
+      "generation=0\n");
+  g_assert_cmpstr (closed.err, ==, "wyctl: request_id " RECONCILE_ID
+      " never committed and is now closed; a new attempt needs a new "
+      "--request-id\n");
+
+  /* The client answers a bound id's conflict as a verdict, so wyctl must
+   * refuse it itself. */
+  g_auto (FactForgetRun) conflict = { 0 };
+  run_reconcile_case (409, "{\"error\":\"operation_request_conflict\"}", 0,
+      issue, issue_body, &conflict);
+  assert_fact_forget_exit (&conflict, 4);
+  g_assert_cmpstr (conflict.out, ==, "");
+  g_assert_cmpstr (conflict.err, ==, "wyctl: service-credential reconcile "
+      "failed: operation_request_conflict\n"
+      "wyctl: request_id " RECONCILE_ID " is bound to a different operation "
+      "or target; do not reuse it for other inputs\n");
+
+  static const struct
+  {
+    guint status;
+    const gchar *body;
+    guint delay_ms;
+    gint exit;
+    const gchar *err;
+  } refusals[] = {
+    {409, "{\"error\":\"x\"}", 0, 4,
+     "wyctl: service-credential reconcile failed: x\n"},
+    {400, "{\"error\":\"invalid_service_credential_operation\"}", 0, 3,
+     "wyctl: service-credential reconcile failed: "
+     "invalid_service_credential_operation\n"},
+    {401, "{\"error\":\"service_credential_auth_required\"}", 0, 6,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_auth_required\n"},
+    {403, "{\"error\":\"service_credential_denied\"}", 0, 4,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_denied\n"},
+    {404, "{\"error\":\"service_credential_not_found\"}", 0, 5,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_not_found\n"},
+    {503, "{\"error\":\"service_credential_unavailable\"}", 0, 5,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_unavailable\n" RECONCILE_UNKNOWN},
+    {500, "{\"error\":\"service_credential_failed\"}", 0, 5,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_failed\n" RECONCILE_UNKNOWN},
+    /* An answer for another id is no verdict on this one. */
+    {200, "{\"version\":1,\"request_id\":\"333333333333333333333333333\","
+     "\"operation\":\"issue\",\"target\":{\"subject\":"
+     "\"svc:tenant-a:worker\",\"tenant\":\"__wr_default\"},"
+     "\"status\":\"not_committed_terminal\"}", 0, 3,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_reconcile_failed\n" RECONCILE_UNKNOWN},
+    {403, LATE_403, 2000, 5,
+     "wyctl: service-credential reconcile failed: "
+     "service_credential_reconcile_failed\n" RECONCILE_UNKNOWN},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (refusals); i++) {
+    g_auto (FactForgetRun) run = { 0 };
+    run_reconcile_case (refusals[i].status, refusals[i].body,
+        refusals[i].delay_ms, issue, issue_body, &run);
+    assert_fact_forget_exit (&run, refusals[i].exit);
+    g_assert_cmpstr (run.out, ==, "");
+    g_assert_cmpstr (run.err, ==, refusals[i].err);
+  }
+}
+
 static void
 test_graph_list (void)
 {
@@ -6724,6 +6861,8 @@ main (int argc, char **argv)
       test_service_change_unknown_outcome);
   g_test_add_func ("/wyctl/service-change-invalid-request-id",
       test_service_change_invalid_request_id);
+  g_test_add_func ("/wyctl/service-credential-reconcile",
+      test_service_credential_reconcile);
   g_test_add_func ("/wyctl/auth-logout-times-out",
       test_auth_logout_times_out);
   g_test_add_func ("/wyctl/auth-logout-refused-token-names-refresh",

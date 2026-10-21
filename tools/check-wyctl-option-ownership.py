@@ -82,7 +82,7 @@ EXPECTED_FIELDS = {
         ("subject", "store_path", "keyprovider_path", "access_token_file"),
     "WyctlServiceTokenOptions": ("credential_file", "token_output"),
     "WyctlServiceCredentialOptions":
-        ("subject", "credential_id", "tenant", "destination",
+        ("operation", "subject", "credential_id", "tenant", "destination",
          "expires_at_us_arg", "request_id", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlServicePrincipalOptions":
@@ -132,6 +132,7 @@ EXPECTED_PARSE_SITES = {
     "run_service_credential_list": "WyctlServiceCredentialOptions",
     "run_service_credential_revoke": "WyctlServiceCredentialOptions",
     "run_service_credential_recover": "WyctlServiceCredentialOptions",
+    "run_service_credential_reconcile": "WyctlServiceCredentialOptions",
     "run_service_credential_status": "WyctlServiceCredentialOptions",
     "run_service_permission_closure_inspect":
         "WyctlServicePermissionClosureOptions",
@@ -146,7 +147,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 264
+EXPECTED_STRING_DESTINATIONS = 273
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,
