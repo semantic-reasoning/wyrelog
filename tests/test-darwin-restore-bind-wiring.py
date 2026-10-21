@@ -33,8 +33,11 @@ Route rules (ROUTE_RULES), one per ported commit step: the step names no
 provisioned capture or execute form, nor any execute form, directly, and
 calls each of its helpers.  A direct call is reported before a missing
 helper.  The facade capture a step makes for directory and lease identity is
-not a provisioned capture and is allowed.  Later steps (retain,
-sync_retained, publish) add rows here when they are ported.
+not a provisioned capture and is allowed.  RETAIN and the rollback-side
+syncs are pinned through their runs, their shared capture helper
+retain_capture and their transaction effects: a run hands its effect over as
+a callback, which count_calls does not see, so each effect has its own row.
+PUBLISH adds rows here when it is ported.
 
 function_body counts braces without regard to string or character literals;
 none of the pinned functions holds a brace literal today.
@@ -123,6 +126,15 @@ ROUTE_RULES = (
     RouteRule("wyl_fact_offline_restore_graph_commit_sync_staged_run",
               ("sync_staged_capture_ready", "graph_execute_provisioned")),
     RouteRule("sync_staged_capture_ready", ("graph_capture_provisioned",)),
+    RouteRule("wyl_fact_offline_restore_graph_commit_retain_run",
+              ("graph_provenance_load",)),
+    RouteRule("retain_capture", ("graph_capture_provisioned",)),
+    RouteRule("retain_effect", ("retain_capture",
+                                "graph_execute_provisioned")),
+    RouteRule("wyl_fact_offline_restore_graph_commit_sync_retained_run",
+              ("graph_provenance_load",)),
+    RouteRule("sync_retained_effect", ("retain_capture",
+                                       "graph_execute_provisioned")),
 )
 
 
@@ -440,6 +452,107 @@ sync_staged_capture_ready (WylFactArtifactTransition *provider,
 }
 """
 
+RETAIN_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_retain_run
+  (wyl_policy_store_t *policy, const gchar *fact_root)
+{
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
+            &lease, &provider);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_retain_with_effect (policy,
+            row, &pending, &completed, retain_effect, &context, &result);
+  wyl_fact_artifact_transition_free (provider);
+  return rc;
+#endif
+}
+"""
+
+RETAIN_CAPTURE_FIXTURE = """\
+static wyrelog_error_t
+retain_capture (WylFactArtifactTransition *provider,
+    const Journal *journal, const GraphProvenance *provenance)
+{
+  wyrelog_error_t rc = wyl_fact_artifact_transition_capture
+        (provider, &lifecycle, &preliminary, &observed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = graph_capture_provisioned (provider, provenance, &request, slot,
+          &lifecycle, out_snapshot, out_observation);
+  return rc;
+}
+"""
+
+RETAIN_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+retain_effect (const Row *row, gpointer user_data)
+{
+  wyrelog_error_t rc = wyl_fact_artifact_transition_capture
+        (provider, &lifecycle, &initial, &first);
+  if (rc == WYRELOG_E_OK)
+    rc = retain_capture (provider, journal, provenance,
+            slot, &request, &snapshot, &before);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_execute_provisioned (provider, provenance, &request,
+            &synced, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_RETAIN,
+            &effect, &durability);
+  if (rc == WYRELOG_E_OK)
+    rc = retain_capture (provider, journal, provenance,
+            WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+            &request, &snapshot, &retained);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_execute_provisioned (provider, provenance, &request,
+            &retained, WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_RETAIN_DIR,
+            &sync_effect, &sync_durability);
+  return rc;
+}
+"""
+
+SYNC_RETAINED_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_sync_retained_run
+  (wyl_policy_store_t *policy, const gchar *fact_root)
+{
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
+            &lease, &provider);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_sync_retained_with_effect
+          (policy, row, &pending, &completed, operation,
+            sync_retained_effect, &context, &result);
+  wyl_fact_artifact_transition_free (provider);
+  return rc;
+#endif
+}
+"""
+
+SYNC_RETAINED_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+sync_retained_effect (const Row *row, gpointer user_data)
+{
+  wyrelog_error_t rc = retain_capture (context->provider, context->journal,
+          context->provenance,
+          WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+          &request, &snapshot, &observation);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < count; i++)
+    rc = graph_execute_provisioned (context->provider,
+            context->provenance, &request, &observation, operation,
+            &effect, &durability);
+  return rc;
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -448,6 +561,12 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_sync_staged_run":
         SYNC_STAGED_RUN_FIXTURE,
     "sync_staged_capture_ready": CAPTURE_READY_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_retain_run": RETAIN_RUN_FIXTURE,
+    "retain_capture": RETAIN_CAPTURE_FIXTURE,
+    "retain_effect": RETAIN_EFFECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_sync_retained_run":
+        SYNC_RETAINED_RUN_FIXTURE,
+    "sync_retained_effect": SYNC_RETAINED_EFFECT_FIXTURE,
 }
 
 
@@ -468,6 +587,11 @@ X = "graph_execute_provisioned"
 P = "graph_provenance_load"
 R = "wyl_fact_offline_restore_graph_commit_sync_staged_run"
 Q = "sync_staged_capture_ready"
+T = "wyl_fact_offline_restore_graph_commit_retain_run"
+K = "retain_capture"
+E = "retain_effect"
+U = "wyl_fact_offline_restore_graph_commit_sync_retained_run"
+F = "sync_retained_effect"
 
 MUTANTS = (
     ("bind: swap to name-only", B, replace(
@@ -591,6 +715,60 @@ MUTANTS = (
     ("capture_ready: helper call removed", Q, replace(
         "    rc = graph_capture_provisioned (provider, provenance, &request,\n"
         "            slot, &lifecycle, &snapshot, out_observation);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("retain_run: provenance load removed", T, replace(
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("retain_run: evidence execute beside the effect", T, replace(
+        "  wyl_fact_artifact_transition_free (provider);",
+        "  rc = wyl_fact_artifact_transition_posix_execute_provisioned_with"
+        "_evidence (provider, uuid, evidence, &request, &observation, op,"
+        " &effect, &durability);\n"
+        "  wyl_fact_artifact_transition_free (provider);"), "E_ROUTE_DIRECT"),
+    ("retain_capture: name-only capture replaces the helper", K, replace(
+        "graph_capture_provisioned (",
+        "wyl_fact_artifact_transition_posix_capture_provisioned ("),
+     "E_ROUTE_DIRECT"),
+    ("retain_capture: helper call removed", K, replace(
+        "  rc = graph_capture_provisioned (provider, provenance, &request,"
+        " slot,\n"
+        "          &lifecycle, out_snapshot, out_observation);\n", ""),
+     "E_ROUTE_HELPER"),
+    ("retain_effect: plain execute for RETAIN", E, replace(
+        "graph_execute_provisioned (",
+        "wyl_fact_artifact_transition_posix_execute (", 1),
+     "E_ROUTE_DIRECT"),
+    ("retain_effect: evidence capture bypasses the helper", E, replace(
+        "    rc = retain_capture (provider, journal, provenance,\n"
+        "            WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,",
+        "    rc = wyl_fact_artifact_transition_posix_capture_provisioned_with"
+        "_evidence (provider, journal, provenance,\n"
+        "            WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,"),
+     "E_ROUTE_DIRECT"),
+    ("retain_effect: facade execute for SYNC_RETAIN_DIR", E, replace(
+        "    rc = graph_execute_provisioned (provider, provenance,"
+        " &request,\n"
+        "            &retained,",
+        "    rc = wyl_fact_artifact_transition_execute (provider,"
+        " provenance, &request,\n"
+        "            &retained,"), "E_ROUTE_DIRECT"),
+    ("retain_effect: every helper capture removed", E, replace(
+        "retain_capture (", "wyl_fact_artifact_transition_capture ("),
+     "E_ROUTE_HELPER"),
+    ("sync_retained_run: provenance load removed", U, replace(
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n",
+        ""), "E_ROUTE_HELPER"),
+    ("sync_retained_effect: Windows execute in the loop", F, replace(
+        "graph_execute_provisioned (",
+        "wyl_fact_artifact_transition_windows_execute ("),
+     "E_ROUTE_DIRECT"),
+    ("sync_retained_effect: helper execute removed", F, replace(
+        "    rc = graph_execute_provisioned (context->provider,\n"
+        "            context->provenance, &request, &observation,"
+        " operation,\n"
+        "            &effect, &durability);\n",
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
 )
 

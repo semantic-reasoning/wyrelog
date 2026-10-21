@@ -5996,7 +5996,7 @@ wyl_fact_offline_restore_graph_commit_sync_staged_run
 #endif
 }
 
-#if defined(__linux__) || defined(G_OS_WIN32)
+#if defined(__linux__) || defined(__APPLE__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactArtifactTransition *provider;
@@ -6218,7 +6218,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#if !defined(__linux__) && !defined(G_OS_WIN32)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
@@ -6374,7 +6374,7 @@ wyl_fact_offline_restore_graph_commit_retain_run
 #endif
 }
 
-#if defined(__linux__) || defined(G_OS_WIN32)
+#if defined(__linux__) || defined(__APPLE__) || defined(G_OS_WIN32)
 typedef struct
 {
   WylFactArtifactTransition *provider;
@@ -6497,7 +6497,7 @@ wyl_fact_offline_restore_graph_commit_sync_retained_run
       || runtime == NULL || operation_uuid == NULL || expected_revision == 0
       || out_committed == NULL)
     return WYRELOG_E_INVALID;
-#if !defined(__linux__) && !defined(G_OS_WIN32)
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
   (void) drain_timeout_us;
   return WYRELOG_E_POLICY;
 #else
