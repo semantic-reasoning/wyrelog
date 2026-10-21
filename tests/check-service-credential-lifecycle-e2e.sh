@@ -14,7 +14,8 @@
 #   3. seed admin2 as wr.system_admin so it can self-enroll;
 #   4. enroll admin2 with a REAL TOTP authenticator and mint an mfa_assured
 #      bearer (#740 self-arm rejects skip-MFA bearers with 403);
-#   5. admin2 self-arms the service-credential management authority;
+#   5. admin2 self-arms the service-credential management authority with
+#      `wyctl service-management arm` (#1269);
 #   6. arm wr.tenant.manage for admin2;
 #   7. create tenant-a (the creator receives wr.system_admin@tenant-a plus a
 #      active tenant scope state);
@@ -186,12 +187,17 @@ chmod 600 "$ADMIN2_TOKEN"
 chmod 600 "$ADMIN2_SECRET"
 
 # --- 5. self-arm the service-credential management authority. -----------------
-# The daemon's HTTP query parser reads UNDERSCORE guard keys; the arm helper
-# owns that spelling internally.
-"$PY" "$SC_E2E_PY" arm --base-url "$URL" --token-file "$ADMIN2_TOKEN" \
+# Through wyctl, as an operator would (#1269); the service-principal create in
+# step 8 is the first command that needs it.
+"$WYCTL" --daemon-url "$URL" service-management arm \
+  --access-token-file "$ADMIN2_TOKEN" \
   --guard-timestamp "$(now_us)" --guard-loc-class trusted --guard-risk 10 \
   >"$TMPDIR/arm.out" 2>"$TMPDIR/arm.err" \
-  || fail "self-arm failed" "$TMPDIR/arm.out" "$TMPDIR/arm.err" "$LOG.err"
+  || fail "wyctl service-management arm failed" \
+    "$TMPDIR/arm.out" "$TMPDIR/arm.err" "$LOG.err"
+grep -qx "service_management_authority=armed" "$TMPDIR/arm.out" \
+  || fail "wyctl service-management arm did not report armed" \
+    "$TMPDIR/arm.out"
 
 # --- 6. arm wr.tenant.manage for admin2. --------------------------------------
 "$PY" "$SC_E2E_PY" http-post --base-url "$URL" \
