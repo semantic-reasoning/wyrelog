@@ -343,19 +343,30 @@ another operation, are refused before the provider opens and before any
 journal change. Evidence that names another object is refused by the evidence
 witness in the provider's capture, before the step's effect. The stage sync
 captures before it journals its attempt, so there the refusal comes before
-any journal change; `RETAIN` and the rollback-side syncs journal their attempt
-as `UNKNOWN` first, and that attempt then refuses the same way.
+any journal change; `RETAIN`, the rollback-side syncs, `PUBLISH` and its
+directory flush journal their attempt as `UNKNOWN` first, and that attempt
+then refuses the same way.
 `tests/test-darwin-restore-bind-wiring.py` pins the bind, both helpers, the
 provenance decode and the routing of each ported step through the helpers.
-The stage sync, `RETAIN` and the two rollback-side syncs (`SYNC_ROLLBACK_FILE`,
-then `SYNC_RETAIN_DIR`) run on macOS from a decided journal. After `RETAIN`
-each step re-proves the old main at this restore's rollback name through the
-same evidence witness, so a same-bytes object there, or evidence that names
-another volume, is refused. `PUBLISH`, its directory flush and the resume
-dispatcher still refuse there and are ported the same way. Like Windows, the
-evidence execute stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE`
-stay refused. None of it is reachable while macOS commit admission refuses;
-these steps are proved by tests that reach the decision directly.
+The stage sync, `RETAIN`, the two rollback-side syncs (`SYNC_ROLLBACK_FILE`,
+then `SYNC_RETAIN_DIR`), `PUBLISH` and its directory flush
+(`SYNC_PUBLISH_DIR`) run on macOS from a decided journal, and the resume
+dispatcher runs them in turn. After `RETAIN` each step re-proves the old main
+at this restore's rollback name through the same evidence witness, so a
+same-bytes object there, or evidence that names another volume, is refused.
+`PUBLISH` renames the stage it re-pins by the journal's device and inode onto
+`facts.duckdb` without replacing (`renameatx_np` with `RENAME_EXCL`): an
+object already at `facts.duckdb` is refused before the rename, and one placed
+there after the capture fails the no-replace rename. Until replacement
+evidence exists (see "Restore replacement evidence") no evidence names the
+object at `facts.duckdb`: the witness accepts there any one-link 0600 file of
+the effective owner other than the old main, and only the journal-pinned
+staged identity binds it, so a same-bytes substitute is refused by the
+transition model rather than by evidence. Like Windows, the evidence execute
+stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE` stay refused, as
+do selection and promotion, so a macOS graph restore stops there with
+`FINALIZE` next. None of it is reachable while macOS commit admission
+refuses; these steps are proved by tests that reach the decision directly.
 
 ## Restore replacement evidence
 

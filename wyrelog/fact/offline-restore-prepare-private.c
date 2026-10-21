@@ -522,8 +522,8 @@ wyl_fact_offline_restore_graph_commit_admit_run
   return WYRELOG_E_POLICY;
 #else
 #if defined(__APPLE__) || defined(G_OS_WIN32)
-  /* The commit steps after admission are Linux-only on macOS (#1303 U5)
-   * and stop at PUBLISHED_DURABLE on Windows (#1304).  Refuse here so a
+  /* The graph commit steps after admission stop at PUBLISHED_DURABLE on
+   * macOS (#1303 U5) and on Windows (#1304).  Refuse here so a
    * bound journal never reaches decision COMMIT, where abort would be
    * barred and resume would have no step to finish.  The body below is
    * intentionally unreachable on both until then. */

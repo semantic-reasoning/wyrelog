@@ -37,7 +37,9 @@ not a provisioned capture and is allowed.  RETAIN and the rollback-side
 syncs are pinned through their runs, their shared capture helper
 retain_capture and their transaction effects: a run hands its effect over as
 a callback, which count_calls does not see, so each effect has its own row.
-PUBLISH adds rows here when it is ported.
+PUBLISH and its directory flush are pinned the same way through
+publish_run, publish_capture and publish_effect.  The resume dispatcher
+calls only the step runs, never a provider form, and needs no row.
 
 function_body counts braces without regard to string or character literals;
 none of the pinned functions holds a brace literal today.
@@ -135,6 +137,11 @@ ROUTE_RULES = (
               ("graph_provenance_load",)),
     RouteRule("sync_retained_effect", ("retain_capture",
                                        "graph_execute_provisioned")),
+    RouteRule("wyl_fact_offline_restore_graph_commit_publish_run",
+              ("graph_provenance_load",)),
+    RouteRule("publish_capture", ("retain_capture",)),
+    RouteRule("publish_effect", ("publish_capture",
+                                 "graph_execute_provisioned")),
 )
 
 
@@ -553,6 +560,73 @@ sync_retained_effect (const Row *row, gpointer user_data)
 }
 """
 
+PUBLISH_RUN_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_publish_run
+  (wyl_policy_store_t *policy, const gchar *fact_root)
+{
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(G_OS_WIN32)
+  return WYRELOG_E_POLICY;
+#else
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_open (&resolver, &directory,
+            lease, operation_uuid, &capability, &provider);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_publish_with_effect
+          (policy, row, &pending, &completed, operation,
+            publish_effect, &context, &result);
+  wyl_fact_artifact_transition_free (provider);
+  return rc;
+#endif
+}
+"""
+
+PUBLISH_CAPTURE_FIXTURE = """\
+static wyrelog_error_t
+publish_capture (PublishEffectContext *context,
+    WylFactArtifactMainTransitionRequest *request,
+    WylFactArtifactInventorySnapshot **snapshot,
+    WylFactArtifactMainTransitionObservation *observation)
+{
+  return retain_capture (context->provider, context->journal,
+             context->provenance,
+             WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK,
+             request, snapshot, observation);
+}
+"""
+
+PUBLISH_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+publish_effect (const Row *row, gpointer user_data)
+{
+  wyrelog_error_t rc = publish_capture (context, &request,
+          &snapshot, &observation);
+  for (guint i = 0; i < G_N_ELEMENTS (prerequisites); i++) {
+    if (rc == WYRELOG_E_OK)
+      rc = graph_execute_provisioned (context->provider,
+              context->provenance, &request, &observation, operation,
+              &effect, &durability);
+    rc = publish_capture (context, &request, &snapshot, &after);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_execute_provisioned (context->provider,
+            context->provenance, &request, &observation,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,
+            &rename_effect, &rename_durability);
+  rc = publish_capture (context, &request, &snapshot, &after);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_execute_provisioned (context->provider,
+            context->provenance, &request, &observation,
+            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,
+            &sync_effect, &sync_durability);
+  rc = publish_capture (context, &request, &snapshot, &after_sync);
+  rc = publish_capture (context, &request, &snapshot, &observation);
+  return rc;
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -567,6 +641,9 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_sync_retained_run":
         SYNC_RETAINED_RUN_FIXTURE,
     "sync_retained_effect": SYNC_RETAINED_EFFECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_publish_run": PUBLISH_RUN_FIXTURE,
+    "publish_capture": PUBLISH_CAPTURE_FIXTURE,
+    "publish_effect": PUBLISH_EFFECT_FIXTURE,
 }
 
 
@@ -592,6 +669,9 @@ K = "retain_capture"
 E = "retain_effect"
 U = "wyl_fact_offline_restore_graph_commit_sync_retained_run"
 F = "sync_retained_effect"
+V = "wyl_fact_offline_restore_graph_commit_publish_run"
+W = "publish_capture"
+H = "publish_effect"
 
 MUTANTS = (
     ("bind: swap to name-only", B, replace(
@@ -770,6 +850,47 @@ MUTANTS = (
         " operation,\n"
         "            &effect, &durability);\n",
         "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("publish_run: provenance load removed", V, replace(
+        "    rc = graph_provenance_load (policy, &journal, row,"
+        " &provenance);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("publish_run: evidence execute beside the effect", V, replace(
+        "  wyl_fact_artifact_transition_free (provider);",
+        "  rc = wyl_fact_artifact_transition_posix_execute_provisioned_with"
+        "_evidence (provider, uuid, evidence, &request, &observation, op,"
+        " &effect, &durability);\n"
+        "  wyl_fact_artifact_transition_free (provider);"), "E_ROUTE_DIRECT"),
+    ("publish_capture: evidence capture replaces the helper", W, replace(
+        "retain_capture (",
+        "wyl_fact_artifact_transition_posix_capture_provisioned_with_evidence"
+        " ("), "E_ROUTE_DIRECT"),
+    ("publish_capture: facade capture replaces the helper", W, replace(
+        "retain_capture (", "wyl_fact_artifact_transition_capture ("),
+     "E_ROUTE_HELPER"),
+    ("publish_effect: plain execute for PUBLISH", H, replace(
+        "    rc = graph_execute_provisioned (context->provider,\n"
+        "            context->provenance, &request, &observation,\n"
+        "            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,",
+        "    rc = wyl_fact_artifact_transition_posix_execute"
+        " (context->provider,\n"
+        "            context->provenance, &request, &observation,\n"
+        "            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_PUBLISH,"),
+     "E_ROUTE_DIRECT"),
+    ("publish_effect: Windows execute for SYNC_PUBLISH_DIR", H, replace(
+        "    rc = graph_execute_provisioned (context->provider,\n"
+        "            context->provenance, &request, &observation,\n"
+        "            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,",
+        "    rc = wyl_fact_artifact_transition_windows_execute"
+        " (context->provider,\n"
+        "            context->provenance, &request, &observation,\n"
+        "            WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_SYNC_PUBLISH_DIR,"),
+     "E_ROUTE_DIRECT"),
+    ("publish_effect: every helper capture removed", H, replace(
+        "publish_capture (", "wyl_fact_artifact_transition_capture ("),
+     "E_ROUTE_HELPER"),
+    ("publish_effect: facade execute replaces every helper", H, replace(
+        "graph_execute_provisioned (",
+        "wyl_fact_artifact_transition_execute ("), "E_ROUTE_DIRECT"),
 )
 
 
