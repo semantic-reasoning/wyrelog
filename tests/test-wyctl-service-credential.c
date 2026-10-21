@@ -510,6 +510,119 @@ test_service_credential_rotate_expires_bounds (void)
   assert_exit_and_stderr (negative_argv, 2, "wyctl: invalid --expires-at-us");
 }
 
+#define RECONCILE_ID "222222222222222222222222222"
+#define RECONCILE_CREDENTIAL "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+
+/* Every reconcile refusal below is local: the daemon URL is unreachable, so
+ * a case that wrongly reached the client would fail with another message.
+ * Each argument list is complete except for the one thing it gets wrong. */
+static void
+test_service_credential_reconcile_local_refusals (void)
+{
+#define RECONCILE_ARGV(...) \
+  { WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1", \
+    "service-credential", "reconcile", __VA_ARGS__, NULL }
+#define RECONCILE_GUARDS \
+  "--guard-timestamp", "123", "--guard-loc-class", "public", \
+  "--guard-risk", "10"
+  gchar *no_operation[] = RECONCILE_ARGV ("--request-id", RECONCILE_ID,
+          "--subject", "svc:tenant-a:worker", "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *bad_operation[] = RECONCILE_ARGV ("--operation", "revoke",
+          "--request-id", RECONCILE_ID, "--credential-id", RECONCILE_CREDENTIAL,
+          "--tenant", "__wr_default", RECONCILE_GUARDS);
+  gchar *no_request_id[] = RECONCILE_ARGV ("--operation", "issue",
+          "--subject", "svc:tenant-a:worker", "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *bad_request_id[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", "req-1", "--subject", "svc:tenant-a:worker",
+          "--tenant", "__wr_default", RECONCILE_GUARDS);
+  gchar *issue_no_subject[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *issue_credential[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+          "--credential-id", RECONCILE_CREDENTIAL, "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *rotate_no_credential[] = RECONCILE_ARGV ("--operation", "rotate",
+          "--request-id", RECONCILE_ID, "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *rotate_subject[] = RECONCILE_ARGV ("--operation", "rotate",
+          "--request-id", RECONCILE_ID, "--credential-id", RECONCILE_CREDENTIAL,
+          "--subject", "svc:tenant-a:worker", "--tenant", "__wr_default",
+          RECONCILE_GUARDS);
+  gchar *no_guards[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+          "--tenant", "__wr_default");
+  gchar *bad_loc_class[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+          "--tenant", "__wr_default", "--guard-timestamp", "123",
+          "--guard-loc-class", "not-a-class", "--guard-risk", "10");
+  gchar *no_tenant[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+          RECONCILE_GUARDS);
+  gchar *trailing[] = RECONCILE_ARGV ("--operation", "issue",
+          "--request-id", RECONCILE_ID, "--subject", "svc:tenant-a:worker",
+          "--tenant", "__wr_default", RECONCILE_GUARDS, "bogus-positional");
+#undef RECONCILE_GUARDS
+#undef RECONCILE_ARGV
+  const struct
+  {
+    gchar **argv;
+    const gchar *err;
+  } cases[] = {
+    {no_operation, "wyctl: missing --operation\n"},
+    {bad_operation, "wyctl: invalid --operation: revoke (issue or rotate)\n"},
+    {no_request_id, "wyctl: missing --request-id\n"},
+    {bad_request_id, "wyctl: invalid --request-id\n"},
+    {issue_no_subject, "wyctl: missing --subject\n"},
+    {issue_credential, "wyctl: --credential-id is only for --operation "
+     "rotate\n"},
+    {rotate_no_credential, "wyctl: missing --credential-id\n"},
+    {rotate_subject, "wyctl: --subject is only for --operation issue\n"},
+    {no_guards, "wyctl: invalid --guard-timestamp\n"},
+    {bad_loc_class, "wyctl: invalid --guard-loc-class\n"},
+    {no_tenant, "wyctl: missing --tenant\n"},
+    {trailing, "wyctl: unexpected service-credential reconcile argument: "
+     "bogus-positional\n"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_autofree gchar *stdout_buf = NULL;
+    g_autofree gchar *stderr_buf = NULL;
+    gint wait_status = 0;
+    run_child (cases[i].argv, &stdout_buf, &stderr_buf, &wait_status);
+    g_assert_true (WIFEXITED (wait_status));
+    g_assert_cmpint (WEXITSTATUS (wait_status), ==, 2);
+    g_assert_cmpstr (stdout_buf, ==, "");
+    g_assert_cmpstr (stderr_buf, ==, cases[i].err);
+  }
+}
+
+static void
+test_service_credential_reconcile_help (void)
+{
+  gchar *help_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "service-credential", "reconcile",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (help_argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_true (WIFEXITED (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, 0);
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1,
+      "- wyrelog service-credential reconcile"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--operation"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--request-id"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--subject"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--credential-id"));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -542,5 +655,9 @@ main (int argc, char **argv)
       test_service_credential_rotate_missing_flags);
   g_test_add_func ("/wyctl/service-credential/rotate-expires-bounds",
       test_service_credential_rotate_expires_bounds);
+  g_test_add_func ("/wyctl/service-credential/reconcile-local-refusals",
+      test_service_credential_reconcile_local_refusals);
+  g_test_add_func ("/wyctl/service-credential/reconcile-help",
+      test_service_credential_reconcile_help);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

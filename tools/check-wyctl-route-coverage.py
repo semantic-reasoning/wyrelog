@@ -101,6 +101,8 @@ COVERAGE = {
     "/service-credential-operations": ("service-credential", "status"),
     "/service-credential-operations/recover": ("service-credential",
                                                "recover"),
+    "/service-credential-operations/reconcile": ("service-credential",
+                                                 "reconcile"),
     "/auth/service-token": ("auth", "service-token"),
     "/service-management-authority/arm": ("service-management", "arm"),
 }
@@ -109,8 +111,6 @@ HTTP_ONLY = {
     "/profile/events":
         "machine-to-machine event forwarding from the service profile to "
         "the system profile; not an operator action",
-    "/service-credential-operations/reconcile":
-        "no wyctl command yet; the client library exposes it (#1270)",
 }
 
 UNSUPPORTED = {

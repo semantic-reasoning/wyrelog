@@ -2920,13 +2920,10 @@ command still being added, run from the source tree:
 python3 tools/check-wyctl-route-coverage.py . --list
 ```
 
-These routes are reached only over HTTP:
+This route is reached only over HTTP:
 
 - `/profile/events`: event forwarding from the service profile to the system
   profile. It is traffic between the two daemons, not an operator action.
-- `/service-credential-operations/reconcile`: reconciles a stalled
-  service-credential operation. The client library exposes it; `wyctl` does
-  not yet (#1270).
 
 `/service-principals` and `/service-credentials` each serve several
 operations, chosen by method and path. The gate counts each of them as one

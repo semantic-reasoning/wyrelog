@@ -286,6 +286,89 @@ check_service_management_arm (SoupServer *server, WylHandle *handle,
   g_unlink (token_path);
 }
 
+/* Run `wyctl service-credential reconcile` for OPERATION and REQUEST_ID
+ * against BASE_URL, with SUBJECT for an issue or CREDENTIAL_ID for a
+ * rotate. */
+static int
+run_reconcile (const gchar *base_url, const gchar *token_path,
+    const gchar *operation, const gchar *request_id, const gchar *subject,
+    const gchar *credential_id, gchar **out, gchar **err)
+{
+  gboolean issue = g_strcmp0 (operation, "issue") == 0;
+  gchar *argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "service-credential", "reconcile",
+    "--operation", (gchar *) operation,
+    "--request-id", (gchar *) request_id,
+    issue ? "--subject" : "--credential-id",
+    (gchar *) (issue ? subject : credential_id),
+    "--tenant", WYL_TEST_SERVICE_TENANT,
+    "--access-token-file", (gchar *) token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  return run_wyctl (argv, out, err);
+}
+
+/*
+ * #1270: reconcile against the live daemon.  A request id the daemon never
+ * saw is closed on first sight, the same answer comes back on a repeat, and
+ * the closed id refuses another target.  A rotate of a credential the tenant
+ * does not hold is not found.  Without the fact store the route is compiled
+ * out, so every reconcile 404s.
+ */
+static void
+check_service_credential_reconcile (const gchar *base_url,
+    const gchar *token_path)
+{
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request_id, sizeof request_id), ==,
+      WYRELOG_E_OK);
+  const gchar *subject = "svc:" WYL_TEST_SERVICE_TENANT ":worker";
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+#ifdef WYL_HAS_FACT_STORE
+  g_autofree gchar *closed = g_strdup_printf ("request_id=%s operation=issue "
+          "result=not_committed_terminal credential_id=- generation=0\n",
+          request_id);
+  for (int i = 0; i < 2; i++) {
+    int exit_code = run_reconcile (base_url, token_path, "issue", request_id,
+            subject, NULL, &out, &err);
+    if (exit_code != 0)
+      g_printerr ("wyctl service-credential reconcile exited %d: %s\n",
+          exit_code, err);
+    g_assert_cmpint (exit_code, ==, 0);
+    g_assert_cmpstr (out, ==, closed);
+    g_clear_pointer (&out, g_free);
+    g_clear_pointer (&err, g_free);
+  }
+
+  g_assert_cmpint (run_reconcile (base_url, token_path, "issue", request_id,
+      "svc:" WYL_TEST_SERVICE_TENANT ":other", NULL, &out, &err), ==, 4);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_nonnull (strstr (err, "wyctl: service-credential reconcile "
+      "failed: operation_request_conflict\n"));
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+
+  gchar rotate_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (rotate_id, sizeof rotate_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (run_reconcile (base_url, token_path, "rotate", rotate_id,
+      NULL, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &out, &err), ==, 5);
+  g_assert_cmpstr (out, ==, "");
+  g_assert_nonnull (strstr (err, "wyctl: service-credential reconcile "
+      "failed: service_credential_not_found\n"));
+#else
+  g_assert_cmpint (run_reconcile (base_url, token_path, "issue", request_id,
+      subject, NULL, &out, &err), ==, 5);
+  g_assert_cmpstr (out, ==, "");
+#endif
+}
+
 int
 main (void)
 {
@@ -466,6 +549,8 @@ main (void)
   };
   assert_wyctl_exit_no_secret (recover_authorized_argv, recover_ok,
       G_N_ELEMENTS (recover_ok));
+
+  check_service_credential_reconcile (base_url, authorized_token_path);
 
   g_unlink (authorized_token_path);
   g_unlink (denied_token_path);

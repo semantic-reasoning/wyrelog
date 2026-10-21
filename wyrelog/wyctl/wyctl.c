@@ -321,6 +321,7 @@ typedef struct
 
 typedef struct
 {
+  gchar *operation;
   gchar *subject;
   gchar *credential_id;
   gchar *tenant;
@@ -704,6 +705,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlServiceTokenOptions,
 static void
 wyctl_service_credential_options_clear (WyctlServiceCredentialOptions *opts)
 {
+  g_clear_pointer (&opts->operation, g_free);
   g_clear_pointer (&opts->subject, g_free);
   g_clear_pointer (&opts->credential_id, g_free);
   g_clear_pointer (&opts->tenant, g_free);
@@ -7271,6 +7273,163 @@ run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
   return exit_rc;
 }
 
+/* Print a reconcile verdict.  A closed id refuses every later attempt, so
+ * say that a new one needs a new id. */
+static void
+print_service_credential_reconcile_result (const gchar *request_id,
+    const gchar *operation,
+    const WylClientServiceCredentialOperationReconcileResult *result)
+{
+  gboolean committed = result->kind ==
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED;
+  g_print ("request_id=%s operation=%s result=%s credential_id=%s "
+      "generation=%" G_GUINT64_FORMAT "\n", request_id, operation,
+      committed ? "committed" : "not_committed_terminal",
+      committed && result->credential_id != NULL ? result->credential_id : "-",
+      result->generation);
+  if (!committed)
+    g_printerr ("wyctl: request_id %s never committed and is now closed; "
+        "a new attempt needs a new --request-id\n", request_id);
+}
+
+static int
+run_service_credential_reconcile (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  g_auto (WyctlServiceCredentialOptions) opts = { 0 };
+  GOptionEntry entries[] = {
+    {"operation", 0, 0, G_OPTION_ARG_STRING, &opts.operation,
+     "Operation the request id was sent for: issue or rotate", "OPERATION"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+     "Request id of the attempt to reconcile", "ID"},
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+     "Service subject id the issue was for", "SUBJECT_ID"},
+    {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
+     "Credential id the rotate was for", "CREDENTIAL_ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Target tenant",
+     "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+     "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+     &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+     "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+     "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential reconcile");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential reconcile argument: "
+        "%s\n", argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+          global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+          global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+          global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+          global_opts->settings, "access-token-file");
+
+  if (opts.operation == NULL || opts.operation[0] == '\0') {
+    g_printerr ("wyctl: missing --operation\n");
+    return 2;
+  }
+  gboolean issue = g_strcmp0 (opts.operation, "issue") == 0;
+  if (!issue && g_strcmp0 (opts.operation, "rotate") != 0) {
+    g_printerr ("wyctl: invalid --operation: %s (issue or rotate)\n",
+        opts.operation);
+    return 2;
+  }
+  /* Reconciling closes an id nobody committed, so never mint one. */
+  if (opts.request_id == NULL || opts.request_id[0] == '\0') {
+    g_printerr ("wyctl: missing --request-id\n");
+    return 2;
+  }
+  if (!wyl_request_id_is_canonical (opts.request_id)) {
+    g_printerr ("wyctl: invalid --request-id\n");
+    return 2;
+  }
+  if (issue && (opts.subject == NULL || opts.subject[0] == '\0')) {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  if (issue && opts.credential_id != NULL) {
+    g_printerr ("wyctl: --credential-id is only for --operation rotate\n");
+    return 2;
+  }
+  if (!issue && (opts.credential_id == NULL || opts.credential_id[0] == '\0')) {
+    g_printerr ("wyctl: missing --credential-id\n");
+    return 2;
+  }
+  if (!issue && opts.subject != NULL) {
+    g_printerr ("wyctl: --subject is only for --operation issue\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+      opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_management_client (daemon_url, timeout_ms_arg, tenant,
+          access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  /* An issue names its tenant in the target as well, and the daemon refuses
+   * one that differs from the query's; a rotate's comes from the stored
+   * credential. */
+  const WylClientServiceCredentialOperationReconcileRequest request = {
+    .operation = issue ?
+        WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE :
+        WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE,
+    .request_id = opts.request_id,
+    .subject_id = issue ? opts.subject : NULL,
+    .tenant_id = issue ? tenant : NULL,
+    .old_credential_id = issue ? NULL : opts.credential_id,
+  };
+  g_auto (WylClientServiceCredentialOperationReconcileResult) result = { 0 };
+  wyrelog_error_t rc =
+      wyl_client_service_credential_operation_reconcile_for_tenant (client,
+          tenant, &request, guard_timestamp, opts.guard_loc_class, guard_risk,
+          &result);
+  /* The client answers a conflict as a verdict; it is no verdict on the
+   * target asked about. */
+  if (rc == WYRELOG_E_OK && result.kind ==
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT){
+    g_printerr ("wyctl: service-credential reconcile failed: "
+        "operation_request_conflict\n"
+        "wyctl: request_id %s is bound to a different operation or target; "
+        "do not reuse it for other inputs\n", opts.request_id);
+    return 4;
+  }
+  int exit_rc = fact_remote_exit (client, "service-credential reconcile", rc,
+          "service_credential_reconcile_failed");
+  if (exit_rc == 0)
+    print_service_credential_reconcile_result (opts.request_id,
+        opts.operation, &result);
+  else if (wyctl_remote_outcome_unknown (client, rc))
+    g_printerr ("wyctl: the service-credential reconcile outcome is unknown; "
+        "repeat the same command with the same --request-id and target, "
+        "which is safe, and the line it then prints is the verdict\n");
+  return exit_rc;
+}
+
 static int
 run_service_credential_status (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -7358,6 +7517,8 @@ run_service_credential (const WyctlOptions *global_opts, gint argc,
     return run_service_credential_revoke (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "recover") == 0)
     return run_service_credential_recover (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "reconcile") == 0)
+    return run_service_credential_reconcile (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "status") == 0)
     return run_service_credential_status (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-credential command: %s\n", argv[1]);

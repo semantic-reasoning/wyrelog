@@ -70,6 +70,7 @@ COMMAND_PATHS = {
     ("service-credential", "list"): 2,
     ("service-credential", "revoke"): 2,
     ("service-credential", "recover"): 2,
+    ("service-credential", "reconcile"): 2,
     ("service-credential", "status"): 2,
     ("service-permission-closure", "inspect"): 2,
     ("service-permission-closure", "dry-run"): 2,
