@@ -42564,6 +42564,14 @@ restore_replacement_mark_companion_synced
       matched = FALSE;
     }
   }
+#ifdef __APPLE__
+  /* ADR 0006: a macOS row reaches companion_synced only with durable
+   * evidence. Without it, refuse before the effect or any write, replay
+   * included: a row that advanced before evidence existed cannot gain it. */
+  if (matched && rc == WYRELOG_E_OK
+      && current->darwin_operation_evidence == NULL)
+    rc = WYRELOG_E_POLICY;
+#endif
   if (matched && rc == WYRELOG_E_OK && effect != NULL
       && (g_str_equal (current->phase, "companion_synced")
       || (g_str_equal (current->phase, "reserved")

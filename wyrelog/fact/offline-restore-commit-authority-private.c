@@ -4251,6 +4251,13 @@ commit_snapshot_valid (const WylFactOfflineRestoreJournal *journal,
          row->graph_reconciliation_generation;
 }
 
+/* g_bytes_equal refuses NULL; Linux and Windows rows carry none. */
+static gboolean
+evidence_equal (GBytes *a, GBytes *b)
+{
+  return a == NULL || b == NULL ? a == b : g_bytes_equal (a, b);
+}
+
 static gboolean
 row_equal (const WylPolicyGraphRestoreReplacementRecord *a,
     const WylPolicyGraphRestoreReplacementRecord *b)
@@ -4268,8 +4275,20 @@ row_equal (const WylPolicyGraphRestoreReplacementRecord *a,
          && a->graph_lifecycle_generation == b->graph_lifecycle_generation
          && a->graph_reconciliation_generation == b->graph_reconciliation_generation
          && a->journal_revision == b->journal_revision
-         && a->attempt == b->attempt;
+         && a->attempt == b->attempt
+         && evidence_equal (a->darwin_operation_evidence,
+             b->darwin_operation_evidence);
 }
+
+#ifdef WYL_TEST_HANDLE_SEAMS
+gboolean
+wyl_fact_offline_restore_graph_commit_row_equal_for_test
+  (const WylPolicyGraphRestoreReplacementRecord *a,
+    const WylPolicyGraphRestoreReplacementRecord *b)
+{
+  return row_equal (a, b);
+}
+#endif
 
 static wyrelog_error_t
 check_policy (wyl_policy_store_t *policy,

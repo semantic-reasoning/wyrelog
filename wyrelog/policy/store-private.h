@@ -3673,10 +3673,13 @@ wyrelog_error_t wyl_policy_store_graph_restore_reacquire_v3_prove
   (wyl_policy_store_t *store, const gchar *operation_uuid,
     GBytes *expected_journal,
     const WylPolicyGraphRestoreReplacementRecord *expected_row);
-/* Storage primitive for a future sealed restore driver. The caller must
- * separately prove a durable post-PUBLISH dual filesystem witness under the
- * root lease and quiescence before invoking this CAS. No current mode-A
- * journal path can legally produce the required COMMIT state yet. */
+/* Storage primitive behind sync_with_effect. The caller must separately
+ * prove a durable post-PUBLISH dual filesystem witness under the root lease
+ * and quiescence before invoking this CAS. On macOS a matched row without
+ * darwin_operation_evidence, reserved or already companion_synced, is
+ * refused with WYRELOG_E_POLICY before any effect or write; the caller sets
+ * the evidence first. out_result is unspecified when the return is not
+ * WYRELOG_E_OK. */
 wyrelog_error_t wyl_policy_store_graph_restore_replacement_mark_companion_synced
   (wyl_policy_store_t *store,
     const WylPolicyGraphRestoreReplacementRecord *expected,
@@ -3696,7 +3699,8 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_mark_companion_synced
  *   already carries other bytes, or a journal that is not post-PUBLISH;
  * - STALE or NOT_FOUND: as for mark_companion_synced.
  * On macOS the row must not advance to companion_synced before this
- * commits and is re-read. */
+ * commits and is re-read; mark_companion_synced and sync_with_effect refuse
+ * that on macOS. */
 wyrelog_error_t wyl_policy_store_graph_restore_replacement_set_darwin_evidence
   (wyl_policy_store_t *store,
     const WylPolicyGraphRestoreReplacementRecord *expected,
@@ -3709,7 +3713,8 @@ wyrelog_error_t wyl_policy_store_graph_restore_replacement_set_darwin_evidence
  * root lease/runtime quiescence; it must already hold those authorities and
  * prove the exact post-PUBLISH shape before and after any effect. An effect
  * may survive a failed/ambiguous policy commit and must be retried by fresh
- * observation, never undone by this API. */
+ * observation, never undone by this API. The macOS evidence refusal of
+ * mark_companion_synced runs before the effect. */
 typedef wyrelog_error_t (*WylPolicyGraphRestoreCompanionEffectFunc)
   (const WylPolicyGraphRestoreReplacementRecord *current,
     gpointer user_data);
