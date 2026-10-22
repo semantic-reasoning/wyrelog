@@ -490,6 +490,8 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
         "wyl-readiness-audit-db", g_steal_pointer (&scratch_audit_store),
         cleanup_readiness_store);
   }
+  rc = wyl_daemon_prepare_readiness_users (*out_handle);
+  if (rc != WYRELOG_E_OK) g_clear_object (out_handle);
   return rc;
 }
 

@@ -30,6 +30,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -133,6 +134,26 @@ create_empty_store (const gchar *path)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  /* Explicit human identities used by the offline MFA fixtures. */
+  register_test_human (store, "admin1");
+  register_test_human (store, "alice.cli");
+  register_test_human (store, "alice.empty");
+  register_test_human (store, "alice.gs");
+  register_test_human (store, "alice.gs.control");
+  register_test_human (store, "alice.kill");
+  register_test_human (store, "alice.kill.control");
+  register_test_human (store, "alice.kp");
+  register_test_human (store, "alice.none");
+  register_test_human (store, "alice.online");
+  register_test_human (store, "alice.reset");
+  register_test_human (store, "alice.scan");
+  register_test_human (store, "alice.user");
+  register_test_human (store, "bob.user");
+  register_test_human (store, "carol.user");
+  register_test_human (store, "dave.user");
+  register_test_human (store, "eve.user");
+  register_test_human (store, "frank.user");
+  register_test_human (store, "weird:user.name");
 }
 
 /* Open a store at `path' and run a fact-emitting callback under a
@@ -643,9 +664,9 @@ test_mfa_enroll_url_encodes_subject (void)
   g_autofree gchar *store = g_build_filename (tmp, "policy.sqlite", NULL);
   create_empty_store (store);
 
-  /* Subject deliberately carries reserved chars (`:' and `/') so the
+  /* Subject deliberately carries a reserved colon so the
    * URI builder must percent-encode them per the Key URI Format. */
-  const gchar *subject = "weird:user/name";
+  const gchar *subject = "weird:user.name";
 
   g_autoptr (GString) out = g_string_new (NULL);
   g_autoptr (GString) err = g_string_new (NULL);
@@ -657,12 +678,11 @@ test_mfa_enroll_url_encodes_subject (void)
 
   g_autofree gchar *uri = extract_kv (out->str, "otpauth_uri");
   g_assert_nonnull (uri);
-  /* Raw `:' and `/' from the subject MUST be percent-encoded in the
+  /* Raw `:' from the subject MUST be percent-encoded in the
    * label segment.  The static `wyrelog:' issuer-prefix colon is the
    * lone unescaped `:' permitted by the spec; check that the
    * percent-encoded forms are present. */
   g_assert_nonnull (strstr (uri, "%3A"));
-  g_assert_nonnull (strstr (uri, "%2F"));
 
   WylTotpEnrollment enr = { 0 };
   g_assert_true (lookup_enrollment (store, subject, &enr));

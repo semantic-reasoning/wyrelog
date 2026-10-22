@@ -3,6 +3,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -599,6 +600,7 @@ insert_symbol_row4 (WylHandle *handle, const gchar *relation,
 static wyrelog_error_t
 insert_allow_fixture (WylHandle *handle)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "http-allow-user");
   const gchar *subject = "http-allow-user";
   const gchar *action = "http.allow";
   const gchar *resource = "http-allow-scope";
@@ -628,6 +630,7 @@ insert_allow_fixture (WylHandle *handle)
 static wyrelog_error_t
 insert_not_armed_fixture (WylHandle *handle)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "http-deny-user");
   const gchar *subject = "http-deny-user";
   const gchar *action = "http.not_armed";
   const gchar *resource = "http-deny-scope";
@@ -653,6 +656,7 @@ insert_not_armed_fixture (WylHandle *handle)
 static wyrelog_error_t
 insert_guarded_fixture (WylHandle *handle)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "http-guard-user");
   const gchar *subject = "http-guard-user";
   const gchar *action = "wr.audit.read";
   const gchar *resource = "http-guard-scope";
@@ -1138,19 +1142,19 @@ check_exact_route_probe_framework (SoupServer *server, const gchar *base_url)
   wyl_daemon_http_route_registration_counts_for_test (server, &total,
       &prefixes, &raw_singletons, &exact_singletons);
 #if defined(WYL_HAS_AUDIT) && defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 43;
+  const guint expected_total = 44;
   const guint expected_exact = 39;
 #elif defined(WYL_HAS_FACT_STORE)
-  const guint expected_total = 42;
+  const guint expected_total = 43;
   const guint expected_exact = 38;
 #elif defined(WYL_HAS_AUDIT)
-  const guint expected_total = 39;
+  const guint expected_total = 40;
   const guint expected_exact = 35;
 #else
-  const guint expected_total = 38;
+  const guint expected_total = 39;
   const guint expected_exact = 34;
 #endif
-  if (total != expected_total || prefixes != 4 || raw_singletons != 0
+  if (total != expected_total || prefixes != 5 || raw_singletons != 0
       || exact_singletons != expected_exact
       || total != prefixes + raw_singletons + exact_singletons)
     return 2280;
@@ -1445,8 +1449,10 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
   if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
       != 0)
     return 1908;
-  if (status != 503 || strstr (body, "\"delta_not_ready\"") == NULL)
+  if (status != 503 || strstr (body, "\"delta_not_ready\"") == NULL) {
+    g_printerr ("readyz unexpected status=%u body=%s\n", status, body);
     return 1909;
+  }
 
   g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
@@ -2370,6 +2376,7 @@ check_human_refresh_replay_body_matches (WylHandle *handle,
   /* The fixture keeps skip-MFA closed between checks, so open it for this
    * login and close it again, exactly as the neighbouring checks do. */
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  register_test_human (wyl_handle_get_policy_store (handle), "replay-body-user");
   gint login_rc = send_raw_login (session, "POST", base_url,
           "username=replay-body-user&skip_mfa=true", &status, &login_body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
@@ -5764,6 +5771,7 @@ check_fresh_tenant_activation_grants_and_decides (SoupServer *server,
 
   const gchar *fresh = "wl744-fresh";
   const gchar *admin = "fresh-tenant-admin";
+  register_test_human (store, admin);
   /*
    * #834: a fresh subject.  WYL_TEST_SERVICE_RESOLVER_SUBJECT is disabled
    * earlier in this variant and service_allow_bool needs the principal
@@ -6425,6 +6433,7 @@ check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
     return 1840;
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  register_test_human (wyl_handle_get_policy_store (handle), "rotation-user");
   gint rc = send_raw_login (session, "POST", base_url,
           "username=rotation-user&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
@@ -6483,6 +6492,8 @@ static gint
 check_raw_login_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "login-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "logout-user");
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
@@ -6924,6 +6935,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  register_test_human (wyl_handle_get_policy_store (handle), "bearer-logout-user");
   rc = send_raw_login (session, "POST", base_url,
           "username=bearer-logout-user&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
@@ -7835,6 +7847,8 @@ check_policy_write_actual_route_finalize_fault
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return result;
+  register_test_human (wyl_handle_get_policy_store (handle), "cleanup-route-secret-actor");
+  register_test_human (wyl_handle_get_policy_store (handle), "cleanup-post-fault-login");
   WylDaemonOptions options = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
@@ -8257,6 +8271,7 @@ policy_write_cancel_fixture_setup (PolicyWriteCancelFixture *fixture,
 {
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &fixture->handle) != WYRELOG_E_OK)
     return base_error;
+  register_test_human (wyl_handle_get_policy_store (fixture->handle), actor);
   WylDaemonOptions options = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
@@ -9297,6 +9312,9 @@ check_valid_exact_auth_alias_canaries (SoupServer *server, WylHandle *handle,
   gchar admin_session[WYL_ID_STRING_BUF] = { 0 };
   g_autofree gchar *admin_access = NULL;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "exact-route-admin");
+  register_test_human (store, "exact-enroll-target");
+  register_test_human (store, "exact-refresh-user");
   if (wyl_id_new (&admin_id) != WYRELOG_E_OK
       || wyl_id_format (&admin_id, admin_session,
       sizeof admin_session) != WYRELOG_E_OK
@@ -9501,6 +9519,7 @@ run_tenant_recovery_slot_detach_interleaving (SoupServer *server,
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return 22480;
+  register_test_human (store, "test-tenant-owner");
   if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
       FALSE) != WYRELOG_E_OK)
     return 22485;
@@ -10471,6 +10490,7 @@ check_unknown_tenant_create_outcome_isolated (void)
     (&descriptor_alloc_before, &descriptor_free_before);
   WylDaemonTenantCreateOutcomeEffect effect =
       WYL_DAEMON_TENANT_CREATE_OUTCOME_REPAIR_ABSENT_PAIR;
+  register_test_human (wyl_handle_get_policy_store (handle), "test-tenant-owner");
   if (wyl_daemon_http_configure_tenant_for_test (server,
       "tenant-outcome-unknown", TRUE, FALSE) != WYRELOG_E_OK
       || !tenant_create_outcome_bundle_new ("http-policy-admin",
@@ -10657,6 +10677,7 @@ check_concurrent_permission_grants_serialize (WylHandle *handle,
   g_autofree gchar *perm_name = g_strdup_printf ("site concurrent read %u",
           iteration);
 
+  register_test_human (store, subject);
   /* permissions.perm_name is also UNIQUE; vary it with the iteration so the
    * stress loop does not turn its own setup into a false return-204 failure. */
   if (wyl_policy_store_upsert_permission (store, perm, perm_name, "basic")
@@ -11039,6 +11060,8 @@ static gint
 check_policy_permission_mutation_contract (SoupServer *server,
     WylHandle *handle, WylClient *client, const gchar *base_url)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "http-policy-admin");
+  register_test_human (wyl_handle_get_policy_store (handle), "http-policy-racer");
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-policy-admin") != WYRELOG_E_OK)
     return 123;
@@ -11576,6 +11599,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 2236;
   g_clear_pointer (&body, g_free);
 
+  register_test_human (store, "tenant-owner");
   gboolean legacy_created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-legacy", "tenant-owner",
       &legacy_created) != WYRELOG_E_OK || !legacy_created
@@ -11683,6 +11707,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
   g_clear_pointer (&body, g_free);
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
   rc = send_raw_login (session, "POST", base_url,
           "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
@@ -11711,6 +11736,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 197;
   g_clear_pointer (&body, g_free);
 
+  register_test_human (store, "tenant-target");
   g_autofree gchar *tenant_grant_query =
       g_strdup_printf ("subject=tenant-target&perm=site.policy.read"
           "&scope=tenant-a&tenant=%s&session_token=%s"
@@ -11747,6 +11773,8 @@ check_policy_permission_mutation_contract (SoupServer *server,
           base_url, transition_mfa_token, "tenant-a", 2261);
   if (arm_creator_rc != 0)
     return arm_creator_rc;
+  register_test_human (store, "creator-role-target");
+  register_test_human (store, "changed-role-target");
   g_autofree gchar *tenant_role_grant_query =
       g_strdup_printf ("subject=creator-role-target&role=site.creator-role"
           "&scope=tenant-a&tenant=%s&session_token=%s&guard_timestamp=123"
@@ -12124,6 +12152,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
       return 213 + (gint) i;
     g_clear_pointer (&body, g_free);
   }
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
   rc = send_raw_login (session, "POST", base_url,
           "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
   if (rc != 0)
@@ -12505,6 +12534,9 @@ check_policy_permission_mutation_contract (SoupServer *server,
   if (permission_state_exists (handle, "state-target", "site.policy.read",
       "tenant-a"))
     return 2682;
+  register_test_human (store, "state-target");
+  register_test_human (store, "client-state-target");
+  register_test_human (store, "target");
   g_autofree gchar *transition_request_id = NULL;
   rc = send_raw_policy_mutation_full (session, "POST", base_url,
           "/policy/permissions/transition", transition_allowed_query, &status,
@@ -12534,6 +12566,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 179;
   g_clear_pointer (&body, g_free);
 
+  register_test_human (store, "reset-target");
   /* Exercise the second FSM edge into armed (cooldown + reset).  A direct
    * grant leaves the target's protected permission dormant until this state
    * transition succeeds. */
@@ -12876,6 +12909,7 @@ check_policy_permission_mutation_contract (SoupServer *server,
 #endif
   g_clear_pointer (&body, g_free);
 
+  register_test_human (store, "bearer-target");
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
           "/policy/permissions/grant",
           "subject=bearer-target&perm=site.policy.read&scope=tenant-a"
@@ -12890,6 +12924,12 @@ check_policy_permission_mutation_contract (SoupServer *server,
     return 166;
   g_clear_pointer (&body, g_free);
 
+  register_test_human (store, "builtin-target");
+  register_test_human (store, "changed-target");
+  register_test_human (store, "changed-state-target");
+  register_test_human (store, "role-target");
+  register_test_human (store, "builtin-role-target");
+  register_test_human (store, "race-target");
   g_autofree gchar *builtin_grant_query =
       g_strdup_printf ("subject=builtin-target&perm=wr.stream.read"
           "&scope=tenant-a&session_token=%s&guard_timestamp=123"
@@ -13348,6 +13388,7 @@ check_audit_tenant_scoped_reader_denied (WylHandle *handle,
     const gchar *base_url)
 {
   const gchar *subject = "http-audit-tenant-reader";
+  register_test_human (wyl_handle_get_policy_store (handle), subject);
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK
       || grant_audit_read (handle, subject, "tenant-a") != WYRELOG_E_OK)
@@ -13861,6 +13902,7 @@ check_audit_query_session_token_fallback (WylHandle *handle,
     const gchar *base_url)
 {
   const gchar *subject = "http-audit-session-only";
+  register_test_human (wyl_handle_get_policy_store (handle), subject);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   WylTotpEnrollment enrollment = { 0 };
   enrollment.subject_id = g_strdup (subject);
@@ -14135,6 +14177,8 @@ check_audit_redacts_live_session_ids (WylHandle *handle, SoupServer *server,
     const gchar *reader_session_token)
 {
   wyl_handle_set_mfa_validator (handle, wyl_mfa_validator_totp, NULL);
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-leak-victim");
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-leak-pending");
   if (enroll_audit_redaction_victim (handle, "audit-leak-victim") != 0
       || enroll_audit_redaction_victim (handle, "audit-leak-pending") != 0)
     return 12601;
@@ -14482,6 +14526,7 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1923;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &tenant_created)
       != WYRELOG_E_OK)
@@ -14802,6 +14847,7 @@ prepare_service_token_subject (WylHandle *handle, const gchar *subject_id)
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (handle), "tenant-a",
       "tenant-owner", &created), ==,
@@ -18268,6 +18314,9 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   policy_store = wyl_handle_get_policy_store (handle);
+  register_test_human (policy_store, "human-principal-admin");
+  register_test_human (policy_store, "test-tenant-owner");
+  register_test_human (policy_store, "tenant-owner");
   /* The datalog allow rules require an authenticated principal and an active
    * session (templates/access/decision.dl); the session seed only marks the
    * in-memory session active, so set both facts here.  The session-state
@@ -19358,7 +19407,10 @@ service_denial_env_init (ServiceDenialEnv *env, gboolean session_active,
       env->session_token, "human-principal-admin", &env->access_token))
     return 2110;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  register_test_human (store, "tenant-owner");
+  register_test_human (store, "human-principal-admin");
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &tenant_created)
       != WYRELOG_E_OK || !tenant_created)
@@ -19683,6 +19735,11 @@ policy_write_owner_fault_prepare_authority (ServiceDenialEnv *env)
     "wr.policy.grant_role",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env->handle);
+  register_test_human (store, "owner-mfa-target");
+  register_test_human (store, "owner-permission-target");
+  register_test_human (store, "owner-transition-target");
+  register_test_human (store, "owner-role-target");
+  register_test_human (store, "test-tenant-owner");
   for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++) {
     wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
             "human-principal-admin", permissions[i], WYL_TENANT_DEFAULT);
@@ -20782,6 +20839,7 @@ check_service_management_self_arm_bundle_contradictory_poison (void)
         "human-principal-admin", perm_a, env.session_token)
         != WYRELOG_E_OK) {
       service_denial_env_clear (&env);
+      g_printerr ("self arm revoke: %s\n", sqlite3_errmsg (wyl_policy_store_get_db (store)));
       return 2800;
     }
     if (wyl_policy_store_set_permission_state (store, "human-principal-admin",
@@ -20917,6 +20975,7 @@ check_mfa_enroll_start_subject_identity (void)
   gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
   wyl_policy_store_t *store = rc == 0
       ? wyl_handle_get_policy_store (env.handle) : NULL;
+  if (rc == 0) register_test_human (store, "direct-grant-user");
   /* The enrolling operator: an armed wr.policy.write at the system tenant,
    * which is what /auth/mfa/enroll/* authorizes against. */
   if (rc == 0
@@ -21016,15 +21075,14 @@ check_mfa_enroll_start_subject_identity (void)
     wyl_totp_enrollment_clear (&enrollment);
   }
 
-  /* #1316: an unauthenticated /auth/login for a name nobody granted
-   * anything must not make that name enrollable.  The login does leave a
-   * principal_states row -- assert it, or this case proves nothing. */
+  /* An unknown login is denied without creating principal state and cannot
+   * make the subject enrollable. */
   if (rc == 0) {
     guint status = 0;
     g_autofree gchar *body = NULL;
     if (send_raw_login (env.session, "POST", env.base_url,
         "username=login-only-user&tenant=__wr_default", &status, &body) != 0
-        || status != 200) {
+        || status != 403 || g_strcmp0 (body, "{\"error\":\"login_denied\"}") != 0) {
       g_printerr ("anonymous login: %u %s\n", status,
           body != NULL ? body : "(null)");
       rc = 2958;
@@ -21033,7 +21091,7 @@ check_mfa_enroll_start_subject_identity (void)
     gboolean state_found = FALSE;
     if (rc == 0 && (wyl_policy_store_get_principal_state (store,
         "login-only-user", &state, &state_found) != WYRELOG_E_OK
-        || !state_found))
+        || state_found))
       rc = 2959;
   }
   if (rc == 0) {
@@ -21065,6 +21123,7 @@ check_skip_mfa_bypass_revoke (void)
   gint rc = service_denial_env_init (&env, TRUE, FALSE, FALSE);
   wyl_policy_store_t *store = rc == 0
       ? wyl_handle_get_policy_store (env.handle) : NULL;
+  if (rc == 0) register_test_human (store, "bypass-subject");
   /* The revoking operator: wr.policy.write armed at the system tenant. */
   if (rc == 0
       && (wyl_policy_store_grant_direct_permission (store,
@@ -22030,6 +22089,9 @@ check_service_management_caller_and_refresh_matrix (void)
     goto out;
   }
   store = wyl_handle_get_policy_store (env.handle);
+  register_test_human (store, "tenant-local-admin");
+  register_test_human (store, "skip-mfa-admin");
+  register_test_human (store, "refresh-mfa-admin");
   if (wyl_policy_store_set_principal_state (store, "tenant-local-admin",
       "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_set_principal_state (store, "skip-mfa-admin",
@@ -23529,6 +23591,7 @@ check_tenant_gate_codes_contract (void)
    * 400 tenant_invalid, because it treated every non-default tenant as
    * unknown.
    */
+  register_test_human (wyl_handle_get_policy_store (handle), "test-tenant-owner");
   if (wyl_daemon_http_configure_tenant_for_test (http.server,
       "tenant-gate-live", TRUE, FALSE) != WYRELOG_E_OK) {
     result = 1909;
@@ -23625,6 +23688,7 @@ check_relogin_binds_current_authn_epoch (WylHandle *handle,
   if (store == NULL)
     return 22701;
 
+  register_test_human (store, subject);
   /* First login: this session drives unverified --login_skip_mfa-->
    * authenticated, so it wins the epoch it is bound to. */
   g_autoptr (WylClient) winner = NULL;
@@ -23827,6 +23891,8 @@ check_session_token_authn_contract (void)
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49", \
       (name), WYL_TENANT_DEFAULT, (sess))
 
+  register_test_human (wyl_handle_get_policy_store (handle), "st-admin");
+  register_test_human (wyl_handle_get_policy_store (handle), "st-erin");
   /* The winning skip-MFA login: it drives the principal to authenticated,
    * so its session is bound to the epoch it won. */
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
@@ -24188,6 +24254,7 @@ check_tenant_delete_contract (void)
   g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   gboolean created = FALSE;
+  register_test_human (store, "human-principal-admin");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "owner-1339",
       "human-principal-admin", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_session_state (store, "owner-1339", "active"), ==, WYRELOG_E_OK);
@@ -24201,6 +24268,7 @@ check_tenant_delete_contract (void)
   g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "owner-1339", &authority), ==, WYRELOG_E_OK);
   g_assert_cmpstr (authority->sealed_by_capacity, ==, "system_admin");
   wyl_policy_tenant_authority_record_free (authority);
+  register_test_human (store, "other-holder");
   g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "other-holder", "wr.system_admin", "owner-1339"), ==, WYRELOG_E_OK);
   tenant_ownership_request (&env, env.access_token, "delete", NULL, NULL, 409);
   g_assert_cmpint (wyl_policy_store_revoke_role_membership (store, "other-holder", "wr.system_admin", "owner-1339"), ==, WYRELOG_E_OK);
@@ -24223,6 +24291,7 @@ check_tenant_ownership_contract (void)
   g_assert_cmpint (service_denial_env_init (&env, TRUE, FALSE, FALSE), ==, 0);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
   gboolean created = FALSE;
+  register_test_human (store, "human-principal-admin");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "owner-1339",
       "human-principal-admin", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_session_state (store, "owner-1339", "active"), ==, WYRELOG_E_OK);
@@ -24237,6 +24306,8 @@ check_tenant_ownership_contract (void)
   g_autofree gchar *bob = NULL, *bob_refresh = NULL;
   g_autofree gchar *other = NULL, *other_refresh = NULL;
   g_autofree gchar *nonmfa = NULL, *nonmfa_refresh = NULL;
+  register_test_human (store, "owner-bob");
+  register_test_human (store, "owner-other");
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, "owner-bob", "authenticated"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_set_principal_state (store, "owner-other", "authenticated"), ==, WYRELOG_E_OK);
   g_assert_true (seed_human_tokens_with_assurance (env.http.server, bob_id,
@@ -24711,6 +24782,7 @@ check_fact_status_tenant_gate_contract (void)
       result = 238;
       goto cleanup;
     }
+    register_test_human (wyl_handle_get_policy_store (handle), "test-tenant-owner");
     if (wyl_daemon_http_configure_tenant_for_test (http.server,
         "tenant-fact-gate", TRUE, FALSE) != WYRELOG_E_OK) {
       result = 238;
@@ -24749,6 +24821,7 @@ check_fact_status_tenant_gate_contract (void)
      * engine reload is needed -- both gate predicates read the policy store
      * directly rather than a cached pair.
      */
+    register_test_human (wyl_handle_get_policy_store (handle), "test-tenant-owner");
     if (wyl_daemon_http_configure_tenant_for_test (http.server,
         "tenant-fact-gate", FALSE, TRUE) != WYRELOG_E_OK) {
       result = 240;
@@ -24794,6 +24867,7 @@ check_bearer_challenge_contract (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 210;
+  register_test_human (wyl_handle_get_policy_store (handle), "login-user");
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
         (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK
@@ -25618,6 +25692,7 @@ service_variant_checks (int argc, char **argv)
     result = 2667;
     goto cleanup;
   }
+  register_test_human (wyl_handle_get_policy_store (handle), "test-tenant-owner");
   gint service_resolver_rc = check_service_bearer_resolver_contract
         (http.server);
   if (service_resolver_rc != 0) {
@@ -26008,6 +26083,7 @@ audit_variant_checks (void)
     return raw_rc;
 
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  register_test_human (wyl_handle_get_policy_store (handle), "http-audit-user");
   if (wyl_client_login_skip_mfa (client, "http-audit-user") != WYRELOG_E_OK)
     return 84;
   g_autofree gchar *audit_session_token = wyl_client_dup_session_token (client);

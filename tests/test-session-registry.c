@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 
@@ -29,6 +30,7 @@ check_login_assigns_nonzero_sid (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -45,6 +47,8 @@ check_two_logins_distinct_sids (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 10;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
+  register_test_human (wyl_handle_get_policy_store (handle), "bob");
 
   g_autoptr (WylSession) a = login_one (handle, "alice");
   g_autoptr (WylSession) b = login_one (handle, "bob");
@@ -64,6 +68,7 @@ check_lookup_returns_registered_session (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 20;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -113,6 +118,7 @@ check_lookups_isolated_per_handle (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &hb) != WYRELOG_E_OK)
     return 61;
 
+  register_test_human (wyl_handle_get_policy_store (ha), "alice");
   g_autoptr (WylSession) sa = login_one (ha, "alice");
   if (sa == NULL)
     return 62;
@@ -129,6 +135,7 @@ check_handle_finalize_releases_registered_sessions (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   WylSession *session = login_one (handle, "alice");
   if (session == NULL) {
@@ -167,6 +174,7 @@ check_logout_tombstones_registry_entry (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 80;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   WylSession *session = login_one (handle, "alice");
   if (session == NULL)
@@ -202,6 +210,7 @@ check_audit_classification_is_not_authority (void)
   g_autoptr (WylHandle) handle = NULL;
   g_autoptr (WylHandle) other = NULL;
   g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-registry");
   g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &other), ==, WYRELOG_E_OK);
   const gchar *unknown = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
   g_autofree gchar *ordinary = wyl_audit_scope_handle (handle, unknown);

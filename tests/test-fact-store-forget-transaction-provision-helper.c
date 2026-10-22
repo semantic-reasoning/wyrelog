@@ -156,6 +156,16 @@ main (int argc, char **argv)
   wyrelog_error_t rc = wyl_policy_store_open (policy_path, &store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_create_schema (store);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_begin_mutation (store);
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_policy_store_user_register (store, "tenant-owner");
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_policy_store_commit_mutation (store);
+      if (rc != WYRELOG_E_OK)
+        wyl_policy_store_rollback_mutation (store);
+    }
+  }
   if (rc == WYRELOG_E_OK && !seed_graph (store, tenant_id, graph_id))
     rc = WYRELOG_E_POLICY;
   const WylPolicyGraphProvisioningInput input = {

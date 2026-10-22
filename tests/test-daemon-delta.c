@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <string.h>
 
@@ -497,6 +498,7 @@ check_session_audit_handles (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-handle-user");
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-handle-user");
   g_autoptr (WylSession) session = NULL;
@@ -615,6 +617,7 @@ check_reopened_session_scope_audit (void)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-restart-user");
   wyl_login_req_set_username (login, "audit-restart-user");
   g_autoptr (WylSession) session = NULL;
   g_assert_cmpint (wyl_session_login (handle, login, &session), ==, WYRELOG_E_OK);

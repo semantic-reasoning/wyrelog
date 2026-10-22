@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "wyrelog/fact/offline-restore-stage-replay-private.h"
 #include "test-exit-status.h"
 #include "fact-test-support.h"
@@ -98,6 +99,7 @@ fixture_init_internal (Fixture *f, gboolean drop_projection, gboolean sealed,
   g_assert_cmpint (wyl_policy_store_open (NULL, &f->policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (f->policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (f->policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (f->policy, tenant,
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);

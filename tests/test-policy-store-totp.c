@@ -26,6 +26,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <stdint.h>
@@ -148,6 +149,7 @@ check_totp_enrollment_insert_lookup_round_trip (void)
     return 41;
 
   WylTotpEnrollment enr = { 0 };
+  register_test_human (store, "alice.root");
   enr.subject_id = g_strdup ("alice.root");
   fill_seed (enr.secret, 0x10);
   enr.last_verified_step = INT64_MIN;
@@ -248,6 +250,7 @@ check_totp_enrollment_delete_then_lookup_miss (void)
     return 71;
 
   WylTotpEnrollment enr = { 0 };
+  register_test_human (store, "carol.svc");
   enr.subject_id = g_strdup ("carol.svc");
   fill_seed (enr.secret, 0x20);
   enr.last_verified_step = INT64_MIN;
@@ -305,6 +308,7 @@ check_totp_enrollment_update_step_durability (void)
       return 83;
 
     WylTotpEnrollment enr = { 0 };
+    register_test_human (store, "bob.admin");
     enr.subject_id = g_strdup ("bob.admin");
     fill_seed (enr.secret, 0x30);
     enr.last_verified_step = INT64_MIN;
@@ -369,6 +373,7 @@ check_totp_enrollment_two_subjects_isolated (void)
     return 101;
 
   WylTotpEnrollment enr_a = { 0 };
+  register_test_human (store, "subject.a");
   enr_a.subject_id = g_strdup ("subject.a");
   fill_seed (enr_a.secret, 0x40);
   enr_a.last_verified_step = INT64_MIN;
@@ -381,6 +386,7 @@ check_totp_enrollment_two_subjects_isolated (void)
   wyl_totp_enrollment_clear (&enr_a);
 
   WylTotpEnrollment enr_b = { 0 };
+  register_test_human (store, "subject.b");
   enr_b.subject_id = g_strdup ("subject.b");
   fill_seed (enr_b.secret, 0x70);
   enr_b.last_verified_step = INT64_MIN;
@@ -447,37 +453,21 @@ check_totp_enrollment_utf8_subject_id (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 121;
 
-  /* U+00E9 LATIN SMALL LETTER E WITH ACUTE plus a CJK ideograph; the
-   * helpers must round-trip the bytes verbatim through SQLite TEXT. */
+  /* Non-ASCII legacy subjects cannot become active registered humans. */
   const gchar *subject = "user.\xc3\xa9.\xe4\xb8\xad";
-
   WylTotpEnrollment enr = { 0 };
   enr.subject_id = g_strdup (subject);
   fill_seed (enr.secret, 0x55);
   enr.last_verified_step = INT64_MIN;
   enr.enrolled_at = 1700000500;
-  if (wyl_policy_store_totp_enrollment_insert (store, &enr) != WYRELOG_E_OK) {
-    wyl_totp_enrollment_clear (&enr);
-    return 122;
-  }
+  wyrelog_error_t rc = wyl_policy_store_totp_enrollment_insert (store, &enr);
   wyl_totp_enrollment_clear (&enr);
-
+  if (rc == WYRELOG_E_OK) return 122;
   WylTotpEnrollment out = { 0 };
   gboolean found = FALSE;
-  if (wyl_policy_store_totp_enrollment_lookup (store, subject, &out, &found)
-      != WYRELOG_E_OK) {
-    wyl_totp_enrollment_clear (&out);
-    return 123;
-  }
-  if (!found) {
-    wyl_totp_enrollment_clear (&out);
-    return 124;
-  }
-  if (g_strcmp0 (out.subject_id, subject) != 0) {
-    wyl_totp_enrollment_clear (&out);
-    return 125;
-  }
+  rc = wyl_policy_store_totp_enrollment_lookup (store, subject, &out, &found);
   wyl_totp_enrollment_clear (&out);
+  if (rc != WYRELOG_E_OK || found) return 123;
   return 0;
 }
 
@@ -509,6 +499,7 @@ check_totp_enrollment_rejects_invalid_args (void)
     return 141;
 
   WylTotpEnrollment enr = { 0 };
+  register_test_human (store, "victim");
   enr.subject_id = g_strdup ("victim");
   fill_seed (enr.secret, 0x88);
   if (wyl_policy_store_totp_enrollment_insert (NULL, &enr)
@@ -577,6 +568,7 @@ check_totp_enrollment_insert_replaces_existing (void)
     return 161;
 
   WylTotpEnrollment first = { 0 };
+  register_test_human (store, "rotator");
   first.subject_id = g_strdup ("rotator");
   fill_seed (first.secret, 0xA0);
   first.last_verified_step = INT64_MIN;
@@ -594,6 +586,7 @@ check_totp_enrollment_insert_replaces_existing (void)
     return 163;
 
   WylTotpEnrollment second = { 0 };
+  register_test_human (store, "rotator");
   second.subject_id = g_strdup ("rotator");
   fill_seed (second.secret, 0xB0);
   second.last_verified_step = INT64_MIN;
@@ -748,6 +741,7 @@ check_totp_enrollment_advance_step_compare_and_advance (void)
     return 191;
 
   WylTotpEnrollment enr = { 0 };
+  register_test_human (store, "cas.subject");
   enr.subject_id = g_strdup ("cas.subject");
   fill_seed (enr.secret, 0x40);
   enr.last_verified_step = 100;

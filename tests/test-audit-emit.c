@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -450,6 +451,7 @@ check_service_lifecycle_audit_reconciliation (void)
     return 702;
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
       "sla-tenant", "tenant-owner", &created) != WYRELOG_E_OK)
     return 703;
@@ -1094,6 +1096,7 @@ check_live_audit_projection_for_action (WylHandle *handle, const gchar *action,
 static wyrelog_error_t
 insert_not_armed_decide_fixture (WylHandle *handle)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-user");
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
           "wr.audit-role", "wr.audit-permission");
   if (rc != WYRELOG_E_OK)
@@ -1115,6 +1118,7 @@ insert_not_armed_decide_fixture (WylHandle *handle)
 static wyrelog_error_t
 insert_allow_decide_fixture (WylHandle *handle)
 {
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-allow-user");
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
           "wr.audit-allow-role", "wr.audit-allow");
   if (rc != WYRELOG_E_OK)
@@ -2299,6 +2303,7 @@ check_permission_grant_rolls_back_on_store_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 57;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-grant-rollback-user");
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -2341,6 +2346,7 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 246;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-role-rollback-user");
   if (seed_audit_role_permission (handle, "site.audit-role-rollback",
       "site.audit-role-rollback.read") != 0) {
     g_object_unref (handle);
@@ -2388,6 +2394,7 @@ check_permission_grant_survives_runtime_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 62;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-grant-runtime-user");
 
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
@@ -2441,6 +2448,7 @@ check_login_survives_runtime_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 68;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-login-runtime-user");
 
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
@@ -2500,6 +2508,7 @@ check_session_transition_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 60;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-session-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-session-user");
@@ -2573,6 +2582,7 @@ check_login_session_state_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-login-session-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-login-session-user");
@@ -2641,6 +2651,7 @@ check_principal_transition_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 80;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-principal-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-principal-user");
@@ -2709,6 +2720,7 @@ check_login_principal_state_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 90;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-login-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-login-user");
@@ -2772,6 +2784,7 @@ check_login_skip_mfa_emits_canonical_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 100;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-skip-mfa-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-skip-mfa-user");
@@ -2835,6 +2848,7 @@ check_denied_login_skip_mfa_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-skip-mfa-denied-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-skip-mfa-denied-user");
@@ -2903,6 +2917,7 @@ check_denied_login_skip_mfa_reports_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 225;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-skip-mfa-fail-user");
 
   wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
       WYRELOG_E_INTERNAL);
@@ -2953,6 +2968,7 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 230;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-skip-mfa-store-fail-user");
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -3032,6 +3048,7 @@ check_login_session_state_rolls_back_on_store_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 236;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-session-store-fail-user");
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -3112,6 +3129,7 @@ check_permission_grant_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 120;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-grant-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-grant-user");
@@ -3174,6 +3192,7 @@ check_permission_grant_actor_emits_audit_subject (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1290;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-grant-target");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-grant-target");
@@ -3220,6 +3239,7 @@ check_permission_revoke_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 130;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-revoke-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-revoke-user");
@@ -3310,6 +3330,7 @@ check_role_grant_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-role-grant-user");
   if (seed_audit_role_permission (handle, "site.audit-role-grant",
       "site.audit-role-grant.read") != 0) {
     g_object_unref (handle);
@@ -3378,6 +3399,7 @@ check_role_revoke_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-role-revoke-user");
   if (seed_audit_role_permission (handle, "site.audit-role-revoke",
       "site.audit-role-revoke.read") != 0) {
     g_object_unref (handle);
@@ -3666,6 +3688,7 @@ check_general_publication_rejects_nested_engine_sessions (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 515;
+  register_test_human (wyl_handle_get_policy_store (handle), "nested-publication-user");
   g_autoptr (WylEngineSession) outer = wyl_engine_session_acquire (handle);
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "nested-publication-user");
@@ -3908,6 +3931,7 @@ check_denied_login_skip_mfa_projects_audit_fact (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 217;
+  register_test_human (wyl_handle_get_policy_store (handle), "audit-live-skip-mfa-denied-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-live-skip-mfa-denied-user");

@@ -31,11 +31,11 @@ typedef enum
   WYL_DAEMON_READINESS_VERIFY_FAULT_REQUEST_WRONG,
 } WylDaemonReadinessVerifyFault;
 void wyl_daemon_check_set_policy_audit_fault_once_for_test
-    (WylDaemonReadinessAuditFault fault);
+  (WylDaemonReadinessAuditFault fault);
 void wyl_daemon_check_set_policy_audit_verify_fault_once_for_test
-    (WylDaemonReadinessVerifyFault fault);
+  (WylDaemonReadinessVerifyFault fault);
 wyrelog_error_t wyl_daemon_check_policy_audit_facts_ready_for_test
-    (WylHandle * handle, gchar ** out_id, gint64 * out_created_at_us,
+  (WylHandle * handle, gchar ** out_id, gint64 * out_created_at_us,
     WylCommittedPublicationStage * out_stage, gboolean * out_verify_exact);
 #endif
 wyrelog_error_t wyl_daemon_check_audit_sink_ready (WylHandle * handle);
@@ -52,3 +52,6 @@ wyrelog_error_t wyl_daemon_emit_start_event (WylHandle * handle);
 wyrelog_error_t wyl_daemon_emit_bootstrap_admin_audit (WylHandle * handle,
     const gchar * subject_id, gboolean applied);
 int wyl_daemon_run_checks (WylHandle * handle);
+
+/* Only isolated readiness handles and disposable test fixtures. */
+wyrelog_error_t wyl_daemon_prepare_readiness_users (WylHandle *handle);

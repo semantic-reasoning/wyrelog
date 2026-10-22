@@ -46,6 +46,7 @@ FUNCTIONS = (
     "mfa_enroll_subject_exists", "lookup_fact_graph",
     "tenant_create_handler", "tenant_seal_handler", "tenant_unseal_handler",
     "tenant_delete_handler", "tenant_delete_execute", "tenant_delete_authorize", "tenant_delete_validate",
+    "users_handler", "user_management_authorize", "user_management_snapshot",
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
     "policy_role_grant_handler", "policy_role_revoke_handler",
     "service_credential_operation_reconcile_execute",
@@ -158,6 +159,7 @@ ALLOW_ACQUIRE = {
     "service_management_authority_arm_handler",
 }
 ALLOW_MUTATORS = ALLOW_ACQUIRE | {
+    "users_handler",  # reusable human lifecycle coordinator owns WRITE
     "tenant_delete_execute",  # reusable handle coordinator owns WRITE
 
     "mutate_tenant_lifecycle_publication", "mutate_tenant_transfer", "tenant_recovery_repair_with_write",
@@ -984,6 +986,7 @@ def validate_terminal_write_contract(defs):
         raise GuardError("OK response must finalize exactly once")
 
     raw_release_owners={
+        "user_management_snapshot",  # authorized read snapshot under WRITE; checks terminal release
         "service_auth_invalidation_execute_locked",
         "service_auth_retire_exact", "service_auth_retire_due",
         "wyl_daemon_http_latch_service_unavailable_for_test",

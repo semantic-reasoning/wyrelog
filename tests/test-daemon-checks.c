@@ -118,6 +118,7 @@ check_login_skip_mfa_ready_rejects_production_path (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 10;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_daemon_check_login_skip_mfa_ready (handle) != WYRELOG_E_OK)
     return 11;
 
@@ -157,6 +158,7 @@ check_login_skip_mfa_ready_allows_development_path (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
         (handle), "development") != WYRELOG_E_OK)
     return 31;
@@ -192,6 +194,7 @@ check_login_skip_mfa_ready_allows_policy_path (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 40;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
         (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
@@ -228,6 +231,7 @@ check_login_skip_mfa_ready_allows_role_policy_path (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 46;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_role (store, "wyrelogd-skip-mfa-role",
       "skip mfa role") != WYRELOG_E_OK)
@@ -276,6 +280,7 @@ check_policy_audit_facts_ready_loads_read_engine (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 50;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_daemon_check_policy_audit_facts_ready (handle) != WYRELOG_E_OK)
     return 51;
 
@@ -363,6 +368,7 @@ check_direct_permission_grant_ready_allows_decide (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_daemon_check_direct_permission_grant_ready (handle) != WYRELOG_E_OK)
     return 71;
 
@@ -388,6 +394,7 @@ check_permission_state_transition_ready_allows_decide (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 74;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_daemon_check_permission_state_transition_ready (handle)
       != WYRELOG_E_OK)
     return 75;
@@ -435,6 +442,7 @@ check_unsafe_service_closure_latches_service_auth_at_reload (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 90;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
 
@@ -498,6 +506,7 @@ check_snapshot_reload_ready_is_idempotent (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   if (wyl_daemon_check_policy_snapshot_reload_ready (handle) != WYRELOG_E_OK)
     return 111;
   if (wyl_daemon_check_policy_snapshot_reload_ready (handle) != WYRELOG_E_OK)

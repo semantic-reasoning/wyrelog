@@ -27,6 +27,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <stdint.h>
@@ -243,6 +244,7 @@ check_fifth_failure_publishes_and_verifies (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 300;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.lock-publish");
   if (login_mfa_required_session (handle, "seam.lock-publish", &session) != 0)
     return 301;
   if (seed_enrollment (handle, "seam.lock-publish") != 0)
@@ -287,6 +289,7 @@ check_fifth_failure_publication_fault_fails_closed (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 320;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.lock-fault");
   if (login_mfa_required_session (handle, "seam.lock-fault", &session) != 0)
     return 321;
   if (seed_enrollment (handle, "seam.lock-fault") != 0)
@@ -336,6 +339,7 @@ check_auto_unlock_publishes_and_verifies (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 340;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.unlock-publish");
   if (login_mfa_required_session (handle, "seam.unlock-publish", &session) != 0)
     return 341;
   if (seed_enrollment (handle, "seam.unlock-publish") != 0)
@@ -380,6 +384,7 @@ check_auto_unlock_not_elapsed_is_policy (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 360;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.in-window");
   if (login_mfa_required_session (handle, "seam.in-window", &session) != 0)
     return 361;
   if (seed_enrollment (handle, "seam.in-window") != 0)
@@ -413,6 +418,7 @@ check_auto_unlock_publication_fault_fails_closed (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 370;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.unlock-fault");
   if (login_mfa_required_session (handle, "seam.unlock-fault", &session) != 0)
     return 371;
   if (seed_enrollment (handle, "seam.unlock-fault") != 0)
@@ -445,6 +451,7 @@ check_first_four_failures_do_not_republish (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 380;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "seam.no-republish");
   if (login_mfa_required_session (handle, "seam.no-republish", &session) != 0)
     return 381;
   if (seed_enrollment (handle, "seam.no-republish") != 0)

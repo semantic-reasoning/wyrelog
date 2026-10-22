@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -85,6 +86,7 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
+  register_test_human (store_of (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
       "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -215,6 +217,8 @@ fixture_init (Fixture *fixture)
   };
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture->handle),
       ==, WYRELOG_E_OK);
+  register_test_human (wyl_handle_get_policy_store (fixture->handle), "admin");
+  register_test_human (wyl_handle_get_policy_store (fixture->handle), "operator");
 }
 
 /* Mock owner publication backend; the non-failure subset drives a fresh ISSUE

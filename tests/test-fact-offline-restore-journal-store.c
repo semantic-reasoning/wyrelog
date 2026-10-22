@@ -1,3 +1,4 @@
+#include "human-user-test-support.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
 
@@ -170,6 +171,7 @@ encrypted_abrupt_exit (void)
       SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -460,6 +462,7 @@ storage_contract (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -576,6 +579,7 @@ tenant_bound_generic_writer_denied (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
@@ -672,6 +676,7 @@ provisioned_handoff_cas (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -823,6 +828,7 @@ not_applied_retry_cas (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -898,6 +904,7 @@ claim_matrix_and_schema_tamper (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -990,6 +997,7 @@ claim_matrix_and_schema_tamper (void)
   g_assert_cmpint (wyl_policy_store_create_schema (tenant_first), ==,
       WYRELOG_E_OK);
   created = FALSE;
+  register_test_human (tenant_first, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (tenant_first, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -1041,6 +1049,7 @@ rollback_tamper_and_concurrency (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -1101,6 +1110,7 @@ rollback_tamper_and_concurrency (void)
   g_assert_cmpint (wyl_policy_store_create_schema (concurrent), ==,
       WYRELOG_E_OK);
   created = FALSE;
+  register_test_human (concurrent, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (concurrent, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -1153,6 +1163,7 @@ encrypted_publication_and_reopen (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -1249,6 +1260,7 @@ encrypted_commit_response_lost (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_clear_pointer (&store, wyl_policy_store_close);
@@ -1290,6 +1302,7 @@ encrypted_rollback_failure (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (store, "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_clear_pointer (&store, wyl_policy_store_close);

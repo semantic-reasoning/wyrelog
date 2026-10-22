@@ -24,6 +24,12 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
+wyrelog_error_t wyl_policy_store_user_login_status (wyl_policy_store_t *store, const gchar *subject, gchar **out_reason);
+wyrelog_error_t wyl_policy_store_user_link_session (wyl_policy_store_t *store, const gchar *subject, const gchar *session_id);
+gboolean wyl_policy_human_subject_is_valid (const gchar *subject);
+wyrelog_error_t wyl_policy_store_user_require (wyl_policy_store_t *store, const gchar *subject, gboolean active);
+wyrelog_error_t wyl_policy_store_user_register (wyl_policy_store_t *store, const gchar *subject);
+
 /* Same-thread coordinator frame.  It excludes same-handle SQL transactions
  * across policy/filesystem work.  publish authenticates and durably replaces
  * an encrypted canonical policy image while both locks remain held; plaintext
@@ -2492,6 +2498,25 @@ wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_set_tenant_sealed_full
   (wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
     gboolean * out_changed);
+wyrelog_error_t
+wyl_policy_store_tenant_lifecycle_coordinated (wyl_policy_store_t *store,
+    WylServiceAuthorityTransaction *transaction, const WylPolicyTenantAuthorityRecord *expected, gboolean sealed,
+    gboolean *changed);
+wyrelog_error_t
+wyl_policy_store_seal_tenant_request_classify
+  (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean classify_empty, gboolean coordinated_mode, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
+wyrelog_error_t
+wyl_policy_store_seal_tenant_coordinated_core
+  (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, const gchar *acting_capacity,
+    const WylPolicyTenantAuthorityRecord *coordinated, WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES]);
 wyrelog_error_t wyl_policy_store_seal_tenant_keyed_capacity_core
   (WylServiceAuthorityTransaction *transaction, wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *actor_subject_id, const gchar *request_id,
@@ -4062,4 +4087,52 @@ wyrelog_error_t wyl_policy_store_tenant_delete_complete (wyl_policy_store_t *sto
 wyrelog_error_t wyl_policy_store_tenant_delete_pending (wyl_policy_store_t *store,
     GPtrArray **tenants);
 
+/* Durable human lifecycle receipt; child journals share its SQL decision. */
+typedef struct
+{
+  gchar *subject;
+  gchar *state;
+  gint64 generation;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+} WylHumanUser;
+void wyl_human_user_free (WylHumanUser *user);
+wyrelog_error_t wyl_policy_store_user_list (wyl_policy_store_t *store, GPtrArray **out);
+typedef struct
+{
+  gchar *subject;
+  gchar *fingerprint;
+  GPtrArray *tenants;
+  guint64 permission_count;
+  guint64 data_bytes;
+  gchar *unsealed;
+  gchar *blockers;
+} WylUserDeletePreview;
+void wyl_user_delete_preview_clear (WylUserDeletePreview *preview);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylUserDeletePreview, wyl_user_delete_preview_clear)
+wyrelog_error_t wyl_policy_store_user_preview (wyl_policy_store_t *store, const gchar *subject, WylUserDeletePreview *out);
+typedef struct
+{
+  gchar *request_id;
+  gchar *subject;
+  gchar *actor;
+  gchar *action;
+  gchar *fingerprint;
+  gchar *audit_id;
+  gchar *summary;
+  gchar *error_code;
+  gint64 created_at_us;
+  gboolean committed;
+  gboolean complete;
+} WylUserOperation;
+void wyl_user_operation_clear (WylUserOperation *operation);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylUserOperation, wyl_user_operation_clear)
+wyrelog_error_t wyl_policy_store_user_operation_read (wyl_policy_store_t *store, const gchar *request_id, WylUserOperation *out);
+wyrelog_error_t wyl_policy_store_user_operation_commit (wyl_policy_store_t *store, const gchar *subject, const gchar *actor, const gchar *action, const gchar *request_id, const gchar *fingerprint, const GPtrArray *children, WylUserOperation *out);
+wyrelog_error_t wyl_policy_store_user_operation_complete (wyl_policy_store_t *store, const gchar *request_id);
+wyrelog_error_t wyl_policy_store_user_recover (wyl_policy_store_t *store);
+
+void wyl_user_child_free (gpointer data);
+wyrelog_error_t wyl_policy_store_user_children (wyl_policy_store_t *store, const gchar *request_id, GPtrArray **out);
+wyrelog_error_t wyl_policy_store_user_require_admin (wyl_policy_store_t *store, const gchar *subject);
 G_END_DECLS;

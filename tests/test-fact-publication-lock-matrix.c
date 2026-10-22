@@ -9,6 +9,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include "fact-test-support.h"
 
@@ -296,6 +297,7 @@ test_fresh_policy_after_child_exit (void)
   g_assert_cmpint (wyl_policy_store_create_schema (initial_policy), ==,
       WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (initial_policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (initial_policy, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -743,6 +745,7 @@ test_reverse_watchdog (ReverseScenario scenario)
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
       WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -821,6 +824,7 @@ test_runtime_policy_forward (void)
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
       WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);

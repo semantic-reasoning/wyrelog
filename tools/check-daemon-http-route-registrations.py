@@ -86,6 +86,7 @@ ROUTES = (
     RouteSpec("/policy/roles/grant", "policy_role_grant_handler"),
     RouteSpec("/policy/roles/revoke", "policy_role_revoke_handler"),
     RouteSpec("/audit/events", "audit_events_handler"),
+    RouteSpec("/users", "users_handler"),
     RouteSpec("/service-principals", "service_principal_management_handler"),
     RouteSpec("/service-credentials", "service_credential_management_handler"),
     RouteSpec("/service-management-authority/arm",
@@ -101,6 +102,7 @@ ROUTES = (
 )
 
 PREFIX_PATHS = {
+    "/users",
     "/facts", "/datalog", "/service-principals", "/service-credentials",
 }
 ISSUE_719_EXACT_PATHS = {

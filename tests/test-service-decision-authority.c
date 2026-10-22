@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -554,6 +555,7 @@ test_service_authority_sealed_tenant_denies (void)
           "svc:authority:sealed", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-seal",
       "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
@@ -620,6 +622,7 @@ test_service_authority_freeze_denies (void)
           "svc:authority:freeze", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-thaw",
       "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
@@ -682,6 +685,7 @@ test_service_authority_allow_deny_and_binding (void)
           "svc:authority:allow", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
       "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
@@ -877,6 +881,7 @@ test_service_authority_concurrent_context_isolation (void)
           "svc:authority:concurrent", TRUE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean tenant_created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-b",
       "tenant-owner",
       &tenant_created), ==, WYRELOG_E_OK);
@@ -1053,6 +1058,8 @@ test_nested_write_reload_serializes_with_human_decide (void)
   g_autoptr (WylHandle) handle = new_service_decision_handle (templates,
           "svc:reload:test", FALSE);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "reload-human");
+  register_test_human (store, "reload-witness");
   g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
       "reload-human", "wr.stream.write_reserved", "reload-scope"), ==,
       WYRELOG_E_OK);

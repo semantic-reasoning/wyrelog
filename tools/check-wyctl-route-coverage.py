@@ -50,6 +50,7 @@ RUNBOOK_SECTION = "## Routes Without a wyctl Command"
 UNSUPPORTED_HEADING = "### Unsupported by the daemon"
 
 COVERAGE = {
+    "/users": ("user", "create"),
     "/healthz": ("status",),
     "/readyz": ("status",),
     "/profile/status": ("profile", "status"),
@@ -123,6 +124,7 @@ PENDING: dict[str, tuple[str, ...]] = {}
 
 # The function in wyctl.c that dispatches the next step after each prefix.
 DISPATCHERS = {
+    ("user",): "run_user",
     (): "main",
     ("policy",): "run_policy",
     ("graph",): "run_graph",

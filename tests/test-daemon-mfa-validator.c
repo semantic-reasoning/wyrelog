@@ -35,6 +35,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <stdint.h>
@@ -134,6 +135,7 @@ check_validator_rejects_null_proof (void)
     return 10;
 
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.null-proof");
   if (login_mfa_required_session (handle, "validator.null-proof",
       &session) != 0)
     return 11;
@@ -151,6 +153,7 @@ check_validator_rejects_short_proof (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 20;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.short-proof");
   if (login_mfa_required_session (handle, "validator.short-proof",
       &session) != 0)
     return 21;
@@ -167,6 +170,7 @@ check_validator_rejects_long_proof (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.long-proof");
   if (login_mfa_required_session (handle, "validator.long-proof",
       &session) != 0)
     return 31;
@@ -188,6 +192,7 @@ check_validator_rejects_huge_proof (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 35;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.huge-proof");
   if (login_mfa_required_session (handle, "validator.huge-proof",
       &session) != 0)
     return 36;
@@ -207,6 +212,7 @@ check_validator_rejects_non_digit_proof (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 40;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.non-digit-proof");
   if (login_mfa_required_session (handle, "validator.non-digit-proof",
       &session) != 0)
     return 41;
@@ -231,6 +237,7 @@ check_validator_rejects_when_no_enrollment (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 50;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.no-enroll");
   if (login_mfa_required_session (handle, "validator.no-enroll", &session) != 0)
     return 51;
   /* No enrollment row inserted: validator must fail closed with POLICY. */
@@ -261,6 +268,7 @@ check_validator_rejects_wrong_code (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 60;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.wrong-code");
   if (login_mfa_required_session (handle, "validator.wrong-code",
       &session) != 0)
     return 61;
@@ -297,6 +305,7 @@ check_validator_accepts_correct_code (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.happy");
   if (login_mfa_required_session (handle, "validator.happy", &session) != 0)
     return 71;
   if (seed_enrollment (handle, "validator.happy") != 0)
@@ -332,6 +341,7 @@ check_validator_rejects_replay_same_session (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 80;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.replay");
   if (login_mfa_required_session (handle, "validator.replay", &session) != 0)
     return 81;
   if (seed_enrollment (handle, "validator.replay") != 0)
@@ -378,6 +388,7 @@ check_validator_rejects_replay_across_restart (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 90;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.restart");
   if (login_mfa_required_session (handle, "validator.restart", &session) != 0)
     return 91;
   if (seed_enrollment (handle, "validator.restart") != 0)
@@ -431,6 +442,7 @@ check_validator_locks_after_five_failures (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 200;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.lockout-five");
   if (login_mfa_required_session (handle, "validator.lockout-five",
       &session) != 0)
     return 201;
@@ -480,6 +492,7 @@ check_validator_locked_principal_rejects_without_hmac (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 230;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.locked-now");
   if (login_mfa_required_session (handle, "validator.locked-now",
       &session) != 0)
     return 231;
@@ -548,6 +561,7 @@ check_validator_auto_unlocks_after_window (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 250;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.auto-unlock");
   if (login_mfa_required_session (handle, "validator.auto-unlock",
       &session) != 0)
     return 251;
@@ -620,6 +634,7 @@ check_validator_resets_counter_on_success (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 270;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.reset-on-ok");
   if (login_mfa_required_session (handle, "validator.reset-on-ok",
       &session) != 0)
     return 271;
@@ -686,6 +701,7 @@ check_validator_rejects_null_handle_or_session (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 100;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.null-args");
   if (login_mfa_required_session (handle, "validator.null-args", &session) != 0)
     return 101;
   if (wyl_mfa_validator_totp (NULL, session, "000000", NULL)
@@ -721,6 +737,7 @@ check_handle_default_validator_is_wired (void)
   /* Calling through the handle-stored pointer must behave identically
   * to calling the symbol directly: invalid proof shape -> INVALID. */
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.wired");
   if (login_mfa_required_session (handle, "validator.wired", &session) != 0)
     return 114;
   if (v (handle, session, "x", NULL) != WYRELOG_E_INVALID)
@@ -802,6 +819,7 @@ check_validator_durable_invariant_after_success (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 290;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.durable");
   if (login_mfa_required_session (handle, "validator.durable", &session) != 0)
     return 291;
   if (seed_enrollment (handle, "validator.durable") != 0)
@@ -833,6 +851,7 @@ check_validator_durable_invariant_survives_reload (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 310;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.reload");
   if (login_mfa_required_session (handle, "validator.reload", &session) != 0)
     return 311;
   if (seed_enrollment (handle, "validator.reload") != 0)
@@ -873,6 +892,7 @@ check_validator_already_authenticated_rejects (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 330;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "validator.already-auth");
   if (login_mfa_required_session (handle, "validator.already-auth",
       &session) != 0)
     return 331;

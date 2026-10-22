@@ -44,6 +44,8 @@ create_predecessor_store (const gchar *dir)
   sqlite3 *db = NULL;
   g_assert_cmpint (sqlite3_open (path, &db), ==, SQLITE_OK);
   exec_sql_ok (db,
+      "DROP TRIGGER human_active_tenants_INSERT;"
+      "DROP TRIGGER human_active_tenants_UPDATE;"
       "DROP TRIGGER tenant_owner_insert_guard;"
       "DROP TRIGGER tenant_owner_update_guard;"
       "ALTER TABLE tenants DROP COLUMN owner_subject_id;"

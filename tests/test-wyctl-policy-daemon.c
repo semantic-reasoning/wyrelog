@@ -14,6 +14,7 @@
  * wyctl with the documented flags and assert ok output.
  */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
@@ -399,6 +400,7 @@ test_wyctl_human_auth_flow (WylHandle *handle, const gchar *base_url)
     0x37, 0x38, 0x39, 0x30,
   };
   const gchar *subject = "wyctl-human-auth-user";
+  register_test_human (wyl_handle_get_policy_store (handle), subject);
   WylTotpEnrollment enrollment = { 0 };
   enrollment.subject_id = g_strdup (subject);
   memcpy (enrollment.secret, seed, sizeof seed);
@@ -700,6 +702,10 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
+  register_test_human (wyl_handle_get_policy_store (handle), "wyctl-policy-admin");
+  register_test_human (wyl_handle_get_policy_store (handle), "wyctl-target");
+  register_test_human (wyl_handle_get_policy_store (handle), "new-owner");
+  register_test_human (wyl_handle_get_policy_store (handle), "wyctl-no-fact-read");
   test_wyctl_human_auth_flow (handle, base_url);
 
   /* Login an operator with skip-mfa so we get a bearer access token, then

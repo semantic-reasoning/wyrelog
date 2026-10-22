@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -44,6 +45,7 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
   rc = wyl_policy_store_create_schema (store);
   if (rc != WYRELOG_E_OK)
     return rc;
+  register_test_human (store, "tenant-owner");
   rc = wyl_policy_store_create_tenant (store, "tenant-a",
           "tenant-owner", &created);
   if (rc != WYRELOG_E_OK)
@@ -578,6 +580,7 @@ check_schema_quota_concurrent_registration (void)
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return 32;
   gboolean created = FALSE;
+  register_test_human (setup, "tenant-owner");
   if (wyl_policy_store_create_tenant (setup, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)

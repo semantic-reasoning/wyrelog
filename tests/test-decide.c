@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -624,6 +625,7 @@ check_decide_allows_engine_tuple (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 40;
+  register_test_human (wyl_handle_get_policy_store (handle), "decide-user-a");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 41;
@@ -654,6 +656,7 @@ check_decide_denies_engine_miss (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 50;
+  register_test_human (wyl_handle_get_policy_store (handle), "decide-user-b");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 51;
@@ -684,6 +687,7 @@ check_decide_unclassified_read_denies (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 210;
+  register_test_human (wyl_handle_get_policy_store (handle), "missing-session-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 211;
@@ -725,6 +729,7 @@ check_decide_allows_guarded_permission_with_context (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 60;
+  register_test_human (wyl_handle_get_policy_store (handle), "decide-user-c");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 61;
@@ -764,6 +769,7 @@ check_decide_denies_guarded_permission_on_context_miss (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "decide-user-d");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 71;
@@ -806,6 +812,7 @@ check_decide_allows_self_authorize_for_system_admin (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 301;
+  register_test_human (wyl_handle_get_policy_store (handle), "self-arm-admin");
   /* Seed only a wr.system_admin membership at __wr_default and rely on the
    * bootstrap role_permission fact for has_permission -- no direct grant. */
   if (insert_symbol_row3 (handle, "member_of", "self-arm-admin",
@@ -855,6 +862,7 @@ check_policy_store_replay_requires_durable_permission_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 123;
+  register_test_human (wyl_handle_get_policy_store (handle), "replay-legacy-user");
 
   if (seed_policy_store_decide_fixture (handle, "replay-legacy-user",
       "site.replay.read", "tenant/replay", NULL) != WYRELOG_E_OK)
@@ -906,6 +914,7 @@ check_policy_store_replay_preserves_dormant_permission_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 130;
+  register_test_human (wyl_handle_get_policy_store (handle), "replay-dormant-user");
 
   if (seed_policy_store_decide_fixture (handle, "replay-dormant-user",
       "site.replay.write", "tenant/replay", "dormant") != WYRELOG_E_OK)
@@ -948,6 +957,7 @@ check_policy_store_replay_preserves_armed_permission_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 136;
+  register_test_human (wyl_handle_get_policy_store (handle), "replay-armed-user");
 
   if (seed_policy_store_decide_fixture (handle, "replay-armed-user",
       "site.replay.admin", "tenant/replay", "armed") != WYRELOG_E_OK)
@@ -994,6 +1004,7 @@ check_persistent_permission_state_authority_matrix (void)
     };
     if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
       return 158;
+    register_test_human (wyl_handle_get_policy_store (handle), "matrix-direct-user");
     if (seed_policy_store_decide_fixture (handle, "matrix-direct-user",
         "site.matrix.read", "tenant/matrix", NULL) != WYRELOG_E_OK)
       return 159;
@@ -1067,6 +1078,7 @@ check_persistent_permission_state_authority_matrix (void)
     if (wyl_policy_store_set_session_state (store, "tenant/matrix-transition",
         "active") != WYRELOG_E_OK)
       return 178;
+    register_test_human (store, "matrix-transition-user");
     if (wyl_policy_store_set_permission_state (store, "matrix-transition-user",
         "site.matrix.transition", "tenant/matrix-transition", "armed")
         != WYRELOG_E_OK)
@@ -1204,6 +1216,7 @@ check_operation_permission_migration (void)
         != WYRELOG_E_OK)
       return 1903;
     for (gsize i = 0; i < G_N_ELEMENTS (members); i++) {
+      register_test_human (store, members[i].subject);
       if (wyl_policy_store_set_principal_state (store, members[i].subject,
           "authenticated") != WYRELOG_E_OK)
         return 1904;
@@ -1327,6 +1340,7 @@ check_decide_cleans_guard_facts_after_guarded_deny (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 80;
+  register_test_human (wyl_handle_get_policy_store (handle), "decide-user-e");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 81;
@@ -1362,6 +1376,8 @@ check_decide_reports_state_deny_reasons (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 220;
+  register_test_human (wyl_handle_get_policy_store (handle), "inactive-session-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "state-deny-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 221;
@@ -1424,6 +1440,7 @@ check_decide_prioritizes_guarded_blockers (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 240;
+  register_test_human (wyl_handle_get_policy_store (handle), "guard-priority-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 241;
@@ -1468,6 +1485,7 @@ check_guard_cleanup_fault (const gchar *relation, gint base_code)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return base_code;
+  register_test_human (wyl_handle_get_policy_store (handle), "cleanup-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return base_code + 1;
@@ -1524,6 +1542,7 @@ check_window_guard_cleanup_fault (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 310;
+  register_test_human (wyl_handle_get_policy_store (handle), "cleanup-window-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 311;
@@ -1568,6 +1587,7 @@ check_decide_evaluates_window_guard (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 90;
+  register_test_human (wyl_handle_get_policy_store (handle), "window-user");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 91;
@@ -1763,6 +1783,7 @@ check_decide_human_path_unchanged_without_flag (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 740;
+  register_test_human (wyl_handle_get_policy_store (handle), "human-user-740");
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 741;

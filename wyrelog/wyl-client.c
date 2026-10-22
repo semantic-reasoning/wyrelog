@@ -5945,3 +5945,104 @@ wyrelog_client_version_string (void)
 {
   return "0.1.0";
 }
+
+static wyrelog_error_t
+client_user_request (WylClient *client, const gchar *action, const gchar *subject,
+    const gchar *request_id, const gchar *fingerprint, gint64 timestamp,
+    const gchar *loc, gint64 risk, GBytes **out)
+{
+  gboolean list = g_str_equal (action, "list");
+  gboolean create = g_str_equal (action, "create");
+  gboolean preview = g_str_equal (action, "delete-preview");
+  if (!list && !wyl_policy_human_subject_is_valid (subject)) return WYRELOG_E_INVALID;
+  if (!list && !preview && !wyl_request_id_is_canonical (request_id)) return WYRELOG_E_INVALID;
+  if (g_str_equal (action, "delete")) {
+    if (fingerprint == NULL || strlen (fingerprint) != 64) return WYRELOG_E_INVALID;
+    for (const gchar *p = fingerprint; *p; p++) if (!g_ascii_isxdigit (*p)) return WYRELOG_E_INVALID;
+  }
+  g_autofree gchar *base = NULL, *access = NULL, *session = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, WYL_TENANT_DEFAULT, timestamp, loc, risk, &base, &access, &session);
+  if (rc != WYRELOG_E_OK) return rc;
+  g_autofree gchar *query = client_fact_guard_query (WYL_TENANT_DEFAULT, timestamp, loc, risk, access != NULL && *access ? NULL : session);
+  g_autofree gchar *escaped = subject != NULL ? g_uri_escape_string (subject, NULL, FALSE) : NULL;
+  g_autofree gchar *uri = list || create ? g_strdup_printf ("%s/users?%s", base, query)
+      : g_strdup_printf ("%s/users/%s/%s?%s", base, escaped, action, query);
+  if (preview && request_id != NULL) {
+    if (!wyl_request_id_is_canonical (request_id)) return WYRELOG_E_INVALID;
+    gchar *extended = g_strdup_printf ("%s&request_id=%s",uri,request_id);
+    g_free (uri); uri = extended;
+  }
+  g_autoptr (SoupMessage) message = soup_message_new (list ? "GET" : "POST", uri);
+  if (message == NULL) return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access);
+  g_autofree gchar *json = NULL;
+  /* Subject grammar and canonical IDs contain no JSON metacharacters. */
+  if (create) json = g_strdup_printf ("{\"subject\":\"%s\",\"request_id\":\"%s\"}", subject, request_id);
+  else if (g_str_equal (action, "delete")) json = g_strdup_printf ("{\"request_id\":\"%s\",\"fingerprint\":\"%s\",\"confirmation\":\"delete\"}", request_id, fingerprint);
+  else if (!list && !preview) json = g_strdup_printf ("{\"request_id\":\"%s\"}", request_id);
+  if (json != NULL) {
+    g_autoptr (GBytes) body = g_bytes_new (json, strlen (json));
+    soup_message_set_request_body_from_bytes (message, "application/json", body);
+  }
+  return client_send_fact_message_full (client, message, out, NULL);
+}
+
+static wyrelog_error_t
+client_user_mutate (WylClient *client, const gchar *action, const gchar *subject,
+    const gchar *request_id, const gchar *fingerprint, gint64 timestamp, const gchar *loc, gint64 risk)
+{
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_user_request (client, action, subject, request_id, fingerprint, timestamp, loc, risk, &body);
+  if (rc != WYRELOG_E_OK) return rc;
+  gsize size = 0; const gchar *data = g_bytes_get_data (body, &size);
+  gboolean ok = FALSE;
+  g_autofree gchar *actual_subject = parse_simple_json_string_member (data, size, "subject");
+  g_autofree gchar *actual_action = parse_simple_json_string_member (data, size, "action");
+  g_autofree gchar *actual_request = parse_simple_json_string_member (data, size, "request_id");
+  return parse_simple_json_bool_member (data,size,"ok",&ok) && ok && !g_strcmp0 (subject,actual_subject)
+         && !g_strcmp0 (action,actual_action) && !g_strcmp0 (request_id,actual_request) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_client_user_create (WylClient *client, const gchar *subject, const gchar *request_id,
+    gint64 timestamp, const gchar *loc, gint64 risk)
+{
+  return client_user_mutate (client,"create",subject,request_id,NULL,timestamp,loc,risk);
+}
+wyrelog_error_t
+wyl_client_user_disable (WylClient *client, const gchar *subject, const gchar *request_id,
+    gint64 timestamp, const gchar *loc, gint64 risk)
+{
+  return client_user_mutate (client,"disable",subject,request_id,NULL,timestamp,loc,risk);
+}
+wyrelog_error_t
+wyl_client_user_delete (WylClient *client, const gchar *subject, const gchar *request_id,
+    const gchar *fingerprint, gint64 timestamp, const gchar *loc, gint64 risk)
+{
+  return client_user_mutate (client,"delete",subject,request_id,fingerprint,timestamp,loc,risk);
+}
+wyrelog_error_t
+wyl_client_user_list (WylClient *client, gint64 timestamp, const gchar *loc, gint64 risk, WylClientUserList *out)
+{
+  if (out == NULL) return WYRELOG_E_INVALID;
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_user_request (client,"list",NULL,NULL,NULL,timestamp,loc,risk,&body);
+  if (rc != WYRELOG_E_OK) return rc;
+  gsize size = 0; const gchar *data = g_bytes_get_data (body,&size);
+  return wyl_client_user_list_decode (data,size,out);
+}
+wyrelog_error_t
+wyl_client_user_delete_preview (WylClient *client, const gchar *subject, const gchar *request_id,
+    gint64 timestamp, const gchar *loc, gint64 risk, WylClientUserDeletePreview *out)
+{
+  if (out == NULL) return WYRELOG_E_INVALID;
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = client_user_request (client,"delete-preview",subject,request_id,NULL,timestamp,loc,risk,&body);
+  if (rc != WYRELOG_E_OK) return rc;
+  gsize size = 0; const gchar *data = g_bytes_get_data (body,&size);
+  rc = wyl_client_user_preview_decode (data,size,out);
+  if (rc == WYRELOG_E_OK && g_strcmp0 (out->subject,subject)) {
+    wyl_client_user_delete_preview_clear (out); return WYRELOG_E_IO;
+  }
+  return rc;
+}

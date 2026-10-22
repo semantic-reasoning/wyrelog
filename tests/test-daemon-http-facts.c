@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <duckdb.h>
 #include <glib.h>
@@ -245,6 +246,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, subject);
   for (gsize i = 0; i < G_N_ELEMENTS (perms); i++) {
     wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
             subject, perms[i], WYL_TENANT_DEFAULT);
@@ -2065,6 +2067,7 @@ check_fact_operation_permissions (WylHandle *handle, SoupSession *session,
 
   for (gsize h = 0; h < G_N_ELEMENTS (holders); h++) {
     g_autofree gchar *subject = g_strdup_printf ("facts-only-%s", holders[h]);
+    register_test_human (store, subject);
     if (wyl_policy_store_grant_direct_permission (store, subject, holders[h],
         WYL_TENANT_DEFAULT) != WYRELOG_E_OK
         || wyl_policy_store_set_permission_state (store, subject, holders[h],
@@ -2126,6 +2129,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
     wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
     return 11;
   }
+  register_test_human (wyl_handle_get_policy_store (handle), "facts-deny");
   if (wyl_client_login_skip_mfa (deny_client, "facts-deny")
       != WYRELOG_E_OK) {
     wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
@@ -2299,6 +2303,7 @@ check_fact_http_contract (WylHandle *handle, SoupServer *server,
   g_ptr_array_unref (restore_targets);
   wyl_fact_offline_backup_manifest_clear (&restore_manifest);
   g_clear_pointer (&restore_body, g_free);
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   gboolean tenant_b_created = FALSE;
   if (wyl_policy_store_create_tenant (store, "tenant-b",
       "tenant-owner", &tenant_b_created)

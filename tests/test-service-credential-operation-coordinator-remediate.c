@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include "auth/service-credential-operation-coordinator-cancel-private.h"
 #include "auth/service-credential-operation-coordinator-remediate-private.h"
@@ -251,6 +252,7 @@ test_authenticated_resume_replay_and_new_epoch (void)
   WylServiceCredentialOperationHandoffRemediationResult result =
       WYL_SERVICE_CREDENTIAL_OPERATION_HANDOFF_REMEDIATION_RESULT_INIT;
   gboolean tenant_created = FALSE;
+  register_test_human (store_of (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
       "tenant-b", "tenant-owner", &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);

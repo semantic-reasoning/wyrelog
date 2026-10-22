@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <sqlite3.h>
@@ -102,6 +103,7 @@ test_login_rejects_service_namespace (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+  register_test_human (wyl_handle_get_policy_store (handle), "human.login");
   register_service (wyl_handle_get_policy_store (handle), "svc:registered");
 
   const gchar *subjects[] = {
@@ -124,6 +126,7 @@ static void
 test_bootstrap_rejects_service_namespace (void)
 {
   wyl_policy_store_t *store = open_store ();
+  register_test_human (store, "human.authz");
   register_service (store, "svc:registered");
 
   const gchar *subjects[] = {
@@ -151,6 +154,7 @@ static void
 test_totp_rejects_service_namespace (void)
 {
   wyl_policy_store_t *store = open_store ();
+  register_test_human (store, "human.authz");
   register_service (store, "svc:registered");
 
   const gchar *subjects[] = {
@@ -179,6 +183,7 @@ test_totp_rejects_service_namespace (void)
         subjects[i]), ==, WYRELOG_E_OK);
   }
 
+  register_test_human (store, "human.totp");
   WylTotpEnrollment human = {
     .subject_id = g_strdup ("human.totp"),
     .last_verified_step = 1,
@@ -197,6 +202,7 @@ static void
 test_mfa_enrollment_rejects_service_namespace (void)
 {
   wyl_policy_store_t *store = open_store ();
+  register_test_human (store, "human.authz");
   register_service (store, "svc:registered");
 
   const gchar *subjects[] = {
@@ -222,6 +228,7 @@ test_mfa_enrollment_rejects_service_namespace (void)
 
   gint64 totp_before = count_all_rows (store, "totp_enrollments");
   gint64 audit_before = count_all_rows (store, "audit_events");
+  register_test_human (store, "human.enrollment");
   WylTotpEnrollment human = {
     .subject_id = g_strdup ("human.enrollment"),
     .last_verified_step = 1,
@@ -246,6 +253,7 @@ static void
 test_authorization_is_kind_aware (void)
 {
   wyl_policy_store_t *store = open_store ();
+  register_test_human (store, "human.authz");
   register_service (store, "svc:registered");
   g_assert_cmpint (wyl_policy_store_upsert_role (store, "app.reader",
       "application reader"), ==, WYRELOG_E_OK);
@@ -254,12 +262,12 @@ test_authorization_is_kind_aware (void)
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
       "svc:unregistered", "app.reader", "tenant-a", TRUE), ==,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_SUBJECT_NOT_REGISTERED);
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-      "svc:", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_POLICY);
+      "svc:", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_SUBJECT_NOT_REGISTERED);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
       "svc:unregistered", "app.read", "tenant-a", TRUE), ==,
-      WYRELOG_E_POLICY);
+      WYRELOG_E_SUBJECT_NOT_REGISTERED);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
       "svc:registered", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
@@ -306,6 +314,7 @@ static void
 test_destructive_remediation (void)
 {
   wyl_policy_store_t *store = open_store ();
+  register_test_human (store, "human.authz");
   register_service (store, "svc:registered");
   g_assert_cmpint (wyl_policy_store_upsert_role (store, "app.reader",
       "application reader"), ==, WYRELOG_E_OK);
@@ -377,6 +386,8 @@ test_destructive_remediation (void)
       "svc:registered", &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
+  /* Reproduce a legacy reserved-subject enrollment for remediation. */
+  exec_fixture_sql (store, "DROP TRIGGER human_active_totp_enrollments_INSERT");
   exec_fixture_sql (store,
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
       "enrolled_at,id_uuidv7) "

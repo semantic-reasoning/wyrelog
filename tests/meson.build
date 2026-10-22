@@ -34,6 +34,13 @@ endif
 
 meson_exe = find_program('meson')
 
+test_human_user_store = executable('test-human-user-store',
+  'test-human-user-store.c',
+  c_args : ['-DWYL_HUMAN_PREDECESSOR_SCHEMA="' + meson.project_source_root() / 'tests' / 'fixtures' / 'human-users-predecessor.sql' + '"'],
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+test('human-user-store', test_human_user_store)
+
 test('product-install-tree-checker-self-test', python3,
   args : [files('../tools/check-product-install-tree.py'), '--self-test'])
 test('product-install-tree-stager-self-test', python3,
@@ -1551,6 +1558,17 @@ if host_machine.system() != 'windows' and build_client
     # tests/check-service-credential-platform-matrix.py -- do not broaden it (for
     # example back to != 'windows') without updating the frozen matrix doc.
     if host_machine.system() == 'linux' and get_option('enable_audit').allowed()
+      if get_option('enable_fact_store').allowed()
+        test('human-user-lifecycle-e2e', python3,
+          args : [meson.current_source_dir() / 'check-human-user-lifecycle-e2e.py',
+            wyrelogd_exe.full_path(), wyctl_exe.full_path(),
+            meson.project_source_root() / 'templates' / 'access',
+            test_human_user_store.full_path()],
+          depends : [wyrelogd_exe, wyctl_exe, test_human_user_store],
+          is_parallel : false,
+          timeout : 360,
+        )
+      endif
       test('service-credential-provider-preflight-e2e', sh,
         args : [
           meson.current_source_dir() / 'check-service-credential-lifecycle-e2e.sh',
@@ -1758,6 +1776,15 @@ test_traits_compile = executable('test-traits-compile',
 )
 
 test('traits-compile', test_traits_compile)
+
+test_human_user_session = executable('test-human-user-session',
+  'test-human-user-session.c',
+  c_args : ['-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"'],
+  dependencies : [wyrelog_dep, sqlite_dep, service_session_private_dep],
+)
+test('human-user-session', test_human_user_session)
+
+
 
 test_policy_store = executable('test-policy-store',
   'test-policy-store.c',
@@ -2408,6 +2435,10 @@ if get_option('enable_fact_store').allowed()
     test_fact_replay_timeout = 180
   endif
   test('fact-replay', test_fact_replay, timeout : test_fact_replay_timeout)
+  test('fact-replay-mutation-races', test_fact_replay,
+    args : ['-p', '/fact-replay/single-graph-refresh-race',
+            '-p', '/fact-replay/mutation-isolation-concurrent'],
+    timeout : test_fact_replay_timeout)
 
   test_fact_replay_scheduler = executable('test-fact-replay-scheduler',
     'test-fact-replay-scheduler.c',

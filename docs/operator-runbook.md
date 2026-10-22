@@ -2478,8 +2478,7 @@ owner's grants. A same-owner transfer reports `changed=false`. The command
 prints its request id; use `--request-id` with the same target to retry an
 uncertain outcome. The original actor may retrieve that recorded result after
 losing ownership, without applying the transfer again. Reusing an id for a
-different intent is refused. User-registry active-user checks are deferred to
-#1337.
+different intent is refused. The new owner must be an active registered human user.
 
 Delete a sealed tenant permanently with:
 
@@ -2491,8 +2490,10 @@ wyctl --daemon-url "$BASE_URL" tenant delete --tenant acme \
 
 The current owner or a SYSTEM administrator needs a live MFA session. The
 lifecycle must be `sealed`; `tenant_not_sealed` also refuses transitional and
-unclassified legacy tenants. A fresh seal request classifies an empty legacy
-tenant. Graph-bearing legacy tenants require fact lifecycle reconciliation.
+unclassified legacy tenants. A fresh operator seal request drains in-flight
+fact users and classifies legacy tenants, including tenants containing graphs.
+Unseal and reseal use the same coordinated lifecycle transitions. Pending
+restore, reconciliation or provisioning work must finish before those transitions.
 Any role, direct permission, or permission state held by another subject,
 including a service principal, causes `tenant_delete_in_use`; the response and
 CLI diagnostics list the holders. Revoke those grants explicitly before retrying.
@@ -4200,3 +4201,54 @@ and whether repeating the command is safe. Unlike the commands above, they
 print `ok` for any successful response without reading its body, and a
 request the client refuses before sending it exits 3, not 2. As with every
 command, `wyctl`'s own argument errors exit 2.
+
+## Human users
+
+Register a human before granting access. User management is system-wide: omit
+`--tenant`, or use only `__wr_default`. Use an MFA-assured SYSTEM administrator's
+access token. A fresh bootstrap administrator must enroll and verify MFA before
+creating other users.
+
+```sh
+wyctl --daemon-url "$SYSTEM_URL" user create --subject alice \
+  --access-token-file "$ADMIN_TOKEN" \
+  --guard-timestamp "$NOW" --guard-loc-class public --guard-risk 0
+wyctl --daemon-url "$SYSTEM_URL" user list \
+  --access-token-file "$ADMIN_TOKEN" \
+  --guard-timestamp "$NOW" --guard-loc-class public --guard-risk 0
+```
+
+Then grant the required roles/permissions and enroll MFA. An unregistered,
+disabled, or deleted user cannot log in. Login refusals deliberately use the same
+`login_denied` response. `user disable --subject alice` invalidates authentication
+and live credentials while preserving grants, owned tenants, and data. There is
+no enable operation.
+
+Before `user delete --subject alice`, seal every currently owned tenant and revoke
+all other subjects' role memberships, direct permissions, and permission states
+in those tenants. The user's own grants do not block deletion. A transferred-away
+tenant survives; a transferred-in tenant is included. An unsealed tenant or another
+holder refuses the entire operation and names the blockers.
+
+Deletion prints its tenant list, all-scope permission count, and a canonical-file
+byte estimate to stderr. It requires typing `delete` interactively, or `--yes`.
+The server rejects a stale preview if ownership, lifecycle, or permissions changed.
+Data bytes are an estimate, not a quota or a filesystem allocation measurement.
+
+Deletion is permanent: it removes the user's operational identity, permissions,
+TOTP enrollment, sessions, and owned tenants and their data. Audit history and
+identity tombstones remain. Neither deleted user IDs nor deleted tenant IDs can
+be reused. Preserve the printed `request_id`; repeat the same command with
+`--request-id ID` after an interrupted operation. The daemon resumes committed
+filesystem cleanup on restart. A retry of a committed deletion lists the saved
+child tenants; the remaining permission/data estimate can be zero.
+
+The last registered, active human holding `wr.system_admin` on `__wr_default`
+cannot be disabled, deleted, or have that role revoked. First register another
+human and grant that root role. Tenant-scoped administrators and disabled users
+do not count. This rule does not recover a last administrator's lost MFA proof.
+
+On upgrade, review the migration messages and retained
+`human_user_migration_report`: existing grant holders and TOTP-enrolled humans
+are registered, including historical typo grants. Login-only subjects are skipped
+and need explicit registration. Backfill runs once and never revives deleted IDs.

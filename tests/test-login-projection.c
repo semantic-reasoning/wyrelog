@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -279,6 +280,7 @@ check_login_projects_mfa_required_principal_state (void)
     return 90;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "projection-login-user");
   wyl_login_req_set_username (login, "projection-login-user");
 
   g_autoptr (WylSession) session = NULL;
@@ -315,6 +317,7 @@ check_login_reload_failure_keeps_durable_state_repairable (void)
       WYRELOG_E_INTERNAL);
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "projection-reload-fail-user");
   wyl_login_req_set_username (login, "projection-reload-fail-user");
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_INTERNAL)
@@ -446,6 +449,7 @@ check_login_event_projection_failure_is_reported (void)
       WYRELOG_E_INTERNAL);
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "projection-event-fail-user");
   wyl_login_req_set_username (login, "projection-event-fail-user");
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_INTERNAL)
@@ -580,6 +584,7 @@ check_skip_mfa_login_projects_authority_state (void)
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), username);
   wyl_login_req_set_username (login, username);
   wyl_login_req_set_skip_mfa (login, TRUE);
 
@@ -774,6 +779,7 @@ check_handle_reopens_persistent_policy_and_audit_paths (void)
     wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
 
     g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+    register_test_human (wyl_handle_get_policy_store (handle), username);
     wyl_login_req_set_username (login, username);
     wyl_login_req_set_skip_mfa (login, TRUE);
 

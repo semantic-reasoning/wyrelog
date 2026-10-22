@@ -233,6 +233,13 @@ ADMIN1_TOKEN="$TMPDIR/admin1.token"
   || fail "admin1 skip-MFA login failed" "$TMPDIR/admin1.err" "$LOG.err"
 chmod 600 "$ADMIN1_TOKEN"
 
+"$PY" "$(dirname "$SC_E2E_PY")/human-user-auth-fixture.py" \
+  "$URL" "$ADMIN1_TOKEN" admin1 "$TMPDIR/admin1.mfa.json" \
+  || fail "admin1 MFA setup failed" "$LOG.err"
+"$WYCTL" --daemon-url "$URL" user create --subject admin2 \
+  --access-token-file "$ADMIN1_TOKEN" --guard-timestamp 1 \
+  --guard-loc-class trusted --guard-risk 0 \
+  || fail "registering admin2 failed" "$LOG.err"
 "$WYCTL" --daemon-url "$URL" policy role-grant \
   --subject admin2 --role wr.system_admin --scope __wr_default \
   --access-token-file "$ADMIN1_TOKEN" \

@@ -59,7 +59,7 @@ hex_digit (gchar value, guint *out)
 }
 
 static gboolean
-parse_string (JsonCursor *cursor, gchar **out)
+parse_string_bounded (JsonCursor *cursor, gchar **out, gsize max_bytes)
 {
   g_autoptr (GString) value = NULL;
   if (out == NULL || !take (cursor, '"'))
@@ -79,7 +79,7 @@ parse_string (JsonCursor *cursor, gchar **out)
     if ((guchar) current < 0x20)
       return FALSE;
     if (current != '\\') {
-      if (value->len >= WYL_CLIENT_CODEC_MAX_STRING)
+      if (value->len >= max_bytes)
         return FALSE;
       g_string_append_c (value, current);
       continue;
@@ -117,7 +117,7 @@ parse_string (JsonCursor *cursor, gchar **out)
           codepoint = (codepoint << 4) | digit;
         }
         if (codepoint > 0x7f || codepoint < 0x20
-            || value->len >= WYL_CLIENT_CODEC_MAX_STRING)
+            || value->len >= max_bytes)
           return FALSE;
         g_string_append_c (value, (gchar) codepoint);
         break;
@@ -125,10 +125,16 @@ parse_string (JsonCursor *cursor, gchar **out)
       default:
         return FALSE;
     }
-    if (value->len > WYL_CLIENT_CODEC_MAX_STRING)
+    if (value->len > max_bytes)
       return FALSE;
   }
   return FALSE;
+}
+
+static gboolean
+parse_string (JsonCursor *cursor, gchar **out)
+{
+  return parse_string_bounded (cursor, out, WYL_CLIENT_CODEC_MAX_STRING);
 }
 
 static gboolean
@@ -2262,4 +2268,122 @@ wyl_client_fact_restore_result_decode (const gchar *document,
 malformed:
   wyl_client_fact_restore_result_clear (out_result);
   return WYRELOG_E_IO;
+}
+
+void
+wyl_client_user_list_clear (WylClientUserList *value)
+{
+  if (value == NULL) return;
+  for (gsize i = 0; i < value->len; i++) {
+    g_free (value->items[i].subject); g_free (value->items[i].state);
+  }
+  g_free (value->items); memset (value, 0, sizeof (*value));
+}
+
+void
+wyl_client_user_delete_preview_clear (WylClientUserDeletePreview *value)
+{
+  if (value == NULL) return;
+  g_free (value->subject); g_free (value->fingerprint); g_strfreev (value->tenants);
+  g_free (value->unsealed); g_free (value->blockers); memset (value, 0, sizeof (*value));
+}
+
+static gboolean
+user_json_key (JsonCursor *cursor, const gchar *expected)
+{
+  g_autofree gchar *key = NULL;
+  return parse_string (cursor, &key) && g_strcmp0 (key, expected) == 0 && take (cursor, ':');
+}
+
+static gboolean
+user_json_ok (JsonCursor *cursor)
+{
+  gboolean ok = FALSE;
+  return take (cursor, '{') && user_json_key (cursor, "ok") && parse_bool (cursor, &ok) && ok && take (cursor, ',');
+}
+
+/* Bulk human inventories and refusal lists are bounded separately from
+ * small operation receipts, so diagnostics remain complete beyond 4 KiB. */
+#define WYL_CLIENT_USER_MAX_DOCUMENT (32u * 1024u * 1024u)
+static gboolean
+user_document_init (const gchar *document, gsize size, JsonCursor *cursor)
+{
+  if (document == NULL || size == 0 || size > WYL_CLIENT_USER_MAX_DOCUMENT
+      || memchr (document, '\0', size) != NULL || memchr (document, '\v', size) != NULL
+      || memchr (document, '\f', size) != NULL) return FALSE;
+  *cursor = (JsonCursor) {document, size, 0};
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_user_list_decode (const gchar *document, gsize size, WylClientUserList *out)
+{
+  if (out == NULL) return WYRELOG_E_INVALID;
+  wyl_client_user_list_clear (out);
+  JsonCursor c;
+  if (!user_document_init (document, size, &c) || !user_json_ok (&c)
+      || !user_json_key (&c, "users") || !take (&c, '[')) return WYRELOG_E_INVALID;
+  g_autoptr (GArray) items = g_array_new (FALSE, TRUE, sizeof (WylClientUser));
+  gboolean valid = TRUE;
+  if (!take (&c, ']')) {
+    do {
+      WylClientUser u = {0};
+      valid = take (&c, '{') && user_json_key (&c, "subject") && parse_string (&c, &u.subject)
+          && take (&c, ',') && user_json_key (&c, "state") && parse_string (&c, &u.state)
+          && take (&c, ',') && user_json_key (&c, "created_at_us") && parse_int64 (&c, &u.created_at_us)
+          && take (&c, ',') && user_json_key (&c, "updated_at_us") && parse_int64 (&c, &u.updated_at_us)
+          && take (&c, '}') && wyl_policy_human_subject_is_valid (u.subject)
+          && u.created_at_us >= 0 && u.updated_at_us >= u.created_at_us
+          && (g_strcmp0 (u.state, "active") == 0 || g_strcmp0 (u.state, "disabled") == 0 || g_strcmp0 (u.state, "deleted") == 0);
+      g_array_append_val (items, u);
+      if (!valid || items->len > 100000) {
+        valid = FALSE; break;
+      }
+      if (take (&c, ']')) break;
+      if (!take (&c, ',')) {
+        valid = FALSE; break;
+      }
+    } while (TRUE);
+  }
+  out->len = items->len; out->items = (WylClientUser *) g_array_free (g_steal_pointer (&items), FALSE);
+  if (!valid || !take (&c, '}') || !document_done (&c)) {
+    wyl_client_user_list_clear (out); return WYRELOG_E_INVALID;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_user_preview_decode (const gchar *document, gsize size, WylClientUserDeletePreview *out)
+{
+  if (out == NULL) return WYRELOG_E_INVALID;
+  wyl_client_user_delete_preview_clear (out);
+  JsonCursor c;
+  g_autoptr (GPtrArray) tenants = g_ptr_array_new_with_free_func (g_free);
+  if (!user_document_init (document, size, &c) || !user_json_ok (&c)
+      || !user_json_key (&c, "subject") || !parse_string (&c, &out->subject)
+      || !take (&c, ',') || !user_json_key (&c, "fingerprint") || !parse_string (&c, &out->fingerprint)
+      || !take (&c, ',') || !user_json_key (&c, "permission_count") || !parse_uint64 (&c, &out->permission_count)
+      || !take (&c, ',') || !user_json_key (&c, "data_bytes") || !parse_uint64 (&c, &out->data_bytes)
+      || !take (&c, ',') || !user_json_key (&c, "tenants") || !take (&c, '[')) goto invalid;
+  if (!take (&c, ']')) {
+    do {
+      gchar *tenant = NULL;
+      if (!parse_string (&c, &tenant)) goto invalid;
+      g_ptr_array_add (tenants, tenant);
+      if (tenants->len > 100000) goto invalid;
+      if (take (&c, ']')) break;
+      if (!take (&c, ',')) goto invalid;
+    } while (TRUE);
+  }
+  if (!take (&c, ',') || !user_json_key (&c, "unsealed") || !parse_string_bounded (&c, &out->unsealed, WYL_CLIENT_USER_MAX_DOCUMENT)
+      || !take (&c, ',') || !user_json_key (&c, "blockers") || !parse_string_bounded (&c, &out->blockers, WYL_CLIENT_USER_MAX_DOCUMENT)
+      || !take (&c, '}') || !document_done (&c) || strlen (out->fingerprint) != 64) goto invalid;
+  if (!wyl_policy_human_subject_is_valid (out->subject)) goto invalid;
+  for (gsize i = 0; i < 64; i++)
+    if (!g_ascii_isxdigit (out->fingerprint[i])) goto invalid;
+  g_ptr_array_add (tenants, NULL);
+  out->tenants = (gchar **) g_ptr_array_free (g_steal_pointer (&tenants), FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  wyl_client_user_delete_preview_clear (out); return WYRELOG_E_INVALID;
 }

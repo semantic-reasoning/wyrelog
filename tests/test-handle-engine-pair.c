@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -2134,6 +2135,7 @@ check_durable_session_event_fanout_failure_poisons_pair (void)
     return 180;
 
   login = wyl_login_req_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "durable-fanout-fail-user");
   wyl_login_req_set_username (login, "durable-fanout-fail-user");
   wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
       WYRELOG_E_IO);
@@ -2817,6 +2819,11 @@ check_login_skip_mfa_projection_autoload_on_open (void)
     return 362;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "skip-mfa-direct-user");
+  register_test_human (store, "skip-mfa-wrong-scope-user");
+  register_test_human (store, "skip-mfa-role-user");
+  register_test_human (store, "skip-mfa-inherited-user");
+
   if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
       "login skip mfa", "critical") != WYRELOG_E_OK)
     return 363;
@@ -3087,6 +3094,7 @@ check_policy_store_role_memberships_autoload_on_open (void)
   if (wyl_policy_store_grant_role_permission (store, "site.member-load-role",
       "site.member-load.read") != WYRELOG_E_OK)
     return 336;
+  register_test_human (store, "member-load-user");
   if (wyl_policy_store_grant_role_membership (store, "member-load-user",
       "site.member-load-role", "member-load-scope") != WYRELOG_E_OK)
     return 337;
@@ -3144,6 +3152,7 @@ check_policy_store_direct_permissions_autoload_without_auto_arm (void)
   if (wyl_policy_store_upsert_permission (store, "site.direct.autoload",
       "direct autoload", "basic") != WYRELOG_E_OK)
     return 351;
+  register_test_human (store, "direct-load-user");
   if (wyl_policy_store_grant_direct_permission (store, "direct-load-user",
       "site.direct.autoload", "direct-load-scope") != WYRELOG_E_OK)
     return 352;
@@ -3190,6 +3199,7 @@ check_policy_store_guarded_direct_permissions_do_not_auto_arm (void)
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 366;
+  register_test_human (store, "guarded-load-user");
   if (wyl_policy_store_grant_direct_permission (store, "guarded-load-user",
       "wr.audit.read", "guarded-load-scope") != WYRELOG_E_OK)
     return 367;
@@ -3332,6 +3342,7 @@ check_decision_holds_one_recursive_engine_session (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 800;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "engine-session-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
@@ -3973,6 +3984,7 @@ check_reload_uses_one_external_wal_snapshot (void)
     return 830;
   }
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "snapshot-subject");
   if (wyl_policy_store_upsert_role (store, "snapshot-role", "snapshot role")
       != WYRELOG_E_OK
       || wyl_policy_store_upsert_permission (store, "snapshot.permission",
@@ -4419,6 +4431,7 @@ check_postcommit_not_found_is_internal (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 851;
+  register_test_human (wyl_handle_get_policy_store (handle), "postcommit-not-found-user");
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (session == NULL
       || wyl_engine_session_run_committed_publication (session,
@@ -4453,6 +4466,7 @@ check_postcommit_policy_is_internal (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 916;
+  register_test_human (wyl_handle_get_policy_store (handle), "postcommit-not-found-user");
   g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
   if (session == NULL
       || wyl_engine_session_run_committed_publication (session,
@@ -4507,6 +4521,7 @@ check_retained_external_publication_outcomes (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 854;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "tenant-owner");
   guint64 generation = 0;
   if (wyl_handle_policy_store_capture_generation (handle, store, &generation)
       != WYRELOG_E_OK)
@@ -4585,6 +4600,7 @@ check_external_postcommit_policy_is_internal (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 919;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "external-postcommit-policy-user");
   if (wyl_policy_store_grant_direct_permission (store,
       "external-postcommit-policy-user", "wr.audit.read",
       "external-postcommit-policy-scope") != WYRELOG_E_OK)
@@ -4654,6 +4670,7 @@ check_candidate_accepted_input_witness (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 929;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "candidate-witness-user");
   if (wyl_policy_store_upsert_permission (store, "candidate-witness-perm",
       "candidate witness", "basic") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (store,
@@ -4832,6 +4849,7 @@ check_session_state_witness_survives_durable_restart (void)
     return 906;
   }
   gboolean created = FALSE;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
       "restart-witness-tenant",
       "tenant-owner", &created) != WYRELOG_E_OK || !created
@@ -5023,6 +5041,8 @@ check_member_of_accepted_input_survives_candidate_reload (void)
     return 941;
   }
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "crash-restart-actor");
+  register_test_human (store, "reload-member");
   if (wyl_policy_store_grant_role_membership (store, "reload-member",
       "wr.system_admin", "reload-scope") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
@@ -5227,6 +5247,8 @@ check_ownership_publication_commit_outcomes (void)
     g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==, WYRELOG_E_OK);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
+    register_test_human (store, "alice");
+    register_test_human (store, "bob");
     g_assert_cmpint (wyl_policy_store_create_tenant (store, "transfer-commit", "alice", &created), ==, WYRELOG_E_OK);
     WylServiceAuthWriteLease *lease = NULL;
     g_assert_cmpint (wyl_service_auth_authority_acquire_write (
@@ -5281,6 +5303,7 @@ check_committed_publication_fault_stages_and_bundle_classifier (void)
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 960 + (gint) i *4;
     g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+    register_test_human (wyl_handle_get_policy_store (handle), "crash-restart-actor");
     wyl_audit_event_set_subject_id (event, "crash-restart-actor");
     wyl_audit_event_set_action (event, "tenant_create");
     wyl_audit_event_set_resource_id (event, "crash-restart-tenant");
@@ -5332,6 +5355,7 @@ check_committed_publication_fault_stages_and_bundle_classifier (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &partial_handle) != WYRELOG_E_OK)
     return 972;
   g_autoptr (WylAuditEvent) partial_event = wyl_audit_event_new ();
+  register_test_human (wyl_handle_get_policy_store (partial_handle), "crash-restart-actor");
   wyl_audit_event_set_subject_id (partial_event, "crash-restart-actor");
   wyl_audit_event_set_action (partial_event, "tenant_create");
   wyl_audit_event_set_resource_id (partial_event, "crash-restart-tenant");
@@ -5376,6 +5400,8 @@ check_committed_publication_fault_stages_and_bundle_classifier (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &owner_handle) != WYRELOG_E_OK)
     return 975;
   g_autoptr (WylAuditEvent) owner_event = wyl_audit_event_new ();
+  register_test_human (wyl_handle_get_policy_store (owner_handle), "crash-restart-actor");
+  register_test_human (wyl_handle_get_policy_store (owner_handle), "someone-else");
   wyl_audit_event_set_subject_id (owner_event, "crash-restart-actor");
   wyl_audit_event_set_action (owner_event, "tenant_create");
   wyl_audit_event_set_resource_id (owner_event, "crash-restart-tenant");
@@ -5441,6 +5467,7 @@ run_committed_crash_child (const gchar *policy_path, const gchar *marker_path)
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 912;
   g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  register_test_human (wyl_handle_get_policy_store (handle), "crash-restart-actor");
   wyl_audit_event_set_subject_id (event, "crash-restart-actor");
   wyl_audit_event_set_action (event, "tenant_create");
   wyl_audit_event_set_resource_id (event, "crash-restart-tenant");
@@ -5740,6 +5767,7 @@ check_policy_store_guarded_direct_permission_decides_with_context (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 378;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "guarded-decide-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 379;
@@ -5782,6 +5810,7 @@ check_policy_store_guarded_direct_permission_tags_miss_after_allow (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 420;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "guarded-seq-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 421;
@@ -5839,6 +5868,7 @@ check_policy_store_guarded_direct_permission_denies_without_context (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 393;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "guarded-empty-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 394;
@@ -5880,6 +5910,7 @@ check_policy_store_guarded_direct_permission_denies_context_miss (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 403;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "guarded-miss-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 404;
@@ -5943,6 +5974,7 @@ check_policy_store_permission_states_autoload_on_open (void)
     return 576;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-user");
   if (wyl_policy_store_upsert_permission (store, "site.permstate.read",
       "permission state read", "basic") != WYRELOG_E_OK)
     return 577;
@@ -5981,6 +6013,7 @@ check_policy_store_permission_states_override_auto_arm (void)
     return 586;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-override-user");
   if (wyl_policy_store_upsert_permission (store, "site.permstate.override",
       "permission state override", "basic") != WYRELOG_E_OK)
     return 587;
@@ -6029,6 +6062,7 @@ check_policy_store_permission_states_reject_non_armed (void)
 
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     g_autofree gchar *user = g_strdup_printf ("permstate-%s-user", states[i]);
+    register_test_human (store, user);
     g_autofree gchar *perm = g_strdup_printf ("site.permstate.%s", states[i]);
     g_autofree gchar *scope = g_strdup_printf ("permstate-%s-scope", states[i]);
     if (wyl_policy_store_upsert_permission (store, perm, perm, "basic")
@@ -6071,6 +6105,7 @@ check_policy_store_guarded_permission_state_stays_guarded (void)
     return 696;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-guard-user");
   if (wyl_policy_store_grant_direct_permission (store, "permstate-guard-user",
       "wr.audit.read", "permstate-guard-scope") != WYRELOG_E_OK)
     return 697;
@@ -6106,6 +6141,7 @@ check_policy_store_guarded_permission_state_needs_context (void)
     return 708;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-guard-context-user");
   if (wyl_policy_store_grant_direct_permission (store,
       "permstate-guard-context-user", "wr.audit.read",
       "permstate-guard-context-scope") != WYRELOG_E_OK)
@@ -6167,6 +6203,7 @@ check_policy_store_permission_states_reject_unknown_state (void)
     return 730;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-bad-user");
   if (wyl_policy_store_set_permission_state (store, "permstate-bad-user",
       "wr.audit.read", "permstate-bad-scope", "missing") != WYRELOG_E_OK)
     return 731;
@@ -6190,6 +6227,7 @@ check_policy_store_permission_states_reload_failure_preserves_pair (void)
   WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "permstate-reload-user");
   if (wyl_policy_store_set_permission_state (store, "permstate-reload-user",
       "wr.audit.read", "permstate-reload-scope", "missing")
       != WYRELOG_E_OK)
@@ -6360,6 +6398,7 @@ check_handle_permission_state_transition_reloads_snapshot (void)
     return 801;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "perm-transition-user");
   if (wyl_policy_store_upsert_permission (store, "site.perm.transition",
       "permission transition", "basic") != WYRELOG_E_OK)
     return 804;
@@ -6429,6 +6468,7 @@ check_handle_permission_state_transition_projects_audit_fact (void)
     return 812;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "perm-audit-runtime-user");
   if (wyl_policy_store_upsert_permission (store, "site.perm.audit.runtime",
       "runtime audit permission", "basic") != WYRELOG_E_OK)
     return 819;
@@ -6467,6 +6507,7 @@ check_handle_permission_state_transition_reload_failure_poisons_pair (void)
       != WYRELOG_E_OK)
     return 820;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "perm-transition-fail-user");
   if (wyl_policy_store_upsert_permission (store, "site.perm.transition.fail",
       "failing transition permission", "basic") != WYRELOG_E_OK)
     return 827;
@@ -6529,6 +6570,7 @@ check_handle_permission_state_transition_rollback_hides_event_id (void)
   WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "perm-transition-rollback-user");
   if (wyl_policy_store_upsert_permission (store, "site.perm.rollback",
       "rollback transition permission", "basic") != WYRELOG_E_OK)
     return 831;
@@ -6912,6 +6954,8 @@ check_tenant_registry_projects_effective_scope_state (void)
     return 860;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-projection-user");
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-projection-active",
       "tenant-owner",
       &created) != WYRELOG_E_OK || !created)
@@ -7035,8 +7079,9 @@ check_scope_projection_requires_compatible_engine_relation (void)
 
   g_autoptr (WylHandle) tenant_handle = NULL;
   gboolean created = FALSE;
-  if (wyl_init (NULL, &tenant_handle) != WYRELOG_E_OK
-      || wyl_policy_store_create_tenant
+  g_assert_cmpint (wyl_init (NULL, &tenant_handle), ==, WYRELOG_E_OK);
+  register_test_human (wyl_handle_get_policy_store (tenant_handle), "tenant-owner");
+  if (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (tenant_handle), "nondefault-tenant",
       "tenant-owner",
       &created) != WYRELOG_E_OK || !created
@@ -7361,6 +7406,7 @@ check_policy_store_admin_auditor_membership_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 490;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.system_admin",
       "system admin") != WYRELOG_E_OK)
     return 491;
@@ -7390,6 +7436,7 @@ check_policy_store_service_admin_auditor_membership_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 498;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.service_admin",
       "service admin") != WYRELOG_E_OK)
     return 499;
@@ -7419,6 +7466,7 @@ check_policy_store_auditor_admin_cross_scope_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 506;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.service_admin",
       "service admin") != WYRELOG_E_OK)
     return 507;
@@ -7451,6 +7499,7 @@ check_policy_store_cross_scope_reload_preserves_valid_pair (void)
   WylEngine *read_engine = wyl_handle_get_read_engine (handle);
   WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "reload-sod-user");
   if (read_engine == NULL || delta_engine == NULL
       || wyl_policy_store_grant_role_membership (store, "reload-sod-user",
       "wr.service_admin", "admin-scope") != WYRELOG_E_OK
@@ -7473,6 +7522,7 @@ check_policy_store_inherited_auditor_admin_membership_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 514;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.service_admin",
       "service admin") != WYRELOG_E_OK)
     return 515;
@@ -7520,6 +7570,7 @@ check_policy_store_direct_permission_sod_fails_reload (void)
   WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "direct-sod-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
       "audit read", "sensitive") != WYRELOG_E_OK)
     return 528;
@@ -7548,6 +7599,7 @@ check_policy_store_direct_audit_write_sod_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 535;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "direct-write-user");
   if (wyl_policy_store_upsert_permission (store, "wr.audit.write",
       "audit write", "critical") != WYRELOG_E_OK)
     return 536;
@@ -7577,6 +7629,7 @@ check_policy_store_direct_audit_role_admin_sod_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 543;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "mixed-sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.service_admin",
       "service admin") != WYRELOG_E_OK)
     return 544;
@@ -7606,6 +7659,7 @@ check_policy_store_auditor_role_direct_admin_sod_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 551;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "mixed-sod-user");
   if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
       != WYRELOG_E_OK)
     return 552;
@@ -7635,6 +7689,7 @@ check_policy_store_auditor_role_direct_control_sod_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 1600;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "mixed-control-user");
   if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
       != WYRELOG_E_OK)
     return 1601;
@@ -7664,6 +7719,7 @@ check_policy_store_custom_role_permission_sod_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 559;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "custom-sod-user");
   if (wyl_policy_store_upsert_role (store, "site.audit-role",
       "site audit role") != WYRELOG_E_OK)
     return 560;
@@ -7858,6 +7914,7 @@ check_poisoned_pair_requires_verified_reconciliation (void)
     return 810;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "repair-subject");
   if (wyl_policy_store_set_permission_state (store, "repair-subject",
       "wr.audit.read", "repair-scope", "missing") != WYRELOG_E_OK)
     return 811;

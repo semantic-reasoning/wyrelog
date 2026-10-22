@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -175,6 +176,7 @@ run_crash_recovery (const gchar *program, const gchar *root)
   if (wyl_policy_store_open_with_options (&options, &setup) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return FALSE;
+  register_test_human (setup, "tenant-owner");
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (setup, "crash-tenant",
       "tenant-owner", &created)
@@ -240,6 +242,7 @@ run_parent (const gchar *program)
   if (wyl_policy_store_open_with_options (&options, &setup) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (setup) != WYRELOG_E_OK)
     return 1;
+  register_test_human (setup, "tenant-owner");
   gboolean created = FALSE;
   if (wyl_policy_store_create_tenant (setup, "race-tenant",
       "tenant-owner", &created)

@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -412,6 +413,7 @@ test_fixture_concurrency_and_reopen (void)
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *missing = (const guint8 *) 0x1;
   gsize missing_len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
@@ -582,6 +584,7 @@ test_handoff_escrow_roundtrip_and_tamper (void)
   g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 
   wyl_id_t escrow_id;
   g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
@@ -636,6 +639,7 @@ test_absent_with_credentials_is_policy (void)
   g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const gchar *sql =
       "INSERT INTO tenants(tenant_id,owner_subject_id,sealed,created_at,"
       "updated_at) "
@@ -671,6 +675,7 @@ assert_ensure_failure (TestRuntime *runtime, TestProvider *provider,
   g_assert_cmpint (open_store (NULL, provider, runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -772,6 +777,7 @@ test_commit_before_cache (void)
   g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_set_authorizer (db, deny_commit, NULL), ==,
       SQLITE_OK);
@@ -810,6 +816,7 @@ test_unseal_failure_is_closed (void)
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -847,6 +854,7 @@ assert_authenticated_inner_tamper_is_policy (gsize offset, guint8 mask)
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -920,6 +928,7 @@ test_providerless_is_policy (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *cvk = (const guint8 *) 0x1;
   gsize len = 99;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
@@ -947,6 +956,7 @@ assert_schema_gate (const gchar *mutation)
   g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), mutation,
       NULL, NULL, NULL), ==, SQLITE_OK);
   const guint8 *cvk = (const guint8 *) 0x1;
@@ -984,6 +994,7 @@ create_persisted_cvk (const gchar *path)
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *cvk = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -1202,6 +1213,7 @@ create_golden_store (const gchar *path, guint8 salt[16], guint8 verifier[32],
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *materialized = NULL;
   gsize len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -1819,6 +1831,7 @@ test_rotation_intent_status (void)
   g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   const guint8 *materialized = NULL;
   gsize materialized_len = 0;
   g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
@@ -2938,6 +2951,7 @@ test_rotation_policy_edges (void)
   g_assert_cmpint (open_store (path, &initial, &initial_runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   guint8 legacy_auth_key[crypto_generichash_KEYBYTES];
   g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store,
       legacy_auth_key, sizeof legacy_auth_key), ==, WYRELOG_E_OK);

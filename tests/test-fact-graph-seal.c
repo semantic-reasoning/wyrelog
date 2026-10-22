@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <errno.h>
 #include <duckdb.h>
@@ -119,6 +120,7 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -157,6 +159,7 @@ create_authority_graph_with_schema (wyl_policy_store_t *store,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -517,6 +520,7 @@ create_provisioned_graph_fixture (wyl_policy_store_t *policy,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);

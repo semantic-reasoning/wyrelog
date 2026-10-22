@@ -1,5 +1,5 @@
 {
-  "aggregate": "d422d0b02dcaab3919a7ea4d26b1573dd61bcaf156bb22c90ef3e0b347929160",
+  "aggregate": "277f736294f32b551cddc2a5514efe62fb40198b32fc88f38b7a93986894f014",
   "directives": {
     "count": 567,
     "sha256": "2d3dd1da5fdffdada05d0e383ce121c9fd168130ab183bb8568dca5b2451c8ae"
@@ -15,9 +15,9 @@
     "graph_create_handler": "20b80e15fd53428c2976821e59dc71f384b335f153425be93a0ab6c14bd9716f",
     "graph_seal_handler": "994aafd22f8bc36b79837e7f75493bde00beb1d1f1a2eece6294214066f93330",
     "lookup_fact_graph": "ef88e73e3c610e8f93838f7d90f50950eaf10103745804bfa9806bb180267db7",
-    "mfa_enroll_confirm_handler": "6cc30363c707becfa081f40cb66c1cba37c6a29687fe1f217303d5c123fb785d",
+    "mfa_enroll_confirm_handler": "f633de54f079dd8374cc10d84e01563380f2a723b4f1f05b687276ed72bd0c4c",
     "mfa_enroll_subject_exists": "cc77193cff332f0bc837bb6ce33ec3c564c8e7e176986d358e27310e682d42d9",
-    "mutate_tenant_lifecycle_publication": "b4714aeec31968346c014e5eb29ff593863748b01a4a8bb4c23c2e6780a51c1a",
+    "mutate_tenant_lifecycle_publication": "be4c54abb439205de08e2870f3ff6875bb144c484170b7849725e2da45f38c69",
     "mutate_tenant_transfer": "5f1a706c97f11c47a98d129b7ebce80b3ea6338a1ecca1dc57ca032adeb05054",
     "policy_permission_grant_handler": "b50b148af1ec85303d588170131974bdcfc441b0c155c15bf316c143635f4988",
     "policy_permission_revoke_handler": "9b67475d2adc3a6006559ea5fc3e66b65508bb5cb0abbdba1e85e1266fd9e736",
@@ -49,7 +49,7 @@
     "tenant_delete_execute": "fe4d419b80b4618f31f6b8dccd523549b0354c4e2646676fe9b9b20f88ca8915",
     "tenant_delete_handler": "3322ba825e54b5e9a9711aceccb0f089162fd496df668a6bc8037161dc1c8783",
     "tenant_delete_validate": "86c4b12dfab7d45b4653fa893be0765ffaed86e530d9cacc55e8a1b73b8c3cf6",
-    "tenant_mutation_handler": "32b36a8dcfe9c7578294b2042b974e5383a9fc887a97ca1589e9faf7b10225ce",
+    "tenant_mutation_handler": "5f03f16f4fc76b6956fb6a345d494218edc1ce674aec50ca021487f813d8038b",
     "tenant_recovery_attempt_before_authorization": "c9e12fa28b50ad75040e4465e83b330662caef11f5f12653873add3b2ac02483",
     "tenant_recovery_finish_claim": "fa04e2d1c3164dbf1a6a89ad56f0aa0961b73077f4e33e2732cf0ce09c479429",
     "tenant_recovery_install": "6ed6d5761708ffdd4356d5c78d1b295a1337ac519379f8796bc05614770ec138",
@@ -59,6 +59,9 @@
     "tenant_seal_recovery_retain": "353d56a4544ae4deda6a0f3857ac128051c4a0357cb07e86f88ffdca955e6767",
     "tenant_transfer_owner_handler": "474fa7feaea5b98239abe75239bb3b6acdd164645be9a2775016c30fabdee344",
     "tenant_unseal_handler": "e1a3c2a0c38383cb5a2fdc0b35e285ee08e65be86ea9716bac14e24ca18f3d7e",
+    "user_management_authorize": "904aac3da19f2be9ce4682febb307437c1d76be8903333a8e80f803c50c588af",
+    "user_management_snapshot": "12deff757f3905c88cb45c0b8a73a24ab8c48e494cfb5452e534a73b5bd64162",
+    "users_handler": "86d3fe29fad8dedf1dbc28e13ca78c370aabfb7e11301aaf5c066b4020a92d42",
     "wyl_daemon_http_configure_tenant_for_test": "fb29004369d9ee4e8e51e0e033a08569607bb57d01f1b8e787b473c7c8d18c4f",
     "wyl_daemon_http_context_rotate_access_token_key": "6468777aca43b8ab402396e42c0e79c2d0d99f43a3274e4b6ce9220576fc8e62",
     "wyl_daemon_http_fail_next_policy_write_acquire_for_test": "b5aee7156199e095c65d96a4f8afa44e432f983e4913b8aa34cf9244e7fb1ed3",

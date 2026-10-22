@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -6655,6 +6656,7 @@ open_reservation_fixture_init (OpenReservationFixture *fixture,
       || wyl_policy_store_create_schema (fixture->policy) != WYRELOG_E_OK)
     return base + 1;
   gboolean created = FALSE;
+  register_test_human (fixture->policy, "tenant-owner");
   if (wyl_policy_store_create_tenant (fixture->policy, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK)

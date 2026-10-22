@@ -161,4 +161,5 @@ wyrelog_error_t wyl_session_mfa_verify_with_publishing_validator (WylHandle *
     handle, WylSession * session, const gchar * proof,
     WylMfaValidator validator, gpointer user_data);
 
+void wyl_session_revoke_human_private (WylSession *session);
 G_END_DECLS;

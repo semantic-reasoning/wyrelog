@@ -74,6 +74,8 @@ typedef enum wyrelog_error_t
   WYRELOG_E_RESOURCE_LIMIT = -14,
   /* A bounded operation exceeded its monotonic execution deadline. */
   WYRELOG_E_TIMED_OUT = -15,
+  WYRELOG_E_SUBJECT_NOT_REGISTERED = -16,
+  WYRELOG_E_LAST_SYSTEM_ADMIN = -17,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);

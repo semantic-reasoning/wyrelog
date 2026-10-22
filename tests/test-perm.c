@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 
@@ -139,6 +140,7 @@ check_grant_returns_ok (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 10;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "alice");
@@ -189,6 +191,7 @@ check_grant_rejects_incomplete_req (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 35;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   if (wyl_perm_grant (handle, req) != WYRELOG_E_INVALID)
@@ -255,6 +258,7 @@ check_role_grant_rejects_incomplete_req (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 95;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
   if (wyl_role_grant (handle, req) != WYRELOG_E_INVALID)
@@ -305,6 +309,7 @@ check_role_grant_requires_existing_role (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 104;
+  register_test_human (wyl_handle_get_policy_store (handle), "missing-role-user");
 
   g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (req, "missing-role-user");
@@ -321,6 +326,7 @@ check_direct_grant_requires_permission_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 50;
+  register_test_human (wyl_handle_get_policy_store (handle), "grant-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "grant-user");
@@ -375,6 +381,7 @@ check_direct_grant_preserves_dormant_permission_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 200;
+  register_test_human (wyl_handle_get_policy_store (handle), "grant-dormant-user");
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_set_principal_state (store, "grant-dormant-user",
@@ -437,6 +444,7 @@ check_role_grant_with_armed_state_allows_engine_decide (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
+  register_test_human (wyl_handle_get_policy_store (handle), "role-grant-user");
   if (seed_role_permission (handle, "site.role-grant-role",
       "site.role-grant-permission") != 0)
     return 111;
@@ -493,6 +501,7 @@ check_gated_grant_is_rejected_by_engine_path (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 59;
+  register_test_human (wyl_handle_get_policy_store (handle), "gated-grant-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "gated-grant-user");
@@ -509,6 +518,7 @@ check_grant_persists_direct_permission (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "store-user");
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "store-user");
@@ -546,6 +556,7 @@ check_revoke_removes_store_grant (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 80;
+  register_test_human (wyl_handle_get_policy_store (handle), "store-revoke-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "store-revoke-user");
@@ -602,6 +613,7 @@ check_role_grant_persists_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 121;
+  register_test_human (wyl_handle_get_policy_store (handle), "store-role-user");
   if (seed_role_permission (handle, "site.store-role", "site.store-role.read")
       != 0)
     return 122;
@@ -642,6 +654,7 @@ check_role_revoke_removes_store_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 128;
+  register_test_human (wyl_handle_get_policy_store (handle), "store-role-revoke-user");
   if (seed_role_permission (handle, "site.store-revoke-role",
       "site.store-revoke-role.read") != 0)
     return 129;
@@ -688,6 +701,7 @@ check_revoke_removes_engine_grant (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 60;
+  register_test_human (wyl_handle_get_policy_store (handle), "revoke-user");
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "revoke-user");
@@ -727,6 +741,7 @@ check_revoke_direct_grant_preserves_role_derived_permission (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 180;
+  register_test_human (wyl_handle_get_policy_store (handle), "dual-path-user");
   if (seed_role_permission (handle, "site.dual-path-role",
       "site.dual-path-permission") != 0)
     return 181;
@@ -808,6 +823,7 @@ check_role_revoke_removes_engine_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
+  register_test_human (wyl_handle_get_policy_store (handle), "role-revoke-user");
   if (seed_role_permission (handle, "site.role-revoke-role",
       "site.role-revoke-permission") != 0)
     return 141;
@@ -853,6 +869,7 @@ check_role_grant_rolls_back_invalid_snapshot (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
+  register_test_human (wyl_handle_get_policy_store (handle), "rollback-sod-user");
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_role (store, "site.audit-role",
@@ -899,6 +916,8 @@ check_poisoned_engine_rejects_permission_mutations (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 162;
+  register_test_human (wyl_handle_get_policy_store (handle), "poison-perm-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "poison-role-user");
   wyl_handle_poison_engine_pair (handle);
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
