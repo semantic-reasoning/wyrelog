@@ -7066,6 +7066,7 @@ wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *acto
 {
   if (self == NULL || runtime == NULL || runtime->authorize == NULL || runtime->validate == NULL
       || out == NULL || !wyl_policy_human_subject_is_valid (subject) || action == NULL) return WYRELOG_E_INVALID;
+  wyl_user_operation_clear (out);
   g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (self);
   WylServiceAuthWriteLease *write = NULL;
   wyrelog_error_t rc = wyl_service_auth_authority_acquire_write (self->service_auth_authority, self, NULL, &write);
@@ -7134,8 +7135,15 @@ wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *acto
     if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("user_child_prepared", runtime->data);
   }
   HandleUserMutation d = {self,subject,actor,action,request_id,fingerprint,runtime,children,out,NULL};
-  gboolean committed = retry;
-  if (rc == WYRELOG_E_OK) {
+  gboolean committed = FALSE;
+  if (rc == WYRELOG_E_OK && retry && !wyl_handle_engine_pair_is_poisoned (self)) {
+    rc = runtime->validate (runtime->data);
+    if (rc == WYRELOG_E_OK) {
+      *out = prior;
+      memset (&prior, 0, sizeof (prior));
+      committed = TRUE;
+    }
+  } else if (rc == WYRELOG_E_OK) {
     g_autoptr (WylEngineSession) engine = wyl_engine_session_acquire (self);
     if (engine == NULL) rc = WYRELOG_E_BUSY;
     else {

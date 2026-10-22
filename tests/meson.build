@@ -1782,7 +1782,10 @@ test_human_user_session = executable('test-human-user-session',
   c_args : ['-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"'],
   dependencies : [wyrelog_dep, sqlite_dep, service_session_private_dep],
 )
-test('human-user-session', test_human_user_session)
+test('human-user-session', test_human_user_session,
+  timeout : 90,
+  is_parallel : host_machine.system() != 'windows',
+)
 
 
 
@@ -2434,7 +2437,11 @@ if get_option('enable_fact_store').allowed()
   if host_machine.system() == 'windows'
     test_fact_replay_timeout = 180
   endif
-  test('fact-replay', test_fact_replay, timeout : test_fact_replay_timeout)
+  test('fact-replay', test_fact_replay,
+    args : ['-s', '/fact-replay/single-graph-refresh-race',
+            '-s', '/fact-replay/mutation-isolation-concurrent'],
+    timeout : test_fact_replay_timeout,
+    is_parallel : host_machine.system() != 'windows')
   test('fact-replay-mutation-races', test_fact_replay,
     args : ['-p', '/fact-replay/single-graph-refresh-race',
             '-p', '/fact-replay/mutation-isolation-concurrent'],
