@@ -2778,6 +2778,204 @@ wyl_fact_graph_provisioned_restore_witness_open_with_evidence
   *out_witness = witness;
   return WYRELOG_E_OK;
 }
+
+/* The journal's "sha256:" form, lowercase only.  A copy of the restore
+ * stage's parser: the locator does not depend on offline restore. */
+static gboolean
+darwin_replacement_checksum_parse (const gchar *text, guint8 digest[32])
+{
+  if (text == NULL)
+    return FALSE;
+  gsize length = 0;
+  while (length < 72 && text[length] != '\0')
+    length++;
+  if (length != 71 || !g_str_has_prefix (text, "sha256:"))
+    return FALSE;
+  for (guint i = 0; i < 64; i++) {
+    gchar c = text[7 + i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+      return FALSE;
+    guint8 nibble = (guint8) g_ascii_xdigit_value (c);
+    if (i % 2 == 0)
+      digest[i / 2] = (guint8) (nibble << 4);
+    else
+      digest[i / 2] |= nibble;
+  }
+  return TRUE;
+}
+
+static wyrelog_error_t
+darwin_replacement_legacy_absent (WylFactGraphDirectory *directory,
+    const gchar *legacy_name)
+{
+  struct stat legacy;
+  if (fstatat (directory->graph_fd, legacy_name, &legacy,
+      AT_SYMLINK_NOFOLLOW) == 0)
+    return WYRELOG_E_POLICY;
+  return errno == ENOENT ? WYRELOG_E_OK : errno_to_resolver_error (errno);
+}
+
+/* The cheap pins on the held descriptor and the canonical name.  Once a
+ * descriptor is held, a missing name is a substitution, not an absence. */
+static wyrelog_error_t
+darwin_replacement_main_pass (WylFactGraphDirectory *directory, gint fd,
+    const WylFactArtifactInventoryIdentity *staged_main,
+    guint64 logical_bytes, const gchar *legacy_name, struct stat *out_held)
+{
+  wyrelog_error_t rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_final_name_revalidate (directory, fd, staged_main->domain,
+            staged_main->object);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && fstat (fd, out_held) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (out_held->st_size < 0
+      || (guint64) out_held->st_size != logical_bytes))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_replacement_legacy_absent (directory, legacy_name);
+  return rc;
+}
+
+/* Read exactly logical_bytes and never past them; growth is the second
+ * pass's size check.  Any short read is a refusal, as in the stage
+ * verifier. */
+static wyrelog_error_t
+darwin_replacement_main_digest (WylFactGraphDirectory *directory, gint fd,
+    guint64 logical_bytes, const guint8 expected_digest[32])
+{
+  const gsize chunk = 64 * 1024;
+  g_autoptr (GChecksum) checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_autofree guint8 *buffer = g_try_malloc (chunk);
+  if (checksum == NULL || buffer == NULL)
+    return WYRELOG_E_NOMEM;
+  guint64 offset = 0;
+  while (offset < logical_bytes) {
+    gsize request = (gsize) MIN ((guint64) chunk, logical_bytes - offset);
+    ssize_t received = pread (fd, buffer, request, (off_t) offset);
+    if (received < 0 && errno == EINTR)
+      continue;
+    if (received < 0)
+      return WYRELOG_E_IO;
+    if ((gsize) received != request)
+      return WYRELOG_E_POLICY;
+    g_checksum_update (checksum, buffer, received);
+    offset += request;
+    if (directory->checkpoint != NULL) {
+      wyrelog_error_t rc =
+          directory->checkpoint ("darwin-replacement-main-read-chunk",
+              directory->checkpoint_data);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+  }
+  guint8 digest[32];
+  gsize size = sizeof digest;
+  g_checksum_get_digest (checksum, digest, &size);
+  return size == sizeof digest && memcmp (digest, expected_digest, size) == 0
+         ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+/* Capture when expected_evidence is NULL, compare otherwise.  The capture
+ * or comparison runs on the hashed descriptor, between the two passes. */
+static wyrelog_error_t
+darwin_replacement_main_prove (WylFactGraphDirectory *directory,
+    const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *staged_main,
+    guint64 logical_bytes, const gchar *checksum,
+    const WylFactGraphDarwinOperationEvidence *expected_evidence,
+    WylFactGraphDarwinOperationEvidence *out_evidence)
+{
+  guint8 expected_digest[32];
+  if (directory == NULL || staged_main == NULL || staged_main->domain == 0
+      || staged_main->object == 0 || staged_main->object_width != 0
+      || !wyl_fact_artifact_inventory_identity_equal (staged_main,
+      staged_main)
+      || logical_bytes == 0 || logical_bytes > G_MAXINT64
+      || !darwin_replacement_checksum_parse (checksum, expected_digest)
+      || !wyl_fact_graph_darwin_operation_uuid_is_valid (replacement_uuid))
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (expected_evidence != NULL)
+    rc = wyl_fact_graph_darwin_evidence_decode (expected_evidence->bytes,
+            sizeof expected_evidence->bytes, replacement_uuid, &decoded);
+  g_autofree gchar *legacy_name = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (replacement_uuid,
+            &legacy_name);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_volume_preflight (directory->graph_fd);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_replacement_legacy_absent (directory, legacy_name);
+  gint fd = -1;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_file (directory, "facts.duckdb", FALSE,
+            &fd);
+  struct stat before;
+  struct stat after;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_replacement_main_pass (directory, fd, staged_main,
+            logical_bytes, legacy_name, &before);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_replacement_main_digest (directory, fd, logical_bytes,
+            expected_digest);
+  WylFactGraphDarwinOperationEvidence captured = { 0 };
+  if (rc == WYRELOG_E_OK && expected_evidence == NULL)
+    rc = wyl_fact_graph_darwin_evidence_capture (directory->graph_fd, fd,
+            replacement_uuid, &captured);
+  else if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, fd,
+            replacement_uuid, &decoded);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("darwin-replacement-main-read",
+            directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_replacement_main_pass (directory, fd, staged_main,
+            logical_bytes, legacy_name, &after);
+  /* Mutation timestamps catch a same-size write into bytes already hashed;
+   * the caller's lease and quiescence are what exclude it. */
+  if (rc == WYRELOG_E_OK && !restore_inventory_same_stat (&before, &after))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && expected_evidence == NULL)
+    rc = wyl_fact_graph_darwin_evidence_compare (directory->graph_fd, fd,
+            replacement_uuid, &captured);
+  if (fd >= 0)
+    close (fd);
+  if (rc == WYRELOG_E_OK && out_evidence != NULL)
+    *out_evidence = captured;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_capture_darwin_replacement_evidence (
+  WylFactGraphDirectory *directory, const gchar *replacement_uuid,
+  const WylFactArtifactInventoryIdentity *staged_main, guint64 logical_bytes,
+  const gchar *checksum, WylFactGraphDarwinOperationEvidence *out_evidence)
+{
+  if (out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_evidence, 0, sizeof *out_evidence);
+  return darwin_replacement_main_prove (directory, replacement_uuid,
+             staged_main, logical_bytes, checksum, NULL, out_evidence);
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_compare_darwin_replacement_evidence (
+  WylFactGraphDirectory *directory, const gchar *replacement_uuid,
+  const WylFactArtifactInventoryIdentity *staged_main, guint64 logical_bytes,
+  const gchar *checksum,
+  const WylFactGraphDarwinOperationEvidence *expected_evidence)
+{
+  if (expected_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  return darwin_replacement_main_prove (directory, replacement_uuid,
+             staged_main, logical_bytes, checksum, expected_evidence, NULL);
+}
 #endif
 
 wyrelog_error_t

@@ -385,14 +385,15 @@ Evidence is therefore captured after `SYNC_PUBLISH_DIR`, by reopening
 `facts.duckdb` through the held graph chain, and is accepted only when that
 descriptor shows the journal's device and inode, the journal's logical size
 and checksum, link count one, mode 0600 and the effective owner, with the
-legacy stage name absent. A mismatch fails closed for operator disposition;
-nothing is minted for an object the journal does not name. The state is the
-same final-exists, evidence-absent seam as above, and it is resolved by the
-journal pin rather than refused. That departs from the provisioning rule
-deliberately: a live device and inode name exactly one object, APFS does not
-recycle file IDs while `ATTR_CMN_FILEID` lookup remains valid, and the full
-checksum re-read goes through the same descriptor whose identity is compared.
-The re-read costs one full read of the main.
+replacement's legacy stage name, `provision-<replacement>.sqlite`, absent. A
+mismatch fails closed for operator disposition; nothing is minted for an
+object the journal does not name. The state is the same final-exists,
+evidence-absent seam as above, and it is resolved by the journal pin rather
+than refused. That departs from the provisioning rule deliberately: a live
+device and inode name exactly one object, APFS does not recycle file IDs while
+`ATTR_CMN_FILEID` lookup remains valid, and the full checksum re-read goes
+through the same descriptor whose identity is compared. The re-read costs one
+full read of the main.
 
 The device number is not durable identity: it only has to match within the
 restore that recorded it. A remount or reboot after the restore binds its
