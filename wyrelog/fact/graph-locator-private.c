@@ -4535,6 +4535,7 @@ tenant_delete_manifest_stat (GKeyFile *key, const gchar *group,
   g_key_file_set_uint64 (key, group, "device", (guint64) st->st_dev);
   g_key_file_set_uint64 (key, group, "inode", (guint64) st->st_ino);
   g_key_file_set_boolean (key, group, "directory", S_ISDIR (st->st_mode));
+  g_key_file_set_uint64 (key, group, "size_bytes", S_ISREG (st->st_mode) && st->st_size > 0 ? (guint64) st->st_size : 0);
 }
 
 static gboolean

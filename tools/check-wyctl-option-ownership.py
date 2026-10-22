@@ -58,6 +58,8 @@ EXPECTED_FIELDS = {
         ("scope", "tenant", "graph", "bundle", "digest", "uuid",
          "revision_arg", "format", "access_token_file",
          "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
+    "WyctlUserOptions":
+        ("subject", "tenant", "request_id", "access_token_file", "guard_timestamp_arg", "guard_loc_class", "guard_risk_arg"),
     "WyctlTenantOptions":
         ("name", "delete_tenant", "request_id", "access_token_file", "guard_timestamp_arg",
          "guard_loc_class", "guard_risk_arg", "to"),
@@ -104,6 +106,7 @@ EXPECTED_PARSE_SITES = {
     "run_graph_create": "WyctlGraphOptions",
     "run_graph_list": "WyctlGraphOptions",
     "run_graph_seal": "WyctlGraphSealOptions",
+    "run_user_command": "WyctlUserOptions",
     "run_tenant_command": "WyctlTenantOptions",
     "run_tenant_assign_owner": "WyctlTenantAssignOwnerOptions",
     "run_fact_schema_register": "WyctlFactSchemaOptions",
@@ -147,7 +150,7 @@ EXPECTED_ARRAY_FIELDS = {
     "WyctlTenantAssignOwnerOptions": ("assignments",),
 }
 
-EXPECTED_STRING_DESTINATIONS = 273
+EXPECTED_STRING_DESTINATIONS = 280
 EXPECTED_REASSIGNMENTS = Counter({
     ("store_path", "g_steal_pointer (&store_path)"): 2,
     ("keyprovider_path", "g_steal_pointer (&keyprovider_path)"): 2,

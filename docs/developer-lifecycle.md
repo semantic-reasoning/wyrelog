@@ -595,3 +595,47 @@ explicit test friends; it is not a production ingress contract.
 Permanent retirement receipts and lifecycle or operation lock artifacts must
 never be manually updated or deleted. There is no supported administrative
 reset that makes a retired request id reusable.
+
+## Human user lifecycle
+
+Human identity is explicit and system-wide. The `human_users` registry is the
+lifecycle authority; the principal FSM records authentication state separately.
+Create a user before granting a role or permission, enrolling MFA, or logging in.
+Human identifiers are 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`, excluding
+`.` and `..` and the reserved `svc:` and `wr.` prefixes.
+
+`wyctl user create|list|disable|delete` uses typed client APIs and the `/users`
+daemon routes. Management requires a live MFA-assured human SYSTEM administrator
+with the root `wr.system_admin` membership. The guarded policy-management decision
+is rechecked under the authority write lease before mutation. Registry existence,
+last-administrator protection, and deletion prerequisites are checked in the SQL
+transaction. Disabled users may retain grants, but cannot authenticate. Revocation
+of stale grants remains available for unregistered subjects.
+
+Named login, human MFA and token publication, and human lifecycle mutations share
+a handle-owned recursive lifecycle lease. Entry points acquire it before authority,
+tenant admission, replay, engine, or token-map locks. They retain it through late
+session registration and token publication or revocation. Login refusal commits
+only an audit decision; it publishes no principal/session state or transition.
+Missing, disabled, and deleted users all receive `login_denied`; the SQL audit
+records the specific reason even in builds without the optional audit sink.
+
+Deletion uses one parent receipt and one transaction for all owned tenants and
+subject authority. Child tenant journals are inserted before their immutable
+parent associations. No public tenant-delete call is committed independently.
+The transaction marks the human tombstone and records the entire child vector;
+filesystem cleanup follows the existing identity-checked tenant manifests.
+Startup finishes child cleanup and verifies parent completion before admitting
+requests. An exact request retry reuses the saved fingerprint and child IDs.
+
+The one-time migration registers valid holders of role memberships, direct
+permissions, or TOTP enrollments. It reports each registered or skipped identity
+and retains `human_user_migration_report`. Principal-state-only and
+permission-state-only subjects are not evidence of registration. Tombstones never
+re-register on reopen. Readiness probe identities are seeded explicitly in the
+existing isolated readiness handle, not in the configured runtime store.
+
+This base has no owner-issued query-credential subsystem (#1341). Service
+credential `created_by` metadata is not an issuer-revocation contract. When #1341
+is implemented, its issuer-indexed revocation belongs in the same disable/delete
+transaction. Last-administrator MFA lockout remains a separate recovery problem.

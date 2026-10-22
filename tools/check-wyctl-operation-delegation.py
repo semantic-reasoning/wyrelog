@@ -33,6 +33,8 @@ import tempfile
 FORBIDDEN_DOMAIN_PATTERNS = (
     re.compile(r"\bWYL_SERVICE_CREDENTIAL_OPERATION_"),
     re.compile(r"\bWylServiceCredentialOperation"),
+    re.compile(r"\bWyl(?:HumanUser|UserOperation|UserDeletePreview)\b"),
+    re.compile(r"\bwyl_(?:handle_user_|policy_store_user_)"),
 )
 
 # A duplicated predecessor state machine would surface as an enum defining
@@ -68,6 +70,7 @@ def check_file(path: Path) -> int:
 def self_test() -> int:
     # The permitted #475 client tokens and a benign enum must NOT trip.
     permitted = (
+        "wyl_client_user_list (client, &list);\n"
         "wyl_client_service_credential_operation_status_list (client, &list);\n"
         "WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE\n"
         "WylClientServiceCredentialOperationStatusEntry entry = { 0 };\n"
@@ -79,6 +82,9 @@ def self_test() -> int:
     # Each forbidden sample must be flagged.
     forbidden_samples = (
         "WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED",
+        "wyl_handle_user_mutate (handle, subject);",
+        "wyl_policy_store_user_require (store, subject, TRUE);",
+        "WylUserDeletePreview preview;",
         "WylServiceCredentialOperation op;",
         "enum { WYL_FOO_STATE_PREPARED = 1 };",
         "enum { WYL_FOO_JOURNAL_HEAD = 1 };",

@@ -1210,6 +1210,34 @@ wyrelog_error_t wyl_client_event_emit (WylClient * client,
 /* Meta */
 const gchar *wyrelog_client_version_string (void);
 
+typedef struct
+{
+  gchar *subject;
+  gchar *state;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+} WylClientUser;
+typedef struct { WylClientUser *items; gsize len; } WylClientUserList;
+typedef struct
+{
+  gchar *subject;
+  gchar *fingerprint;
+  gchar **tenants;
+  guint64 permission_count;
+  guint64 data_bytes;
+  gchar *unsealed;
+  gchar *blockers;
+} WylClientUserDeletePreview;
+void wyl_client_user_list_clear (WylClientUserList *value);
+void wyl_client_user_delete_preview_clear (WylClientUserDeletePreview *value);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylClientUserList, wyl_client_user_list_clear)
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylClientUserDeletePreview, wyl_client_user_delete_preview_clear)
+wyrelog_error_t wyl_client_user_list (WylClient *client, gint64 timestamp, const gchar *loc, gint64 risk, WylClientUserList *out);
+wyrelog_error_t wyl_client_user_create (WylClient *client, const gchar *subject, const gchar *request_id, gint64 timestamp, const gchar *loc, gint64 risk);
+wyrelog_error_t wyl_client_user_disable (WylClient *client, const gchar *subject, const gchar *request_id, gint64 timestamp, const gchar *loc, gint64 risk);
+wyrelog_error_t wyl_client_user_delete_preview (WylClient *client, const gchar *subject, const gchar *request_id, gint64 timestamp, const gchar *loc, gint64 risk, WylClientUserDeletePreview *out);
+wyrelog_error_t wyl_client_user_delete (WylClient *client, const gchar *subject, const gchar *request_id, const gchar *fingerprint, gint64 timestamp, const gchar *loc, gint64 risk);
+
 G_END_DECLS;
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)

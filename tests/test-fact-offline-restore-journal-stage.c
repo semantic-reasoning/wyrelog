@@ -1,3 +1,4 @@
+#include "human-user-test-support.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
 
@@ -105,6 +106,7 @@ static void
 create_restore_journal (Fixture *fixture, const guint8 *bytes, gsize length,
     gboolean two_graphs)
 {
+  register_test_human (fixture->policy, "tenant-owner");
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant (fixture->policy,
       "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);

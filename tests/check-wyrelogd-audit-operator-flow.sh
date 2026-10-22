@@ -198,6 +198,7 @@ if status != 403 or '"audit_denied"' not in body:
     fail(f"system administrator was not denied audit read: {status} {body}")
 
 # Provision the separate auditor using supported CLI and MFA product paths.
+cli("user", "create", "--subject", "carol", "--access-token-file", admin_token, *guard())
 cli("policy", "role-grant", "--subject", "carol", "--role", "wr.auditor",
     "--scope", "__wr_default", "--access-token-file", admin_token,
     *guard())

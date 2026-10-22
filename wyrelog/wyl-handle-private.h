@@ -24,6 +24,13 @@
 
 G_BEGIN_DECLS;
 
+typedef struct { WylHandle *handle; } WylHumanLifecycleLease;
+void wyl_handle_set_human_revocation_callback (WylHandle *handle, gpointer data, void (*callback)(gpointer, const gchar *));
+WylHumanLifecycleLease wyl_handle_human_lifecycle_acquire (WylHandle *handle);
+void wyl_handle_human_lifecycle_clear (WylHumanLifecycleLease *lease);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylHumanLifecycleLease, wyl_handle_human_lifecycle_clear)
+
+
 /* Audit-only identity classification. Retained through retirement; grants no
  * authority. These helpers never acquire an engine or policy-store lock. */
 void wyl_handle_note_audit_session (WylHandle *self, const gchar *session_id);
@@ -614,6 +621,14 @@ typedef enum
   WYL_DURABLE_COMMIT_COMMITTED,
   WYL_DURABLE_COMMIT_UNCERTAIN,
 } WylDurableCommitState;
+
+typedef struct _WylTenantSealCoordination WylTenantSealCoordination;
+wyrelog_error_t wyl_handle_tenant_seal_prepare (WylHandle *self,
+    WylServiceAuthWriteLease *write, const gchar *tenant,
+    WylTenantSealCoordination **out);
+wyrelog_error_t wyl_handle_tenant_seal_finish (WylTenantSealCoordination *scope,
+    WylDurableCommitState outcome);
+
 wyrelog_error_t wyl_engine_verification_lookup_symbol
   (WylEngineVerification * verification, const gchar * symbol,
     gint64 * out_id);
@@ -1110,4 +1125,8 @@ wyrelog_error_t wyl_handle_delete_tenant (WylHandle *self,
     const gchar *tenant, const gchar *actor, const gchar *request_id,
     const WylTenantDeleteRuntime *runtime, WylTenantDeleteRecord *out);
 
+wyrelog_error_t wyl_handle_user_preview (WylHandle *self, const gchar *subject, const gchar *actor, const WylTenantDeleteRuntime *runtime, WylUserDeletePreview *out);
+wyrelog_error_t wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *actor,
+    const gchar *action, const gchar *request_id, const gchar *fingerprint,
+    const WylTenantDeleteRuntime *runtime, WylUserOperation *out);
 G_END_DECLS;

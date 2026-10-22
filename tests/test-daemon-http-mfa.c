@@ -19,6 +19,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <stdint.h>
@@ -471,6 +472,7 @@ check_wrong_state_session (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
   (void) server;
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.skip");
   /* Acquire an already-authenticated session via skip_mfa. */
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (SoupSession) session = soup_session_new ();
@@ -773,6 +775,7 @@ check_tenant_sealed_between_login_and_verify (SoupServer *server,
   (void) server;
   /* Use a non-default tenant: the policy store explicitly refuses to
    * seal __wr_default (see wyl_policy_store_set_tenant_sealed). */
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   static const gchar *tenant_id = "mfa-sealed-tenant";
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
@@ -992,6 +995,20 @@ main (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (1);
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.alias-verify");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.happy");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.locked");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.logout-bystander");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.logout-success");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.logout-victim");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.malformed");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.missing-code");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.no-enroll");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.peer");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.reauth");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.replay");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.sealed");
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa.wrong");
 
   /* Install the TOTP validator on the handle so the HTTP route can
   * resolve it via wyl_handle_get_mfa_validator. The daemon init

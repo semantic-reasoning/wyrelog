@@ -3,6 +3,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -778,6 +779,9 @@ check_tenant_seal_capacity (void)
   g_close (fd, NULL);
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "alice");
+  register_test_human (store, "bob");
+  register_test_human (store, "charlie");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "capacity-test",
       "alice", &changed), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
@@ -902,6 +906,7 @@ check_store_manages_tenant_registry (void)
     return 65;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 66;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_tenant_exists (store, "__wr_default", &exists)
       != WYRELOG_E_OK || !exists)
     return 67;
@@ -1693,10 +1698,10 @@ check_restore_selected_predecessor_migration (void)
   gboolean created = FALSE;
   if (root == NULL || wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_create_tenant (store, "tenant-a",
-      "tenant-owner", &created)
-      != WYRELOG_E_OK || !created)
-    return 9620;
+      ) return 9620;
+  register_test_human (store, "tenant-owner");
+  if (wyl_policy_store_create_tenant (store, "tenant-a", "tenant-owner", &created)
+      != WYRELOG_E_OK || !created) return 9620;
   const wyl_policy_fact_graph_column_t columns[] = { { "subject", "symbol" } };
   const wyl_policy_fact_graph_relation_t relations[] = {
     { "site.node", columns, G_N_ELEMENTS (columns) },
@@ -1809,6 +1814,7 @@ check_store_manages_fact_graph_registry (void)
     return 401;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 402;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -1909,6 +1915,7 @@ check_store_unseals_only_the_reversible_population (void)
     return 9701;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9702;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2214,6 +2221,7 @@ check_store_unseal_loses_a_race_without_writing (void)
     return 9741;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9742;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2388,6 +2396,7 @@ check_store_seals_fact_graph_registry (void)
     return 421;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 422;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2453,6 +2462,7 @@ check_store_rejects_fact_graph_registry_escapes (void)
     return 441;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 442;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2513,6 +2523,7 @@ check_store_rejects_fact_graph_reserved_metadata (void)
     return 461;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 462;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2599,6 +2610,7 @@ check_store_fact_graph_metadata_only (void)
     return 481;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 482;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2666,6 +2678,7 @@ check_store_pins_fact_root_identity (void)
     return 491;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 492;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -2925,6 +2938,7 @@ check_store_rejects_builtin_catalog_upsert_drift (void)
     return 232;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 233;
+  register_test_human (store, "subject");
 
   if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
       != WYRELOG_E_OK)
@@ -3451,6 +3465,7 @@ check_store_grants_role_membership (void)
     return 68;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 69;
+  register_test_human (store, "member-user");
   if (wyl_policy_store_upsert_role (store, "site.member-role", "member role")
       != WYRELOG_E_OK)
     return 70;
@@ -3516,6 +3531,7 @@ check_store_grants_direct_permission (void)
     return 60;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 61;
+  register_test_human (store, "direct-user");
   if (wyl_policy_store_upsert_permission (store, "site.direct.read",
       "direct read", "basic") != WYRELOG_E_OK)
     return 62;
@@ -4067,6 +4083,8 @@ check_store_checks_effective_subject_permission (void)
     return 233;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 234;
+  register_test_human (store, "direct-effective-user");
+  register_test_human (store, "role-effective-user");
   if (wyl_policy_store_upsert_permission (store, "site.effective.read",
       "effective read", "basic") != WYRELOG_E_OK)
     return 235;
@@ -4123,6 +4141,7 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
     return 197;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 198;
+  register_test_human (store, "rollback-role-user");
   if (wyl_policy_store_upsert_role (store, "site.rollback-role",
       "rollback role") != WYRELOG_E_OK)
     return 199;
@@ -4169,6 +4188,7 @@ check_role_membership_revoke_rolls_back_on_event_failure (void)
     return 206;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 207;
+  register_test_human (store, "rollback-role-revoke-user");
   if (wyl_policy_store_upsert_role (store, "site.rollback-role-revoke",
       "rollback role revoke") != WYRELOG_E_OK)
     return 208;
@@ -4207,6 +4227,7 @@ check_store_appends_direct_permission_event (void)
     return 92;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 93;
+  register_test_human (store, "direct-user");
   if (wyl_policy_store_append_direct_permission_event (store, "direct-user",
       "site.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
     return 94;
@@ -4234,6 +4255,7 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
     return 180;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 181;
+  register_test_human (store, "rollback-user");
   if (sqlite3_exec (wyl_policy_store_get_db (store),
       "CREATE TRIGGER fail_direct_permission_event "
       "BEFORE INSERT ON direct_permission_events "
@@ -4297,6 +4319,7 @@ check_direct_permission_revoke_rolls_back_on_event_failure (void)
     return 189;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 190;
+  register_test_human (store, "rollback-revoke-user");
   if (wyl_policy_store_upsert_permission (store, "site.rollback-revoke",
       "rollback revoke", "basic") != WYRELOG_E_OK)
     return 191;
@@ -4334,6 +4357,7 @@ check_store_sets_permission_state (void)
     return 218;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 219;
+  register_test_human (store, "perm-user");
   if (wyl_policy_store_set_permission_state (store, "perm-user",
       "wr.perm.read", "perm-scope", "armed") != WYRELOG_E_OK)
     return 220;
@@ -4408,6 +4432,8 @@ check_store_applies_permission_state_transition (void)
     return 238;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 239;
+  register_test_human (store, "perm-apply-user");
+  register_test_human (store, "perm-trigger-user");
 
   gint64 grant_event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition (store,
@@ -4514,6 +4540,7 @@ check_store_permission_state_transition_rejects_invalid_edge (void)
     return 250;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 251;
+  register_test_human (store, "perm-invalid-user");
 
   gint64 event_id = 77;
   if (wyl_policy_store_apply_permission_state_transition (store,
@@ -4556,6 +4583,7 @@ check_store_permission_state_transition_rolls_back_event_failure (void)
     return 258;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 259;
+  register_test_human (store, "perm-rollback-user");
   if (sqlite3_exec (wyl_policy_store_get_db (store),
       "CREATE TRIGGER fail_permission_state_event "
       "BEFORE INSERT ON permission_state_events "
@@ -4587,6 +4615,7 @@ check_store_permission_state_transition_appends_audit (void)
     return 264;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 265;
+  register_test_human (store, "perm-audit-user");
 
   gint64 event_id = -1;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
@@ -4626,6 +4655,7 @@ check_store_permission_state_transition_rolls_back_audit_failure (void)
     return 270;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 271;
+  register_test_human (store, "perm-audit-rollback-user");
   if (sqlite3_exec (wyl_policy_store_get_db (store),
       "CREATE TRIGGER fail_permission_state_audit "
       "BEFORE INSERT ON audit_events "
@@ -4678,6 +4708,7 @@ check_store_permission_state_transition_rejects_invalid_audit (void)
     return 286;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 287;
+  register_test_human (store, "perm-bad-audit-user");
 
   gint64 event_id = 101;
   if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
@@ -4724,6 +4755,7 @@ check_store_permission_state_transition_rolls_back_audit_conflict (void)
     return 294;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 295;
+  register_test_human (store, "perm-audit-conflict-user");
   if (wyl_policy_store_append_audit_event (store, id, 1001,
       "existing-audit-user", "existing.action", "existing-resource",
       NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_OK)
@@ -6812,6 +6844,7 @@ check_store_rejects_bad_direct_permission (void)
     return 70;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 71;
+  register_test_human (store, "direct-user");
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
       "missing-perm", "direct-scope") != WYRELOG_E_IO)
     return 72;
@@ -6850,6 +6883,8 @@ check_store_rejects_bad_role_permission (void)
     return 50;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 51;
+  register_test_human (store, "role-user");
+  register_test_human (store, "user");
   if (wyl_policy_store_grant_role_permission (store, "missing-role",
       "missing-perm") != WYRELOG_E_IO)
     return 52;
@@ -7341,6 +7376,7 @@ check_bootstrap_admin_legacy_skip_migration (void)
       return 922;
     if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
       return 923;
+    register_test_human (store, "legacy.admin");
     if (wyl_policy_store_grant_role_membership (store, "legacy.admin",
         "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
       return 924;
@@ -7494,6 +7530,7 @@ check_store_provisions_fact_graph (void)
     return 961;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 962;
+  register_test_human (store, "tenant-owner");
   if (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner", &created)
       != WYRELOG_E_OK || !created)
@@ -7632,10 +7669,10 @@ check_store_fact_graph_materialization_state (void)
   gboolean created = FALSE;
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_create_tenant (store, "tenant-a",
-      "tenant-owner", &created)
-      != WYRELOG_E_OK || !created)
-    return 979;
+      ) return 979;
+  register_test_human (store,"tenant-owner");
+  if (wyl_policy_store_create_tenant (store,"tenant-a","tenant-owner",&created)
+      != WYRELOG_E_OK || !created) return 979;
 
   const wyl_policy_fact_graph_column_t columns[] = {
     {"subject", "symbol"},
@@ -7716,6 +7753,7 @@ check_audit_scope_rejects_cross_scope_privilege (void)
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9401;
 
+  register_test_human (store, "cross-scope-auditor");
   if (wyl_policy_store_apply_role_membership_mutation (store,
       "cross-scope-auditor", "wr.system_admin", "tenant-a", TRUE)
       != WYRELOG_E_OK)
@@ -7731,6 +7769,8 @@ check_audit_scope_rejects_cross_scope_privilege (void)
       "wr.auditor", "__wr_default", &exists) != WYRELOG_E_OK || exists)
     return 9404;
 
+  register_test_human (store, "separate-admin");
+  register_test_human (store, "separate-auditor");
   /* A separate dedicated auditor may coexist with a distinct operator. */
   if (wyl_policy_store_apply_role_membership_mutation (store,
       "separate-admin", "wr.system_admin", "__wr_default", TRUE)
@@ -7759,6 +7799,7 @@ check_audit_scope_rejects_cross_scope_privilege (void)
     return 9405;
   /* A custom role with audit-read authority may not coexist with privileged
    * authority at a different scope. */
+  register_test_human (store, "cross-scope-custom");
   if (wyl_policy_store_grant_role_membership (store, "cross-scope-custom",
       "site.audit-reader", "__wr_default") != WYRELOG_E_OK
       || wyl_policy_store_grant_role_membership (store, "cross-scope-custom",
@@ -7796,6 +7837,7 @@ check_audit_so_d_permission_taxonomy (void)
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9411;
 
+  register_test_human (store, "direct-audit-reader");
   for (gsize i = 0; i < G_N_ELEMENTS (audit_permissions); i++) {
     if (wyl_policy_store_apply_direct_permission_mutation (store,
         "direct-audit-reader", audit_permissions[i], "__wr_default", TRUE)
@@ -7887,6 +7929,7 @@ check_audit_so_d_permission_taxonomy (void)
           audit_permissions[j]) != WYRELOG_E_OK)
         return 9416;
     }
+    register_test_human (store, "inherited-auditor");
     if (wyl_policy_store_grant_role_membership (store, "inherited-auditor",
         "site.audit-reader", "__wr_default") != WYRELOG_E_OK
         || wyl_policy_store_upsert_role (store, "site.privilege-base",
@@ -7910,6 +7953,7 @@ check_audit_so_d_permission_taxonomy (void)
       return 9424;
     /* The local guard must catch the same custom-role permission when the
      * auditor has only a tenant-scoped grant, outside the global guard. */
+    register_test_human (store, "local-auditor");
     if (wyl_policy_store_grant_role_membership (store, "local-auditor",
         "site.audit-reader", "tenant-c") != WYRELOG_E_OK
         || wyl_policy_store_apply_role_membership_mutation (store,
@@ -7923,9 +7967,11 @@ check_audit_so_d_permission_taxonomy (void)
       return 9426;
   }
   g_clear_pointer (&store, wyl_policy_store_close);
-  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
-      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_upsert_permission (store, "site.control.approve",
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "site-custom-auditor");
+  register_test_human (store, "catalog-auditor");
+  if (wyl_policy_store_upsert_permission (store, "site.control.approve",
       "custom control", "basic") != WYRELOG_E_OK
       || wyl_policy_store_upsert_role (store, "site.audit-reader",
       "custom audit reader") != WYRELOG_E_OK
@@ -7944,9 +7990,11 @@ check_audit_so_d_permission_taxonomy (void)
   /* An allowlisted ID becomes CONTROL if its catalog metadata drifts.
    * Snapshot validation must classify it the same way as the plane API. */
   g_clear_pointer (&store, wyl_policy_store_close);
-  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
-      || wyl_policy_store_create_schema (store) != WYRELOG_E_OK
-      || wyl_policy_store_upsert_role (store, "site.audit-reader",
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "site-custom-auditor");
+  register_test_human (store, "catalog-auditor");
+  if (wyl_policy_store_upsert_role (store, "site.audit-reader",
       "custom audit reader") != WYRELOG_E_OK
       || wyl_policy_store_grant_role_permission (store, "site.audit-reader",
       "wr.audit.read") != WYRELOG_E_OK
@@ -7980,6 +8028,8 @@ check_store_subject_has_human_identity (void)
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK
       || wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 9501;
+  register_test_human (store, "id-role");
+  register_test_human (store, "id-direct");
   if (wyl_policy_store_set_principal_state (store, "id-state",
       "authenticated") != WYRELOG_E_OK
       || wyl_policy_store_grant_role_membership (store, "id-role",
@@ -8067,6 +8117,8 @@ check_tenant_delete_races (void)
     g_autoptr (wyl_policy_store_t) store = NULL;
     g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    register_test_human (store, "alice");
+    register_test_human (store, "late");
     gboolean created = FALSE;
     g_assert_cmpint (wyl_policy_store_create_tenant (store, "race", "alice", &created), ==, WYRELOG_E_OK);
     WylPolicyAuthorityMutationResult result;
@@ -8102,6 +8154,10 @@ check_tenant_delete_schema (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (":memory:", &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "alice");
+  register_test_human (store, "human-holder");
+  register_test_human (store, "state-holder");
+  register_test_human (store, "late-holder");
   sqlite3 *db = wyl_policy_store_get_db (store);
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db,
@@ -8191,6 +8247,7 @@ check_tenant_delete_schema (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
 
 }
+
 
 int
 main (void)

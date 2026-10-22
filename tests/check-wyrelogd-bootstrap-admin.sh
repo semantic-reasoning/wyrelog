@@ -189,6 +189,11 @@ import os
 os.chmod(token_path, 0o600)
 PY
 
+"$PYTHON" "$(dirname "$0")/human-user-auth-fixture.py" "http://127.0.0.1:$PORT" "$TOKEN_FILE" admin1 "$TMPDIR/admin1-seed.json"
+
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "bootstrap-target" \
+  --access-token-file "$TOKEN_FILE" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \
   --subject "bootstrap-target" \
   --perm "wr.stream.read" \
@@ -201,6 +206,9 @@ PY
 # The daemon remains the sole owner of the encrypted clear-file while a
 # second administrator is created and enrolls through the authenticated
 # online two-step flow.
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "admin2" \
+  --access-token-file "$TOKEN_FILE" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy role-grant \
   --subject "admin2" \
   --role "wr.system_admin" \
@@ -370,6 +378,9 @@ with open(token_path, "w", encoding="utf-8") as f:
 os.chmod(token_path, 0o600)
 PY
 
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "online-enroll-target" \
+  --access-token-file "$ADMIN2_TOKEN" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \
   --subject "online-enroll-target" \
   --perm "wr.stream.read" \
@@ -379,10 +390,16 @@ PY
   --guard-loc-class public \
   --guard-risk 0 >/dev/null
 
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "admin3" \
+  --access-token-file "$TOKEN_FILE" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy role-grant \
   --subject "admin3" --role "wr.system_admin" --scope "__wr_default" \
   --access-token-file "$TOKEN_FILE" --guard-timestamp 123 \
   --guard-loc-class public --guard-risk 0 >/dev/null
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "admin4" \
+  --access-token-file "$TOKEN_FILE" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy role-grant \
   --subject "admin4" --role "wr.system_admin" --scope "__wr_default" \
   --access-token-file "$TOKEN_FILE" --guard-timestamp 123 \
@@ -395,27 +412,13 @@ PY
 # Issue #752: two sessions of ONE subject are constructible again. The ratified
 # single-active precedence makes a login against an already-authenticated
 # subject idempotent - it appends no authenticating transition, so it neither
-# advances the durable watermark nor retires the first session's token. The
-# second session attaches to the epoch the first won and is non-authoritative
-# (it is not mfa_assured), but it authenticates. That is what lets the
-# cross-session assertion below - a challenge is bound to the exact session and
-# not merely to the actor - be driven by two sessions of the same admin, as it
-# was before the supersession gate landed.
-#
-# The supersession gate is not asserted here any more, because under this model
-# a second login is not the transition that would trip it. It is asserted where
-# a real watermark advance can be driven: check_relogin_binds_current_authn_epoch
-# in tests/test-daemon-http-decide.c.
-"$PYTHON" - "http://127.0.0.1:$PORT" <<'PY'
+# Use two live MFA-assured administrators for cross-session challenge binding.
+"$PYTHON" - "http://127.0.0.1:$PORT" "$TOKEN_FILE" "$ADMIN2_TOKEN" <<'PY'
 import base64, hashlib, hmac, json, struct, sys, time
 import urllib.error, urllib.request
+from pathlib import Path
 
 base = sys.argv[1]
-def login():
-    req = urllib.request.Request(
-        base + "/auth/login?username=admin1&skip_mfa=true", method="POST")
-    with urllib.request.urlopen(req, timeout=3) as response:
-        return json.load(response)["access_token"]
 def request(path, token, payload):
     query = "?tenant=__wr_default&guard_timestamp=123&guard_loc_class=public&guard_risk=0"
     return urllib.request.Request(base + path + query,
@@ -428,7 +431,7 @@ def code(secret):
                       hashlib.sha1).digest()
     offset = digest[-1] & 15
     return (struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000
-tokens = [login(), login()]
+tokens = [Path(path).read_text(encoding="utf-8").strip() for path in sys.argv[2:]]
 # A challenge is bound to the exact authenticated session, not merely actor.
 with urllib.request.urlopen(request("/auth/mfa/enroll/start", tokens[0],
         {"subject": "admin4"}), timeout=3) as response:
@@ -473,32 +476,15 @@ for index, (token, challenge) in enumerate(zip(tokens, challenges)):
             raise SystemExit("competing enrollment unexpectedly overwrote secret")
 PY
 
-# Enroll the bootstrap administrator itself and prove that the live engine
-# snapshot immediately observes the atomic skip-MFA revoke.
+# Bootstrap self-enrollment happened before creating additional users, which
+# requires live MFA. Its skip-MFA revocation must still be visible here.
 ADMIN1_SECRET="$TMPDIR/admin1.secret"
-"$PYTHON" - "$WYCTL" "http://127.0.0.1:$PORT" "$ADMIN2_TOKEN" \
-    "$ADMIN1_SECRET" "admin1" <<'PY'
-import base64, hashlib, hmac, os, struct, subprocess, sys, time
-wyctl, daemon_url, token_file, secret_path, subject = sys.argv[1:]
-proc = subprocess.Popen([wyctl, "--daemon-url", daemon_url, "mfa", "enroll",
-    "--subject", subject, "--access-token-file", token_file], stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
-uri = proc.stdout.readline().strip()
-secret_line = proc.stdout.readline().strip()
-if not uri.startswith("otpauth_uri=") or not secret_line.startswith("secret_base32="):
-    raise SystemExit("bootstrap online enrollment material missing")
-secret = secret_line.split("=", 1)[1]
-seed = base64.b32decode(secret)
-step = int(time.time()) // 30
-digest = hmac.new(seed, struct.pack(">Q", step), hashlib.sha1).digest()
-offset = digest[-1] & 15
-code = (struct.unpack(">I", digest[offset:offset+4])[0] & 0x7fffffff) % 1000000
-proc.stdin.write(f"{code:06d}\n"); proc.stdin.flush()
-_, err = proc.communicate(timeout=10)
-if proc.returncode != 0:
-    sys.stderr.write(err); raise SystemExit(proc.returncode)
-with open(secret_path, "w", encoding="ascii") as f: f.write(secret)
-os.chmod(secret_path, 0o600)
+"$PYTHON" - "$TMPDIR/admin1-seed.json" "$ADMIN1_SECRET" <<'PY'
+import json, os, sys
+from pathlib import Path
+material = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[2]).write_text(material["secret"], encoding="ascii")
+os.chmod(sys.argv[2], 0o600)
 PY
 
 "$PYTHON" - "http://127.0.0.1:$PORT" <<'PY'
@@ -635,6 +621,9 @@ with urllib.request.urlopen(verify, timeout=3) as response:
 with open(token_path, "w", encoding="utf-8") as f: f.write(token + "\n")
 os.chmod(token_path, 0o600)
 PY
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" user create --subject "restart-persistence-target" \
+  --access-token-file "$RESTART_TOKEN" --guard-timestamp 123 --guard-loc-class public --guard-risk 0 >/dev/null
+
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \
   --subject "restart-persistence-target" --perm "wr.stream.read" \
   --scope "__wr_default" --access-token-file "$RESTART_TOKEN" \

@@ -19,6 +19,7 @@ typedef struct
   wyl_policy_store_t *store;
   WylServiceAuthWriteLease *lease;
   WylServiceAuthorityTransaction *transaction;
+  WylTenantSealCoordination *seal_coordination;
   WylServiceAuthorityCommitEvidence *evidence;
   WylEngineSession *engine_session;
   guint64 policy_store_generation;
@@ -462,7 +463,15 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     wyl_engine_session_release (mutation->engine_session);
     mutation->engine_session = NULL;
   }
-  gboolean latch_required = invalidation_rc != WYRELOG_E_OK
+  WylDurableCommitState coordination_outcome =
+      outcome == SERVICE_MUTATION_COMMITTED ? WYL_DURABLE_COMMIT_COMMITTED :
+      outcome == SERVICE_MUTATION_UNCERTAIN ? WYL_DURABLE_COMMIT_UNCERTAIN :
+      WYL_DURABLE_COMMIT_NOT_COMMITTED;
+  wyrelog_error_t coordination_rc = wyl_handle_tenant_seal_finish
+        (mutation->seal_coordination, coordination_outcome);
+  mutation->seal_coordination = NULL;
+  if (coordination_rc != WYRELOG_E_OK) result = coordination_rc;
+  gboolean latch_required = coordination_rc != WYRELOG_E_OK || invalidation_rc != WYRELOG_E_OK
       || (outcome == SERVICE_MUTATION_UNCERTAIN
       && mutation->authority_write_attempted)
       || (outcome == SERVICE_MUTATION_COMMITTED && result != WYRELOG_E_OK
@@ -786,6 +795,25 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
     rc = service_mutation_authorize (&mutation, runtime->authorization,
             actor_subject_id);
   WylPolicyServiceRetirementOutcome stored_retirement = { 0 };
+  gboolean classified_found = FALSE;
+  gchar classified_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = {0};
+  WylPolicyTenantAuthorityRecord *coordinated = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_seal_tenant_request_classify (mutation.store,
+            tenant_id, actor_subject_id, request_id, receipt_version,
+            runtime->acting_capacity != NULL, runtime->acting_capacity != NULL, &classified_found, &stored_retirement,
+            classified_tenant);
+  if (rc == WYRELOG_E_OK && !classified_found && runtime->acting_capacity != NULL) {
+    rc = wyl_policy_store_read_tenant_authority (mutation.store, tenant_id, &coordinated);
+    if (rc == WYRELOG_E_OK && coordinated->lifecycle_state != WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED
+        && coordinated->lifecycle_state != WYL_POLICY_TENANT_LIFECYCLE_ACTIVE) {
+      wyl_policy_tenant_authority_record_free (coordinated);
+      coordinated = NULL;
+    }
+    if (rc == WYRELOG_E_OK && coordinated != NULL)
+      rc = wyl_handle_tenant_seal_prepare (handle, mutation.lease, tenant_id,
+              &mutation.seal_coordination);
+  }
   TenantScopePublication publication = {
     .tenant_id = tenant_id,
     .state = runtime->test_verify_opposite_state ? "active" : "closed",
@@ -801,17 +829,18 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
   gboolean receipt_found = FALSE;
   gchar stored_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_seal_tenant_keyed_precheck_core
-          (mutation.transaction, mutation.store, tenant_id, actor_subject_id,
-            request_id, receipt_version, runtime->acting_capacity != NULL, &receipt_found, &stored_retirement,
+    rc = wyl_policy_store_seal_tenant_request_classify
+          (mutation.store, tenant_id, actor_subject_id,
+            request_id, receipt_version, runtime->acting_capacity != NULL, coordinated != NULL, &receipt_found, &stored_retirement,
             stored_tenant);
+  if (rc == WYRELOG_E_OK && receipt_found && coordinated != NULL) rc = WYRELOG_E_CONFLICT;
   if (rc == WYRELOG_E_OK && !receipt_found)
     rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !receipt_found) {
     mutation.authority_write_attempted = TRUE;
-    rc = wyl_policy_store_seal_tenant_keyed_capacity_core (mutation.transaction,
+    rc = wyl_policy_store_seal_tenant_coordinated_core (mutation.transaction,
             mutation.store, tenant_id, actor_subject_id, request_id,
-            receipt_version, runtime->acting_capacity != NULL ? *runtime->acting_capacity : NULL, &stored_retirement, stored_tenant);
+            receipt_version, runtime->acting_capacity != NULL ? *runtime->acting_capacity : NULL, coordinated, &stored_retirement, stored_tenant);
   }
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
       && stored_retirement.disposition ==
@@ -821,6 +850,7 @@ wyl_tenant_seal_keyed_with_runtime (WylHandle *handle,
     mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
+  wyl_policy_tenant_authority_record_free (coordinated);
   gboolean lifecycle_coordination = rc == WYRELOG_E_BUSY
       && stored_retirement.disposition ==
       WYL_POLICY_SERVICE_RETIREMENT_LIFECYCLE_COORDINATION_REQUIRED;

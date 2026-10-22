@@ -13,6 +13,7 @@
 #include "wyl-handle-compound-private.h"
 #include "fact/publication-lock-event-private.h"
 #include "wyl-handle-private.h"
+#include "wyl-session-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
 #include "wyl-keyprovider-file-private.h"
@@ -37,6 +38,8 @@
 
 static wyrelog_error_t wyl_handle_load_policy_store_role_inheritances
   (WylHandle *self);
+
+typedef struct { gpointer data; void (*callback)(gpointer,const gchar *); } WylHumanRevocationObserver;
 
 typedef struct
 {
@@ -154,6 +157,8 @@ struct _WylHandle
    * receives the integer id) can resolve back to the session that
    * owns the durable state about to be torn down.
    */
+  GRecMutex human_lifecycle_mutex;
+  GPtrArray *human_revocation_observers;
   GMutex sessions_lock;
   GHashTable *sessions_by_id;
   /* Digest-only audit classification, retained until handle destruction. */
@@ -1268,6 +1273,8 @@ wyl_handle_finalize (GObject *object)
       wyl_service_auth_authority_unref);
   g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
   g_clear_pointer (&self->audit_session_handles, g_hash_table_unref);
+  g_clear_pointer (&self->human_revocation_observers, g_ptr_array_unref);
+  g_rec_mutex_clear (&self->human_lifecycle_mutex);
   g_mutex_clear (&self->sessions_lock);
 #ifdef WYL_HAS_BREAK_GLASS
   g_mutex_clear (&self->break_glass_lock);
@@ -1328,6 +1335,8 @@ wyl_handle_init (WylHandle *self)
    * Sid 0 is reserved for "uninitialised", so the counter starts at
    * 1 and is incremented on every successful registration.
    */
+  g_rec_mutex_init (&self->human_lifecycle_mutex);
+  self->human_revocation_observers = g_ptr_array_new_with_free_func (g_free);
   g_mutex_init (&self->sessions_lock);
   self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
           g_free, wyl_session_registry_entry_free);
@@ -1339,6 +1348,40 @@ wyl_handle_init (WylHandle *self)
   self->break_glass_active = FALSE;
   self->break_glass_used = FALSE;
 #endif
+}
+
+void
+wyl_handle_set_human_revocation_callback (WylHandle *handle, gpointer data,
+    void (*callback)(gpointer,const gchar *))
+{
+  if (handle == NULL) return;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
+  for (gsize i=0; i<handle->human_revocation_observers->len; i++) {
+    WylHumanRevocationObserver *observer = g_ptr_array_index (handle->human_revocation_observers,i);
+    if (observer->data == data) {
+      g_ptr_array_remove_index (handle->human_revocation_observers,i); break;
+    }
+  }
+  if (callback != NULL) {
+    WylHumanRevocationObserver *observer = g_new0 (WylHumanRevocationObserver,1);
+    observer->data = data; observer->callback = callback;
+    g_ptr_array_add (handle->human_revocation_observers,observer);
+  }
+}
+
+WylHumanLifecycleLease
+wyl_handle_human_lifecycle_acquire (WylHandle *handle)
+{
+  WylHumanLifecycleLease lease = {handle};
+  if (handle != NULL) g_rec_mutex_lock (&handle->human_lifecycle_mutex);
+  return lease;
+}
+
+void
+wyl_handle_human_lifecycle_clear (WylHumanLifecycleLease *lease)
+{
+  if (lease->handle != NULL) g_rec_mutex_unlock (&lease->handle->human_lifecycle_mutex);
+  lease->handle = NULL;
 }
 
 wyrelog_error_t
@@ -6689,6 +6732,112 @@ handle_tenant_delete_resume_startup (WylHandle *self)
     rc = wyl_policy_store_tenant_delete_read (self->policy_store, g_ptr_array_index (tenants, i), &record);
     if (rc == WYRELOG_E_OK) rc = handle_tenant_delete_cleanup (self, &record, NULL);
   }
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_recover (self->policy_store);
+  return rc;
+}
+
+/* A seal excludes cooperating tenant users only for this scope. Durable policy
+ * is the lasting fence; no permanent tenant gate is introduced. */
+struct _WylTenantSealCoordination
+{
+  WylHandle *handle;
+#ifdef WYL_HAS_FACT_STORE
+  WylFactTenantAdmissionLease *admission;
+  gboolean replay_locked;
+  GPtrArray *reopen_graphs;
+#endif
+};
+
+#ifdef WYL_HAS_FACT_STORE
+static wyrelog_error_t
+handle_seal_drain_graph (const wyl_policy_fact_graph_info_t *info, gpointer data)
+{
+  WylTenantSealCoordination *scope = data;
+  if (scope->handle->fact_root == NULL) return WYRELOG_E_POLICY;
+  WylFactGraphKey key = {0};
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, info->tenant_id, info->graph_id);
+  WylFactGraphAdmission previous = WYL_FACT_GRAPH_ADMISSION_CLOSED;
+  guint64 generation = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_close_admission_with_previous
+          (scope->handle->fact_graph_runtime, &key, &previous, &generation);
+  if (rc == WYRELOG_E_OK && previous == WYL_FACT_GRAPH_ADMISSION_OPEN) {
+    WylFactGraphKey *saved = g_new0 (WylFactGraphKey, 1);
+    *saved = key;
+    memset (&key, 0, sizeof key);
+    g_ptr_array_add (scope->reopen_graphs, saved);
+    key = *saved;
+    WylFactGraphRuntimeStatus status = {0};
+    rc = wyl_fact_graph_runtime_manager_drain (scope->handle->fact_graph_runtime,
+            &key, 30 * G_USEC_PER_SEC, &status);
+    wyl_fact_graph_runtime_status_clear (&status);
+    memset (&key, 0, sizeof key);
+  } else if (rc == WYRELOG_E_OK) {
+    WylFactGraphRuntimeStatus status = {0};
+    rc = wyl_fact_graph_runtime_manager_drain (scope->handle->fact_graph_runtime,
+            &key, 30 * G_USEC_PER_SEC, &status);
+    wyl_fact_graph_runtime_status_clear (&status);
+  }
+  wyl_fact_graph_key_clear (&key);
+  return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_OK : rc;
+}
+#endif
+
+wyrelog_error_t
+wyl_handle_tenant_seal_prepare (WylHandle *self, WylServiceAuthWriteLease *write,
+    const gchar *tenant, WylTenantSealCoordination **out)
+{
+  if (self == NULL || out == NULL || !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  *out = NULL;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store (write, self, &store);
+  if (rc != WYRELOG_E_OK) return rc;
+  WylTenantSealCoordination *scope = g_new0 (WylTenantSealCoordination, 1);
+  scope->handle = self;
+  *out = scope; /* Caller owns partial preparation cleanup too. */
+#ifdef WYL_HAS_FACT_STORE
+  scope->reopen_graphs = g_ptr_array_new ();
+  rc = wyl_fact_tenant_admission_acquire_write (self->fact_tenant_admission,
+          tenant, NULL, &scope->admission);
+  if (rc == WYRELOG_E_OK) {
+    g_mutex_lock (&self->fact_replay_coordinator_lock);
+    scope->replay_locked = TRUE;
+    rc = wyl_policy_store_foreach_fact_graph (store, tenant, handle_seal_drain_graph, scope);
+  }
+#else
+  rc = wyl_policy_store_foreach_fact_graph (store, tenant, handle_tenant_delete_evict, self);
+#endif
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_tenant_seal_finish (WylTenantSealCoordination *scope,
+    WylDurableCommitState outcome)
+{
+  if (scope == NULL) return WYRELOG_E_OK;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_HAS_FACT_STORE
+  for (guint i = scope->reopen_graphs->len; i > 0; i--) {
+    WylFactGraphKey *key = g_ptr_array_index (scope->reopen_graphs, i - 1);
+    if (outcome != WYL_DURABLE_COMMIT_UNCERTAIN) {
+      wyrelog_error_t restored = wyl_fact_graph_runtime_manager_open_admission
+            (scope->handle->fact_graph_runtime, key);
+      if (restored != WYRELOG_E_OK) rc = restored;
+    }
+    wyl_fact_graph_key_clear (key);
+    g_free (key);
+  }
+  g_ptr_array_unref (scope->reopen_graphs);
+  if (scope->replay_locked) g_mutex_unlock (&scope->handle->fact_replay_coordinator_lock);
+  if (scope->admission != NULL) {
+    wyrelog_error_t released = wyl_fact_tenant_admission_lease_release (scope->admission);
+    if (released != WYRELOG_E_OK) rc = released;
+  }
+#else
+  (void) outcome;
+#endif
+  g_free (scope);
   return rc;
 }
 
@@ -6788,4 +6937,272 @@ wyl_handle_delete_tenant (WylHandle *self, const gchar *tenant,
     if (rc == WYRELOG_E_OK) rc = release;
   }
   return rc;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *subject;
+  const gchar *actor;
+  const gchar *action;
+  const gchar *request_id;
+  const gchar *fingerprint;
+  const WylTenantDeleteRuntime *runtime;
+  GPtrArray *children;
+  WylUserOperation *out;
+  GPtrArray *published_children;
+} HandleUserMutation;
+
+static wyrelog_error_t
+handle_user_mutation_body (wyl_policy_store_t *store, gpointer data)
+{
+  HandleUserMutation *d = data;
+  wyrelog_error_t rc = d->runtime->validate (d->runtime->data);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_operation_commit (store, d->subject,
+            d->actor, d->action, d->request_id, d->fingerprint, d->children, d->out);
+  if (rc == WYRELOG_E_OK) {
+    g_clear_pointer (&d->published_children, g_ptr_array_unref);
+    rc = wyl_policy_store_user_children (store, d->request_id, &d->published_children);
+  }
+  if (rc == WYRELOG_E_OK && d->runtime->checkpoint != NULL)
+    rc = d->runtime->checkpoint ("before_user_commit", d->runtime->data);
+  return rc;
+}
+
+static wyrelog_error_t
+handle_user_mutation_verify (WylEngineVerification *verification, gpointer data)
+{
+  HandleUserMutation *d = data;
+  WylUserOperation *o = d->out;
+  g_autofree gchar *action = g_strdup_printf ("user_%s", o->action);
+  wyrelog_error_t rc = wyl_engine_verification_verify_audit_event (verification, o->audit_id,
+          o->created_at_us, TRUE, o->actor, action, o->subject, o->summary, o->fingerprint, o->request_id);
+  if (rc == WYRELOG_E_OK && g_str_equal (o->action, "delete")) {
+    gint64 subject = 0;
+    rc = wyl_engine_verification_lookup_symbol (verification, o->subject, &subject);
+    const gchar *relations[] = {"principal_state", "member_of", "direct_permission", "perm_state"};
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (relations); i++) {
+      gboolean absent = FALSE;
+      rc = wyl_engine_verification_has_no_input_key (verification, relations[i], subject, &absent);
+      if (rc == WYRELOG_E_OK && !absent) rc = WYRELOG_E_POLICY;
+    }
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && d->published_children != NULL
+      && i < d->published_children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (d->published_children, i);
+    HandleTenantDelete verify_child = {.tenant = child->tenant, .record = child};
+    rc = handle_tenant_delete_verify (verification, &verify_child);
+  }
+  return rc;
+}
+
+static void
+handle_user_revoke_sessions (WylHandle *self, const gchar *subject)
+{
+  g_mutex_lock (&self->sessions_lock);
+  GHashTableIter iter;
+  gpointer value;
+  g_hash_table_iter_init (&iter, self->sessions_by_id);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    WylSessionRegistryEntry *entry = value;
+    if (entry->session == NULL) continue;
+    g_autofree gchar *username = wyl_session_dup_username (entry->session);
+    if (g_strcmp0 (username, subject) == 0) {
+      wyl_session_revoke_human_private (entry->session);
+      g_clear_object (&entry->session);
+    }
+  }
+  g_mutex_unlock (&self->sessions_lock);
+}
+
+wyrelog_error_t
+wyl_handle_user_preview (WylHandle *self, const gchar *subject, const gchar *actor,
+    const WylTenantDeleteRuntime *runtime, WylUserDeletePreview *out)
+{
+  if (self == NULL || out == NULL) return WYRELOG_E_INVALID;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (self);
+  WylServiceAuthWriteLease *write = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write (self->service_auth_authority, self, NULL, &write);
+  gboolean admin = FALSE;
+  if (rc == WYRELOG_E_OK) rc = runtime != NULL && runtime->authorize != NULL
+      ? runtime->authorize (runtime->data,actor,&admin) : WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK && !admin) rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_preview (self->policy_store, subject, out);
+#ifdef WYL_HAS_FACT_STORE
+  for (gsize i = 0; rc == WYRELOG_E_OK && self->fact_root != NULL && i < out->tenants->len; i++) {
+    const gchar *tenant = g_ptr_array_index (out->tenants, i);
+    g_autoptr (WylFactTenantAdmissionLease) admission = NULL;
+    rc = wyl_fact_tenant_admission_acquire_write (self->fact_tenant_admission, tenant, NULL, &admission);
+    WylFactGraphResolver resolver = {0};
+    g_autofree gchar *manifest = NULL;
+    if (rc == WYRELOG_E_OK) rc = wyl_fact_graph_resolver_open (self->fact_root, &resolver);
+    if (rc == WYRELOG_E_OK) rc = wyl_fact_tenant_delete_manifest_prepare (&resolver, self->fact_root_writer_lease, tenant, &manifest);
+    wyl_fact_graph_resolver_clear (&resolver);
+    if (rc == WYRELOG_E_OK) {
+      g_autoptr (GKeyFile) key = g_key_file_new ();
+      if (!g_key_file_load_from_data (key,manifest,-1,G_KEY_FILE_NONE,NULL)) rc = WYRELOG_E_IO;
+      gint count = g_key_file_get_integer (key,"root","count",NULL);
+      for (gint j = 0; rc == WYRELOG_E_OK && j < count; j++) {
+        g_autofree gchar *group = g_strdup_printf ("entry%d",j);
+        g_autoptr (GError) error = NULL;
+        guint64 bytes = g_key_file_get_uint64 (key,group,"size_bytes",&error);
+        if (error != NULL || bytes > G_MAXUINT64-out->data_bytes) rc = WYRELOG_E_IO;
+        else out->data_bytes += bytes;
+      }
+    }
+  }
+#endif
+  if (write != NULL) {
+    wyrelog_error_t release = wyl_service_auth_write_lease_release_terminal (&write);
+    if (rc == WYRELOG_E_OK) rc = release;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_user_mutate (WylHandle *self, const gchar *subject, const gchar *actor,
+    const gchar *action, const gchar *request_id, const gchar *fingerprint,
+    const WylTenantDeleteRuntime *runtime, WylUserOperation *out)
+{
+  if (self == NULL || runtime == NULL || runtime->authorize == NULL || runtime->validate == NULL
+      || out == NULL || !wyl_policy_human_subject_is_valid (subject) || action == NULL) return WYRELOG_E_INVALID;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (self);
+  WylServiceAuthWriteLease *write = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write (self->service_auth_authority, self, NULL, &write);
+  if (rc != WYRELOG_E_OK) return rc;
+  gboolean admin = FALSE;
+  rc = runtime->authorize (runtime->data, actor, &admin);
+  if (rc == WYRELOG_E_OK && !admin) rc = WYRELOG_E_AUTH;
+  g_auto (WylUserOperation) prior = {0};
+  gboolean retry = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_user_operation_read (self->policy_store, request_id, &prior);
+    if (rc == WYRELOG_E_OK) {
+      if (g_strcmp0 (subject, prior.subject) || g_strcmp0 (actor, prior.actor)
+          || g_strcmp0 (action, prior.action) || g_strcmp0 (fingerprint == NULL ? "" : fingerprint, prior.fingerprint))
+        rc = WYRELOG_E_CONFLICT;
+      else retry = TRUE;
+    } else if (rc == WYRELOG_E_NOT_FOUND) rc = WYRELOG_E_OK;
+  }
+  g_auto (WylUserDeletePreview) preview = {0};
+  g_autoptr (GPtrArray) children = g_ptr_array_new_with_free_func (wyl_user_child_free);
+  if (rc == WYRELOG_E_OK && retry) {
+    g_clear_pointer (&children, g_ptr_array_unref);
+    rc = wyl_policy_store_user_children (self->policy_store, request_id, &children);
+  } else if (rc == WYRELOG_E_OK && g_str_equal (action, "delete")) {
+    rc = wyl_policy_store_user_preview (self->policy_store, subject, &preview);
+    if (rc == WYRELOG_E_OK && (preview.unsealed[0] || preview.blockers[0])) {
+      out->error_code = g_strdup (preview.unsealed[0] ? "user_delete_tenant_not_sealed" : "user_delete_tenant_in_use");
+      out->summary = g_strdup (preview.unsealed[0] ? preview.unsealed : preview.blockers);
+      rc = WYRELOG_E_POLICY;
+    }
+    if (rc == WYRELOG_E_OK && g_strcmp0 (preview.fingerprint, fingerprint)) {
+      out->error_code = g_strdup ("user_delete_preview_stale"); rc = WYRELOG_E_CONFLICT;
+    }
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < preview.tenants->len; i++) {
+      WylTenantDeleteRecord *child = g_new0 (WylTenantDeleteRecord, 1);
+      child->tenant = g_strdup (g_ptr_array_index (preview.tenants, i));
+      gchar id[WYL_REQUEST_ID_STRING_BUF];
+      rc = wyl_request_id_new (id, sizeof id);
+      if (rc == WYRELOG_E_OK) child->request_id = g_strdup (id);
+      g_ptr_array_add (children, child);
+    }
+  }
+#ifdef WYL_HAS_FACT_STORE
+  g_autoptr (GPtrArray) admissions = g_ptr_array_new_with_free_func ((GDestroyNotify) wyl_fact_tenant_admission_lease_cleanup);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+    WylFactTenantAdmissionLease *admission = NULL;
+    rc = wyl_fact_tenant_admission_acquire_write (self->fact_tenant_admission, child->tenant, NULL, &admission);
+    if (rc == WYRELOG_E_OK) g_ptr_array_add (admissions, admission);
+  }
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+#endif
+  for (gsize i = 0; rc == WYRELOG_E_OK && !retry && i < children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+    rc = wyl_policy_store_foreach_fact_graph (self->policy_store, child->tenant, handle_tenant_delete_evict, self);
+#ifdef WYL_HAS_FACT_STORE
+    if (rc == WYRELOG_E_OK && self->fact_root != NULL) {
+      WylFactGraphResolver resolver = {0};
+      rc = wyl_fact_graph_resolver_open (self->fact_root, &resolver);
+      if (rc == WYRELOG_E_OK) rc = wyl_fact_tenant_delete_manifest_prepare (&resolver,
+                self->fact_root_writer_lease, child->tenant, &child->manifest);
+      wyl_fact_graph_resolver_clear (&resolver);
+    }
+#endif
+    if (rc == WYRELOG_E_OK && child->manifest == NULL) child->manifest = g_strdup ("none");
+    if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("user_child_prepared", runtime->data);
+  }
+  HandleUserMutation d = {self,subject,actor,action,request_id,fingerprint,runtime,children,out,NULL};
+  gboolean committed = retry;
+  if (rc == WYRELOG_E_OK) {
+    g_autoptr (WylEngineSession) engine = wyl_engine_session_acquire (self);
+    if (engine == NULL) rc = WYRELOG_E_BUSY;
+    else {
+      WylCommittedPublicationStage stage = WYL_COMMITTED_PUBLICATION_PRECOMMIT_REJECTED;
+      rc = wyl_engine_session_run_committed_publication (engine, handle_user_mutation_body, &d,
+              handle_user_mutation_verify, &d, NULL, NULL, &stage);
+      committed = stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED;
+      if (rc != WYRELOG_E_OK && stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS) {
+        g_auto (WylUserOperation) durable = {0};
+        if (wyl_policy_store_user_operation_read (self->policy_store, request_id, &durable) == WYRELOG_E_OK)
+          committed = g_strcmp0 (durable.audit_id, out->audit_id) == 0;
+      }
+      if (rc != WYRELOG_E_OK && committed) {
+        guint64 generation = 0;
+        wyrelog_error_t repair = wyl_handle_policy_store_capture_generation (self, self->policy_store, &generation);
+        if (repair == WYRELOG_E_OK) repair = wyl_engine_session_repair_committed_publication (engine,
+                  write, self->policy_store, generation, handle_user_mutation_verify, &d);
+        if (repair == WYRELOG_E_OK) rc = WYRELOG_E_OK;
+      }
+    }
+  }
+  g_clear_pointer (&d.published_children, g_ptr_array_unref);
+  out->committed = committed;
+  if (committed && !g_str_equal (action, "create")) {
+    handle_user_revoke_sessions (self, subject);
+    for (gsize i=0; i<self->human_revocation_observers->len; i++) {
+      WylHumanRevocationObserver *observer = g_ptr_array_index (self->human_revocation_observers,i);
+      observer->callback (observer->data,subject);
+    }
+  }
+  if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("after_user_commit", runtime->data);
+  if (rc == WYRELOG_E_OK) {
+    g_clear_pointer (&children, g_ptr_array_unref);
+    rc = wyl_policy_store_user_children (self->policy_store, request_id, &children);
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+    g_autoptr (WylAuditEvent) child_event = NULL;
+    g_autofree gchar *child_summary = g_strdup_printf ("owner=%s;capacity=%s;removed=tenant,policy,graphs,schemas,quota,restore,credentials;rows=%" G_GUINT64_FORMAT,
+            child->owner, child->capacity, child->removed_rows);
+    if (wyl_audit_event_new_from_fields (child->audit_id, child->created_at_us,
+        child->actor, "tenant_delete", child->tenant, child_summary, child->manifest,
+        child->request_id, WYL_DECISION_ALLOW, &child_event) == WYRELOG_E_OK)
+      wyl_audit_complete_authoritative_event (self, child_event);
+    rc = handle_tenant_delete_cleanup (self, child, runtime);
+    if (rc == WYRELOG_E_OK && runtime->checkpoint != NULL) rc = runtime->checkpoint ("user_child_cleaned", runtime->data);
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_begin_mutation (self->policy_store);
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_policy_store_user_operation_complete (self->policy_store, request_id);
+      if (rc == WYRELOG_E_OK) rc = wyl_policy_store_commit_mutation (self->policy_store);
+      else wyl_policy_store_rollback_mutation (self->policy_store);
+    }
+  }
+  if (rc == WYRELOG_E_OK) {
+    g_autoptr (WylAuditEvent) event = NULL;
+    g_autofree gchar *audit_action = g_strdup_printf ("user_%s", action);
+    if (wyl_audit_event_new_from_fields (out->audit_id, out->created_at_us, actor, audit_action,
+        subject, out->summary, out->fingerprint, request_id, WYL_DECISION_ALLOW, &event) == WYRELOG_E_OK)
+      wyl_audit_complete_authoritative_event (self, event);
+    out->complete = TRUE;
+  }
+#ifdef WYL_HAS_FACT_STORE
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
+  g_clear_pointer (&admissions, g_ptr_array_unref);
+#endif
+  wyrelog_error_t release = wyl_service_auth_write_lease_release_terminal (&write);
+  return rc == WYRELOG_E_OK ? release : rc;
 }

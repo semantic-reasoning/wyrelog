@@ -863,6 +863,8 @@ static const BuiltinPermission builtin_permissions[] = {
 #define WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE "login"
 
 static const gchar *const required_tables[] = {
+  "human_users", "human_user_migration", "human_user_migration_report",
+  "human_user_sessions", "human_user_operations", "human_user_delete_children", "human_user_events",
   "wyrelog_config",
   "tenants",
   "roles",
@@ -15183,6 +15185,242 @@ migrate_tenant_delete_schema (sqlite3 *db)
   return rc == WYRELOG_E_OK ? end : rc;
 }
 
+gboolean
+wyl_policy_human_subject_is_valid (const gchar *subject)
+{
+  if (subject == NULL || !*subject || strlen (subject) > 128
+      || g_str_equal (subject, ".") || g_str_equal (subject, "..")
+      || g_str_has_prefix (subject, "svc:") || g_str_has_prefix (subject, "wr."))
+    return FALSE;
+  for (const gchar *p = subject; *p; p++)
+    if (!g_ascii_isalnum (*p) && !strchr ("._:-", *p)) return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_require (wyl_policy_store_t *store, const gchar *subject,
+    gboolean active)
+{
+  if (store == NULL || !wyl_policy_human_subject_is_valid (subject))
+    return WYRELOG_E_SUBJECT_NOT_REGISTERED;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT state FROM human_users WHERE subject_id=?", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, subject);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step == SQLITE_ROW) {
+      const gchar *state = (const gchar *) sqlite3_column_text (stmt, 0);
+      if (g_str_equal (state, "deleted") || (active && !g_str_equal (state, "active")))
+        rc = WYRELOG_E_SUBJECT_NOT_REGISTERED;
+    } else rc = step == SQLITE_DONE ? WYRELOG_E_SUBJECT_NOT_REGISTERED : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+/* Bootstrap/operation body only: callers own the publication transaction. */
+wyrelog_error_t
+wyl_policy_store_user_register (wyl_policy_store_t *store, const gchar *subject)
+{
+  if (store == NULL || !wyl_policy_human_subject_is_valid (subject)
+      || !wyl_policy_store_transaction_owned_by_caller (store)) return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "INSERT INTO human_users(subject_id,state,generation,created_at_us,updated_at_us) "
+          "VALUES(?,'active',1,?2,?2) ON CONFLICT(subject_id) DO NOTHING", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, subject);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 2, g_get_real_time ()) != SQLITE_OK) rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc == WYRELOG_E_OK ? wyl_policy_store_user_require (store, subject, TRUE) : rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_login_status (wyl_policy_store_t *store, const gchar *subject,
+    gchar **out_reason)
+{
+  if (store == NULL || subject == NULL || out_reason == NULL) return WYRELOG_E_INVALID;
+  *out_reason = NULL;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, "SELECT state FROM human_users WHERE subject_id=?", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, subject);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step == SQLITE_DONE) *out_reason = g_strdup ("subject_not_registered");
+    else if (step != SQLITE_ROW) rc = WYRELOG_E_IO;
+    else {
+      const gchar *state = (const gchar *) sqlite3_column_text (stmt, 0);
+      if (!g_str_equal (state, "active")) *out_reason = g_strdup (g_str_equal (state, "disabled") ? "user_disabled" : "user_deleted");
+    }
+  }
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_link_session (wyl_policy_store_t *store, const gchar *subject,
+    const gchar *session_id)
+{
+  if (store == NULL || !wyl_policy_store_transaction_owned_by_caller (store)) return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_policy_store_user_require (store, subject, TRUE);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (store->db, "INSERT INTO human_user_sessions VALUES(?,?)", &stmt);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 1, session_id);
+  if (rc == WYRELOG_E_OK) rc = bind_text (stmt, 2, subject);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+migrate_human_user_schema (sqlite3 *db)
+{
+  static const gchar *names[] = {"human_users", "human_user_migration", "human_user_migration_report", "human_user_sessions", "human_user_operations", "human_user_delete_children", "human_user_events"};
+  static const gchar *definitions[] = {
+    "CREATE TABLE IF NOT EXISTS human_users(subject_id TEXT PRIMARY KEY CHECK(length(subject_id) BETWEEN 1 AND 128 AND subject_id NOT GLOB '*[^A-Za-z0-9._:-]*' AND subject_id NOT IN ('.','..') AND substr(subject_id,1,4)<>'svc:' AND substr(subject_id,1,3)<>'wr.'), state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), generation INTEGER NOT NULL CHECK(generation>0), created_at_us INTEGER NOT NULL, updated_at_us INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS human_user_migration(version INTEGER PRIMARY KEY CHECK(version=1), completed_at_us INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS human_user_migration_report(subject_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, reason TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS human_user_sessions(session_id TEXT PRIMARY KEY, subject_id TEXT NOT NULL REFERENCES human_users(subject_id))",
+    "CREATE TABLE IF NOT EXISTS human_user_operations(request_id TEXT PRIMARY KEY, subject_id TEXT NOT NULL REFERENCES human_users(subject_id), actor TEXT NOT NULL, action TEXT NOT NULL CHECK(action IN ('create','disable','delete')), fingerprint TEXT NOT NULL, audit_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL, created_at_us INTEGER NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('cleanup','complete')), child_count INTEGER NOT NULL CHECK(child_count>=0))",
+    "CREATE TABLE IF NOT EXISTS human_user_delete_children(parent_request_id TEXT NOT NULL REFERENCES human_user_operations(request_id), tenant_id TEXT NOT NULL UNIQUE REFERENCES tenant_delete_journals(tenant_id), child_request_id TEXT NOT NULL UNIQUE, audit_id TEXT NOT NULL UNIQUE, PRIMARY KEY(parent_request_id,tenant_id))",
+    "CREATE TABLE IF NOT EXISTS human_user_events(event_id INTEGER PRIMARY KEY AUTOINCREMENT, subject_id TEXT NOT NULL REFERENCES human_users(subject_id), state TEXT NOT NULL, generation INTEGER NOT NULL, created_at_us INTEGER NOT NULL, UNIQUE(subject_id,generation))"
+  };
+  wyrelog_error_t rc = exec_sql (db, "SAVEPOINT human_user_schema");
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (names); i++)
+    rc = tenant_delete_schema_object (db, names[i], definitions[i]);
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_user_created",
+            "CREATE TRIGGER IF NOT EXISTS human_user_created AFTER INSERT ON human_users BEGIN INSERT INTO human_user_events(subject_id,state,generation,created_at_us) VALUES(NEW.subject_id,NEW.state,NEW.generation,NEW.created_at_us); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_user_changed",
+            "CREATE TRIGGER IF NOT EXISTS human_user_changed AFTER UPDATE ON human_users BEGIN INSERT INTO human_user_events(subject_id,state,generation,created_at_us) VALUES(NEW.subject_id,NEW.state,NEW.generation,NEW.updated_at_us); END");
+  gboolean first_migration = FALSE;
+  sqlite3_stmt *marker = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (db,"SELECT NOT EXISTS(SELECT 1 FROM human_user_migration)",&marker);
+  if (rc == WYRELOG_E_OK) {
+    if (sqlite3_step (marker) != SQLITE_ROW) rc = WYRELOG_E_IO;
+    else first_migration = sqlite3_column_int (marker,0) != 0;
+  }
+  sqlite3_finalize (marker);
+  sqlite3_stmt *subjects = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (db,
+            "WITH candidates AS (SELECT subject_id FROM role_memberships UNION SELECT subject_id FROM direct_permissions UNION SELECT subject_id FROM totp_enrollments), "
+            "observed AS (SELECT subject_id FROM candidates UNION SELECT subject_id FROM principal_states UNION SELECT subject_id FROM permission_states) "
+            "SELECT subject_id, EXISTS(SELECT 1 FROM candidates c WHERE c.subject_id=o.subject_id) FROM observed o "
+            "WHERE NOT EXISTS(SELECT 1 FROM human_user_migration) ORDER BY subject_id", &subjects);
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (subjects)) == SQLITE_ROW) {
+    const gchar *subject = (const gchar *) sqlite3_column_text (subjects, 0);
+    gboolean valid = wyl_policy_human_subject_is_valid (subject);
+    gboolean eligible = valid && sqlite3_column_int (subjects, 1);
+    sqlite3_stmt *write = NULL;
+    rc = prepare_stmt (db, "INSERT INTO human_user_migration_report VALUES(?,?,?)", &write);
+    if (rc == WYRELOG_E_OK) rc = bind_text (write, 1, subject);
+    if (rc == WYRELOG_E_OK) rc = bind_text (write, 2, eligible ? "registered" : "skipped");
+    if (rc == WYRELOG_E_OK) rc = bind_text (write, 3, !valid ? "reserved_or_invalid" : eligible ? "grant_or_totp" : "state_only");
+    if (rc == WYRELOG_E_OK && sqlite3_step (write) != SQLITE_DONE) rc = WYRELOG_E_IO;
+    sqlite3_finalize (write);
+    if (rc == WYRELOG_E_OK && eligible) {
+      rc = prepare_stmt (db, "INSERT INTO human_users VALUES(?,'active',1,?2,?2)", &write);
+      if (rc == WYRELOG_E_OK) rc = bind_text (write, 1, subject);
+      if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (write, 2, g_get_real_time ()) != SQLITE_OK) rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK && sqlite3_step (write) != SQLITE_DONE) rc = WYRELOG_E_IO;
+      sqlite3_finalize (write);
+    }
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (subjects);
+  if (rc == WYRELOG_E_OK) rc = exec_sql (db, "INSERT OR IGNORE INTO human_user_migration VALUES(1,unixepoch()*1000000)");
+  const gchar *tables[] = {"role_memberships", "direct_permissions", "permission_states"};
+  const gchar *ops[] = {"INSERT", "UPDATE"};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (tables); i++) {
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < G_N_ELEMENTS (ops); j++) {
+      g_autofree gchar *name = g_strdup_printf ("human_registered_%s_%s", tables[i], ops[j]);
+      g_autofree gchar *sql = g_strdup_printf (
+        "CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s WHEN substr(NEW.subject_id,1,4)<>'svc:' "
+        "AND NOT EXISTS(SELECT 1 FROM human_users WHERE subject_id=NEW.subject_id AND state<>'deleted') "
+        "BEGIN SELECT RAISE(ABORT,'subject_not_registered'); END", name, ops[j], tables[i]);
+      rc = tenant_delete_schema_object (db, name, sql);
+    }
+  }
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db, "human_last_admin_role",
+            "CREATE TRIGGER IF NOT EXISTS human_last_admin_role BEFORE DELETE ON role_memberships "
+            "WHEN OLD.role_id='wr.system_admin' AND OLD.scope='__wr_default' "
+            "AND EXISTS(SELECT 1 FROM human_users WHERE subject_id=OLD.subject_id AND state='active') "
+            "AND NOT EXISTS(SELECT 1 FROM role_memberships r JOIN human_users u USING(subject_id) "
+            "WHERE r.role_id='wr.system_admin' AND r.scope='__wr_default' AND u.state='active' AND r.subject_id<>OLD.subject_id) "
+            "BEGIN SELECT RAISE(ABORT,'last_system_admin'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db, "human_last_admin_state",
+            "CREATE TRIGGER IF NOT EXISTS human_last_admin_state BEFORE UPDATE OF state ON human_users "
+            "WHEN OLD.state='active' AND NEW.state<>'active' "
+            "AND EXISTS(SELECT 1 FROM role_memberships WHERE subject_id=OLD.subject_id AND role_id='wr.system_admin' AND scope='__wr_default') "
+            "AND NOT EXISTS(SELECT 1 FROM role_memberships r JOIN human_users u USING(subject_id) "
+            "WHERE r.role_id='wr.system_admin' AND r.scope='__wr_default' AND u.state='active' AND r.subject_id<>OLD.subject_id) "
+            "BEGIN SELECT RAISE(ABORT,'last_system_admin'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db, "human_users_permanent",
+            "CREATE TRIGGER IF NOT EXISTS human_users_permanent BEFORE DELETE ON human_users BEGIN SELECT RAISE(ABORT,'human registry is permanent'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db, "human_users_no_reactivation",
+            "CREATE TRIGGER IF NOT EXISTS human_users_no_reactivation BEFORE UPDATE ON human_users "
+            "WHEN NEW.subject_id<>OLD.subject_id OR (OLD.state='deleted' AND NEW.state<>'deleted') "
+            "OR (OLD.state='disabled' AND NEW.state='active') BEGIN SELECT RAISE(ABORT,'human lifecycle is monotone'); END");
+  const gchar *active_tables[] = {"totp_enrollments", "tenants"};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (active_tables); i++) {
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < G_N_ELEMENTS (ops); j++) {
+      g_autofree gchar *name = g_strdup_printf ("human_active_%s_%s",active_tables[i],ops[j]);
+      const gchar *subject = i == 0 ? "NEW.subject_id" : "NEW.owner_subject_id";
+      g_autofree gchar *sql = g_strdup_printf (
+        "CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s WHEN %s "
+        "NOT EXISTS(SELECT 1 FROM human_users WHERE subject_id=%s AND state='active') "
+        "BEGIN SELECT RAISE(ABORT,'subject_not_active'); END",name,ops[j],active_tables[i],
+        i == 0 ? "" : j == 0 ? "NEW.owner_subject_id<>'wr.system' AND " : "NEW.owner_subject_id<>OLD.owner_subject_id AND NEW.owner_subject_id<>'wr.system' AND ",subject);
+      rc = tenant_delete_schema_object (db,name,sql);
+    }
+  }
+  const gchar *immutable[] = {"human_user_events","human_user_delete_children","human_user_migration","human_user_migration_report"};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (immutable); i++) {
+    const gchar *changes[] = {"UPDATE","DELETE"};
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < G_N_ELEMENTS (changes); j++) {
+      g_autofree gchar *name = g_strdup_printf ("%s_no_%s",immutable[i],changes[j]);
+      g_autofree gchar *sql = g_strdup_printf ("CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s BEGIN SELECT RAISE(ABORT,'human history is immutable'); END",name,changes[j],immutable[i]);
+      rc = tenant_delete_schema_object (db,name,sql);
+    }
+  }
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_operations_no_delete",
+            "CREATE TRIGGER IF NOT EXISTS human_operations_no_delete BEFORE DELETE ON human_user_operations BEGIN SELECT RAISE(ABORT,'human receipt is permanent'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_operations_immutable",
+            "CREATE TRIGGER IF NOT EXISTS human_operations_immutable BEFORE UPDATE ON human_user_operations "
+            "WHEN NEW.request_id<>OLD.request_id OR NEW.subject_id<>OLD.subject_id OR NEW.actor<>OLD.actor OR NEW.action<>OLD.action OR NEW.fingerprint<>OLD.fingerprint OR NEW.audit_id<>OLD.audit_id OR NEW.summary<>OLD.summary OR NEW.created_at_us<>OLD.created_at_us OR NEW.child_count<>OLD.child_count OR (OLD.phase='complete' AND NEW.phase<>'complete') "
+            "BEGIN SELECT RAISE(ABORT,'human receipt is immutable'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_last_admin_role_update",
+            "CREATE TRIGGER IF NOT EXISTS human_last_admin_role_update BEFORE UPDATE ON role_memberships "
+            "WHEN OLD.role_id='wr.system_admin' AND OLD.scope='__wr_default' "
+            "AND (NEW.subject_id<>OLD.subject_id OR NEW.role_id<>OLD.role_id OR NEW.scope<>OLD.scope) "
+            "AND EXISTS(SELECT 1 FROM human_users WHERE subject_id=OLD.subject_id AND state='active') "
+            "AND NOT EXISTS(SELECT 1 FROM role_memberships r JOIN human_users u USING(subject_id) "
+            "WHERE r.role_id='wr.system_admin' AND r.scope='__wr_default' AND u.state='active' AND r.subject_id<>OLD.subject_id) "
+            "BEGIN SELECT RAISE(ABORT,'last_system_admin'); END");
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_schema_object (db,"human_child_link_valid",
+            "CREATE TRIGGER IF NOT EXISTS human_child_link_valid BEFORE INSERT ON human_user_delete_children "
+            "WHEN NOT EXISTS(SELECT 1 FROM human_user_operations p JOIN tenant_delete_journals j ON j.tenant_id=NEW.tenant_id "
+            "WHERE p.request_id=NEW.parent_request_id AND p.action='delete' AND p.phase='cleanup' AND p.actor=j.actor "
+            "AND j.request_id=NEW.child_request_id AND j.audit_id=NEW.audit_id AND j.owner=p.subject_id) "
+            "BEGIN SELECT RAISE(ABORT,'invalid user deletion child'); END");
+  if (rc != WYRELOG_E_OK) (void) exec_sql (db, "ROLLBACK TO human_user_schema");
+  wyrelog_error_t end = exec_sql (db, "RELEASE human_user_schema");
+  if (rc == WYRELOG_E_OK && end == WYRELOG_E_OK && first_migration) {
+    sqlite3_stmt *report = NULL;
+    rc = prepare_stmt (db,"SELECT subject_id,outcome,reason FROM human_user_migration_report ORDER BY subject_id",&report);
+    int report_step = SQLITE_DONE;
+    while (rc == WYRELOG_E_OK && (report_step = sqlite3_step (report)) == SQLITE_ROW) {
+      g_autofree gchar *subject = g_strescape ((const gchar *) sqlite3_column_text (report,0),NULL);
+      g_message ("human user migration: subject=%s outcome=%s reason=%s",subject,
+          sqlite3_column_text (report,1),sqlite3_column_text (report,2));
+    }
+    if (rc == WYRELOG_E_OK && report_step != SQLITE_DONE) rc = WYRELOG_E_IO;
+    sqlite3_finalize (report);
+  }
+  return rc == WYRELOG_E_OK ? end : rc;
+}
+
 wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
@@ -16211,7 +16449,8 @@ graph_authority_schema_ready:
   if (rc == WYRELOG_E_OK) {
     wyrelog_error_t release_rc =
         exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
-    return release_rc == WYRELOG_E_OK ? migrate_tenant_delete_schema (store->db) : release_rc;
+    if (release_rc == WYRELOG_E_OK) release_rc = migrate_tenant_delete_schema (store->db);
+    return release_rc == WYRELOG_E_OK ? migrate_human_user_schema (store->db) : release_rc;
   }
   (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_service_schema;");
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
@@ -25774,7 +26013,7 @@ service_authorization_subject_check (wyl_policy_store_t *store,
     const gchar *subject_id, gboolean human_only)
 {
   if (!wyl_policy_subject_has_service_prefix (subject_id))
-    return WYRELOG_E_OK;
+    return wyl_policy_store_user_require (store, subject_id, FALSE);
   if (human_only)
     return WYRELOG_E_POLICY;
 
@@ -25784,7 +26023,7 @@ service_authorization_subject_check (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_OK)
     return rc;
   return kind == WYL_POLICY_PRINCIPAL_KIND_SERVICE ? WYRELOG_E_OK :
-         WYRELOG_E_POLICY;
+         WYRELOG_E_SUBJECT_NOT_REGISTERED;
 }
 
 void wyl_policy_service_principal_info_clear
@@ -27423,11 +27662,11 @@ service_retirement_namespace_collision (wyl_policy_store_t *store,
       " UNION ALL SELECT 1 FROM service_credential_handoff_retirement_receipts"
       " WHERE original_request_id=?"
       " UNION ALL SELECT 1 FROM service_credential_handoff_dispositions"
-      " WHERE original_request_id=? UNION ALL SELECT 1 FROM tenant_ownership_events WHERE request_id=? UNION ALL SELECT 1 FROM tenant_delete_journals WHERE request_id=? LIMIT 1;";
+      " WHERE original_request_id=? UNION ALL SELECT 1 FROM tenant_ownership_events WHERE request_id=? UNION ALL SELECT 1 FROM tenant_delete_journals WHERE request_id=? UNION ALL SELECT 1 FROM human_user_operations WHERE request_id=? LIMIT 1;";
   sqlite3_stmt *stmt = NULL;
   *out_found = FALSE;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
-  for (int i = 1; rc == WYRELOG_E_OK && i <= 10; i++)
+  for (int i = 1; rc == WYRELOG_E_OK && i <= 11; i++)
     rc = bind_text (stmt, i, request_id);
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
@@ -27670,11 +27909,10 @@ wyl_policy_store_read_exact_tenant_seal_receipt_proof
 }
 
 wyrelog_error_t
-wyl_policy_store_seal_tenant_keyed_precheck_core
-  (WylServiceAuthorityTransaction * transaction,
-    wyl_policy_store_t * store, const gchar * tenant_id,
+wyl_policy_store_seal_tenant_request_classify
+  (wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
-    guint32 receipt_version, gboolean classify_empty, gboolean * out_found,
+    guint32 receipt_version, gboolean classify_empty, gboolean coordinated_mode, gboolean * out_found,
     WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
@@ -27693,8 +27931,7 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
   if (g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
     return WYRELOG_E_POLICY;
 
-  wyrelog_error_t rc = service_authority_transaction_validate_active
-        (transaction, store);
+  wyrelog_error_t rc = WYRELOG_E_OK;
   g_autoptr (GRecMutexLocker) authority_locker = rc == WYRELOG_E_OK ?
       g_rec_mutex_locker_new (&store->graph_authority_mutex) : NULL;
   ServiceRetirementReceipt receipt = { 0 };
@@ -27723,6 +27960,7 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
     if (rc == WYRELOG_E_OK)
       rc = service_retirement_read_tenant_state (store, tenant_id, &current);
     if (rc == WYRELOG_E_OK
+        && !(coordinated_mode && current.lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE)
         && service_retirement_tenant_requires_lifecycle_coordination
           (store, &current, classify_empty)) {
       service_retirement_tenant_coordination_outcome (&current, retirement);
@@ -27757,10 +27995,94 @@ wyl_policy_store_seal_tenant_keyed_precheck_core
   return rc;
 }
 
+wyrelog_error_t
+wyl_policy_store_seal_tenant_keyed_precheck_core
+  (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, gboolean classify_empty, gboolean * out_found,
+    WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  wyrelog_error_t rc = service_authority_transaction_validate_active (transaction, store);
+  return rc == WYRELOG_E_OK ? wyl_policy_store_seal_tenant_request_classify
+           (store, tenant_id, actor_subject_id, request_id, receipt_version,
+             classify_empty, FALSE, out_found, retirement, out_tenant) : rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_tenant_lifecycle_coordinated (wyl_policy_store_t *store,
+    WylServiceAuthorityTransaction *transaction, const WylPolicyTenantAuthorityRecord *expected, gboolean sealed,
+    gboolean *changed)
+{
+  if (store == NULL || expected == NULL || changed == NULL
+      || (!wyl_policy_store_transaction_owned_by_caller (store)
+      && service_authority_transaction_validate_active (transaction, store) != WYRELOG_E_OK)) return WYRELOG_E_INVALID;
+  *changed = FALSE;
+  const gchar *tenant_id = expected->tenant_id;
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (store, tenant_id, &record);
+  if (rc != WYRELOG_E_OK) return rc;
+  if (record->lifecycle_state != expected->lifecycle_state
+      || record->lifecycle_generation != expected->lifecycle_generation
+      || record->reconciliation_generation != expected->reconciliation_generation)
+    rc = WYRELOG_E_CONFLICT;
+  WylPolicyTenantLifecycleState target = sealed ? WYL_POLICY_TENANT_LIFECYCLE_SEALED : WYL_POLICY_TENANT_LIFECYCLE_ACTIVE;
+  if (rc == WYRELOG_E_OK && record->lifecycle_state == target) {
+    wyl_policy_tenant_authority_record_free (record);
+    return WYRELOG_E_OK;
+  }
+  sqlite3_stmt *pending = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+            "SELECT EXISTS(SELECT 1 FROM fact_offline_restore_tenant_claims WHERE tenant_id=?1) OR "
+            "EXISTS(SELECT 1 FROM fact_offline_restore_graph_claims WHERE tenant_id=?1) OR "
+            "EXISTS(SELECT 1 FROM fact_graph_restore_replacements WHERE tenant_id=?1) OR "
+            "EXISTS(SELECT 1 FROM fact_tenant_restore_replacements WHERE tenant_id=?1) OR "
+            "EXISTS(SELECT 1 FROM fact_reconcile_journal WHERE tenant_id=?1 AND state NOT IN ('done','aborted')) OR "
+            "EXISTS(SELECT 1 FROM fact_graph_provisioning WHERE tenant_id=?1 AND phase NOT IN ('active','aborted'));", &pending);
+  if (rc == WYRELOG_E_OK) rc = bind_text (pending, 1, tenant_id);
+  if (rc == WYRELOG_E_OK) {
+    if (sqlite3_step (pending) != SQLITE_ROW) rc = WYRELOG_E_IO;
+    else if (sqlite3_column_int (pending, 0)) rc = WYRELOG_E_BUSY;
+  }
+  sqlite3_finalize (pending);
+
+  WylPolicyAuthorityMutationResult result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (rc == WYRELOG_E_OK && record->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED) {
+    rc = wyl_policy_store_reconcile_tenant_authority (store, tenant_id, target,
+            record->lifecycle_generation, record->reconciliation_generation, &result);
+  } else if (rc == WYRELOG_E_OK && record->lifecycle_state ==
+      (sealed ? WYL_POLICY_TENANT_LIFECYCLE_ACTIVE : WYL_POLICY_TENANT_LIFECYCLE_SEALED)) {
+    WylPolicyTenantLifecycleState intermediate = sealed ? WYL_POLICY_TENANT_LIFECYCLE_SEALING : WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
+    rc = wyl_policy_store_transition_tenant_authority (store, tenant_id,
+            record->lifecycle_state, intermediate, record->lifecycle_generation,
+            record->reconciliation_generation, &result);
+    if (rc == WYRELOG_E_OK && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) rc = WYRELOG_E_CONFLICT;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_transition_tenant_authority (store, tenant_id,
+              intermediate, target, record->lifecycle_generation + 1,
+              record->reconciliation_generation, &result);
+  } else if (rc == WYRELOG_E_OK) rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK && result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) rc = WYRELOG_E_CONFLICT;
+  if (rc == WYRELOG_E_OK && !sealed) {
+    sqlite3_stmt *capacity = NULL;
+    rc = prepare_stmt (store->db, "UPDATE tenants SET sealed_by_capacity=NULL WHERE tenant_id=?", &capacity);
+    if (rc == WYRELOG_E_OK) rc = bind_text (capacity, 1, tenant_id);
+    if (rc == WYRELOG_E_OK && sqlite3_step (capacity) != SQLITE_DONE) rc = WYRELOG_E_IO;
+    sqlite3_finalize (capacity);
+  }
+  *changed = rc == WYRELOG_E_OK;
+  wyl_policy_tenant_authority_record_free (record);
+  return rc;
+}
+
 static wyrelog_error_t
 service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
+    WylServiceAuthorityTransaction *transaction,
     const gchar *tenant_id, const gchar *actor_subject_id,
     const gchar *request_id, guint32 receipt_version, const gchar *acting_capacity,
+    const WylPolicyTenantAuthorityRecord *coordinated,
     WylPolicyServiceRetirementOutcome *retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
@@ -27826,7 +28148,13 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && !found)
     rc = service_retirement_read_tenant_state (store, tenant_id, &current);
   gboolean transitioned = FALSE;
-  if (rc == WYRELOG_E_OK && !found && acting_capacity != NULL) {
+  gboolean classification_only = FALSE;
+  if (rc == WYRELOG_E_OK && !found && coordinated != NULL) {
+    classification_only = current.sealed;
+    rc = wyl_policy_store_tenant_lifecycle_coordinated (store, transaction, coordinated, TRUE, &transitioned);
+    if (rc == WYRELOG_E_OK) rc = service_retirement_read_tenant_state (store, tenant_id, &current);
+  }
+  if (rc == WYRELOG_E_OK && !found && acting_capacity != NULL && coordinated == NULL) {
     gboolean handled = FALSE;
     rc = tenant_empty_lifecycle (store, tenant_id, TRUE, &handled, &transitioned);
     if (rc == WYRELOG_E_OK && handled)
@@ -27865,7 +28193,7 @@ service_tenant_seal_keyed_impl (wyl_policy_store_t *store,
         rc = service_retirement_read_tenant_state (store, tenant_id, &current);
     }
   }
-  if (rc == WYRELOG_E_OK && transitioned && acting_capacity != NULL) {
+  if (rc == WYRELOG_E_OK && transitioned && !classification_only && acting_capacity != NULL) {
     sqlite3_stmt *capacity_stmt = NULL;
     rc = prepare_stmt (store->db, "UPDATE tenants SET sealed_by_capacity=? WHERE tenant_id=?", &capacity_stmt);
     if (rc == WYRELOG_E_OK)
@@ -28087,11 +28415,12 @@ wyl_policy_store_transfer_tenant_owner (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_seal_tenant_keyed_capacity_core
+wyl_policy_store_seal_tenant_coordinated_core
   (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
-    guint32 receipt_version, const gchar *acting_capacity, WylPolicyServiceRetirementOutcome * retirement,
+    guint32 receipt_version, const gchar *acting_capacity,
+    const WylPolicyTenantAuthorityRecord *coordinated, WylPolicyServiceRetirementOutcome * retirement,
     gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
 {
   if (retirement != NULL)
@@ -28106,9 +28435,22 @@ wyl_policy_store_seal_tenant_keyed_capacity_core
   wyrelog_error_t rc =
       wyl_policy_store_service_authority_transaction_enter_participant
         (transaction, store);
-  return rc == WYRELOG_E_OK ? service_tenant_seal_keyed_impl (store,
-             tenant_id, actor_subject_id, request_id, receipt_version, acting_capacity, retirement,
+  return rc == WYRELOG_E_OK ? service_tenant_seal_keyed_impl (store, transaction,
+             tenant_id, actor_subject_id, request_id, receipt_version, acting_capacity, coordinated, retirement,
              out_tenant) : rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_seal_tenant_keyed_capacity_core
+  (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    guint32 receipt_version, const gchar *acting_capacity, WylPolicyServiceRetirementOutcome * retirement,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES])
+{
+  return wyl_policy_store_seal_tenant_coordinated_core (transaction, store,
+             tenant_id, actor_subject_id, request_id, receipt_version, acting_capacity,
+             NULL, retirement, out_tenant);
 }
 
 wyrelog_error_t
@@ -38952,7 +39294,9 @@ wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
   }
 
   int step_rc = sqlite3_step (stmt);
+  gboolean last_admin = g_strcmp0 (sqlite3_errmsg (store->db), "last_system_admin") == 0;
   sqlite3_finalize (stmt);
+  if (last_admin) return WYRELOG_E_LAST_SYSTEM_ADMIN;
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
@@ -39070,9 +39414,7 @@ wyl_policy_store_subject_has_human_identity (wyl_policy_store_t *store,
    * unauthenticated /auth/login materialises a row for any username, so
    * counting it let anyone make a name enrollable. */
   static const gchar *sql =
-      "SELECT 1 FROM role_memberships WHERE subject_id = ?1 "
-      "UNION ALL SELECT 1 FROM direct_permissions WHERE subject_id = ?1 "
-      "LIMIT 1;";
+      "SELECT 1 FROM human_users WHERE subject_id = ?1 AND state='active';";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -39750,7 +40092,7 @@ bootstrap_admin_rollback (wyl_policy_store_t *store,
     gboolean manage_transaction)
 {
   if (manage_transaction)
-    (void) exec_sql (store->db, "ROLLBACK;");
+    (void) wyl_policy_store_rollback_mutation (store);
 }
 
 static wyrelog_error_t
@@ -39779,7 +40121,7 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
 
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (manage_transaction) {
-    rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+    rc = wyl_policy_store_begin_mutation (store);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -39918,8 +40260,10 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
   }
   sqlite3_finalize (stmt);
 
-  rc = wyl_policy_store_grant_role_membership (store, subject_id,
-          "wr.system_admin", WYL_TENANT_DEFAULT);
+  rc = wyl_policy_store_user_register (store, subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_membership (store, subject_id,
+            "wr.system_admin", WYL_TENANT_DEFAULT);
   if (rc != WYRELOG_E_OK) {
     bootstrap_admin_rollback (store, manage_transaction);
     return rc;
@@ -39984,7 +40328,7 @@ apply_bootstrap_admin_internal (wyl_policy_store_t *store,
   }
 
   if (manage_transaction) {
-    rc = exec_sql (store->db, "COMMIT;");
+    rc = wyl_policy_store_commit_mutation (store);
     if (rc != WYRELOG_E_OK) {
       bootstrap_admin_rollback (store, manage_transaction);
       return rc;
@@ -47003,5 +47347,368 @@ wyl_policy_store_tenant_delete_pending (wyl_policy_store_t *store, GPtrArray **o
   sqlite3_finalize (s);
   if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
   if (rc != WYRELOG_E_OK) g_clear_pointer (out, g_ptr_array_unref);
+  return rc;
+}
+
+void
+wyl_human_user_free (WylHumanUser *user)
+{
+  if (user == NULL) return;
+  g_free (user->subject); g_free (user->state); g_free (user);
+}
+
+wyrelog_error_t
+wyl_policy_store_user_list (wyl_policy_store_t *store, GPtrArray **out)
+{
+  if (store == NULL || out == NULL) return WYRELOG_E_INVALID;
+  *out = NULL;
+  g_autoptr (GPtrArray) users = g_ptr_array_new_with_free_func ((GDestroyNotify) wyl_human_user_free);
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, "SELECT subject_id,state,generation,created_at_us,updated_at_us FROM human_users ORDER BY subject_id", &s);
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW) {
+    WylHumanUser *u = g_new0 (WylHumanUser, 1);
+    u->subject = g_strdup ((const gchar *) sqlite3_column_text (s, 0));
+    u->state = g_strdup ((const gchar *) sqlite3_column_text (s, 1));
+    u->generation = sqlite3_column_int64 (s, 2);
+    u->created_at_us = sqlite3_column_int64 (s, 3);
+    u->updated_at_us = sqlite3_column_int64 (s, 4);
+    g_ptr_array_add (users, u);
+  }
+  sqlite3_finalize (s);
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) *out = g_steal_pointer (&users);
+  return rc;
+}
+
+void
+wyl_user_delete_preview_clear (WylUserDeletePreview *p)
+{
+  g_free (p->subject); g_free (p->fingerprint);
+  g_clear_pointer (&p->tenants, g_ptr_array_unref);
+  g_free (p->unsealed); g_free (p->blockers);
+  memset (p, 0, sizeof (*p));
+}
+
+static void
+user_preview_hash_row (GChecksum *hash, sqlite3_stmt *s)
+{
+  for (int i = 0; i < sqlite3_column_count (s); i++) {
+    const gchar *value = (const gchar *) sqlite3_column_text (s, i);
+    g_autofree gchar *frame = g_strdup_printf ("%d:", value == NULL ? -1 : sqlite3_column_bytes (s, i));
+    g_checksum_update (hash, (const guchar *) frame, strlen (frame));
+    if (value != NULL) g_checksum_update (hash, (const guchar *) value, sqlite3_column_bytes (s, i));
+  }
+}
+
+wyrelog_error_t
+wyl_policy_store_user_preview (wyl_policy_store_t *store, const gchar *subject,
+    WylUserDeletePreview *out)
+{
+  if (store == NULL || out == NULL || !wyl_policy_human_subject_is_valid (subject)) return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_policy_store_user_require (store, subject, FALSE);
+  if (rc != WYRELOG_E_OK) return rc;
+  out->subject = g_strdup (subject);
+  out->tenants = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GChecksum) hash = g_checksum_new (G_CHECKSUM_SHA256);
+  g_autoptr (GString) unsealed = g_string_new (NULL);
+  g_autoptr (GString) blockers = g_string_new (NULL);
+  const gchar *queries[] = {
+    "SELECT subject_id,state,generation FROM human_users WHERE subject_id=?1",
+    "SELECT tenant_id,owner_subject_id FROM tenants WHERE owner_subject_id=?1 ORDER BY tenant_id",
+    "SELECT 'role',scope,role_id FROM role_memberships WHERE subject_id=?1 UNION ALL SELECT 'permission',scope,perm_id FROM direct_permissions WHERE subject_id=?1 UNION ALL SELECT 'state',scope,perm_id||':'||state FROM permission_states WHERE subject_id=?1 ORDER BY 1,2,3"
+  };
+  for (gsize q = 0; rc == WYRELOG_E_OK && q < G_N_ELEMENTS (queries); q++) {
+    sqlite3_stmt *s = NULL;
+    rc = prepare_stmt (store->db, queries[q], &s);
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, subject);
+    int step = SQLITE_DONE;
+    while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW) {
+      user_preview_hash_row (hash, s);
+      if (q == 2) out->permission_count++;
+      if (q == 1) {
+        const gchar *tenant = (const gchar *) sqlite3_column_text (s, 0);
+        g_ptr_array_add (out->tenants, g_strdup (tenant));
+        WylPolicyTenantAuthorityRecord *authority = NULL;
+        rc = wyl_policy_store_read_tenant_authority (store, tenant, &authority);
+        if (rc != WYRELOG_E_OK) break;
+        gboolean sealed = authority->lifecycle_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED;
+        g_autofree gchar *state = g_strdup_printf ("lifecycle:%d;", authority->lifecycle_state);
+        g_checksum_update (hash, (const guchar *) state, strlen (state));
+        wyl_policy_tenant_authority_record_free (authority);
+        if (!sealed) g_string_append_printf (unsealed, "%s%s", unsealed->len ? "," : "", tenant);
+        sqlite3_stmt *holders = NULL;
+        rc = prepare_stmt (store->db,
+                "SELECT subject_id,'role',role_id FROM role_memberships WHERE scope=?1 AND subject_id<>?2 "
+                "UNION ALL SELECT subject_id,'permission',perm_id FROM direct_permissions WHERE scope=?1 AND subject_id<>?2 "
+                "UNION ALL SELECT subject_id,'state',perm_id FROM permission_states WHERE scope=?1 AND subject_id<>?2 ORDER BY 1,2,3", &holders);
+        if (rc == WYRELOG_E_OK) rc = bind_text (holders, 1, tenant);
+        if (rc == WYRELOG_E_OK) rc = bind_text (holders, 2, subject);
+        int hs = SQLITE_DONE;
+        while (rc == WYRELOG_E_OK && (hs = sqlite3_step (holders)) == SQLITE_ROW) {
+          user_preview_hash_row (hash, holders);
+          g_string_append_printf (blockers, "%s%s:%s:%s:%s", blockers->len ? ";" : "", tenant,
+              sqlite3_column_text (holders, 0), sqlite3_column_text (holders, 1), sqlite3_column_text (holders, 2));
+        }
+        if (rc == WYRELOG_E_OK && hs != SQLITE_DONE) rc = WYRELOG_E_IO;
+        sqlite3_finalize (holders);
+      }
+    }
+    if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+    sqlite3_finalize (s);
+  }
+  if (rc == WYRELOG_E_OK) {
+    out->fingerprint = g_strdup (g_checksum_get_string (hash));
+    out->unsealed = g_string_free (g_steal_pointer (&unsealed), FALSE);
+    out->blockers = g_string_free (g_steal_pointer (&blockers), FALSE);
+  }
+  return rc;
+}
+
+void
+wyl_user_operation_clear (WylUserOperation *o)
+{
+  g_free (o->request_id); g_free (o->subject); g_free (o->actor); g_free (o->action);
+  g_free (o->fingerprint); g_free (o->audit_id); g_free (o->summary); g_free (o->error_code);
+  memset (o, 0, sizeof (*o));
+}
+
+wyrelog_error_t
+wyl_policy_store_user_operation_read (wyl_policy_store_t *store,
+    const gchar *request_id, WylUserOperation *out)
+{
+  if (store == NULL || request_id == NULL || out == NULL) return WYRELOG_E_INVALID;
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT request_id,subject_id,actor,action,fingerprint,audit_id,summary,created_at_us,phase FROM human_user_operations WHERE request_id=?", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, request_id);
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (s);
+    if (step == SQLITE_ROW) {
+      gchar **fields[] = {&out->request_id,&out->subject,&out->actor,&out->action,&out->fingerprint,&out->audit_id,&out->summary};
+      for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) *fields[i] = g_strdup ((const gchar *) sqlite3_column_text (s, i));
+      out->created_at_us = sqlite3_column_int64 (s, 7);
+      out->complete = g_strcmp0 ((const gchar *) sqlite3_column_text (s, 8), "complete") == 0;
+    } else rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  }
+  sqlite3_finalize (s);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_operation_commit (wyl_policy_store_t *store,
+    const gchar *subject, const gchar *actor, const gchar *action,
+    const gchar *request_id, const gchar *fingerprint, const GPtrArray *children,
+    WylUserOperation *out)
+{
+  if (store == NULL || out == NULL || !wyl_policy_store_transaction_owned_by_caller (store)
+      || !wyl_policy_human_subject_is_valid (subject) || !wyl_policy_human_subject_is_valid (actor)
+      || !wyl_request_id_is_canonical (request_id) || action == NULL
+      || (!g_str_equal (action, "create") && !g_str_equal (action, "disable") && !g_str_equal (action, "delete"))) return WYRELOG_E_INVALID;
+  if (!g_str_equal (action, "delete") && children != NULL && children->len != 0)
+    return WYRELOG_E_INVALID;
+  const gchar *fp = fingerprint == NULL ? "" : fingerprint;
+  g_auto (WylUserOperation) prior = {0};
+  wyrelog_error_t rc = wyl_policy_store_user_operation_read (store, request_id, &prior);
+  if (rc == WYRELOG_E_OK) {
+    if (g_strcmp0 (subject, prior.subject) || g_strcmp0 (actor, prior.actor)
+        || g_strcmp0 (action, prior.action) || g_strcmp0 (fp, prior.fingerprint)) return WYRELOG_E_CONFLICT;
+    *out = prior; memset (&prior, 0, sizeof (prior)); return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND) return rc;
+  gboolean collision = FALSE;
+  rc = service_retirement_namespace_collision (store, request_id, &collision);
+  if (rc != WYRELOG_E_OK || collision) return collision ? WYRELOG_E_CONFLICT : rc;
+  /* Recheck authority inside the one SQL decision, including stale callers. */
+  rc = wyl_policy_store_user_require (store, actor, TRUE);
+  sqlite3_stmt *s = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (store->db,
+            "SELECT 1 FROM role_memberships WHERE subject_id=? AND role_id='wr.system_admin' AND scope='__wr_default'", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, actor);
+  if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_ROW) rc = WYRELOG_E_AUTH;
+  sqlite3_finalize (s); s = NULL;
+  if (rc != WYRELOG_E_OK) return rc;
+  g_auto (WylUserDeletePreview) preview = {0};
+  if (g_str_equal (action, "delete")) {
+    rc = wyl_policy_store_user_preview (store, subject, &preview);
+    if (rc != WYRELOG_E_OK) return rc;
+    if (preview.unsealed[0] || preview.blockers[0]) {
+      out->error_code = g_strdup (preview.unsealed[0] ? "user_delete_tenant_not_sealed" : "user_delete_tenant_in_use");
+      out->summary = g_strdup (preview.unsealed[0] ? preview.unsealed : preview.blockers);
+      return WYRELOG_E_POLICY;
+    }
+    if (g_strcmp0 (fp, preview.fingerprint) || children == NULL || children->len != preview.tenants->len) {
+      out->error_code = g_strdup ("user_delete_preview_stale"); return WYRELOG_E_CONFLICT;
+    }
+    for (gsize i = 0; i < children->len; i++) {
+      WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+      if (g_strcmp0 (child->tenant, g_ptr_array_index (preview.tenants, i))
+          || !wyl_request_id_is_canonical (child->request_id) || g_str_equal (child->request_id, request_id)) return WYRELOG_E_CONFLICT;
+      for (gsize j = 0; j < i; j++) {
+        WylTenantDeleteRecord *other = g_ptr_array_index (children, j);
+        if (g_str_equal (child->request_id, other->request_id)) return WYRELOG_E_CONFLICT;
+      }
+    }
+  }
+  if (g_str_equal (action, "create")) {
+    rc = prepare_stmt (store->db, "SELECT 1 FROM human_users WHERE subject_id=?", &s);
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, subject);
+    if (rc == WYRELOG_E_OK) {
+      int step = sqlite3_step (s);
+      if (step != SQLITE_DONE) rc = step == SQLITE_ROW ? WYRELOG_E_CONFLICT : WYRELOG_E_IO;
+    }
+    sqlite3_finalize (s); s = NULL;
+    if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_register (store, subject);
+  } else {
+    rc = wyl_policy_store_user_require (store, subject, FALSE);
+    if (rc == WYRELOG_E_OK) rc = prepare_stmt (store->db,
+              "UPDATE human_users SET state=?,generation=generation+1,updated_at_us=? WHERE subject_id=?", &s);
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, g_str_equal (action, "delete") ? "deleted" : "disabled");
+    if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (s, 2, g_get_real_time ()) != SQLITE_OK) rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) rc = bind_text (s, 3, subject);
+    if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_DONE) {
+      if (g_strcmp0 (sqlite3_errmsg (store->db), "last_system_admin") == 0) {
+        out->error_code = g_strdup ("last_system_admin"); rc = WYRELOG_E_POLICY;
+      } else rc = WYRELOG_E_IO;
+    }
+    sqlite3_finalize (s); s = NULL;
+  }
+  if (rc != WYRELOG_E_OK) return rc;
+  gchar audit_id[WYL_ID_STRING_BUF] = {0};
+  rc = service_domain_new_audit_id (audit_id);
+  gint64 now = g_get_real_time ();
+  g_autoptr (GString) summary = g_string_new (action);
+  if (preview.tenants != NULL) {
+    g_string_append_printf (summary, ";permissions=%" G_GUINT64_FORMAT ";tenants=", preview.permission_count);
+    for (gsize i = 0; i < preview.tenants->len; i++) g_string_append_printf (summary, "%s%s", i ? "," : "", (gchar *) g_ptr_array_index (preview.tenants, i));
+    g_string_append (summary, ";removed=permissions,principal,sessions,totp,owned_tenants,data");
+  }
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (store->db,
+            "INSERT INTO human_user_operations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", &s);
+  const gchar *values[] = {request_id, subject, actor, action, fp, audit_id, summary->str};
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (values); i++) rc = bind_text (s, i + 1, values[i]);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (s, 8, now) != SQLITE_OK) rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 9, g_str_equal (action, "delete") ? "cleanup" : "complete");
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (s,10,children != NULL ? children->len : 0) != SQLITE_OK) rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (s); s = NULL;
+  /* Child reservation is the tenant journal itself, created before linkage. */
+  for (gsize i = 0; rc == WYRELOG_E_OK && children != NULL && i < children->len; i++) {
+    WylTenantDeleteRecord *child = g_ptr_array_index (children, i);
+    g_auto (WylTenantDeleteRecord) result = {0};
+    rc = wyl_policy_store_tenant_delete_commit (store, child->tenant, actor, child->request_id, TRUE, child->manifest, &result);
+    if (rc == WYRELOG_E_OK) {
+      gchar *sql = sqlite3_mprintf ("INSERT INTO human_user_delete_children VALUES(%Q,%Q,%Q,%Q)", request_id, child->tenant, child->request_id, result.audit_id);
+      rc = exec_sql (store->db, sql); sqlite3_free (sql);
+    }
+  }
+  if (rc == WYRELOG_E_OK && !g_str_equal (action, "create")) {
+    gchar *sql = sqlite3_mprintf (
+      "DELETE FROM session_states WHERE session_id IN (SELECT session_id FROM human_user_sessions WHERE subject_id=%Q);"
+      "DELETE FROM human_user_sessions WHERE subject_id=%Q;", subject, subject);
+    rc = exec_sql (store->db, sql); sqlite3_free (sql);
+  }
+  if (rc == WYRELOG_E_OK && g_str_equal (action, "delete")) {
+    const gchar *tables[] = {"role_memberships", "direct_permissions", "permission_states", "principal_states", "totp_enrollments"};
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < G_N_ELEMENTS (tables); i++) {
+      gchar *sql = sqlite3_mprintf ("DELETE FROM %s WHERE subject_id=%Q", tables[i], subject);
+      rc = exec_sql (store->db, sql); sqlite3_free (sql);
+    }
+  }
+  g_autofree gchar *audit_action = g_strdup_printf ("user_%s", action);
+  gboolean inserted = FALSE;
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_append_audit_event_full (store, audit_id, now, actor, audit_action, subject, summary->str, fp, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_record_audit_intention_full (store, audit_id, now, actor, audit_action, subject, summary->str, fp, request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_operation_read (store, request_id, out);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_operation_complete (wyl_policy_store_t *store, const gchar *request_id)
+{
+  if (store == NULL || !wyl_policy_store_transaction_owned_by_caller (store)) return WYRELOG_E_INVALID;
+  gchar *sql = sqlite3_mprintf (
+    "UPDATE human_user_operations SET phase='complete' WHERE request_id=%Q AND phase='cleanup' "
+    "AND (SELECT COUNT(*) FROM human_user_delete_children c WHERE c.parent_request_id=human_user_operations.request_id)=child_count "
+    "AND NOT EXISTS(SELECT 1 FROM human_user_delete_children c LEFT JOIN tenant_delete_journals j ON j.tenant_id=c.tenant_id "
+    "WHERE c.parent_request_id=%Q AND (j.phase IS NULL OR j.phase<>'complete' OR j.request_id<>c.child_request_id OR j.audit_id<>c.audit_id))", request_id, request_id);
+  wyrelog_error_t rc = exec_sql (store->db, sql); sqlite3_free (sql);
+  if (rc == WYRELOG_E_OK) {
+    g_auto (WylUserOperation) receipt = {0};
+    rc = wyl_policy_store_user_operation_read (store,request_id,&receipt);
+    if (rc == WYRELOG_E_OK && !receipt.complete) rc = WYRELOG_E_POLICY;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_recover (wyl_policy_store_t *store)
+{
+  if (store == NULL) return WYRELOG_E_INVALID;
+  /* Opening a second read-capable handle must not demand a writer when there
+   * is nothing to recover. Snapshot the pending IDs, then revalidate each
+   * receipt under the mutation transaction. */
+  g_autoptr (GPtrArray) requests = g_ptr_array_new_with_free_func (g_free);
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT request_id FROM human_user_operations WHERE phase='cleanup'", &s);
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW)
+    g_ptr_array_add (requests, g_strdup ((const gchar *) sqlite3_column_text (s, 0)));
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (s);
+  if (rc != WYRELOG_E_OK || requests->len == 0) return rc;
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK) return rc;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < requests->len; i++)
+    rc = wyl_policy_store_user_operation_complete (store, g_ptr_array_index (requests, i));
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_commit_mutation (store);
+  else (void) wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+void
+wyl_user_child_free (gpointer data)
+{
+  WylTenantDeleteRecord *r = data;
+  wyl_tenant_delete_record_clear (r);
+  g_free (r);
+}
+
+wyrelog_error_t
+wyl_policy_store_user_children (wyl_policy_store_t *store, const gchar *request_id,
+    GPtrArray **out)
+{
+  if (store == NULL || request_id == NULL || out == NULL) return WYRELOG_E_INVALID;
+  *out = NULL;
+  g_autoptr (GPtrArray) children = g_ptr_array_new_with_free_func (wyl_user_child_free);
+  sqlite3_stmt *s = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+          "SELECT tenant_id,child_request_id,audit_id FROM human_user_delete_children WHERE parent_request_id=? ORDER BY tenant_id", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, request_id);
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (s)) == SQLITE_ROW) {
+    WylTenantDeleteRecord *r = g_new0 (WylTenantDeleteRecord, 1);
+    g_ptr_array_add (children, r);
+    rc = wyl_policy_store_tenant_delete_read (store, (const gchar *) sqlite3_column_text (s, 0), r);
+    if (rc == WYRELOG_E_OK && (g_strcmp0 (r->request_id, (const gchar *) sqlite3_column_text (s, 1))
+        || g_strcmp0 (r->audit_id, (const gchar *) sqlite3_column_text (s, 2)))) rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE) rc = WYRELOG_E_IO;
+  sqlite3_finalize (s);
+  if (rc == WYRELOG_E_OK) *out = g_steal_pointer (&children);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_user_require_admin (wyl_policy_store_t *store, const gchar *subject)
+{
+  wyrelog_error_t rc = wyl_policy_store_user_require (store, subject, TRUE);
+  sqlite3_stmt *s = NULL;
+  if (rc == WYRELOG_E_OK) rc = prepare_stmt (store->db,
+            "SELECT 1 FROM role_memberships WHERE subject_id=? AND role_id='wr.system_admin' AND scope='__wr_default'", &s);
+  if (rc == WYRELOG_E_OK) rc = bind_text (s, 1, subject);
+  if (rc == WYRELOG_E_OK && sqlite3_step (s) != SQLITE_ROW) rc = WYRELOG_E_AUTH;
+  sqlite3_finalize (s);
   return rc;
 }

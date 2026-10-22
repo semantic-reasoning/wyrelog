@@ -163,6 +163,7 @@ PROTECTED_DIRECTIVE_DIGESTS = {
 }
 
 TEST_HEADER_INVENTORY = {
+    "tests/human-user-test-support.h",
     "tests/fact-artifact-transition-driver-fixture.h",
     "tests/fact-test-support.h",
     "tests/test-daemon-http-decide-seed-helper.h",

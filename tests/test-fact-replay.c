@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -190,6 +191,7 @@ create_graph_with_schema (wyl_policy_store_t *store, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -248,6 +250,7 @@ create_compound_graph_with_schemas (wyl_policy_store_t *store,
     const gchar *root, const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -1547,6 +1550,7 @@ test_unleased_replay_rejects_metadata (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -1751,6 +1755,7 @@ test_boot_converges_forget_on_sealed_provisioned_graph (void)
     g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
         WYRELOG_E_OK);
     gboolean created = FALSE;
+    register_test_human (policy, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
         "tenant-owner",
         &created), ==, WYRELOG_E_OK);
@@ -2946,6 +2951,7 @@ test_replay_keeps_legacy_nullable_null_fail_closed (void)
     g_assert_cmpint (wyl_policy_store_create_schema (policy), ==,
         WYRELOG_E_OK);
     gboolean created = FALSE;
+    register_test_human (policy, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
         "tenant-owner",
         &created), ==, WYRELOG_E_OK);
@@ -4931,6 +4937,7 @@ test_replay_keeps_registered_empty_sibling_with_existing_store (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -6137,6 +6144,7 @@ create_graph_with_two_relations (wyl_policy_store_t *store, const gchar *root,
     const gchar *tenant_id, const gchar *graph_id)
 {
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant_id,
       "tenant-owner", &created), ==, WYRELOG_E_OK);
 
@@ -6788,6 +6796,7 @@ test_handle_unseal_traces_coordinator_before_publication (void)
      * graph created with create_fact_graph() has no store identity and is
      * deliberately rejected by the secure opener during unseal. */
     gboolean created = FALSE;
+    register_test_human (policy, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
         "tenant-owner",
         &created), ==, WYRELOG_E_OK);
@@ -6920,6 +6929,7 @@ test_graph_program_is_pinned_on_both_load_paths (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, "tenant-a",
       "tenant-owner", &created), ==, WYRELOG_E_OK);
 
@@ -7137,6 +7147,186 @@ delete_test_checkpoint (const gchar *point, gpointer data)
   return g_strcmp0 (point, data) == 0 ? WYRELOG_E_IO : WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+user_delete_test_authorize (gpointer data, const gchar *actor, gboolean *admin)
+{
+  (void) data; (void) actor; *admin = TRUE; return WYRELOG_E_OK;
+}
+
+static gpointer
+tenant_seal_scope_writer (gpointer data)
+{
+  SealBarrierHold *hold = data;
+  g_autoptr (WylServiceAuthWriteLease) write = NULL;
+  hold->result = wyl_service_auth_authority_acquire_write (
+    wyl_handle_get_service_auth_authority (hold->handle), hold->handle, NULL, &write);
+  WylTenantSealCoordination *scope = NULL;
+  if (hold->result == WYRELOG_E_OK)
+    hold->result = wyl_handle_tenant_seal_prepare (hold->handle, write, "tenant-a", &scope);
+  wyrelog_error_t cleanup = wyl_handle_tenant_seal_finish (scope, WYL_DURABLE_COMMIT_NOT_COMMITTED);
+  if (hold->result == WYRELOG_E_OK) hold->result = cleanup;
+  return NULL;
+}
+
+static void
+assert_tenant_seal_scope_waits_for_snapshot (WylHandle *handle)
+{
+  SealBarrierHold reader = {.handle = handle};
+  SealBarrierHold writer = {.handle = handle};
+  g_mutex_init (&reader.mutex);
+  g_cond_init (&reader.changed);
+  GThread *read_thread = g_thread_new ("held-snapshot", seal_barrier_holder, &reader);
+  g_mutex_lock (&reader.mutex);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!reader.inside && g_cond_wait_until (&reader.changed, &reader.mutex, deadline));
+  g_assert_true (reader.inside);
+  g_mutex_unlock (&reader.mutex);
+  GThread *write_thread = g_thread_new ("tenant-seal-scope", tenant_seal_scope_writer, &writer);
+  guint readers = 0, waiters = 0;
+  WylFactTenantAdmissionState state;
+  deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  do {
+    g_assert_cmpint (wyl_handle_get_fact_tenant_admission_for_test (handle, "tenant-a", &state, &readers, &waiters), ==, WYRELOG_E_OK);
+    if (waiters > 0) break;
+    g_usleep (1000);
+  } while (g_get_monotonic_time () < deadline);
+  g_assert_cmpuint (readers, ==, 1);
+  g_assert_cmpuint (waiters, ==, 1);
+  g_mutex_lock (&reader.mutex);
+  reader.release = TRUE;
+  g_cond_broadcast (&reader.changed);
+  g_mutex_unlock (&reader.mutex);
+  g_thread_join (read_thread);
+  g_thread_join (write_thread);
+  g_assert_cmpint (reader.result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (writer.result, ==, WYRELOG_E_OK);
+  g_cond_clear (&reader.changed);
+  g_mutex_clear (&reader.mutex);
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+}
+
+static void
+test_tenant_seal_scope_outcomes (void)
+{
+  g_autofree gchar *root = wyl_test_make_secure_fact_root ("wyl-tenant-seal-scope-XXXXXX", NULL);
+  g_autofree gchar *path = g_build_filename (root, "policy.sqlite", NULL);
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    create_graph_with_schema (store, root, "tenant-a", "orders");
+    append_order_batches (store, root, "tenant-a", "orders");
+  }
+  const WylHandleOpenOptions options = {.policy_store_path = path, .fact_root = root};
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+  assert_tenant_seal_scope_waits_for_snapshot (handle);
+  const WylDurableCommitState outcomes[] = {
+    WYL_DURABLE_COMMIT_NOT_COMMITTED, WYL_DURABLE_COMMIT_COMMITTED,
+    WYL_DURABLE_COMMIT_UNCERTAIN, WYL_DURABLE_COMMIT_NOT_COMMITTED
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (outcomes); i++) {
+    g_autoptr (WylServiceAuthWriteLease) write = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write (
+          wyl_handle_get_service_auth_authority (handle), handle, NULL, &write), ==, WYRELOG_E_OK);
+    WylTenantSealCoordination *scope = NULL;
+    g_assert_cmpint (wyl_handle_tenant_seal_prepare (handle, write, "tenant-a", &scope), ==, WYRELOG_E_OK);
+    g_assert_nonnull (scope);
+    g_assert_cmpint (wyl_handle_tenant_seal_finish (scope, outcomes[i]), ==, WYRELOG_E_OK);
+    g_clear_pointer (&write, wyl_service_auth_write_lease_free);
+    if (i < 2)
+      assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+    else {
+      /* An uncertain outcome closes admission; a later rollback must preserve
+       * that pre-existing closure rather than reopening the graph. */
+      g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name ("shop.ns", "orders-rel");
+      g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+      SnapshotProbe probe = {observed, 0, FALSE};
+      g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, "tenant-a", "orders", observed, handle_snapshot_cb, &probe), !=, WYRELOG_E_OK);
+      g_assert_cmpuint (probe.count, ==, 0);
+    }
+  }
+  g_clear_object (&handle);
+  remove_tree (root);
+}
+
+static void
+test_user_delete_restart (void)
+{
+  const gchar *faults[] = {"user_child_prepared", "before_user_commit", "after_user_commit",
+                           "before_unlink", "after_unlink", "before_journal_complete", "user_child_cleaned"};
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_test_message ("User cascade restart checkpoint: %s", faults[i]);
+    g_autofree gchar *root = wyl_test_make_secure_fact_root ("wyl-user-delete-XXXXXX", NULL);
+    g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite", NULL);
+    g_autofree gchar *storage_a = NULL;
+    g_autofree gchar *storage_b = NULL;
+    {
+      g_autoptr (wyl_policy_store_t) policy = NULL;
+      g_assert_cmpint (wyl_policy_store_open (policy_path, &policy), ==, WYRELOG_E_OK);
+      g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
+      register_test_human (policy, "admin");
+      g_assert_cmpint (wyl_policy_store_grant_role_membership (policy, "admin", "wr.system_admin", "__wr_default"), ==, WYRELOG_E_OK);
+      const gchar *tenants[] = {"tenant-a", "tenant-b"};
+      for (guint t = 0; t < G_N_ELEMENTS (tenants); t++) {
+        create_graph_with_schema (policy, root, tenants[t], "orders");
+        append_order_batches (policy, root, tenants[t], "orders");
+        WylPolicyAuthorityMutationResult result;
+        g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (policy, tenants[t], WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
+        g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+      }
+      storage_a = lookup_graph_storage_path (policy, "tenant-a", "orders");
+      storage_b = lookup_graph_storage_path (policy, "tenant-b", "orders");
+    }
+    WylHandleOpenOptions options = {.policy_store_path=policy_path,.fact_root=root};
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+    gchar request[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
+    WylTenantDeleteRuntime runtime = {.authorize=user_delete_test_authorize,.validate=delete_test_validate,
+                                      .checkpoint=delete_test_checkpoint,.data=(gpointer) faults[i]};
+    g_auto (WylUserDeletePreview) preview = {0};
+    g_assert_cmpint (wyl_handle_user_preview (handle, "tenant-owner", "admin", &runtime, &preview), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (preview.tenants->len, ==, 2);
+    g_assert_cmpuint (preview.data_bytes, >, 0);
+    g_auto (WylUserOperation) operation = {0};
+    g_assert_cmpint (wyl_handle_user_mutate (handle, "tenant-owner", "admin", "delete", request,
+        preview.fingerprint, &runtime, &operation), ==, WYRELOG_E_IO);
+    g_clear_object (&handle);
+    g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
+    wyl_policy_store_t *policy = wyl_handle_get_policy_store (handle);
+    gboolean exists = FALSE;
+    g_assert_cmpint (wyl_policy_store_tenant_exists (policy, "tenant-a", &exists), ==, WYRELOG_E_OK);
+    g_assert_cmpint (exists, ==, i < 2);
+    g_assert_cmpint (wyl_policy_store_tenant_exists (policy, "tenant-b", &exists), ==, WYRELOG_E_OK);
+    g_assert_cmpint (exists, ==, i < 2);
+    g_assert_cmpint (g_file_test (storage_a, G_FILE_TEST_IS_DIR), ==, i < 2);
+    g_assert_cmpint (g_file_test (storage_b, G_FILE_TEST_IS_DIR), ==, i < 2);
+    wyl_user_operation_clear (&operation);
+    if (i < 2) {
+      g_assert_cmpint (wyl_policy_store_user_operation_read (policy, request, &operation), ==, WYRELOG_E_NOT_FOUND);
+      wyl_user_delete_preview_clear (&preview);
+      g_assert_cmpint (wyl_handle_user_preview (handle, "tenant-owner", "admin", &runtime, &preview), ==, WYRELOG_E_OK);
+    } else {
+      g_assert_cmpint (wyl_policy_store_user_operation_read (policy, request, &operation), ==, WYRELOG_E_OK);
+      g_assert_true (operation.complete);
+      g_autoptr (GPtrArray) children = NULL;
+      g_assert_cmpint (wyl_policy_store_user_children (policy, request, &children), ==, WYRELOG_E_OK);
+      g_assert_cmpuint (children->len, ==, 2);
+      for (guint c = 0; c < children->len; c++) g_assert_true (((WylTenantDeleteRecord *) g_ptr_array_index (children, c))->complete);
+    }
+    runtime.checkpoint = NULL;
+    wyl_user_operation_clear (&operation);
+    g_assert_cmpint (wyl_handle_user_mutate (handle, "tenant-owner", "admin", "delete", request,
+        preview.fingerprint, &runtime, &operation), ==, WYRELOG_E_OK);
+    g_assert_false (g_file_test (storage_a, G_FILE_TEST_IS_DIR));
+    g_assert_false (g_file_test (storage_b, G_FILE_TEST_IS_DIR));
+    g_clear_object (&handle);
+    remove_tree (root);
+  }
+}
+
 static void
 test_tenant_delete_restart (void)
 {
@@ -7213,6 +7403,7 @@ test_tenant_delete_lock_order (void)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==, WYRELOG_E_OK);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
+  register_test_human (store, "alice");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "delete-order", "alice", &created), ==, WYRELOG_E_OK);
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store, "delete-order", WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
@@ -7246,6 +7437,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-replay/tenant-delete-lock-order", test_tenant_delete_lock_order);
   g_test_add_func ("/fact-replay/tenant-delete-restart", test_tenant_delete_restart);
+  g_test_add_func ("/fact-replay/tenant-seal-scope-outcomes", test_tenant_seal_scope_outcomes);
+  g_test_add_func ("/fact-replay/user-delete-restart", test_user_delete_restart);
   g_test_add_func ("/fact-replay/register-rule-pack",
       test_register_rule_pack_checks_then_stores);
   g_test_add_func ("/fact-replay/graph-program-pinned",

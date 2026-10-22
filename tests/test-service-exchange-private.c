@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -85,12 +86,14 @@ prepare_authority (WylHandle *handle, const gchar *subject_id)
       subject_id, "admin", "principal-create", &principal), ==,
       WYRELOG_E_OK);
   wyl_service_principal_clear (&principal);
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   gboolean created = FALSE;
   g_assert_cmpint (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (handle), "tenant-a",
       "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (handle), "tenant-b",
       "tenant-owner", &created), ==,

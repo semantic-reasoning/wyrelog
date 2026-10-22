@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -490,6 +491,7 @@ test_fresh_schema_is_legacy_unclassified (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
 
   const gchar *tenant_columns[] = {
@@ -529,6 +531,7 @@ test_provisioning_schema_is_fail_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-provision", "graph-provision", FALSE);
   WylPolicyAuthorityMutationResult mutation;
@@ -622,6 +625,7 @@ test_provisioning_schema_is_fail_closed (void)
   g_assert_cmpint (mutation, ==,
       WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
       "tenant-provision", "graph-provision",
       WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
@@ -629,6 +633,7 @@ test_provisioning_schema_is_fail_closed (void)
       2, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
       "tenant-provision", "graph-provision",
       WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
@@ -640,10 +645,12 @@ test_provisioning_schema_is_fail_closed (void)
       WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
       4, 0, &mutation), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (store,
       "tenant-provision", "graph-provision", 5, 0, &mutation), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 }
 
 static void
@@ -652,6 +659,7 @@ test_provisioning_degraded_terminal_coupling (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   WylPolicyAuthorityMutationResult mutation;
   insert_graph (db, "tenant-provision-degraded", "graph-provision-degraded",
@@ -680,6 +688,7 @@ test_provisioning_degraded_terminal_coupling (void)
   exec_ok (db,
       "UPDATE fact_graph_provisioning SET phase='degraded',updated_at=2;");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 }
 
 static void
@@ -688,6 +697,7 @@ test_dangling_provisioning_record_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-dangling", "graph-dangling", FALSE);
   WylPolicyAuthorityMutationResult mutation;
@@ -1060,6 +1070,7 @@ run_provisioning_predecessor_migration (gboolean windows)
     g_autoptr (wyl_policy_store_t) store = NULL;
     g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     sqlite3 *db = wyl_policy_store_get_db (store);
     prepare_provisioning_fixture_row (store, db, windows);
     gint64 provisioning_rowid = scalar_int64 (db,
@@ -1102,6 +1113,7 @@ run_provisioning_predecessor_migration (gboolean windows)
       g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
       g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
           WYRELOG_E_OK);
+      register_test_human (store, "tenant-owner");
       g_clear_pointer (&store, wyl_policy_store_close);
       cleanup_store_path (root, path);
       continue;
@@ -1122,6 +1134,7 @@ run_provisioning_predecessor_migration (gboolean windows)
         "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
         "WHERE name='darwin_operation_evidence';"), ==, 0);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (scalar_int64 (db, "PRAGMA foreign_keys;"), ==, 1);
     g_assert_cmpint (scalar_int64 (db,
         "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
@@ -1159,6 +1172,7 @@ run_provisioning_predecessor_migration (gboolean windows)
     g_clear_pointer (&store, wyl_policy_store_close);
     g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
         "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
         "WHERE name='darwin_operation_evidence';"), ==, 1);
@@ -1188,6 +1202,7 @@ test_provisioning_migration_preserves_sequence_absence (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_db_config (db, SQLITE_DBCONFIG_DEFENSIVE, 1, NULL),
       ==, SQLITE_OK);
@@ -1214,6 +1229,7 @@ test_provisioning_migration_preserves_sequence_absence (void)
       ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (scalar_int64 (db,
       "SELECT count(*) FROM main.sqlite_schema WHERE name='sqlite_sequence';"),
       ==, 0);
@@ -1221,6 +1237,7 @@ test_provisioning_migration_preserves_sequence_absence (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (root, path);
 }
@@ -1253,11 +1270,13 @@ test_darwin_evidence_schema_is_structural_and_immutable (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   gint64 canonical_rootpage = scalar_int64 (db,
           "SELECT rootpage FROM sqlite_schema WHERE type='table' AND "
           "name='fact_graph_provisioning';");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (scalar_int64 (db,
       "SELECT rootpage FROM sqlite_schema WHERE type='table' AND "
       "name='fact_graph_provisioning';"), ==, canonical_rootpage);
@@ -1440,6 +1459,7 @@ test_coordinator_fence_owns_connection_transaction (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==,
       WYRELOG_E_OK);
   WylPolicyStoreCoordinatorFence fence =
@@ -1598,6 +1618,7 @@ test_publication_transaction_waits_for_foreign_savepoint (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   TransactionRaceGate gate;
   transaction_race_gate_init (&gate, store);
   wyl_policy_store_set_transaction_contention_hook_for_test (store,
@@ -1644,7 +1665,9 @@ test_savepoint_never_nests_into_foreign_publication_transaction (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -1680,6 +1703,7 @@ test_same_thread_nesting_still_refused (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   /* Inside this thread's own savepoint a publication transaction, and the
    * fact-open reservation built on one, are refused as before. */
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
@@ -1709,6 +1733,7 @@ test_transaction_commit_requires_owner (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   TransactionRaceGate gate;
   transaction_race_gate_init (&gate, store);
   GThread *holder = g_thread_new ("savepoint-holder", run_savepoint_holder,
@@ -1734,6 +1759,7 @@ test_transaction_owned_by_caller (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_false (wyl_policy_store_transaction_owned_by_caller (store));
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
   g_assert_true (wyl_policy_store_transaction_owned_by_caller (store));
@@ -1776,6 +1802,7 @@ test_failed_savepoint_commit_ends_the_frame (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
   guint rejected = 0;
   sqlite3 *db = wyl_policy_store_get_db (store);
@@ -1816,6 +1843,7 @@ test_publication_commit_after_auto_rollback_ends_the_frame (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_publication_transaction_begin (store),
       ==, WYRELOG_E_OK);
   /* Stand in for the statement failure that makes SQLite roll back. */
@@ -1853,6 +1881,7 @@ test_darwin_evidence_policy_persistence (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_autofree gchar *op_uuid = prepare_evidence_test_operation (store, db,
           "darwin-persist", "01890f47-3c4b-7cc2-b8c4-dc0c0c079211");
@@ -2016,6 +2045,7 @@ test_darwin_evidence_encrypted_immediate_publication (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_autofree gchar *op_uuid = prepare_evidence_test_operation (store, db,
           "darwin-encrypted", "01890f47-3c4b-7cc2-b8c4-dc0c0c079214");
@@ -2182,6 +2212,7 @@ test_provisioning_migration_preflight_is_fail_closed (void)
     exec_ok (db, "ROLLBACK;");
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
   }
   {
     g_autoptr (wyl_policy_store_t) store = NULL;
@@ -2235,6 +2266,7 @@ test_provisioning_migration_preflight_is_fail_closed (void)
     exec_ok (db, "DROP TABLE temp.fact_graph_provisioning;");
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
   }
   {
     g_autoptr (wyl_policy_store_t) store = NULL;
@@ -2270,6 +2302,7 @@ test_provisioning_migration_preflight_is_fail_closed (void)
         "'fact_graph_provisioning' AS value /* fact_graph_provisioning */;");
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (scalar_int64 (db,
         "SELECT count(*) FROM sqlite_schema WHERE type='view' AND "
         "name='harmless_provisioning_text';"), ==, 1);
@@ -2305,6 +2338,7 @@ test_provisioning_migration_preflight_is_fail_closed (void)
         WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_PROVISIONING_COMMIT);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (scalar_int64 (db,
         "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
         "WHERE name='darwin_operation_evidence';"), ==, 1);
@@ -2585,6 +2619,7 @@ test_provisioning_terminal_fences_rotation_intent_waiters (void)
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
         fixture_pre_windows_table_sql,
         fixture_pre_windows_immutable_trigger_sql);
@@ -2663,6 +2698,7 @@ test_provisioning_migration_terminalizes_restore_failure (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
       fixture_pre_windows_immutable_trigger_sql);
@@ -2683,6 +2719,7 @@ test_provisioning_migration_terminalizes_restore_failure (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
       "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
       "WHERE name='darwin_operation_evidence';"), ==, 1);
@@ -2699,6 +2736,7 @@ test_provisioning_migration_verifier_snapshot_is_exact (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
       fixture_pre_windows_table_sql,
       fixture_pre_windows_immutable_trigger_sql);
@@ -2781,6 +2819,7 @@ test_provisioning_migration_competing_writer_is_not_retried (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   install_provisioning_schema_fixture (db, fixture_pre_windows_table_sql,
       fixture_pre_windows_immutable_trigger_sql);
@@ -2798,6 +2837,7 @@ test_provisioning_migration_competing_writer_is_not_retried (void)
   g_assert_cmpint (sqlite3_close (writer), ==, SQLITE_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (root, path);
 }
@@ -2826,6 +2866,7 @@ test_provisioning_migration_terminalizes_rollback_failure (void)
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
       fixture_windows_table_sql, fixture_windows_immutable_trigger_sql);
   wyl_policy_store_graph_authority_migration_gate (store,
@@ -2843,6 +2884,7 @@ test_provisioning_migration_terminalizes_rollback_failure (void)
       "WHERE name='darwin_operation_evidence';"), ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (root, path);
 }
@@ -2878,6 +2920,7 @@ test_encrypted_provisioning_migration_publication (void)
           ==, WYRELOG_E_OK);
       g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
           WYRELOG_E_OK);
+      register_test_human (store, "tenant-owner");
       sqlite3 *db = wyl_policy_store_get_db (store);
       install_provisioning_schema_fixture (db,
           predecessor == 0 ? fixture_pre_windows_table_sql :
@@ -2944,6 +2987,7 @@ test_encrypted_provisioning_migration_publication (void)
           fail_publication == 0 ? 1 : 0);
       g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
           WYRELOG_E_OK);
+      register_test_human (store, "tenant-owner");
       g_assert_cmpint (scalar_int64 (db,
           "SELECT count(*) FROM pragma_table_info('fact_graph_provisioning') "
           "WHERE name='darwin_operation_evidence';"), ==, 1);
@@ -2967,6 +3011,7 @@ test_encrypted_policy_store_deferred_close_blob (void)
   g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
       ==, WYRELOG_E_OK);
@@ -3026,6 +3071,7 @@ test_encrypted_policy_store_deferred_close_transaction (void)
   g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (open_encrypted_policy_store (path, key_path, &store),
       ==, WYRELOG_E_OK);
@@ -3155,6 +3201,7 @@ test_encrypted_maintenance_migration_identity_gate (void)
         WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
         fixture_pre_windows_table_sql,
         fixture_pre_windows_immutable_trigger_sql);
@@ -3290,6 +3337,7 @@ test_provisioning_migration_process_crashes (void)
           wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
       g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
           WYRELOG_E_OK);
+      register_test_human (store, "tenant-owner");
       install_provisioning_schema_fixture (wyl_policy_store_get_db (store),
           predecessor == 0 ? fixture_pre_windows_table_sql :
           fixture_windows_table_sql,
@@ -3353,6 +3401,7 @@ test_provisioning_immutable_trigger_is_verified (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER fact_graph_provisioning_immutable;"
@@ -3453,6 +3502,7 @@ test_pre_sealed_generation_guards_migrate (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER tenant_authority_insert_guard;"
@@ -3465,6 +3515,7 @@ test_pre_sealed_generation_guards_migrate (void)
       "('pre-guard-open','tenant-owner',0,1,1),('pre-guard-sealed',"
       "'tenant-owner',1,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (scalar_int64 (db,
       "SELECT count(*) FROM tenants WHERE "
       "(tenant_id='pre-guard-open' AND sealed_generation=0) OR "
@@ -3482,6 +3533,7 @@ test_unknown_preexisting_tenant_guard_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER tenant_authority_insert_guard;"
@@ -3510,7 +3562,9 @@ test_pre_537_rows_migrate_idempotently (void)
   insert_graph (db, "tenant-sealed", "graph-sealed", TRUE);
 
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM fact_graphs;"), ==,
       2);
   g_assert_cmpint (scalar_int64 (db,
@@ -3542,6 +3596,7 @@ test_graph_identity_and_state_constraints (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-a", "graph-a", FALSE);
   insert_graph (db, "tenant-b", "graph-b", FALSE);
@@ -3647,6 +3702,7 @@ test_tenant_state_constraints (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "INSERT INTO tenants (tenant_id,owner_subject_id,"
@@ -3691,6 +3747,7 @@ test_tenant_state_constraints (void)
       "WHERE tenant_id='tenant-a';");
 
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-generic",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -3718,11 +3775,14 @@ test_graph_quota_store_api (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-a",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-b",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -3784,19 +3844,24 @@ test_fact_concurrent_open_quota_store_api (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-a",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-b",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-c",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "open-d",
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);
@@ -4009,6 +4074,7 @@ test_fact_concurrent_open_quota_store_api (void)
       "('open-a','graph_count',1,NULL,NULL,1),"
       "('open-b','write_rate',NULL,7,11,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   WylPolicyFactQuotaConfig migrated = { 0 };
   g_assert_cmpint (wyl_policy_store_get_fact_quota_config (store, "open-a",
       WYL_POLICY_FACT_QUOTA_GRAPH_COUNT, &migrated), ==, WYRELOG_E_OK);
@@ -4041,6 +4107,7 @@ test_fact_concurrent_open_quota_store_api (void)
   g_assert_cmpint (wyl_policy_store_settle_fact_open (store,
       limited_reservation_id, "recovery-api", NULL, TRUE), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
       ==, WYRELOG_E_OK);
@@ -4049,6 +4116,7 @@ test_fact_concurrent_open_quota_store_api (void)
   g_assert_cmpuint (migrated_open_status.pending, ==, 0);
   g_assert_cmpuint (migrated_open_status.charged, ==, 0);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_store_path (store_root, store_path);
 }
@@ -4236,7 +4304,9 @@ test_fact_concurrent_open_quota_cross_handle_reopen (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&options, &setup), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (setup), ==, WYRELOG_E_OK);
+  register_test_human (setup, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (setup, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (setup, "race-tenant",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -4334,6 +4404,7 @@ open_fact_open_fault_fixture (const gchar *path,
   g_assert_cmpint (wyl_policy_store_create_schema (*out_store), ==,
       WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (*out_store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (*out_store, "fault-tenant",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -4620,12 +4691,15 @@ test_graph_quota_reservation_survives_reopen (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-reopen",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
   created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-zero",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -4738,6 +4812,7 @@ test_graph_quota_reservation_survives_reopen (void)
    * touching the filesystem. A failure and store reopen keep one pending
    * operation, which an identical retry resumes rather than double-counting. */
   created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "quota-fallback",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -4899,6 +4974,7 @@ test_tenant_sealed_generation_overflow (void)
       " VALUES ('tenant-max',0,9223372036854775807,1,1);");
   seed_legacy_creator_grant (db, "tenant-max");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store, "tenant-max",
       TRUE), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (scalar_int64 (db,
@@ -4914,6 +4990,7 @@ test_integer_domain_constraints (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
 
   exec_rejected (db,
@@ -4959,6 +5036,7 @@ test_typed_authority_reads_and_lists (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-b", "graph-b", FALSE);
   insert_graph (db, "tenant-a", "graph-a", TRUE);
@@ -5065,6 +5143,7 @@ test_reservation_and_cross_connection_cas (void)
   g_autoptr (wyl_policy_store_t) second = NULL;
   g_assert_cmpint (wyl_policy_store_open (path, &first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (first), ==, WYRELOG_E_OK);
+  register_test_human (first, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (first);
   insert_graph (db, "tenant-cas", "graph-cas", FALSE);
   exec_ok (db,
@@ -5081,6 +5160,7 @@ test_reservation_and_cross_connection_cas (void)
       "'tenant-cas',1,1,1);");
   g_assert_cmpint (wyl_policy_store_open (path, &second), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (second), ==, WYRELOG_E_OK);
+  register_test_human (second, "tenant-owner");
 
   WylPolicyAuthorityMutationResult result;
   exec_ok (db, "BEGIN IMMEDIATE;");
@@ -5201,6 +5281,7 @@ test_reservation_and_cross_connection_cas (void)
       "'01890f47-3c4b-7cc2-b8c4-dc0c0c073102',1,1,"
       "9223372036854775807,1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (first), ==, WYRELOG_E_OK);
+  register_test_human (first, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
       "tenant-cas", "graph-max", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
       WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
@@ -5355,6 +5436,7 @@ test_complete_transition_matrices (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   const WylPolicyGraphLifecycleState graph_states[] = {
     WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED,
@@ -5423,6 +5505,7 @@ test_complete_transition_tables_and_overflow (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER tenant_authority_insert_guard;"
@@ -5462,6 +5545,7 @@ test_complete_transition_tables_and_overflow (void)
       "'01890f47-3c4b-7cc2-b8c4-dc0c0c073205',1,1,"
       "9223372036854775807,0,'none',1,1);");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
@@ -5547,6 +5631,7 @@ test_nested_transaction_uses_savepoint (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-nested", "graph-nested", FALSE);
 
@@ -5579,6 +5664,7 @@ test_mutation_faults_roll_back (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-fault-a", "graph-fault-a", FALSE);
   insert_graph (db, "tenant-fault-b", "graph-fault-b", FALSE);
@@ -5671,6 +5757,7 @@ test_fresh_migration_failures_reopen_and_retry (void)
     store = NULL;
     g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    register_test_human (store, "tenant-owner");
     assert_column (wyl_policy_store_get_db (store), "fact_graphs",
         "store_uuid");
     wyl_policy_store_close (store);
@@ -5701,6 +5788,7 @@ test_legacy_failure_preserves_rows_and_retries (void)
   store = NULL;
   g_assert_cmpint (wyl_policy_store_open (path, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   db = wyl_policy_store_get_db (store);
   g_assert_cmpint (scalar_int64 (db,
       "SELECT count(*) FROM fact_graphs WHERE "
@@ -5777,6 +5865,7 @@ test_preexisting_invalid_row_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER tenant_authority_insert_guard;"
@@ -5804,6 +5893,7 @@ test_malformed_preexisting_trigger_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db,
       "DROP TRIGGER tenant_authority_insert_guard;"
@@ -5819,6 +5909,7 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   insert_graph (wyl_policy_store_get_db (store), "tenant-journal",
       "graph-journal", FALSE);
   const gchar *op = "01890f47-3c4b-7cc2-b8c4-dc0c0c073990";
@@ -5919,6 +6010,7 @@ test_reconcile_journal_round_trips_high_bit_windows_serial (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   insert_graph (wyl_policy_store_get_db (store), "tenant-high-serial",
       "graph-high-serial", FALSE);
   WylPolicyFactReconcileArtifactEvidence evidence = {
@@ -5952,6 +6044,7 @@ test_reconcile_journal_evidence_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-evidence", "graph-evidence", FALSE);
   WylPolicyFactReconcileJournalInput input = {
@@ -5985,6 +6078,7 @@ test_reconcile_evidence_trigger_is_verified (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   exec_ok (wyl_policy_store_get_db (store),
       "DROP TRIGGER fact_reconcile_evidence_immutable;"
       "CREATE TRIGGER fact_reconcile_evidence_immutable "
@@ -5999,6 +6093,7 @@ test_reconcile_evidence_prepare_rolls_back (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-evidence-fault", "graph-evidence-fault", FALSE);
   WylPolicyFactReconcileJournalInput input = {
@@ -6024,6 +6119,7 @@ test_graph_provisioning_private_api (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-provision-api", "graph-provision-api", FALSE);
   WylPolicyGraphProvisioningInput input = {
@@ -6107,6 +6203,7 @@ test_graph_provisioning_blob_phase_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-provision-blob", "graph-provision-blob", FALSE);
   WylPolicyAuthorityMutationResult result;
@@ -6137,6 +6234,7 @@ test_graph_provisioning_prepare_rolls_back_reservation (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-provision-fault", "graph-provision-fault", FALSE);
   WylPolicyGraphProvisioningInput input = {
@@ -6166,6 +6264,7 @@ test_graph_provisioning_terminal_rolls_back (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-provision-terminal", "graph-provision-terminal",
       FALSE);
@@ -6219,6 +6318,7 @@ test_relation_activation_fsm_is_fail_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-a", "graph-a", FALSE);
   exec_ok (db, "INSERT INTO fact_namespaces "
@@ -6280,6 +6380,7 @@ test_relation_activation_typed_api (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-a", "graph-a", FALSE);
   exec_ok (db, "INSERT INTO fact_namespaces "
@@ -6456,6 +6557,7 @@ test_fact_backup_snapshot_schema_digest (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-backup", "graph-a", FALSE);
 
@@ -6570,6 +6672,7 @@ test_fact_graph_backup_snapshot (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-backup", "graph-a", FALSE);
   exec_ok (db, "INSERT INTO fact_graphs "
@@ -6644,6 +6747,7 @@ test_graph_provisioning_selected_list (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   /* Remove fixture constraints to exercise all-row decoding and ordering,
    * even when multiple operations name the same graph. */
@@ -6722,7 +6826,9 @@ test_fact_write_rate_quota_persists (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-persist",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -6744,6 +6850,7 @@ test_fact_write_rate_quota_persists (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   exec_rejected (wyl_policy_store_get_db (store),
       "INSERT INTO fact_tenant_quota_limits "
       "(tenant_id,dimension,rate_per_second,burst,updated_at) "
@@ -6881,7 +6988,9 @@ test_fact_write_rate_admission_clock_remainder (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-clock",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -6951,7 +7060,9 @@ test_fact_write_rate_admission_persists_and_bounds (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "rate-admit",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -7039,6 +7150,7 @@ test_fact_write_rate_admission_persists_and_bounds (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_admit_fact_write_rate (store,
       "rate-admit", &admission), ==, WYRELOG_E_POLICY);
   g_assert_false (admission.admitted);
@@ -7058,7 +7170,9 @@ test_fact_logical_quota_cancelled_reopen (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "reopen-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -7216,10 +7330,13 @@ test_fact_physical_quota_ledger (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "physical-b",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -7374,10 +7491,13 @@ test_fact_logical_quota_ledger (void)
   g_assert_cmpint (wyl_policy_store_open_with_options (&open_opts, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-a",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "logical-b",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -7556,6 +7676,7 @@ test_default_tenant_is_system_owned (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   assert_column (wyl_policy_store_get_db (store), "tenants",
       "owner_subject_id");
 
@@ -7578,8 +7699,10 @@ test_create_tenant_records_owner (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 
   gboolean created = FALSE;
+  register_test_human (store, "alice");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme", "alice",
       &created), ==, WYRELOG_E_OK);
   g_assert_true (created);
@@ -7587,6 +7710,7 @@ test_create_tenant_records_owner (void)
   g_assert_cmpstr (owner, ==, "alice");
 
   /* Creating an existing tenant is a no-op and never rewrites its owner. */
+  register_test_human (store, "bob");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "acme", "bob",
       &created), ==, WYRELOG_E_OK);
   g_assert_false (created);
@@ -7616,6 +7740,7 @@ test_create_tenant_refuses_invalid_owner (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_autofree gchar *too_long = g_strnfill (129, 'a');
   const gchar *invalid[] = {
     "", ".", "..", "a b", "alice/bob", "wr.system", "wr.alice", "svc:app",
@@ -7645,6 +7770,7 @@ test_tenant_owner_guards (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   const gchar *rejected_inserts[] = {
     "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
@@ -7664,6 +7790,7 @@ test_tenant_owner_guards (void)
   };
   for (gsize i = 0; i < G_N_ELEMENTS (rejected_inserts); i++)
     exec_rejected (db, rejected_inserts[i]);
+  register_test_human (store, "alice");
   exec_ok (db,
       "INSERT INTO tenants (tenant_id,owner_subject_id,sealed,created_at,"
       "updated_at) VALUES ('owned','alice',0,1,1);");
@@ -7688,6 +7815,8 @@ strip_tenant_owner_schema (sqlite3 *db)
   exec_ok (db,
       "DROP TRIGGER tenant_owner_insert_guard;"
       "DROP TRIGGER tenant_owner_update_guard;"
+      "DROP TRIGGER human_active_tenants_INSERT;"
+      "DROP TRIGGER human_active_tenants_UPDATE;"
       "ALTER TABLE tenants DROP COLUMN owner_subject_id;");
 }
 
@@ -7717,6 +7846,7 @@ test_pre_owner_tenants_migrate_from_creator_grant (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   strip_tenant_owner_schema (db);
   insert_unowned_tenant (db, "acme");
@@ -7731,6 +7861,7 @@ test_pre_owner_tenants_migrate_from_creator_grant (void)
   insert_role_event (db, "erin", "wr.system_admin", "elsewhere", "grant");
 
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_autofree gchar *acme = tenant_owner_of (store, "acme");
   g_autofree gchar *revoked = tenant_owner_of (store, "revoked");
   g_autofree gchar *builtin = tenant_owner_of (store, "__wr_default");
@@ -7743,6 +7874,7 @@ test_pre_owner_tenants_migrate_from_creator_grant (void)
   exec_rejected (db,
       "UPDATE tenants SET owner_subject_id='bob' WHERE tenant_id='acme';");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_autofree gchar *again = tenant_owner_of (store, "acme");
   g_assert_cmpstr (again, ==, "alice");
 }
@@ -7753,6 +7885,7 @@ test_unresolvable_tenant_owner_fails_closed (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   sqlite3 *db = wyl_policy_store_get_db (store);
   strip_tenant_owner_schema (db);
   insert_unowned_tenant (db, "acme");
@@ -7777,6 +7910,7 @@ test_unresolvable_tenant_owner_fails_closed (void)
   insert_role_event (db, "bob", "wr.system_admin", "orphan", "grant");
   exec_ok (db, "DELETE FROM tenants WHERE tenant_id='service-made';");
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_autofree gchar *orphan = tenant_owner_of (store, "orphan");
   g_assert_cmpstr (orphan, ==, "bob");
 }
@@ -7787,6 +7921,7 @@ test_operator_owner_assignments (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
 
   /* Refused sets: built-in tenant, invalid owner, duplicate tenant. */
   const gchar *builtin_t[] = { "__wr_default" }, *builtin_o[] = { "bob" };
@@ -7825,6 +7960,7 @@ test_operator_owner_assignments (void)
   g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
       full_t, full_o, 3), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   for (gsize i = 0; i < G_N_ELEMENTS (full_t); i++) {
     g_autofree gchar *owner = tenant_owner_of (store, full_t[i]);
     g_assert_cmpstr (owner, ==, full_o[i]);
@@ -7837,6 +7973,7 @@ test_operator_owner_assignments (void)
   g_assert_cmpint (wyl_policy_store_set_tenant_owner_assignments (store,
       late_t, late_o, 1), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  register_test_human (store, "tenant-owner");
   g_assert_false (wyl_policy_store_tenant_owner_assignment_applied (store,
       "acme"));
   g_autofree gchar *kept = tenant_owner_of (store, "acme");

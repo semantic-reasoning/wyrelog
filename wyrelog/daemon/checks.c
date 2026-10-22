@@ -908,3 +908,32 @@ wyl_daemon_run_checks (WylHandle *handle)
 
   return 0;
 }
+
+static wyrelog_error_t
+mutate_readiness_users (wyl_policy_store_t *store, gpointer data)
+{
+  const gchar *subjects[] = {"wyrelogd-snapshot-user", "wyrelogd-direct-grant-user",
+                             "wyrelogd-perm-state-user", "wyrelogd-role-user", "wyrelogd-skip-mfa-user", "wyrelogd-skip-mfa-override-user"};
+  for (gsize i = 0; i < G_N_ELEMENTS (subjects); i++) {
+    wyrelog_error_t rc = wyl_policy_store_user_register (store, subjects[i]);
+    if (rc != WYRELOG_E_OK) return rc;
+  }
+  return mutate_policy_audit_readiness_publication (store, data);
+}
+
+wyrelog_error_t
+wyl_daemon_prepare_readiness_users (WylHandle *handle)
+{
+  g_autoptr (WylAuditEvent) event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (event, "wyrelogd");
+  wyl_audit_event_set_action (event, "readiness_users_prepare");
+  wyl_audit_event_set_request_id (event, "wyrelogd-readiness-users");
+  wyl_audit_event_set_resource_id (event, "scratch_store");
+  wyl_audit_event_set_decision (event, WYL_DECISION_ALLOW);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+  WylPolicyAuditReadinessPublication publication = {.event=event,.id=id};
+  g_autoptr (WylEngineSession) session = wyl_engine_session_acquire (handle);
+  if (session == NULL) return WYRELOG_E_BUSY;
+  return wyl_engine_session_run_committed_publication (session,
+             mutate_readiness_users,&publication,verify_exact_policy_audit_readiness_publication,&publication,NULL,NULL,NULL);
+}

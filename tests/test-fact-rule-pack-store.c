@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "test-exit-status.h"
+#include "human-user-test-support.h"
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
@@ -55,6 +56,7 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
   wyrelog_error_t rc = wyl_policy_store_open (NULL, &store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_create_schema (store);
+  if (rc == WYRELOG_E_OK) register_test_human (store, "tenant-owner");
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_create_tenant (store, "tenant-a", "tenant-owner",
             &created);

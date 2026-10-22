@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
+#include "wyrelog/wyl-handle-private.h"
 #include "test-exit-status.h"
 #include <glib.h>
 
@@ -57,6 +59,7 @@ check_logout_drives_active_session_to_closed (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 20;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -77,6 +80,7 @@ check_logout_is_idempotent_on_repeat (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -102,6 +106,7 @@ check_logout_after_session_close_is_idempotent (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 40;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -130,6 +135,7 @@ check_logout_with_request_id_propagates (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 50;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
 
   g_autoptr (WylSession) session = login_one (handle, "alice");
   if (session == NULL)
@@ -151,6 +157,8 @@ check_logout_with_null_request_id_matches_plain (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 60;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
+  register_test_human (wyl_handle_get_policy_store (handle), "bob");
 
   g_autoptr (WylSession) a = login_one (handle, "alice");
   g_autoptr (WylSession) b = login_one (handle, "bob");
@@ -171,6 +179,8 @@ check_logout_isolates_sessions_by_id (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
+  register_test_human (wyl_handle_get_policy_store (handle), "bob");
 
   g_autoptr (WylSession) a = login_one (handle, "alice");
   g_autoptr (WylSession) b = login_one (handle, "bob");

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ static wyrelog_error_t
 seed_fixture (WylHandle *handle)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "bench-user");
   wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
           "bench.decision.read", "bench decision read", "basic");
   if (rc != WYRELOG_E_OK)

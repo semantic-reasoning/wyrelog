@@ -12,6 +12,7 @@
 #include <duckdb.h>
 
 #include "fact-test-support.h"
+#include "human-user-test-support.h"
 #include "fact/provisioning-construct-private.h"
 #include "fact/provisioning-run-private.h"
 #include "fact/replay-private.h"
@@ -39,8 +40,10 @@ exec_ok (sqlite3 *db, const gchar *sql)
 }
 
 static void
-seed_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id)
+seed_graph (wyl_policy_store_t *store, const gchar *tenant_id, const gchar *graph_id)
 {
+  register_test_human (store, "tenant-owner");
+  sqlite3 *db = wyl_policy_store_get_db (store);
   g_autofree gchar *sql =
       g_strdup_printf
         ("INSERT INTO tenants (tenant_id,owner_subject_id,"
@@ -174,7 +177,7 @@ test_run_drives_fresh_graph_to_active (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-run", "graph-run");
+  seed_graph (store, "tenant-run", "graph-run");
 
   WylPolicyGraphProvisioningInput input = make_input ("tenant-run", "graph-run");
   WylPolicyGraphProvisioningRecord *record = NULL;
@@ -317,7 +320,7 @@ test_darwin_encrypted_crash_checkpoints (void)
         &store), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
         WYRELOG_E_OK);
-    seed_graph (wyl_policy_store_get_db (store), "tenant-crash",
+    seed_graph (store, "tenant-crash",
         "graph-crash");
     g_clear_pointer (&store, wyl_policy_store_close);
 
@@ -405,7 +408,7 @@ test_darwin_reserved_publication_failure_is_pre_filesystem (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-publish-fail",
+  seed_graph (store, "tenant-publish-fail",
       "graph-publish-fail");
   g_clear_pointer (&store, wyl_policy_store_close);
 
@@ -481,7 +484,7 @@ test_darwin_recover_publishes_prepared_reservation_before_filesystem (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-recover",
+  seed_graph (store, "tenant-recover",
       "graph-recover");
   g_clear_pointer (&store, wyl_policy_store_close);
 
@@ -570,7 +573,7 @@ test_darwin_eexist_uses_fresh_exact_evidence (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-eexist",
+  seed_graph (store, "tenant-eexist",
       "graph-eexist");
   DarwinConcurrentFinalContext context = {
     .store = store,
@@ -600,7 +603,7 @@ static gchar *
 prepare_darwin_published_operation (wyl_policy_store_t *store,
     const gchar *fact_root, const gchar *tenant_id, const gchar *graph_id)
 {
-  seed_graph (wyl_policy_store_get_db (store), tenant_id, graph_id);
+  seed_graph (store, tenant_id, graph_id);
   WylPolicyGraphProvisioningInput input = make_input (tenant_id, graph_id);
   WylPolicyGraphProvisioningRecord *record = NULL;
   WylPolicyAuthorityMutationResult mutation;
@@ -1018,7 +1021,7 @@ test_run_refuses_outer_policy_transaction (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
-  seed_graph (db, "tenant-outer", "graph-outer");
+  seed_graph (store, "tenant-outer", "graph-outer");
   WylPolicyGraphProvisioningInput input = make_input ("tenant-outer",
           "graph-outer");
   exec_ok (db, "BEGIN;");
@@ -1057,7 +1060,7 @@ test_recover_rejects_malformed_evidence_before_path (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
-  seed_graph (db, "tenant-malformed", "graph-malformed");
+  seed_graph (store, "tenant-malformed", "graph-malformed");
   WylPolicyAuthorityMutationResult mutation;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
       "tenant-malformed", "graph-malformed", store_uuid, 1, 1, 0, 0,
@@ -1117,7 +1120,7 @@ test_recover_preserves_final_without_evidence_wedge (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
       WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
-  seed_graph (db, "tenant-wedge", "graph-wedge");
+  seed_graph (store, "tenant-wedge", "graph-wedge");
   WylPolicyAuthorityMutationResult mutation;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
       "tenant-wedge", "graph-wedge", store_uuid, 1, 1, 0, 0, &mutation), ==,
@@ -1193,7 +1196,7 @@ test_run_rejects_reprovision_of_active (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-run", "graph-run");
+  seed_graph (store, "tenant-run", "graph-run");
 
   WylPolicyGraphProvisioningInput input = make_input ("tenant-run", "graph-run");
   WylPolicyGraphProvisioningRecord *record = NULL;
@@ -1221,7 +1224,7 @@ test_recover_drives_reserved_to_active (void)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
-  seed_graph (db, "tenant-recover", "graph-recover");
+  seed_graph (store, "tenant-recover", "graph-recover");
 
   /* Reserve the authority (PROVISIONING) and stamp a durable reserved record,
    * exactly as a crash after prepare would leave the store. */
@@ -1314,7 +1317,7 @@ recover_over_published_pair (const gchar *phase_sql)
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
-  seed_graph (db, "tenant-seam", "graph-seam");
+  seed_graph (store, "tenant-seam", "graph-seam");
   WylPolicyAuthorityMutationResult mutation;
   g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
       "tenant-seam", "graph-seam", store_uuid, 1, 1, 0, 0, &mutation), ==,
@@ -1386,7 +1389,7 @@ test_open_for_graph_serves_active_graph (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-run", "graph-run");
+  seed_graph (store, "tenant-run", "graph-run");
   WylPolicyGraphProvisioningInput input = make_input ("tenant-run", "graph-run");
   g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),
       ==, WYRELOG_E_OK);
@@ -1498,7 +1501,7 @@ windows_recover_from_crash_state (const gchar *tag, WindowsCrashState state)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), tenant_id, graph_id);
+  seed_graph (store, tenant_id, graph_id);
 
   WylPolicyGraphProvisioningInput input = make_input (tenant_id, graph_id);
   WylPolicyGraphProvisioningRecord *record = NULL;
@@ -1788,7 +1791,7 @@ test_read_only_open_is_not_more_permissive_than_writable (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-ro", "graph-ro");
+  seed_graph (store, "tenant-ro", "graph-ro");
   WylPolicyGraphProvisioningInput input = make_input ("tenant-ro", "graph-ro");
   g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),
       ==, WYRELOG_E_OK);
@@ -1866,7 +1869,7 @@ test_boot_forget_probe_survives_a_held_reader_guard (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  seed_graph (wyl_policy_store_get_db (store), "tenant-lease", "graph-lease");
+  seed_graph (store, "tenant-lease", "graph-lease");
   WylPolicyGraphProvisioningInput input = make_input ("tenant-lease",
           "graph-lease");
   g_assert_cmpint (wyl_fact_graph_provisioning_run (store, &input, root, NULL),

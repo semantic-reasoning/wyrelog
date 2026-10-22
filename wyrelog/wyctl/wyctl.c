@@ -236,6 +236,18 @@ typedef struct
 
 typedef struct
 {
+  gchar *subject;
+  gchar *tenant;
+  gchar *request_id;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+  gboolean yes;
+} WyctlUserOptions;
+
+typedef struct
+{
   gchar *name;
   gchar *delete_tenant;
   gchar *request_id;
@@ -597,6 +609,21 @@ wyctl_graph_seal_options_clear (WyctlGraphSealOptions *opts)
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlGraphSealOptions,
     wyctl_graph_seal_options_clear);
+
+static void
+wyctl_user_options_clear (WyctlUserOptions *opts)
+{
+  g_clear_pointer (&opts->subject, g_free);
+  g_clear_pointer (&opts->tenant, g_free);
+  g_clear_pointer (&opts->request_id, g_free);
+  g_clear_pointer (&opts->access_token_file, g_free);
+  g_clear_pointer (&opts->guard_timestamp_arg, g_free);
+  g_clear_pointer (&opts->guard_loc_class, g_free);
+  g_clear_pointer (&opts->guard_risk_arg, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlUserOptions,
+    wyctl_user_options_clear);
 
 static void
 wyctl_tenant_options_clear (WyctlTenantOptions *opts)
@@ -8166,6 +8193,114 @@ run_tenant_assign_owner (const WyctlOptions *global_opts, gint argc,
 }
 
 static int
+run_user_command (const WyctlOptions *global_opts, gint argc, gchar **argv,
+    const gchar *action)
+{
+  g_auto (WyctlUserOptions) opts = {0};
+  gboolean list = g_strcmp0 (action, "list") == 0;
+  gboolean deleting = g_strcmp0 (action, "delete") == 0;
+  GOptionEntry entries[] = {
+    {"subject",0,0,G_OPTION_ARG_STRING,&opts.subject,"Human subject","SUBJECT"},
+    {"tenant",0,0,G_OPTION_ARG_STRING,&opts.tenant,"Only __wr_default is accepted","TENANT"},
+    {"request-id",0,0,G_OPTION_ARG_STRING,&opts.request_id,"Operation request id to repeat","ID"},
+    {"access-token-file",0,0,G_OPTION_ARG_STRING,&opts.access_token_file,"MFA-assured SYSTEM admin access token","PATH"},
+    {"guard-timestamp",0,0,G_OPTION_ARG_STRING,&opts.guard_timestamp_arg,"Guard timestamp","US"},
+    {"guard-loc-class",0,0,G_OPTION_ARG_STRING,&opts.guard_loc_class,"Guard location class","CLASS"},
+    {"guard-risk",0,0,G_OPTION_ARG_STRING,&opts.guard_risk_arg,"Guard risk score","N"},
+    {"yes",0,0,G_OPTION_ARG_NONE,&opts.yes,"Confirm permanent user and owned tenant deletion",NULL},
+    {NULL}
+  };
+  g_autofree gchar *description = g_strdup_printf ("- user %s", action);
+  g_autoptr (GOptionContext) context = g_option_context_new (description);
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_autoptr (GError) error = NULL;
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n",error->message); return 2;
+  }
+  if (argc > 1 || (opts.tenant != NULL && g_strcmp0 (opts.tenant, WYL_TENANT_DEFAULT))
+      || (list && (opts.subject != NULL || opts.request_id != NULL)) || (!deleting && opts.yes)
+      || (!list && !wyl_policy_human_subject_is_valid (opts.subject))) {
+    g_printerr ("wyctl: invalid user options; use a valid --subject and system-wide context\n"); return 2;
+  }
+  gchar minted[WYL_REQUEST_ID_STRING_BUF] = "";
+  const gchar *request = opts.request_id;
+  if (!list) {
+    if (request == NULL) {
+      if (wyl_request_id_new (minted,sizeof minted) != WYRELOG_E_OK) return 1;
+      request = minted;
+    } else if (!wyl_request_id_is_canonical (request)) {
+      g_printerr ("wyctl: invalid --request-id\n"); return 2;
+    }
+  }
+  gint64 timestamp = 0, risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg,opts.guard_loc_class,opts.guard_risk_arg,&timestamp,&risk)) return 2;
+  g_autoptr (WylClient) client = NULL;
+  int exit_code = create_tenant_client (global_opts,opts.access_token_file,&client);
+  if (exit_code != 0) return exit_code;
+  g_autofree gchar *command = g_strdup_printf ("user %s",action);
+  wyrelog_error_t rc;
+  if (list) {
+    g_auto (WylClientUserList) users = {0};
+    rc = wyl_client_user_list (client,timestamp,opts.guard_loc_class,risk,&users);
+    exit_code = fact_remote_exit (client,command,rc,"user_list_failed");
+    if (exit_code != 0) return exit_code;
+    for (gsize i=0; i<users.len; i++)g_print ("subject=%s state=%s\n",users.items[i].subject,users.items[i].state);
+    return 0;
+  }
+  g_printerr ("wyctl: user %s request_id=%s\n",action,request);
+  if (deleting) {
+    g_auto (WylClientUserDeletePreview) preview = {0};
+    rc = wyl_client_user_delete_preview (client,opts.subject,request,timestamp,opts.guard_loc_class,risk,&preview);
+    exit_code = fact_remote_exit (client,command,rc,"user_preview_failed");
+    if (exit_code != 0) return exit_code;
+    g_autofree gchar *tenants = g_strjoinv (",",preview.tenants);
+    g_printerr ("wyctl: delete subject=%s tenants=%s permissions=%" G_GUINT64_FORMAT " data_bytes_estimate=%" G_GUINT64_FORMAT " fingerprint=%s\n",
+        opts.subject,tenants,preview.permission_count,preview.data_bytes,preview.fingerprint);
+    if (preview.unsealed[0] || preview.blockers[0]) {
+      g_printerr ("wyctl: deletion blocked unsealed=%s holders=%s\n",preview.unsealed,preview.blockers); return 1;
+    }
+    if (!opts.yes) {
+#ifdef G_OS_WIN32
+      gboolean tty = _isatty (_fileno (stdin)) != 0;
+#else
+      gboolean tty = isatty (STDIN_FILENO) != 0;
+#endif
+      if (!tty) {
+        g_printerr ("wyctl: user delete requires --yes in noninteractive use\n"); return 2;
+      }
+      gchar answer[32] = {0};
+      g_printerr ("Permanently delete this user and listed data? Type delete: ");
+      if (fgets (answer,sizeof answer,stdin) == NULL || g_strcmp0 (g_strstrip (answer),"delete")) {
+        g_printerr ("wyctl: deletion cancelled\n"); return 2;
+      }
+    }
+    rc = wyl_client_user_delete (client,opts.subject,request,preview.fingerprint,timestamp,opts.guard_loc_class,risk);
+  } else if (g_str_equal (action,"create")) rc = wyl_client_user_create (client,opts.subject,request,timestamp,opts.guard_loc_class,risk);
+  else rc = wyl_client_user_disable (client,opts.subject,request,timestamp,opts.guard_loc_class,risk);
+  exit_code = fact_remote_exit (client,command,rc,"user_mutation_failed");
+  if (exit_code == 0) g_print ("subject=%s action=%s request_id=%s\n",opts.subject,action,request);
+  return exit_code;
+}
+
+static int
+run_user (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing user command (create|list|disable|delete)\n"); return 2;
+  }
+  if (g_strcmp0 (argv[1], "create") == 0)
+    return run_user_command (global_opts, argc - 1, argv + 1, "create");
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_user_command (global_opts, argc - 1, argv + 1, "list");
+  if (g_strcmp0 (argv[1], "disable") == 0)
+    return run_user_command (global_opts, argc - 1, argv + 1, "disable");
+  if (g_strcmp0 (argv[1], "delete") == 0)
+    return run_user_command (global_opts, argc - 1, argv + 1, "delete");
+  g_printerr ("wyctl: unknown user command: %s\n", argv[1]);
+  return 2;
+}
+
+static int
 run_tenant (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -8329,6 +8464,7 @@ main (int argc, char **argv)
       "  mfa                        Enroll or reset TOTP factors\n"
       "  auth                       Exchange service credentials for tokens\n"
       "  service-management         Arm the service-management authority\n"
+      "  user                       Manage human users\n"
       "  service-principal          Manage service principals\n"
       "  service-credential         Manage service credentials\n"
       "  service-permission-closure Inspect or apply permission closures");
@@ -8383,6 +8519,8 @@ main (int argc, char **argv)
     return run_auth (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-management") == 0)
     return run_service_management (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "user") == 0)
+    return run_user (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-principal") == 0)
     return run_service_principal (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-credential") == 0)

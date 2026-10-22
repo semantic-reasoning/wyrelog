@@ -310,7 +310,6 @@ verify_session_event_row (WylEngineVerification *verification,
   return exact ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
-#ifdef WYL_HAS_AUDIT
 static wyrelog_error_t
 verify_session_audit_event (WylEngineVerification *verification,
     const WylAuditEvent *event)
@@ -330,7 +329,6 @@ verify_session_audit_event (WylEngineVerification *verification,
              wyl_audit_event_get_deny_origin (event),
              wyl_audit_event_get_request_id (event));
 }
-#endif
 
 static wyrelog_error_t
 enqueue_session_event_delta (WylEngineVerification *verification,
@@ -361,6 +359,9 @@ static wyrelog_error_t
 mutate_principal_publication (wyl_policy_store_t *store, gpointer data)
 {
   WylPrincipalPublication *ctx = data;
+  if (wyl_policy_store_user_require (store, ctx->username, TRUE) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+
   /* Issue #752: subject-global expected-from-state CAS.  The transition is
    * gated on the durable observed state re-read inside this savepoint, so a
    * concurrent superseding commit collapses to a clean no-op rather than a
@@ -503,6 +504,8 @@ totp_mutate_mfa_ok (wyl_policy_store_t *store, gpointer data)
 {
   WylTotpMfaOkPublication *wrap = data;
   WylPrincipalPublication *ctx = &wrap->publication;
+  if (wyl_policy_store_user_require (store, ctx->username, TRUE) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
 
   gchar *state = NULL;
   gint64 failed_count = 0;
@@ -662,6 +665,9 @@ static wyrelog_error_t
 mutate_totp_reauth (wyl_policy_store_t *store, gpointer data)
 {
   WylTotpReauthPublication *ctx = data;
+  if (wyl_policy_store_user_require (store, ctx->username, TRUE) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+
   g_autofree gchar *state = NULL;
   gint64 failed_count = 0;
   gint64 locked_at = 0;
@@ -740,6 +746,7 @@ wyrelog_error_t
 wyl_session_totp_reauthenticate (WylHandle *handle, WylSession *session,
     gint64 matched_step, WylMfaTotpReceipt *out_receipt)
 {
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
   if (out_receipt != NULL)
     *out_receipt = WYL_MFA_TOTP_RECEIPT_REPLAY_SUPERSEDED;
   if (session_is_service (session))
@@ -973,6 +980,7 @@ typedef struct
   wyl_session_state_t session_new_state;
   const WylAuditEvent *session_audit_event;
   gint64 session_event_id;
+  WylAuditEvent *denial_audit;
 #ifdef WYL_HAS_AUDIT
   WylAuditEvent *principal_audit_events[2];
   WylAuditEvent *skip_mfa_audit_event;
@@ -999,7 +1007,28 @@ mutate_login_publication (wyl_policy_store_t *store, gpointer data)
   if (session_event == NULL || session_from == NULL || session_to == NULL)
     return WYRELOG_E_INTERNAL;
 
-  wyrelog_error_t rc = wyl_policy_store_apply_principal_login (store,
+  g_autofree gchar *reason = NULL;
+  wyrelog_error_t rc = wyl_policy_store_user_login_status (store, ctx->username, &reason);
+  if (rc != WYRELOG_E_OK) return rc;
+  if (reason != NULL) {
+    ctx->denial_audit = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (ctx->denial_audit, ctx->username);
+    wyl_audit_event_set_action (ctx->denial_audit, "login_denied");
+    wyl_audit_event_set_resource_id (ctx->denial_audit, "human_user");
+    wyl_audit_event_set_deny_reason (ctx->denial_audit, reason);
+    wyl_audit_event_set_deny_origin (ctx->denial_audit, "human_registry");
+    wyl_audit_event_set_request_id (ctx->denial_audit, ctx->request_id);
+    wyl_audit_event_set_decision (ctx->denial_audit, WYL_DECISION_DENY);
+    g_autofree gchar *id = wyl_audit_event_dup_id_string (ctx->denial_audit);
+    if (id == NULL) return WYRELOG_E_INTERNAL;
+    rc = append_policy_audit_event (store, id, ctx->denial_audit);
+    gboolean inserted = FALSE;
+    if (rc == WYRELOG_E_OK) rc = wyl_policy_store_record_audit_intention_full (store, id,
+              wyl_audit_event_get_created_at_us (ctx->denial_audit), ctx->username, "login_denied",
+              "human_user", reason, "human_registry", ctx->request_id, WYL_DECISION_DENY, &inserted);
+    return rc;
+  }
+  rc = wyl_policy_store_apply_principal_login (store,
           ctx->username, ctx->skip_mfa, WYL_MFA_AUTO_UNLOCK_SECONDS,
           g_get_real_time () / G_USEC_PER_SEC, &ctx->principal_outcome,
           &ctx->principal_from, &ctx->principal_to,
@@ -1093,6 +1122,8 @@ mutate_login_publication (wyl_policy_store_t *store, gpointer data)
       rc = append_policy_audit_event (store, audit_id,
               ctx->session_audit_event);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_user_link_session (store, ctx->username, ctx->session_id);
   return rc;
 }
 
@@ -1100,6 +1131,8 @@ static wyrelog_error_t
 verify_login_publication (WylEngineVerification *verification, gpointer data)
 {
   WylLoginPublication *ctx = data;
+  if (ctx->denial_audit != NULL)
+    return verify_session_audit_event (verification, ctx->denial_audit);
   const gchar *session_event = wyl_session_event_name (ctx->session_event);
   const gchar *session_from = wyl_session_state_name (ctx->session_old_state);
   const gchar *session_to = wyl_session_state_name (ctx->session_new_state);
@@ -1137,6 +1170,8 @@ produce_login_publication_deltas (WylEngineVerification *verification,
     gpointer data)
 {
   WylLoginPublication *ctx = data;
+  if (ctx->denial_audit != NULL)
+    return WYRELOG_E_OK;
   wyrelog_error_t rc = WYRELOG_E_OK;
   for (gint i = 0; i < ctx->principal_event_count; i++) {
     rc = enqueue_session_event_delta (verification, "principal_fired",
@@ -1176,9 +1211,14 @@ publish_login_mutation (WylLoginPublication *ctx)
       (void) wyl_audit_mirror_event (ctx->handle,
           ctx->skip_mfa_audit_event);
   }
-  if (rc == WYRELOG_E_OK && ctx->session_audit_event != NULL)
+  if (rc == WYRELOG_E_OK && ctx->denial_audit == NULL && ctx->session_audit_event != NULL)
     (void) wyl_audit_mirror_event (ctx->handle, ctx->session_audit_event);
 #endif
+  if (ctx->denial_audit != NULL) {
+    if (rc == WYRELOG_E_OK) wyl_audit_complete_authoritative_event (ctx->handle, ctx->denial_audit);
+    g_clear_object (&ctx->denial_audit);
+    if (rc == WYRELOG_E_OK) rc = WYRELOG_E_POLICY;
+  }
   return rc;
 }
 
@@ -1222,6 +1262,7 @@ wyrelog_error_t
 wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
 {
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
   if (out_session == NULL)
     return WYRELOG_E_INVALID;
   *out_session = NULL;
@@ -1239,7 +1280,12 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (wyl_policy_subject_has_service_prefix (requested_username))
     return WYRELOG_E_POLICY;
 
-  if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
+  /* Inactive identities take the publication's audit-only denial branch,
+   * including requests that ask to skip MFA. The transaction checks again. */
+  gboolean active_human = requested_username == NULL ||
+      wyl_policy_store_user_require (wyl_handle_get_policy_store (handle),
+          requested_username, TRUE) == WYRELOG_E_OK;
+  if (active_human && req != NULL && wyl_login_req_get_skip_mfa (req)) {
     gboolean skip_mfa_allowed = FALSE;
     wyrelog_error_t rc = login_skip_mfa_allowed (handle, req,
             &skip_mfa_allowed);
@@ -1444,7 +1490,7 @@ session_mfa_verify_is_idempotent (WylHandle *handle, WylSession *session)
     return FALSE;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (store == NULL)
+  if (store == NULL || wyl_policy_store_user_require (store, session->username, TRUE) != WYRELOG_E_OK)
     return FALSE;
 
   g_autofree gchar *durable_state = NULL;
@@ -1494,6 +1540,7 @@ mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
 {
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
   /* Issue #752: the idempotent report belongs to THIS boundary only.  It is
    * the proof-free one, whose contract is "the caller vouches that MFA
    * happened", and for an attachment the ratified precedence has already
@@ -1538,6 +1585,7 @@ wyrelog_error_t
 wyl_session_mfa_verify_with_proof (WylHandle *handle, WylSession *session,
     const gchar *proof, WylMfaValidator validator, gpointer user_data)
 {
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
   wyrelog_error_t guard =
       mfa_proof_entry_guard (handle, session, proof, validator);
   if (guard != WYRELOG_E_OK)
@@ -1575,6 +1623,7 @@ wyl_session_mfa_verify_with_publishing_validator (WylHandle *handle,
     WylSession *session, const gchar *proof, WylMfaValidator validator,
     gpointer user_data)
 {
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (handle);
   wyrelog_error_t guard =
       mfa_proof_entry_guard (handle, session, proof, validator);
   if (guard != WYRELOG_E_OK)
@@ -1795,4 +1844,11 @@ wyl_session_dup_tenant (const WylSession *self)
   if (self->tenant == NULL)
     return NULL;
   return g_strdup (self->tenant);
+}
+
+/* Caller retains the handle's human lifecycle lease after the durable decision. */
+void
+wyl_session_revoke_human_private (WylSession *session)
+{
+  if (session != NULL) wyl_session_state_store_private (session, WYL_SESSION_STATE_CLOSED);
 }

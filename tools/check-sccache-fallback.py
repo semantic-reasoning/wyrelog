@@ -118,7 +118,7 @@ def main() -> int:
         # The repeat step is this issue's query/mutation race deliverable, so
         # pin which suite actually repeats, not merely that a repeat exists.
         require(mutation,
-            "            fact-replay \\\n"
+            "            fact-replay-mutation-races \\\n"
             "            fact-runtime \\\n"
             "            --repeat 5 \\\n"
             "            --timeout-multiplier 3 \\\n", path)
@@ -128,6 +128,11 @@ def main() -> int:
     if mutation_jobs[0] != mutation_jobs[1]:
         raise SystemExit("fact mutation focused sanitizer jobs differ")
     meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
+    require(meson,
+        "  test('fact-replay-mutation-races', test_fact_replay,\n"
+        "    args : ['-p', '/fact-replay/single-graph-refresh-race',\n"
+        "            '-p', '/fact-replay/mutation-isolation-concurrent'],\n"
+        "    timeout : test_fact_replay_timeout)", root / "tests/meson.build")
     require(meson, "[service_session_boundary_cc[1]]", root / "tests/meson.build")
     require(meson, "contains('cache')", root / "tests/meson.build")
     boundary = (root / "tools" /

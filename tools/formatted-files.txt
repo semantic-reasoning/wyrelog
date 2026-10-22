@@ -1,6 +1,7 @@
 tests/fact-artifact-transition-driver-fixture.c
 tests/fact-artifact-transition-driver-fixture.h
 tests/fact-test-support.h
+tests/human-user-test-support.h
 tests/test-access-decision.c
 tests/test-audit-conn-duckdb-hardening.c
 tests/test-audit-conn.c
@@ -103,6 +104,8 @@ tests/test-guard-expr.c
 tests/test-handle-engine-pair.c
 tests/test-handle-id.c
 tests/test-hardening-fuzz.c
+tests/test-human-user-session.c
+tests/test-human-user-store.c
 tests/test-id.c
 tests/test-jwt.c
 tests/test-keyprovider-dev.c
@@ -216,6 +219,7 @@ wyrelog/auth/totp.h
 wyrelog/break-glass.h
 wyrelog/client.h
 wyrelog/daemon/checks.c
+wyrelog/daemon/checks.h
 wyrelog/daemon/delta.c
 wyrelog/daemon/delta.h
 wyrelog/daemon/fact-status.c

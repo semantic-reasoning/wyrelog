@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include "fact-test-support.h"
+#include "human-user-test-support.h"
 #include "fact/graph-locator-private.h"
 #include "fact/provisioning-run-private.h"
 #include "fact/store-open-private.h"
@@ -37,6 +38,7 @@ exec_sqlite_ok (sqlite3 *db, const gchar *sql)
 static void
 seed_graph (wyl_policy_store_t *store)
 {
+  register_test_human (store, "tenant-owner");
   exec_sqlite_ok (wyl_policy_store_get_db (store),
       "INSERT INTO tenants (tenant_id,owner_subject_id,"
       "sealed,created_at,updated_at) "

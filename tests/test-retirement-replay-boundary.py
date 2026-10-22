@@ -46,8 +46,8 @@ DOMAIN_FUNCTIONS = {
         "wyl_service_auth_selector_init_principal",
     ),
     "wyl_tenant_seal_keyed_with_runtime": (
-        "wyl_policy_store_seal_tenant_keyed_precheck_core",
-        "wyl_policy_store_seal_tenant_keyed_capacity_core",
+        "wyl_policy_store_seal_tenant_request_classify",
+        "wyl_policy_store_seal_tenant_coordinated_core",
         "wyl_service_auth_selector_init_tenant",
     ),
     "wyl_service_credential_revoke_keyed_with_runtime": (
@@ -80,8 +80,22 @@ def violations(domain: str, http: str, handoff: str,
             "service_mutation_finish")]
         if -1 in ordered or ordered != sorted(ordered):
             errors.append(f"{name} authorization/replay order changed")
-        if body.count(precheck) != 1 or body.count(core) != 1:
+        seal = name == "wyl_tenant_seal_keyed_with_runtime"
+        if body.count(precheck) != (2 if seal else 1) or body.count(core) != 1:
             errors.append(f"{name} keyed store boundary is not singular")
+        if seal:
+            # Classify before touching runtime admissions, then revalidate in
+            # the final SQL transaction. Replays must skip preparation.
+            stages = [body.find(precheck),
+                      body.find("wyl_handle_tenant_seal_prepare"),
+                      body.find("service_mutation_start_transaction"),
+                      body.rfind(precheck), body.find(core)]
+            if -1 in stages or stages != sorted(stages):
+                errors.append("tenant seal classification/coordination order changed")
+            guard = body.rfind("if (rc == WYRELOG_E_OK && !classified_found && "
+                               "runtime->acting_capacity != NULL) {", 0, stages[1])
+            if guard < stages[0] or stages[1] - guard > 800:
+                errors.append("tenant seal replay can prepare runtime admissions")
         if body.count(selector) != 1:
             errors.append(f"{name} selector boundary is not singular")
         selector_pos = body.find(selector)
@@ -262,6 +276,15 @@ for function in ("service_principal_disable_handler",
         ".registry = NULL,"), handoff, coordinator))
 
 mutants.extend([
+    (mutate_function(domain, "wyl_tenant_seal_keyed_with_runtime",
+                     "wyl_policy_store_seal_tenant_request_classify (mutation.store,",
+                     "removed_classifier (mutation.store,"), http, handoff, coordinator),
+    (mutate_function(domain, "wyl_tenant_seal_keyed_with_runtime",
+                     "!classified_found && runtime->acting_capacity != NULL",
+                     "runtime->acting_capacity != NULL"), http, handoff, coordinator),
+    (mutate_function(domain, "wyl_tenant_seal_keyed_with_runtime",
+                     "service_mutation_start_transaction",
+                     "removed_transaction"), http, handoff, coordinator),
     (domain, mutate_function(
         http, "service_credential_handoff_emit",
         "hctx.registry = ctx->service_auth_registry;",

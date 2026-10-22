@@ -34,6 +34,7 @@
  * passed, service unavailable) and exit 4 (denied) is what proves the token
  * was accepted and authorization actually gates the call.
  */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -227,6 +228,7 @@ check_service_management_arm (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "human-svc-armer");
   g_assert_cmpint (wyl_policy_store_grant_role_membership (store,
       "human-svc-armer", "wr.system_admin", WYL_TENANT_DEFAULT), ==,
       WYRELOG_E_OK);
@@ -379,6 +381,9 @@ main (void)
   if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (1);
 
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
+  register_test_human (wyl_handle_get_policy_store (handle), "human-svc-admin");
+  register_test_human (wyl_handle_get_policy_store (handle), "human-svc-denied");
   gboolean tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
       WYL_TEST_SERVICE_TENANT, "tenant-owner", &tenant_created) != WYRELOG_E_OK

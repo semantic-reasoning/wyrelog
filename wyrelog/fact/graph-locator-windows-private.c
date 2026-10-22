@@ -3540,6 +3540,11 @@ tenant_delete_win_walk (HANDLE parent, const gchar *name, const gchar *path,
   g_autofree gchar *group = g_strdup_printf ("entry%u", (*count)++);
   g_key_file_set_string (key, group, "path", path);
   tenant_delete_win_identity (key, path, &id, directory);
+  LARGE_INTEGER file_size = {0};
+  if (!directory && (!GetFileSizeEx (handle, &file_size) || file_size.QuadPart < 0)) {
+    CloseHandle (handle); return WYRELOG_E_IO;
+  }
+  g_key_file_set_uint64 (key, group, "size_bytes", (guint64) file_size.QuadPart);
   if (directory) {
     const DWORD buffer_size = 64 * 1024;
     g_autofree BYTE *buffer = g_malloc (buffer_size);

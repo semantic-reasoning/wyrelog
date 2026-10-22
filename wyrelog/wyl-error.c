@@ -36,6 +36,10 @@ wyrelog_error_string (wyrelog_error_t err)
       return "conflict";
     case WYRELOG_E_RESOURCE_LIMIT:
       return "resource limit exceeded";
+    case WYRELOG_E_SUBJECT_NOT_REGISTERED:
+      return "subject_not_registered";
+    case WYRELOG_E_LAST_SYSTEM_ADMIN:
+      return "last_system_admin";
     case WYRELOG_E_TIMED_OUT:
       return "operation timed out";
   }

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <stdio.h>
@@ -342,6 +343,10 @@ login_with_username (const gchar *username)
     return NULL;
 
   g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  /* Fixed positive identities used by this fixture; unknown input stays unknown. */
+  register_test_human (wyl_handle_get_policy_store (handle), "alice");
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "carol");
   wyl_login_req_set_username (req, username);
 
   WylSession *session = NULL;
@@ -410,6 +415,7 @@ check_login_accepts_registry_ready_tenant (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 36;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
 
   g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
   wyl_login_req_set_username (req, "tenant-user");
@@ -432,6 +438,7 @@ check_login_validates_tenant_before_skip_mfa (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 39;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
 
   g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
   wyl_login_req_set_username (req, "tenant-user");
@@ -458,6 +465,7 @@ check_login_rejects_invalid_tenant_syntax (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 46;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-user");
 
   g_autoptr (wyl_login_req_t) reject_req = wyl_login_req_new ();
   wyl_login_req_set_username (reject_req, "tenant-user");
@@ -491,6 +499,7 @@ check_request_buffer_independent_of_session (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 40;
+  register_test_human (wyl_handle_get_policy_store (handle), "bob");
 
   wyl_login_req_t *req = wyl_login_req_new ();
   wyl_login_req_set_username (req, "bob");
@@ -544,6 +553,7 @@ check_login_requires_mfa_before_allow (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
+  register_test_human (wyl_handle_get_policy_store (handle), "login-user");
 
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 71;
@@ -578,6 +588,7 @@ check_mfa_verify_authenticates_engine_principal (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 80;
+  register_test_human (wyl_handle_get_policy_store (handle), "login-user");
 
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 81;
@@ -622,6 +633,7 @@ check_mfa_delta_callback_survives_state_reload (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 91;
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa-delta-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "mfa-delta-user");
@@ -673,6 +685,7 @@ check_login_persists_mfa_required_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
+  register_test_human (wyl_handle_get_policy_store (handle), "persist-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "persist-user");
@@ -698,6 +711,7 @@ check_mfa_verify_persists_authenticated_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 120;
+  register_test_human (wyl_handle_get_policy_store (handle), "persist-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "persist-user");
@@ -725,6 +739,7 @@ check_login_persists_active_session_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 130;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-state-user");
@@ -753,6 +768,7 @@ check_login_inserts_wirelog_session_fired (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 136;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-fired-login-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-fired-login-user");
@@ -773,6 +789,8 @@ check_login_delta_callback_survives_state_reload (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 141;
+  register_test_human (wyl_handle_get_policy_store (handle), "login-delta-session-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "login-delta-user");
 
   gint64 row[5];
   if (intern_principal_fired_row (handle, 1, "login-delta-user",
@@ -814,6 +832,7 @@ check_login_session_id_is_active_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-id-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-id-user");
@@ -883,6 +902,7 @@ check_mfa_verify_with_proof_requires_validator (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 100;
+  register_test_human (wyl_handle_get_policy_store (handle), "mfa-proof-user");
 
   if (store_active_scope (handle, "mfa-proof-scope") != WYRELOG_E_OK)
     return 101;
@@ -971,6 +991,7 @@ check_login_skip_mfa_rejected_by_default (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 149;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-denied-user");
 
   if (wyl_handle_get_login_skip_mfa_allowed (handle))
     return 150;
@@ -1001,6 +1022,7 @@ check_login_skip_mfa_authenticates_principal (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-user");
 
   if (store_active_scope (handle, "skip-mfa-scope") != WYRELOG_E_OK)
     return 151;
@@ -1072,6 +1094,9 @@ check_login_skip_mfa_uses_deployment_mode (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 160;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-demo-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-development-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-production-user");
 
   if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
         (handle), "development") != WYRELOG_E_OK)
@@ -1122,6 +1147,10 @@ check_login_skip_mfa_uses_policy_permission (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 173;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-other-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-policy-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-role-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-wrong-scope-user");
 
   if (grant_direct (handle, "skip-mfa-policy-user", "wr.login.skip_mfa",
       "login") != WYRELOG_E_OK)
@@ -1188,6 +1217,7 @@ check_login_skip_mfa_does_not_use_state_without_permission (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 187;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-state-only-user");
 
   gint64 event_id = -1;
   if (wyl_handle_apply_permission_state_transition (handle,
@@ -1210,6 +1240,7 @@ check_login_skip_mfa_policy_permission_observes_state_lifecycle (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 192;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-dormant-user");
 
   if (grant_direct (handle, "skip-mfa-dormant-user", "wr.login.skip_mfa",
       "login") != WYRELOG_E_OK)
@@ -1243,6 +1274,7 @@ check_login_skip_mfa_inserts_wirelog_principal_fired (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 162;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-fired-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "skip-mfa-fired-user");
@@ -1283,6 +1315,7 @@ check_login_skip_mfa_does_not_bypass_guarded_permission (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 166;
+  register_test_human (wyl_handle_get_policy_store (handle), "skip-mfa-guarded-user");
 
   if (store_active_scope (handle, "skip-mfa-guarded-scope") != WYRELOG_E_OK)
     return 167;
@@ -1335,6 +1368,7 @@ check_session_logout_preserves_locked_and_revoked_principals (void)
     g_autoptr (WylHandle) handle = NULL;
     if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
       return 170 + (gint) i * 10;
+    register_test_human (wyl_handle_get_policy_store (handle), subjects[i]);
     g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
     wyl_login_req_set_username (login, subjects[i]);
     g_autoptr (WylSession) session = NULL;
@@ -1391,6 +1425,8 @@ check_session_logout_logs_out_principal (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
+  register_test_human (wyl_handle_get_policy_store (handle), "logout-auth-user");
+  register_test_human (wyl_handle_get_policy_store (handle), "logout-principal-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "logout-principal-user");
@@ -1499,6 +1535,7 @@ check_session_close_persists_closed_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 160;
+  register_test_human (wyl_handle_get_policy_store (handle), "close-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "close-state-user");
@@ -1529,6 +1566,7 @@ check_session_close_inserts_wirelog_session_fired (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 166;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-fired-close-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-fired-close-user");
@@ -1550,6 +1588,7 @@ check_session_close_deactivates_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 170;
+  register_test_human (wyl_handle_get_policy_store (handle), "close-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "close-user");
@@ -1611,6 +1650,7 @@ check_session_elevate_persists_elevated_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 200;
+  register_test_human (wyl_handle_get_policy_store (handle), "elevate-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevate-state-user");
@@ -1641,6 +1681,7 @@ check_session_transitions_insert_wirelog_session_fired (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 206;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-fired-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-fired-user");
@@ -1675,6 +1716,7 @@ check_session_drop_elevation_persists_active_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 210;
+  register_test_human (wyl_handle_get_policy_store (handle), "drop-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "drop-state-user");
@@ -1707,6 +1749,7 @@ check_elevated_session_remains_active_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 220;
+  register_test_human (wyl_handle_get_policy_store (handle), "elevate-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevate-user");
@@ -1747,6 +1790,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 230;
+  register_test_human (wyl_handle_get_policy_store (handle), "elevated-close-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-close-user");
@@ -1793,6 +1837,7 @@ check_session_idle_timeout_persists_idle_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 260;
+  register_test_human (wyl_handle_get_policy_store (handle), "idle-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "idle-state-user");
@@ -1823,6 +1868,7 @@ check_idle_session_deactivates_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 270;
+  register_test_human (wyl_handle_get_policy_store (handle), "idle-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "idle-user");
@@ -1867,6 +1913,7 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 280;
+  register_test_human (wyl_handle_get_policy_store (handle), "elevated-idle-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-idle-user");
@@ -1913,6 +1960,7 @@ check_session_expire_persists_expiring_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 300;
+  register_test_human (wyl_handle_get_policy_store (handle), "expiry-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "expiry-state-user");
@@ -1943,6 +1991,7 @@ check_expiring_session_deactivates_decision_scope (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 310;
+  register_test_human (wyl_handle_get_policy_store (handle), "expiry-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "expiry-user");
@@ -1987,6 +2036,7 @@ check_expiring_session_expire_persists_closed_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 320;
+  register_test_human (wyl_handle_get_policy_store (handle), "expiry-close-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "expiry-close-state-user");
@@ -2019,6 +2069,7 @@ check_session_expiry_inserts_wirelog_session_fired (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 327;
+  register_test_human (wyl_handle_get_policy_store (handle), "session-fired-expiry-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-fired-expiry-user");
@@ -2046,6 +2097,7 @@ check_elevated_session_expire_persists_expiring_state (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 330;
+  register_test_human (wyl_handle_get_policy_store (handle), "elevated-expiry-state-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-expiry-state-user");
@@ -2181,6 +2233,7 @@ check_attached_login_stays_unassured (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 202;
+  register_test_human (wyl_handle_get_policy_store (handle), "attach-probe-user");
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "attach-probe-user");

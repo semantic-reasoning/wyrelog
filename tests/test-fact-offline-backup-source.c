@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <libsoup/soup.h>
@@ -130,6 +131,7 @@ create_tenant (BackupFixture *fixture)
   gboolean created = FALSE;
   WylPolicyAuthorityMutationResult result =
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  register_test_human (fixture->policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (fixture->policy,
       "tenant-a", "tenant-owner", &created), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority
@@ -2600,6 +2602,7 @@ grant_restore_http_authority (WylHandle *handle)
     "wr.tenant.manage", "wr.graph.manage", "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "restore-http-admin");
   for (gsize i = 0; i < G_N_ELEMENTS (permissions); i++) {
     wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
             "restore-http-admin", permissions[i], WYL_TENANT_DEFAULT);

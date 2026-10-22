@@ -216,6 +216,7 @@ assert_embedded_nul_identifiers_rejected (wyl_policy_store_t *store)
 {
   sqlite3 *db = wyl_policy_store_get_db (store);
   exec_ok (db, "SAVEPOINT nul_identifier_test;"
+      "INSERT OR IGNORE INTO human_users VALUES('tenant-owner','active',1,1,1);"
       "INSERT OR IGNORE INTO tenants(tenant_id,owner_subject_id,sealed,"
       "created_at,updated_at) VALUES('tenant-a','tenant-owner',0,1,1);");
   exec_rejected (db,
@@ -298,6 +299,7 @@ static void
 insert_fixture_principal (sqlite3 *db)
 {
   exec_ok (db,
+      "INSERT OR IGNORE INTO human_users VALUES('tenant-owner','active',1,1,1);"
       "INSERT OR IGNORE INTO tenants (tenant_id,owner_subject_id,sealed,"
       "created_at,updated_at) VALUES ('tenant-a','tenant-owner',0,1,1);"
       "INSERT INTO service_principals"
@@ -1137,6 +1139,7 @@ test_collision_policy (void)
       "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM principal_states WHERE subject_id='svc:tenant-a:worker';"
+      "DROP TRIGGER human_active_totp_enrollments_INSERT;"
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
       " enrolled_at,id_uuidv7) VALUES"
       " ('svc:tenant-a:worker',zeroblob(20),-1,1,'totp-id');");
@@ -1187,6 +1190,8 @@ test_unregistered_legacy_service_artifacts (void)
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
       &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
+  /* Model the pre-registry database that admitted reserved TOTP subjects. */
+  exec_ok (db, "DROP TRIGGER human_active_totp_enrollments_INSERT");
   exec_ok (db,
       "DELETE FROM principal_states WHERE subject_id='svc:legacy';"
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
@@ -1810,7 +1815,7 @@ assert_immediate_parent_objects (sqlite3 *db)
   for (gsize i = 0; i < wyl_policy_store_required_table_count (); i++) {
     const gchar *name = wyl_policy_store_required_table_name (i);
     g_assert_nonnull (name);
-    if (g_str_has_prefix (name, "service_"))
+    if (g_str_has_prefix (name, "service_") || g_str_has_prefix (name, "human_"))
       continue;
     g_autofree gchar *sql =
         g_strdup_printf
@@ -1832,6 +1837,11 @@ build_immediate_parent_fixture (sqlite3 *db)
   gsize schema_len = 0;
   g_assert_true (g_file_get_contents (WYL_TEST_SQLITE_SCHEMA_PATH, &schema,
       &schema_len, NULL));
+  /* This fixture predates both service and explicit human registries. */
+  gchar *human = strstr (schema, "-- Human user lifecycle (#1337).");
+  g_assert_nonnull (human);
+  *human = '\0';
+  schema_len = human - schema;
   const gchar *start = strstr (schema, start_marker);
   const gchar *end = strstr (schema, end_marker);
   g_assert_nonnull (start);

@@ -421,6 +421,7 @@ test_snapshot_reload_ready_is_idempotent (void)
 
   g_assert_cmpint (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (wyl_daemon_prepare_readiness_users (handle), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_daemon_check_policy_snapshot_reload_ready (handle), ==,

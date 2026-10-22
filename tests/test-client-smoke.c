@@ -1278,6 +1278,63 @@ main (void)
       "\"session_state\":\"active\"," "\"access_token\":\"management-access\"}";
   if (wyl_client_login_skip_mfa (management_client, "alice") != WYRELOG_E_OK)
     return wyl_test_normalize_exit_status (280);
+  /* Human lifecycle transport: exact acknowledgements, typed records and
+   * validation before any request is sent. */
+  {
+    const gchar *request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
+    const gchar *fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    guint requests_before = http.request_count;
+    g_assert_cmpint (wyl_client_user_create (management_client, "svc:reserved", request_id,
+        123, "trusted", 0), ==, WYRELOG_E_INVALID);
+    g_assert_cmpuint (http.request_count, ==, requests_before);
+    const gchar *actions[] = {"create", "disable", "delete"};
+    for (gsize i = 0; i < G_N_ELEMENTS (actions); i++) {
+      g_autofree gchar *response = g_strdup_printf (
+        "{\"ok\":true,\"subject\":\"alice\",\"action\":\"%s\",\"request_id\":\"%s\"}", actions[i], request_id);
+      http.body = response;
+      wyrelog_error_t rc = i == 0
+          ? wyl_client_user_create (management_client, "alice", request_id, 123, "trusted", 0)
+          : i == 1 ? wyl_client_user_disable (management_client, "alice", request_id, 123, "trusted", 0)
+          : wyl_client_user_delete (management_client, "alice", request_id, fingerprint, 123, "trusted", 0);
+      g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+      g_assert_cmpstr (http.last_method, ==, "POST");
+      g_assert_cmpstr (http.last_tenant, ==, "__wr_default");
+      g_assert_nonnull (strstr (http.last_body, request_id));
+      if (i == 2) g_assert_nonnull (strstr (http.last_body, "\"confirmation\":\"delete\""));
+    }
+    http.body = "{\"ok\":true,\"users\":[{\"subject\":\"alice\",\"state\":\"disabled\",\"created_at_us\":1,\"updated_at_us\":2}]}";
+    g_auto (WylClientUserList) users = {0};
+    g_assert_cmpint (wyl_client_user_list (management_client, 123, "trusted", 0, &users), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (users.len, ==, 1);
+    g_assert_cmpstr (users.items[0].state, ==, "disabled");
+    g_assert_cmpstr (http.last_method, ==, "GET");
+    const gchar *malformed = "{\"ok\":true,\"users\":[{\"subject\":\"svc:bad\",\"state\":\"active\",\"created_at_us\":1,\"updated_at_us\":2}]}";
+    g_assert_cmpint (wyl_client_user_list_decode (malformed, strlen (malformed), &users), ==, WYRELOG_E_INVALID);
+    g_assert_null (users.items);
+    g_autoptr (GString) inventory = g_string_new ("{\"ok\":true,\"users\":[");
+    for (guint u = 0; u < 1000; u++)
+      g_string_append_printf (inventory, "%s{\"subject\":\"user-%u\",\"state\":\"active\",\"created_at_us\":1,\"updated_at_us\":1}", u ? "," : "", u);
+    g_string_append (inventory, "]}");
+    g_assert_cmpint (wyl_client_user_list_decode (inventory->str, inventory->len, &users), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (users.len, ==, 1000);
+    g_autofree gchar *preview_body = g_strdup_printf (
+      "{\"ok\":true,\"subject\":\"alice\",\"fingerprint\":\"%s\",\"permission_count\":3,\"data_bytes\":1234,\"tenants\":[\"alice-data\"],\"unsealed\":\"\",\"blockers\":\"\"}", fingerprint);
+    http.body = preview_body;
+    g_auto (WylClientUserDeletePreview) preview = {0};
+    g_assert_cmpint (wyl_client_user_delete_preview (management_client, "alice", request_id,
+        123, "trusted", 0, &preview), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (preview.data_bytes, ==, 1234);
+    g_assert_cmpstr (preview.tenants[0], ==, "alice-data");
+    g_autofree gchar *blockers = g_strnfill (20000, 'x');
+    g_autofree gchar *large_preview = g_strdup_printf (
+      "{\"ok\":true,\"subject\":\"alice\",\"fingerprint\":\"%s\",\"permission_count\":3,\"data_bytes\":1234,\"tenants\":[],\"unsealed\":\"\",\"blockers\":\"%s\"}", fingerprint, blockers);
+    g_assert_cmpint (wyl_client_user_preview_decode (large_preview, strlen (large_preview), &preview), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (strlen (preview.blockers), ==, 20000);
+    g_assert_cmpstr (http.last_path, ==, "/users/alice/delete-preview");
+    http.body = "{\"ok\":true,\"subject\":\"other\",\"action\":\"create\",\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}";
+    g_assert_cmpint (wyl_client_user_create (management_client, "alice", request_id,
+        123, "trusted", 0), ==, WYRELOG_E_IO);
+  }
   g_auto (WylClientFactStatus) fact_status = { 0 };
   http.body =
       "{\"status\":\"degraded\",\"graphs_total\":1,"

@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -50,6 +51,7 @@ seed_provisioned_graph (const gchar *path, const gchar *root)
   g_assert_cmpint (wyl_policy_store_open (path, &policy), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (policy), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (policy, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (policy, tenant_id,
       "tenant-owner", &created),
       ==, WYRELOG_E_OK);

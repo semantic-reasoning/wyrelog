@@ -69,4 +69,6 @@ wyrelog_error_t wyl_client_fact_replay_resources_copy
   (const WylClientFactReplayResources * parsed,
     WylClientFactReplayResources * out_resources, gsize result_size);
 
+wyrelog_error_t wyl_client_user_list_decode (const gchar *document, gsize size, WylClientUserList *out);
+wyrelog_error_t wyl_client_user_preview_decode (const gchar *document, gsize size, WylClientUserDeletePreview *out);
 G_END_DECLS;

@@ -1205,18 +1205,14 @@ jobs:
             --timeout-multiplier 3 \
             --print-errorlogs
 
-      # fact-replay carries this issue's actual race cases
-      # (single-graph-refresh-race, mutation-isolation-concurrent);
-      # fact-runtime's stress case is a runtime-manager property.  Repeating
-      # only the latter would leave the race coverage running once.
-      #
-      # Deliberately no --num-processes cap here, unlike the step above: this
-      # step exists to surface races, and contention is how they surface.
-      # ~30s against a 360s multiplied budget leaves no timeout risk.
+      # Run the full suites above once, then repeat both replay race cases
+      # alongside runtime stress. Repeating the entire growing recovery suite
+      # under contention exceeds its timeout and obscures the intended races.
+      # Keep default parallelism and five repetitions for race stress.
       - name: Repeat fact query/mutation race paths
         run: |
           meson test -C build-fact-mutation-sanitizer --no-rebuild \
-            fact-replay \
+            fact-replay-mutation-races \
             fact-runtime \
             --repeat 5 \
             --timeout-multiplier 3 \

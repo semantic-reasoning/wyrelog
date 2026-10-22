@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -461,11 +462,13 @@ test_compound_tenant_seal_zero_survivors (void)
   g_autoptr (WylHandle) handle = NULL;
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   gboolean created = FALSE;
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (handle), "tenant-a",
       "tenant-owner", &created), ==,
       WYRELOG_E_OK);
   g_assert_true (created);
+  register_test_human (wyl_handle_get_policy_store (handle), "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant
         (wyl_handle_get_policy_store (handle), "tenant-b",
       "tenant-owner", &created), ==,
@@ -791,6 +794,8 @@ test_collision_classes (void)
         "reader"), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_upsert_permission (store, "app.read",
         "read", "basic"), ==, WYRELOG_E_OK);
+    /* Corrupt predecessor fixture intentionally predates active-human TOTP guards. */
+    if (i == 2) exec_ok (db, "DROP TRIGGER human_active_totp_enrollments_INSERT;");
     exec_ok (db, fixtures[i]);
     wyl_service_principal_t principal = { 0 };
     g_autofree gchar *request = g_strdup_printf ("collision-%u", (guint) i);
@@ -957,6 +962,7 @@ test_concurrent_keyed_tenant_seal (void)
   g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-concurrent",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -983,6 +989,7 @@ test_concurrent_keyed_tenant_seal (void)
       "SELECT count(*) FROM service_retirement_receipts WHERE "
       "request_id='000000000000000000000000216';"), ==, 1);
 
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
       "tenant-concurrent-mismatch",
       "tenant-owner", &created), ==, WYRELOG_E_OK);
@@ -1604,6 +1611,7 @@ test_tenant_seal_publication_recovery_classification (void)
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     g_autofree gchar *tenant = g_strdup_printf ("tenant-recovery-%u", fault);
     gboolean created = FALSE;
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (store, tenant,
         "tenant-owner", &created),
         ==, WYRELOG_E_OK);
@@ -1698,6 +1706,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   sqlite3 *db = handle_db (handle);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-receipt",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -1828,6 +1837,7 @@ test_keyed_tenant_seal_receipt_semantics (void)
       "operation='tenant_seal';"), ==, 3);
   probe.deny = FALSE;
 
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-promoted",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -1934,6 +1944,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
       WYRELOG_E_OK);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   gboolean created = FALSE;
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-restart",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -1955,6 +1966,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
       ==, 1);
 
   store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store, "tenant-fault",
       "tenant-owner",
       &created), ==, WYRELOG_E_OK);
@@ -1984,6 +1996,7 @@ test_keyed_tenant_seal_restart_and_commit_fault (void)
       "tenant-fault", "operator", "000000000000000000000000219", 1,
       &runtime, &outcome), ==, WYRELOG_E_OK);
 
+  register_test_human (store, "tenant-owner");
   g_assert_cmpint (wyl_policy_store_create_tenant (store,
       "tenant-receipt-fault", "tenant-owner", &created), ==, WYRELOG_E_OK);
   exec_ok (handle_db (handle),
@@ -2014,6 +2027,7 @@ test_retirement_postcommit_error_normalization (void)
     g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
         "tenant-no-selector", "tenant-owner", &created), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store,
@@ -2052,6 +2066,7 @@ test_retirement_postcommit_error_normalization (void)
     g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
         "tenant-uncertain", "tenant-owner", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
@@ -2080,6 +2095,7 @@ test_retirement_postcommit_error_normalization (void)
     g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
         "tenant-replay-cleanup", "tenant-owner", &created), ==, WYRELOG_E_OK);
     wyl_service_credential_mutation_authorization_t authorization = {
@@ -2122,6 +2138,7 @@ test_retirement_postcommit_error_normalization (void)
     g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
     wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
     gboolean created = FALSE;
+    register_test_human (store, "tenant-owner");
     g_assert_cmpint (wyl_policy_store_create_tenant (store,
         "tenant-coordination-cleanup",
         "tenant-owner", &created), ==, WYRELOG_E_OK);

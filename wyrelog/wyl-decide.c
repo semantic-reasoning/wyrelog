@@ -852,6 +852,15 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
   if (wyl_handle_engine_pair_is_poisoned (handle))
     return WYRELOG_E_INVALID;
 
+  const gchar *human_subject = wyl_decide_req_get_subject_id (req);
+  if (!wyl_policy_subject_has_service_prefix (human_subject)
+      && wyl_policy_store_user_require (wyl_handle_get_policy_store (handle), human_subject, TRUE) != WYRELOG_E_OK) {
+    wyl_decide_resp_set_deny_tags (resp, "user_inactive", "human_registry");
+    g_clear_pointer (&session, wyl_engine_session_release);
+    emit_decide_audit (handle, req, resp);
+    return WYRELOG_E_OK;
+  }
+
   const gchar *deny_reason = NULL;
   const gchar *deny_origin = NULL;
   if (wyl_handle_engine_pair_is_ready (handle)) {

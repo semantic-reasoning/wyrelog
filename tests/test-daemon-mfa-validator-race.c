@@ -32,6 +32,7 @@
 #if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#include "human-user-test-support.h"
 #include "test-exit-status.h"
 
 #include <stdint.h>
@@ -281,6 +282,7 @@ check_race_orchestrator_same_step_one_won_receipt (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "race.orch");
   if (login_mfa_required_session (handle, "race.orch", &session) != 0)
     return 31;
   if (seed_enrollment (handle, "race.orch") != 0)
@@ -355,6 +357,7 @@ check_newer_step_wins_on_fresh_principal (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 50;
   g_autoptr (WylSession) session = NULL;
+  register_test_human (wyl_handle_get_policy_store (handle), "race.newer");
   if (login_mfa_required_session (handle, "race.newer", &session) != 0)
     return 51;
   if (seed_enrollment (handle, "race.newer") != 0)

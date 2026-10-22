@@ -1958,6 +1958,8 @@ service_auth_retirement_tick (gpointer data)
   return G_SOURCE_CONTINUE;
 }
 
+static void user_revoke_daemon_state (gpointer data, const gchar *subject);
+
 static void
 wyl_daemon_http_context_unref (gpointer data)
 {
@@ -1966,6 +1968,7 @@ wyl_daemon_http_context_unref (gpointer data)
   if (ctx == NULL || !g_atomic_int_dec_and_test (&ctx->ref_count))
     return;
 
+  wyl_handle_set_human_revocation_callback (ctx->handle,ctx,NULL);
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   if (ctx->service_auth_retirement_source != NULL) {
     g_source_destroy (ctx->service_auth_retirement_source);
@@ -2017,6 +2020,7 @@ wyl_daemon_http_context_unref (gpointer data)
   g_mutex_clear (&ctx->lock);
   g_clear_pointer (&ctx->service_auth_registry,
       wyl_service_auth_registry_unref);
+  g_clear_object (&ctx->handle);
   g_free (ctx);
 }
 
@@ -2336,7 +2340,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
   ctx->ref_count = 1;
   ctx->service_auth_registry = service_auth_registry;
-  ctx->handle = handle;
+  ctx->handle = g_object_ref (handle);
   ctx->runtime = runtime;
   ctx->production_mode = opts->production_mode;
   ctx->profile = opts->profile;
@@ -2417,6 +2421,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
     return NULL;
   }
 #endif
+  wyl_handle_set_human_revocation_callback (ctx->handle,ctx,user_revoke_daemon_state);
   return ctx;
 }
 
@@ -2455,7 +2460,8 @@ human_session_matches (WylDaemonHttpContext *ctx, WylSession *session,
     return FALSE;
   g_autofree gchar *principal_state = NULL;
   gboolean found = FALSE;
-  return wyl_policy_store_get_principal_state
+  return wyl_policy_store_user_require (wyl_handle_get_policy_store (ctx->handle), subject, TRUE) == WYRELOG_E_OK
+         && wyl_policy_store_get_principal_state
            (wyl_handle_get_policy_store (ctx->handle), subject, &principal_state,
              &found) == WYRELOG_E_OK && found
          && g_strcmp0 (principal_state, "authenticated") == 0;
@@ -10605,6 +10611,7 @@ typedef struct
   const gchar *creator_subject;
   WylManagementReauthorization *authorization;
   gboolean create;
+  const WylPolicyTenantAuthorityRecord *coordinated;
   gboolean *changed;
   gboolean expected_active;
   const WylAuditEvent *audit_event;
@@ -10648,6 +10655,9 @@ mutate_tenant_lifecycle_publication (wyl_policy_store_t *store, gpointer data)
   wyrelog_error_t rc = publication->create ?
       wyl_policy_store_create_tenant (store, publication->tenant,
           publication->creator_subject, publication->changed) :
+      publication->coordinated != NULL ?
+      wyl_policy_store_tenant_lifecycle_coordinated (store, NULL, publication->coordinated,
+          FALSE, publication->changed) :
       wyl_policy_store_set_tenant_sealed_full (store, publication->tenant,
           FALSE, publication->changed);
   if (rc == WYRELOG_E_OK)
@@ -11825,6 +11835,9 @@ wyl_daemon_http_attempt_seal_tenant_recovery_for_test (SoupServer *server,
 static void
 set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
 {
+  if (rc == WYRELOG_E_SUBJECT_NOT_REGISTERED || rc == WYRELOG_E_LAST_SYSTEM_ADMIN) {
+    set_json_error (msg,409,rc == WYRELOG_E_SUBJECT_NOT_REGISTERED ? "subject_not_registered" : "last_system_admin"); return;
+  }
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return;
@@ -11839,6 +11852,9 @@ set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
 static void
 set_policy_transition_error (SoupServerMessage *msg, wyrelog_error_t rc)
 {
+  if (rc == WYRELOG_E_SUBJECT_NOT_REGISTERED || rc == WYRELOG_E_LAST_SYSTEM_ADMIN) {
+    set_json_error (msg,409,rc == WYRELOG_E_SUBJECT_NOT_REGISTERED ? "subject_not_registered" : "last_system_admin"); return;
+  }
   if (rc == WYRELOG_E_INVALID || rc == WYRELOG_E_POLICY) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return;
@@ -12078,6 +12094,14 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
             WYL_DAEMON_POLICY_WRITE_OWNER_TENANT, &write);
     if (rc == WYRELOG_E_OK && !creating)
       rc = management_reauthorize_inside_write (&reauthorization, actor);
+    WylTenantSealCoordination *coordination = NULL;
+    WylPolicyTenantAuthorityRecord *coordinated = NULL;
+    WylDurableCommitState coordination_outcome = WYL_DURABLE_COMMIT_NOT_COMMITTED;
+    if (rc == WYRELOG_E_OK && !creating) {
+      rc = wyl_policy_store_read_tenant_authority (write.store, tenant, &coordinated);
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_handle_tenant_seal_prepare (ctx->handle, write.lease, tenant, &coordination);
+    }
     gboolean tenant_exists = FALSE;
     if (rc == WYRELOG_E_OK && creating)
       rc = wyl_policy_store_tenant_exists (write.store, tenant, &tenant_exists);
@@ -12110,6 +12134,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
       .creator_subject = actor,
       .authorization = creating ? NULL : &reauthorization,
       .create = creating,
+      .coordinated = coordinated,
       .changed = &changed,
       .audit_event = lifecycle_audit,
       .audit_id = lifecycle_audit_id,
@@ -12156,6 +12181,9 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
         rc = wyl_engine_session_run_committed_publication (engine_session,
                 mutate_tenant_lifecycle_publication, &publication,
                 verify_active_tenant_publication, &publication, NULL, NULL, &stage);
+        coordination_outcome = stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED ?
+            WYL_DURABLE_COMMIT_COMMITTED : stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS ?
+            WYL_DURABLE_COMMIT_UNCERTAIN : WYL_DURABLE_COMMIT_NOT_COMMITTED;
         if (rc != WYRELOG_E_OK && publication.create
             && (stage == WYL_COMMITTED_PUBLICATION_COMMIT_CONFIRMED
             || stage == WYL_COMMITTED_PUBLICATION_COMMIT_AMBIGUOUS)) {
@@ -12195,6 +12223,14 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
             rc = install_rc;
         }
       }
+    }
+    wyrelog_error_t coordination_rc = wyl_handle_tenant_seal_finish
+          (coordination, coordination_outcome);
+    wyl_policy_tenant_authority_record_free (coordinated);
+    if (coordination_rc != WYRELOG_E_OK || coordination_outcome == WYL_DURABLE_COMMIT_UNCERTAIN) {
+      (void) wyl_service_auth_write_lease_mark_unavailable (write.lease, ctx->handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+      rc = WYRELOG_E_INTERNAL;
     }
     if (rc == WYRELOG_E_OK && changed)
       wyl_audit_complete_authoritative_event (ctx->handle, lifecycle_audit);
@@ -12313,6 +12349,221 @@ tenant_delete_validate (gpointer data)
   WylManagementReauthorization *a = data;
   return management_session_matches_live (a->session, a->session_id, a->actor,
              WYL_TENANT_DEFAULT, TRUE) ? WYRELOG_E_OK : WYRELOG_E_AUTH;
+}
+
+static wyrelog_error_t
+user_management_authorize (gpointer data, const gchar *actor, gboolean *admin)
+{
+  WylManagementReauthorization *a = data;
+  wyrelog_error_t rc = management_reauthorize_inside_write (data, actor);
+  if (rc == WYRELOG_E_OK) rc = wyl_policy_store_user_require_admin (wyl_handle_get_policy_store (a->handle), actor);
+  if (rc == WYRELOG_E_OK) *admin = TRUE;
+  return rc;
+}
+
+/* Keep authorization and the corresponding registry snapshot in one authority
+ * interval. Release it before entering the full preview's tenant lock order. */
+static wyrelog_error_t
+user_management_snapshot (WylManagementReauthorization *authorization,
+    const gchar *request_id, GPtrArray **users, WylUserOperation *prior,
+    GPtrArray **children)
+{
+  WylHandle *handle = authorization->handle;
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write (
+    wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+  gboolean admin = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = user_management_authorize (authorization, authorization->actor, &admin);
+  if (rc == WYRELOG_E_OK && !admin) rc = WYRELOG_E_AUTH;
+  if (rc == WYRELOG_E_OK) rc = tenant_delete_validate (authorization);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (rc == WYRELOG_E_OK && users != NULL)
+    rc = wyl_policy_store_user_list (store, users);
+  else if (rc == WYRELOG_E_OK && request_id != NULL) {
+    rc = wyl_policy_store_user_operation_read (store, request_id, prior);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_user_children (store, request_id, children);
+  } else if (rc == WYRELOG_E_OK) rc = WYRELOG_E_NOT_FOUND;
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release_terminal (&lease);
+    if (release_rc != WYRELOG_E_OK) rc = release_rc;
+  }
+  return rc;
+}
+
+static void
+user_revoke_daemon_state (gpointer data, const gchar *subject)
+{
+  WylDaemonHttpContext *ctx = data;
+  g_mutex_lock (&ctx->lock);
+  GHashTableIter iter;
+  gpointer value;
+  GHashTable *session_maps[] = {ctx->sessions_by_id, ctx->sessions_by_digest};
+  for (gsize i = 0; i < G_N_ELEMENTS (session_maps); i++) {
+    g_hash_table_iter_init (&iter, session_maps[i]);
+    while (g_hash_table_iter_next (&iter, NULL, &value)) {
+      g_autofree gchar *username = wyl_session_dup_username (value);
+      if (g_strcmp0 (username, subject) == 0) g_hash_table_iter_remove (&iter);
+    }
+  }
+  g_hash_table_iter_init (&iter, ctx->access_tokens_by_jti);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    WylAccessTokenState *token = value;
+    if (g_strcmp0 (token->subject, subject) == 0) g_hash_table_iter_remove (&iter);
+  }
+  g_hash_table_iter_init (&iter, ctx->refresh_tokens_by_token);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    WylRefreshTokenState *token = value;
+    if (g_strcmp0 (token->subject, subject) == 0) g_hash_table_iter_remove (&iter);
+  }
+  g_hash_table_iter_init (&iter, ctx->mfa_enroll_challenges);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    WylMfaEnrollChallenge *challenge = value;
+    if (g_strcmp0 (challenge->subject, subject) == 0 || g_strcmp0 (challenge->actor, subject) == 0)
+      g_hash_table_iter_remove (&iter);
+  }
+  g_mutex_unlock (&ctx->lock);
+}
+
+static void
+users_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
+    GHashTable *query, gpointer user_data)
+{
+  WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
+  const gchar *method = soup_server_message_get_method (msg);
+  gboolean collection = g_strcmp0 (path, "/users") == 0;
+  gboolean list = collection && g_strcmp0 (method, "GET") == 0;
+  g_autofree gchar *subject = NULL;
+  const gchar *action = collection ? "create" : NULL;
+  if (!collection) {
+    if (!g_str_has_prefix (path, "/users/")) {
+      set_json_error (msg, 404, "not_found"); return;
+    }
+    const gchar *tail = strchr (path + 7, '/');
+    if (tail == NULL || (g_strcmp0 (tail, "/disable") && g_strcmp0 (tail, "/delete") && g_strcmp0 (tail, "/delete-preview"))) {
+      set_json_error (msg, 404, "not_found"); return;
+    }
+    subject = g_strndup (path + 7, tail - (path + 7)); action = tail + 1;
+  }
+  if (!list && g_strcmp0 (method, "POST")) {
+    set_json_error (msg, 405, "method_not_allowed"); return;
+  }
+  gboolean preview = g_strcmp0 (action, "delete-preview") == 0;
+  gboolean deleting = g_strcmp0 (action, "delete") == 0;
+  const gchar *tenant = query != NULL ? g_hash_table_lookup (query, "tenant") : NULL;
+  if (tenant != NULL && g_strcmp0 (tenant, WYL_TENANT_DEFAULT)) {
+    set_json_error (msg, 400, "invalid_user_tenant"); return;
+  }
+  static const WylDaemonHttpStrictJsonField create_fields[] = {
+    {"subject",128,WYL_DAEMON_HTTP_STRICT_JSON_STRING}, {"request_id",27,WYL_DAEMON_HTTP_STRICT_JSON_STRING}
+  };
+  static const WylDaemonHttpStrictJsonField mutation_fields[] = {{"request_id",27,WYL_DAEMON_HTTP_STRICT_JSON_STRING}};
+  static const WylDaemonHttpStrictJsonField delete_fields[] = {
+    {"request_id",27,WYL_DAEMON_HTTP_STRICT_JSON_STRING}, {"fingerprint",64,WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"confirmation",16,WYL_DAEMON_HTTP_STRICT_JSON_STRING}
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, 4);
+  const gchar *request = NULL, *fingerprint = NULL;
+  if (!list && !preview) {
+    const WylDaemonHttpStrictJsonField *fields = collection ? create_fields : deleting ? delete_fields : mutation_fields;
+    guint count = collection ? G_N_ELEMENTS (create_fields) : deleting ? G_N_ELEMENTS (delete_fields) : G_N_ELEMENTS (mutation_fields);
+    if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields, count, values)) {
+      set_json_error (msg, 400, "invalid_user_request"); return;
+    }
+    if (collection) subject = g_strdup (values[0]);
+    request = values[collection ? 1 : 0];
+    if (!wyl_request_id_is_canonical (request) || (deleting && g_strcmp0 (values[2], "delete"))) {
+      set_json_error (msg, 400, "invalid_user_request"); return;
+    }
+    if (deleting) fingerprint = values[1];
+  }
+  if (!list && !wyl_policy_human_subject_is_valid (subject)) {
+    set_json_error (msg, 400, "invalid_user_subject"); return;
+  }
+  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    set_json_error (msg,403,"user_denied"); return;
+  }
+  g_auto (WylDaemonAuthContext) auth = {0};
+  g_autofree gchar *actor = NULL, *loc = NULL;
+  g_autoptr (WylSession) session = NULL;
+  WylManagementReauthorization authorization;
+  if (!tenant_actor_authenticate (server, msg, query, ctx, WYL_TENANT_DEFAULT,
+      &auth, &actor, &session, &loc, &authorization)) return;
+  authorization.action = "wr.policy.grant_role";
+  authorization.owner_tenant = NULL;
+  if (wyl_policy_store_user_require_admin (wyl_handle_get_policy_store (ctx->handle), actor) != WYRELOG_E_OK) {
+    set_json_error (msg, 403, "user_denied"); return;
+  }
+  WylTenantDeleteRuntime runtime = {.authorize=user_management_authorize,.validate=tenant_delete_validate,.data=&authorization};
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true");
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (list) {
+    g_autoptr (GPtrArray) users = NULL;
+    rc = user_management_snapshot (&authorization, NULL, &users, NULL, NULL);
+    g_string_append (body, ",\"users\":[");
+    for (gsize i = 0; rc == WYRELOG_E_OK && i < users->len; i++) {
+      WylHumanUser *user = g_ptr_array_index (users, i);
+      g_string_append (body, i ? ",{\"subject\":" : "{\"subject\":"); append_json_string (body, user->subject);
+      g_string_append (body, ",\"state\":"); append_json_string (body, user->state);
+      g_string_append_printf (body, ",\"created_at_us\":%" G_GINT64_FORMAT ",\"updated_at_us\":%" G_GINT64_FORMAT "}", user->created_at_us,user->updated_at_us);
+    }
+    g_string_append_c (body, ']');
+  } else if (preview) {
+    g_auto (WylUserDeletePreview) result = {0};
+    const gchar *retry_id = query != NULL ? g_hash_table_lookup (query,"request_id") : NULL;
+    g_auto (WylUserOperation) prior = {0};
+    if (retry_id != NULL && !wyl_request_id_is_canonical (retry_id)) {
+      set_json_error (msg,400,"invalid_user_request"); return;
+    }
+    g_autoptr (GPtrArray) children = NULL;
+    wyrelog_error_t found = user_management_snapshot (&authorization,
+            retry_id, NULL, &prior, &children);
+    if (found == WYRELOG_E_OK) {
+      if (g_strcmp0 (prior.actor,actor) || g_strcmp0 (prior.subject,subject) || g_strcmp0 (prior.action,"delete")) {
+        set_json_error (msg,409,"user_request_conflict"); return;
+      }
+      result.subject = g_strdup (subject); result.fingerprint = g_strdup (prior.fingerprint);
+      result.tenants = g_ptr_array_new_with_free_func (g_free);
+      result.unsealed = g_strdup (""); result.blockers = g_strdup ("");
+      for (gsize i = 0; rc == WYRELOG_E_OK && i < children->len; i++) {
+        WylTenantDeleteRecord *child = g_ptr_array_index (children,i);
+        g_ptr_array_add (result.tenants,g_strdup (child->tenant));
+      }
+    } else if (found == WYRELOG_E_NOT_FOUND) rc = wyl_handle_user_preview (ctx->handle, subject, actor, &runtime, &result);
+    else rc = found;
+    if (rc == WYRELOG_E_OK) {
+      g_string_append (body, ",\"subject\":"); append_json_string (body, subject);
+      g_string_append (body, ",\"fingerprint\":"); append_json_string (body, result.fingerprint);
+      g_string_append_printf (body, ",\"permission_count\":%" G_GUINT64_FORMAT ",\"data_bytes\":%" G_GUINT64_FORMAT ",\"tenants\":[", result.permission_count,result.data_bytes);
+      for (gsize i = 0; i < result.tenants->len; i++) {
+        if (i) g_string_append_c (body, ','); append_json_string (body, g_ptr_array_index (result.tenants, i));
+      }
+      g_string_append (body, "],\"unsealed\":"); append_json_string (body, result.unsealed);
+      g_string_append (body, ",\"blockers\":"); append_json_string (body, result.blockers);
+    }
+  } else {
+    g_auto (WylUserOperation) result = {0};
+    rc = wyl_handle_user_mutate (ctx->handle, subject, actor, action, request, fingerprint, &runtime, &result);
+    if (rc != WYRELOG_E_OK) {
+      const gchar *error = result.error_code != NULL ? result.error_code : result.committed ? "user_delete_pending"
+          : rc == WYRELOG_E_CONFLICT ? "user_request_conflict" : rc == WYRELOG_E_AUTH ? "user_denied" : "user_mutation_failed";
+      g_string_assign (body, "{\"error\":"); append_json_string (body, error);
+      g_string_append (body, ",\"details\":"); append_json_string (body, result.summary != NULL ? result.summary : ""); g_string_append_c (body, '}');
+      attach_request_id_header (msg); soup_server_message_set_status (msg, rc == WYRELOG_E_AUTH ? 403 : 409, NULL);
+      soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len); return;
+    }
+    g_string_append (body, ",\"subject\":"); append_json_string (body, subject);
+    g_string_append (body, ",\"action\":"); append_json_string (body, action);
+    g_string_append (body, ",\"request_id\":"); append_json_string (body, request);
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_AUTH ? 403 : 409, rc == WYRELOG_E_AUTH ? "user_denied" : "user_request_failed"); return;
+  }
+  g_string_append_c (body, '}'); attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY, body->str, body->len);
 }
 
 static void
@@ -18159,6 +18410,7 @@ mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) path;
   WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
   ctx->mfa_enroll_start_handler_entries++;
@@ -18248,6 +18500,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) path;
   WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
   ctx->mfa_enroll_confirm_handler_entries++;
@@ -18373,6 +18626,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) path;
 
   WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
   ctx->login_handler_entries++;
@@ -18546,6 +18800,7 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) path;
   WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
   ctx->mfa_verify_handler_entries++;
@@ -19126,6 +19381,7 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) path;
 
   WylDaemonHttpContext *ctx = user_data;
+  g_auto (WylHumanLifecycleLease) lifecycle = wyl_handle_human_lifecycle_acquire (ctx->handle);
   gboolean dispatch_owned = human_refresh_dispatch_owned (ctx);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_lock (&ctx->lock);
@@ -20390,6 +20646,7 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       mfa_verify_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/auth/mfa/enroll/start",
       mfa_enroll_start_handler, ctx, NULL);
+  wyl_daemon_http_add_prefix_handler (server, "/users", users_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/auth/mfa/enroll/confirm",
       mfa_enroll_confirm_handler, ctx, NULL);
   wyl_daemon_http_add_exact_handler (server, "/auth/refresh", refresh_handler,
