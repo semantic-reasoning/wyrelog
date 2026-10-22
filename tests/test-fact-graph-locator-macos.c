@@ -1806,6 +1806,268 @@ test_restore_replacement_evidence_compare (void)
   replacement_fixture_clear (&f);
 }
 
+/* One change during the compare, each from a fresh fixture after a clean
+ * capture (#1303 U5-6 finding 4): the compare reads the bytes the capture
+ * read, so a writer between the two passes is refused there too. */
+static void
+test_restore_replacement_evidence_compare_race (void)
+{
+  static const struct
+  {
+    const gchar *at;
+    ReplacementAction action;
+  } cases[] = {
+    {REPLACEMENT_READ, REPLACEMENT_SUBSTITUTE},
+    {REPLACEMENT_READ, REPLACEMENT_RENAME_AWAY},
+    {REPLACEMENT_CHUNK, REPLACEMENT_OVERWRITE},
+    {REPLACEMENT_CHUNK, REPLACEMENT_APPEND},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    ReplacementFixture f;
+    replacement_fixture_init (&f, "graph-replacement-compare-race");
+    WylFactGraphDarwinOperationEvidence evidence = { 0 };
+    g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+        f.checksum, &evidence), ==, WYRELOG_E_OK);
+    f.act_at = cases[i].at;
+    f.action = cases[i].action;
+    g_test_message ("compare race case %" G_GSIZE_FORMAT, i);
+    guint fds = open_fd_count ();
+    g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+        f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_POLICY);
+    g_assert_cmpuint (open_fd_count (), ==, fds);
+    g_assert_cmpuint (f.hits, ==, 1);
+    replacement_fixture_clear (&f);
+  }
+
+  /* The primitive reports an absent main as absent; the commit authority
+   * maps that to a refusal after SYNC_PUBLISH_DIR. */
+  ReplacementFixture f;
+  replacement_fixture_init (&f, "graph-replacement-compare-absent");
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &evidence), ==, WYRELOG_E_OK);
+  replacement_rename (&f, "facts.duckdb", "parked");
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_NOT_FOUND);
+  replacement_rename (&f, "parked", "facts.duckdb");
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_OK);
+  replacement_fixture_clear (&f);
+}
+
+/* Included here, after the _exit site tests/test-exit-status-sites.json
+ * pins by line, so that site does not move. */
+#include "fact/root-writer-lease-private.h"
+
+typedef struct
+{
+  ReplacementFixture fixture;
+  WylFactRootWriterLease *lease;
+  gchar *graph_path;
+  gchar *outside;
+} ShapeFixture;
+
+static void
+shape_fixture_init (ShapeFixture *s)
+{
+  replacement_fixture_init (&s->fixture, "graph-darwin-post-publish");
+  s->lease = NULL;
+  g_assert_cmpint (wyl_fact_root_writer_lease_acquire (s->fixture.root,
+      &s->lease), ==, WYRELOG_E_OK);
+  s->graph_path = wyl_fact_graph_directory_descriptive_path
+        (&s->fixture.graph);
+  g_assert_nonnull (s->graph_path);
+  s->outside = g_build_filename (s->fixture.root, "parked-outside", NULL);
+}
+
+static void
+shape_fixture_clear (ShapeFixture *s)
+{
+  g_clear_pointer (&s->lease, wyl_fact_root_writer_lease_release);
+  g_clear_pointer (&s->graph_path, g_free);
+  g_clear_pointer (&s->outside, g_free);
+  replacement_fixture_clear (&s->fixture);
+}
+
+static wyrelog_error_t
+shape_open_with (ShapeFixture *s, WylFactRootWriterLease *lease,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *replacement, const WylFactArtifactInventoryIdentity *old_main,
+    const WylFactArtifactInventoryIdentity *staged, guint64 logical_bytes)
+{
+  ReplacementFixture *f = &s->fixture;
+  return wyl_fact_graph_restore_darwin_post_publish_shape_open
+           (&f->resolver, &f->graph, lease, operation_uuid, old_evidence,
+             witness_restore_uuid, replacement, old_main, staged,
+             logical_bytes);
+}
+
+/* The expected code, with no descriptor left behind. */
+static void
+assert_shape (ShapeFixture *s, wyrelog_error_t expected)
+{
+  ReplacementFixture *f = &s->fixture;
+  guint fds = open_fd_count ();
+  g_assert_cmpint (shape_open_with (s, s->lease, &f->old_evidence,
+      replacement_uuid, &f->old_main, &f->staged, f->logical_bytes), ==,
+      expected);
+  g_assert_cmpuint (open_fd_count (), ==, fds);
+}
+
+/* Moves a graph entry out of the graph directory, so its absence does not
+ * leave an unlisted name behind. */
+static void
+shape_park (ShapeFixture *s, const gchar *name)
+{
+  g_assert_cmpint (renameat (s->fixture.graph.graph_fd, name, AT_FDCWD,
+      s->outside), ==, 0);
+}
+
+static void
+shape_unpark (ShapeFixture *s, const gchar *name)
+{
+  g_assert_cmpint (renameat (AT_FDCWD, s->outside, s->fixture.graph.graph_fd,
+      name), ==, 0);
+}
+
+static void
+shape_write (ShapeFixture *s, const gchar *name, const void *bytes,
+    gsize length, mode_t mode)
+{
+  gint fd = openat (s->fixture.graph.graph_fd, name,
+          O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (write_exact (fd, bytes, length));
+  g_assert_cmpint (fchmod (fd, mode), ==, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+}
+
+/* A name the namespace must not hold: refused, and accepted again once it
+ * is gone. */
+static void
+assert_shape_refuses_name (ShapeFixture *s, const gchar *name)
+{
+  g_test_message ("unlisted name %s", name);
+  shape_write (s, name, "x", 1, 0600);
+  assert_shape (s, WYRELOG_E_POLICY);
+  replacement_unlink (&s->fixture, name);
+  assert_shape (s, WYRELOG_E_OK);
+}
+
+static void
+test_restore_darwin_post_publish_shape (void)
+{
+  ShapeFixture s;
+  shape_fixture_init (&s);
+  ReplacementFixture *f = &s.fixture;
+  assert_shape (&s, WYRELOG_E_OK);
+  assert_shape (&s, WYRELOG_E_OK);
+
+  /* Argument shape. */
+  WylFactArtifactInventoryIdentity bad = f->staged;
+  g_assert_cmpint (shape_open_with (&s, NULL, &f->old_evidence,
+      replacement_uuid, &f->old_main, &f->staged, f->logical_bytes), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (shape_open_with (&s, s.lease, NULL, replacement_uuid,
+      &f->old_main, &f->staged, f->logical_bytes), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      replacement_uuid, &f->old_main, &f->old_main, f->logical_bytes), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      operation_uuid, &f->old_main, &f->staged, f->logical_bytes), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      "01890f47-3c4b-4cc2-b8c4-dc0c0c07054a", &f->old_main, &f->staged,
+      f->logical_bytes), ==, WYRELOG_E_INVALID);
+  bad.object = 0;
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      replacement_uuid, &f->old_main, &bad, f->logical_bytes), ==,
+      WYRELOG_E_INVALID);
+
+  /* At most the lock besides the two mains, one-link 0600 and owned. */
+  shape_write (&s, "facts.duckdb.lock", "", 0, 0600);
+  assert_shape (&s, WYRELOG_E_OK);
+  g_assert_cmpint (fchmodat (f->graph.graph_fd, "facts.duckdb.lock", 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_shape (&s, WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f->graph.graph_fd, "facts.duckdb.lock", 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_shape (&s, WYRELOG_E_OK);
+  /* A second link to the lock outside the directory: only the inventory
+   * sees that one. */
+  g_assert_cmpint (linkat (f->graph.graph_fd, "facts.duckdb.lock", AT_FDCWD,
+      s.outside, 0), ==, 0);
+  assert_shape (&s, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_unlink (s.outside), ==, 0);
+  assert_shape (&s, WYRELOG_E_OK);
+  replacement_unlink (f, "facts.duckdb.lock");
+  g_assert_cmpint (linkat (f->graph.graph_fd, "facts.duckdb",
+      f->graph.graph_fd, "facts.duckdb.lock", 0), ==, 0);
+  assert_shape (&s, WYRELOG_E_POLICY);
+  replacement_unlink (f, "facts.duckdb.lock");
+  assert_shape (&s, WYRELOG_E_OK);
+
+  /* Every other name: a sidecar, the restore stage and both provisioning
+   * legacy names. */
+  g_autofree gchar *stage = g_strdup_printf ("restore-%s.duckdb",
+          witness_restore_uuid);
+  g_autofree gchar *old_legacy = g_strdup_printf ("provision-%s.sqlite",
+          operation_uuid);
+  assert_shape_refuses_name (&s, "facts.duckdb.wal");
+  assert_shape_refuses_name (&s, stage);
+  assert_shape_refuses_name (&s, f->legacy);
+  assert_shape_refuses_name (&s, old_legacy);
+
+  /* The new main: absent, or a same-bytes object on a new inode. */
+  shape_park (&s, "facts.duckdb");
+  assert_shape (&s, WYRELOG_E_POLICY);
+  (void) replacement_write_file (f, "facts.duckdb");
+  assert_shape (&s, WYRELOG_E_POLICY);
+  replacement_unlink (f, "facts.duckdb");
+  shape_unpark (&s, "facts.duckdb");
+  assert_shape (&s, WYRELOG_E_OK);
+
+  /* The old main: a same-bytes object at the rollback name, or absent.
+   * The witness reports the absence as such; the commit authority maps it
+   * to a refusal. */
+  shape_park (&s, f->rollback);
+  shape_write (&s, f->rollback, "provisioned", 11, 0600);
+  assert_shape (&s, WYRELOG_E_POLICY);
+  replacement_unlink (f, f->rollback);
+  assert_shape (&s, WYRELOG_E_NOT_FOUND);
+  shape_unpark (&s, f->rollback);
+  assert_shape (&s, WYRELOG_E_OK);
+
+  /* Pins: old evidence naming another volume, the new main's device and
+   * its logical size. */
+  WylFactGraphDarwinOperationEvidence flipped = f->old_evidence;
+  flipped.bytes[24] ^= 0xffu;
+  g_assert_cmpint (shape_open_with (&s, s.lease, &flipped, replacement_uuid,
+      &f->old_main, &f->staged, f->logical_bytes), ==, WYRELOG_E_POLICY);
+  WylFactArtifactInventoryIdentity shifted = f->staged;
+  shifted.domain ^= 1;
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      replacement_uuid, &f->old_main, &shifted, f->logical_bytes), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (shape_open_with (&s, s.lease, &f->old_evidence,
+      replacement_uuid, &f->old_main, &f->staged, f->logical_bytes + 1), ==,
+      WYRELOG_E_POLICY);
+  assert_shape (&s, WYRELOG_E_OK);
+
+  /* Read-only throughout: the mains kept their objects and bytes. */
+  struct stat status;
+  g_assert_cmpint (fstatat (f->graph.graph_fd, "facts.duckdb", &status,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpuint ((guint64) status.st_ino, ==, f->staged.object);
+  g_assert_cmpint (fstatat (f->graph.graph_fd, f->rollback, &status,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  g_assert_cmpuint ((guint64) status.st_ino, ==, f->old_main.object);
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (replacement_capture (f, &f->staged, f->logical_bytes,
+      f->checksum, &evidence), ==, WYRELOG_E_OK);
+  shape_fixture_clear (&s);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1845,5 +2107,11 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/restore-replacement-evidence-compare",
     test_restore_replacement_evidence_compare);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-compare-race",
+    test_restore_replacement_evidence_compare_race);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-darwin-post-publish-shape",
+    test_restore_darwin_post_publish_shape);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

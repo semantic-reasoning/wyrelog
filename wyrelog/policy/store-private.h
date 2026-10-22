@@ -3674,11 +3674,12 @@ wyrelog_error_t wyl_policy_store_graph_restore_reacquire_v3_prove
     GBytes *expected_journal,
     const WylPolicyGraphRestoreReplacementRecord *expected_row);
 /* Storage primitive behind sync_with_effect. The caller must separately
- * prove a durable post-PUBLISH dual filesystem witness under the root lease
- * and quiescence before invoking this CAS. On macOS a matched row without
- * darwin_operation_evidence, reserved or already companion_synced, is
- * refused with WYRELOG_E_POLICY before any effect or write; the caller sets
- * the evidence first. out_result is unspecified when the return is not
+ * prove a durable post-PUBLISH dual filesystem witness (on macOS the Darwin
+ * post-publish shape and the compared replacement evidence) under the root
+ * lease and quiescence before invoking this CAS. On macOS a matched row
+ * without darwin_operation_evidence, reserved or already companion_synced,
+ * is refused with WYRELOG_E_POLICY before any effect or write; the caller
+ * sets the evidence first. out_result is unspecified when the return is not
  * WYRELOG_E_OK. */
 wyrelog_error_t wyl_policy_store_graph_restore_replacement_mark_companion_synced
   (wyl_policy_store_t *store,

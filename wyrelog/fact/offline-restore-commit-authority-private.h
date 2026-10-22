@@ -205,6 +205,13 @@ wyrelog_error_t wyl_fact_offline_restore_graph_commit_inspect
  * Success returns an owned companion_synced row; any failure empties output.
  * A failed policy commit may leave the exact dual filesystem shape in place,
  * so retry must reload both durable records and reobserve the full shape.
+ * On macOS there is no companion link: the old ACTIVE evidence and the
+ * journal pins prove the post-publish namespace, the replacement evidence
+ * is captured only while the reserved row has none, persisted write-once,
+ * re-read and compared on a fresh descriptor, and then the row advances.
+ * NOT_FOUND, BUSY and INVALID from the shape, capture or compare become
+ * WYRELOG_E_POLICY.  There the step runs only by direct call while
+ * selection refuses.
  * This does not admit COMMIT, finalize, publish policy generations or unseal. */
 wyrelog_error_t wyl_fact_offline_restore_graph_commit_companion_recover
   (wyl_policy_store_t *policy, const gchar *fact_root,

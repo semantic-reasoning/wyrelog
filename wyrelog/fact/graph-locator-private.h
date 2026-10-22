@@ -507,6 +507,27 @@ wyl_fact_graph_directory_compare_darwin_replacement_evidence
     const WylFactArtifactInventoryIdentity *staged_main,
     guint64 logical_bytes, const gchar *checksum,
     const WylFactGraphDarwinOperationEvidence *expected_evidence);
+/* Darwin post-publication namespace proof under the retained root writer
+ * lease (ADR 0006, "Restore replacement evidence").  The held graph directory,
+ * mode 0700, holds exactly `facts.duckdb`, this restore's rollback name and
+ * at most `facts.duckdb.lock`, each a one-link 0600 regular file of the
+ * effective owner.  `facts.duckdb` is expected_new_main by device and inode
+ * with logical_bytes as its size; the rollback name is expected_old_main,
+ * proved by the old ACTIVE record's evidence through the RETAINED_ROLLBACK
+ * witness.  The restore stage, both provisioning legacy names and every
+ * other name are refused.  This proves neither the new main's bytes nor its
+ * evidence: the caller runs the replacement capture or compare for that.
+ * Read-only; no witness or descriptor escapes.  After SYNC_PUBLISH_DIR
+ * NOT_FOUND, BUSY and INVALID are refusals for that journal; IO and NOMEM
+ * pass through. */
+wyrelog_error_t wyl_fact_graph_restore_darwin_post_publish_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes);
 #endif
 /* Post-publication read-only proof. The old ACTIVE companion and rollback
  * still bind the old inode; the replacement companion and new main bind a

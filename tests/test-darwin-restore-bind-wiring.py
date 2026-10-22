@@ -40,6 +40,31 @@ a callback, which count_calls does not see, so each effect has its own row.
 PUBLISH and its directory flush are pinned the same way through
 publish_run, publish_capture and publish_effect.  The resume dispatcher
 calls only the step runs, never a provider form, and needs no row.
+The macOS companion step has two rows: its transaction effect
+darwin_companion_effect re-proves the root writer lease's authority, the
+runtime state and the post-publish shape, and darwin_companion_recover calls
+each authority helper of the Linux prologue it copies (the lease
+acquisition, the policy bind, commit_snapshot_valid, check_policy, the lease
+authorization of the resolver, graph_commit_quiesce, check_persisted,
+check_runtime and the raw journal load) besides the provenance load and the
+shape.  Presence is what a route rule checks: it does not judge the order
+or the use of each result.
+
+Companion rules (check_companion_rules), for the macOS companion step
+(#1303 U5-7b):
+
+- wyl_fact_offline_restore_graph_commit_companion_recover has exactly one
+  ``#ifdef __APPLE__`` arm, which calls darwin_companion_recover exactly once
+  and none of the replacement capture, compare, evidence setter, sync or
+  mark itself; its ``#else`` arm calls neither darwin_companion_recover, the
+  setter nor the capture;
+- darwin_companion_recover calls the capture, the setter, the compare and
+  the sync exactly once each and the mark never; it reloads the row from
+  the setter's committed record exactly once (``row = g_steal_pointer
+  (&stored)``); the capture, setter, reload, compare and sync appear in that
+  order; a check_persisted lies strictly between the reload and the compare,
+  and check_persisted appears exactly twice; and the setter and the sync
+  take ``row`` as the expected record.
 
 function_body counts braces without regard to string or character literals;
 none of the pinned functions holds a brace literal today.
@@ -88,6 +113,19 @@ EXECUTE_PLAIN_CALLS = (
     "wyl_fact_artifact_transition_windows_execute",
 )
 FORBIDDEN_CALLS = PLAIN_CALLS + EXECUTE_PLAIN_CALLS
+COMPANION_RECOVER = "wyl_fact_offline_restore_graph_commit_companion_recover"
+DARWIN_COMPANION = "darwin_companion_recover"
+CAPTURE_CALL = "wyl_fact_graph_directory_capture_darwin_replacement_evidence"
+COMPARE_CALL = "wyl_fact_graph_directory_compare_darwin_replacement_evidence"
+SETTER_CALL = "wyl_policy_store_graph_restore_replacement_set_darwin_evidence"
+SYNC_CALL = "wyl_policy_store_graph_restore_replacement_sync_with_effect"
+MARK_CALL = "wyl_policy_store_graph_restore_replacement_mark_companion_synced"
+COMPANION_CALLS = (CAPTURE_CALL, COMPARE_CALL, SETTER_CALL, SYNC_CALL,
+                   MARK_CALL)
+RELOAD_PATTERN = re.compile(
+    r"\brow\s*=\s*g_steal_pointer\s*\(\s*&stored\s*\)"
+)
+PERSISTED_PATTERN = re.compile(r"(?<![\w])check_persisted\s*\(")
 
 
 @dataclass(frozen=True)
@@ -142,6 +180,17 @@ ROUTE_RULES = (
     RouteRule("publish_capture", ("retain_capture",)),
     RouteRule("publish_effect", ("publish_capture",
                                  "graph_execute_provisioned")),
+    RouteRule("darwin_companion_effect",
+              ("wyl_fact_root_writer_lease_authorizes_resolver",
+               "check_runtime", "darwin_post_publish_shape")),
+    RouteRule("darwin_companion_recover",
+              ("wyl_fact_root_writer_lease_acquire",
+               "wyl_policy_store_bind_fact_root_authorized",
+               "commit_snapshot_valid", "check_policy",
+               "wyl_fact_root_writer_lease_authorizes_resolver",
+               "graph_commit_quiesce", "check_persisted", "check_runtime",
+               "wyl_policy_store_offline_restore_load",
+               "graph_provenance_load", "darwin_post_publish_shape")),
 )
 
 
@@ -302,12 +351,92 @@ def check_route_rule(source: str, rule: RouteRule) -> None:
             )
 
 
+def first_call(text: str, name: str) -> int:
+    match = re.search(r"(?<![\w])" + re.escape(name) + r"\s*\(", text)
+    return -1 if match is None else match.start()
+
+
+def check_companion_rules(source: str) -> None:
+    body = function_body(source, COMPANION_RECOVER)
+    arms = apple_arms(body)
+    if len(arms) != 1:
+        raise ContractError(
+            f"E_COMPANION_ARMS: {COMPANION_RECOVER} has {len(arms)}"
+            " #ifdef __APPLE__ arms, expected 1"
+        )
+    apple, other = arms[0]
+    if count_calls(apple, DARWIN_COMPANION) != 1:
+        raise ContractError(
+            f"E_COMPANION_ROUTE: the Darwin arm of {COMPANION_RECOVER} must"
+            f" call {DARWIN_COMPANION} exactly once"
+        )
+    for call in COMPANION_CALLS:
+        if count_calls(apple, call) != 0:
+            raise ContractError(
+                f"E_COMPANION_DIRECT: the Darwin arm of {COMPANION_RECOVER}"
+                f" calls {call} instead of {DARWIN_COMPANION}"
+            )
+    for call in (DARWIN_COMPANION, SETTER_CALL, CAPTURE_CALL):
+        if count_calls(other, call) != 0:
+            raise ContractError(
+                f"E_COMPANION_LEAK: the #else arm of {COMPANION_RECOVER}"
+                f" calls {call}"
+            )
+    body = function_body(source, DARWIN_COMPANION)
+    for call in (CAPTURE_CALL, SETTER_CALL, COMPARE_CALL, SYNC_CALL):
+        if count_calls(body, call) != 1:
+            raise ContractError(
+                f"E_COMPANION_CALLS: {DARWIN_COMPANION} must call {call}"
+                " exactly once"
+            )
+    if count_calls(body, MARK_CALL) != 0:
+        raise ContractError(
+            f"E_COMPANION_CALLS: {DARWIN_COMPANION} calls {MARK_CALL}"
+        )
+    reloads = list(RELOAD_PATTERN.finditer(body))
+    if len(reloads) != 1:
+        raise ContractError(
+            f"E_COMPANION_RELOAD: {DARWIN_COMPANION} must take the setter's"
+            " committed row exactly once"
+        )
+    reload = reloads[0].start()
+    capture = first_call(body, CAPTURE_CALL)
+    setter = first_call(body, SETTER_CALL)
+    compare = first_call(body, COMPARE_CALL)
+    sync = first_call(body, SYNC_CALL)
+    if not capture < setter < reload < compare < sync:
+        raise ContractError(
+            f"E_COMPANION_ORDER: {DARWIN_COMPANION} must capture, persist,"
+            " reload, compare and sync in that order"
+        )
+    persisted = [match.start() for match in PERSISTED_PATTERN.finditer(body)]
+    if not any(reload < at < compare for at in persisted):
+        raise ContractError(
+            f"E_COMPANION_REREAD: {DARWIN_COMPANION} must re-read the"
+            " persisted row between the reload and the compare"
+        )
+    if len(persisted) != 2:
+        raise ContractError(
+            f"E_COMPANION_PERSISTED: {DARWIN_COMPANION} must call"
+            f" check_persisted exactly twice, not {len(persisted)} times"
+        )
+    if (re.search(r"set_darwin_evidence\s*\(\s*policy\s*,\s*row\s*,", body)
+            is None
+            or re.search(r"sync_with_effect\s*\(\s*policy\s*,\s*row\s*,",
+                         body) is None):
+        raise ContractError(
+            f"E_COMPANION_ROW: {DARWIN_COMPANION} must pass row as the"
+            " expected record to the setter and the sync"
+        )
+
+
 def check_source(source: str) -> None:
     source = strip_comments(source)
     for rule in ARM_RULES:
         check_arm_rule(source, rule)
     for route in ROUTE_RULES:
         check_route_rule(source, route)
+    check_companion_rules(source)
 
 
 def check_tree(root: Path) -> None:
@@ -627,6 +756,109 @@ publish_effect (const Row *row, gpointer user_data)
 }
 """
 
+COMPANION_FIXTURE = """\
+wyrelog_error_t
+wyl_fact_offline_restore_graph_commit_companion_recover
+  (wyl_policy_store_t *policy, const gchar *fact_root,
+    WylPolicyGraphRestoreReplacementRecord **out_committed)
+{
+  if (policy == NULL)
+    return WYRELOG_E_INVALID;
+#ifdef __APPLE__
+  return darwin_companion_recover (policy, fact_root, runtime,
+             operation_uuid, expected_revision, drain_timeout_us,
+             out_committed);
+#else
+#ifndef __linux__
+  (void) drain_timeout_us;
+  return WYRELOG_E_POLICY;
+#else
+  rc = wyl_policy_store_graph_restore_replacement_sync_with_effect
+        (policy, row, raw_journal, sync_companion_effect, &effect,
+          &result, out_committed);
+  return rc;
+#endif
+#endif
+}
+"""
+
+DARWIN_RECOVER_FIXTURE = """\
+static wyrelog_error_t
+darwin_companion_recover (wyl_policy_store_t *policy,
+    const gchar *fact_root,
+    WylPolicyGraphRestoreReplacementRecord **out_committed)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_acquire (fact_root, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_bind_fact_root_authorized (policy, fact_root, lease);
+  if (rc == WYRELOG_E_OK && !commit_snapshot_valid
+        (&journal, row, expected_revision))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = check_policy (policy, &journal, row);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,
+            operation_uuid, encoded, row, FALSE, &key, drain_timeout_us,
+            &quiescence);
+  if (rc == WYRELOG_E_OK)
+    rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (runtime, &key);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_provenance_load (policy, &journal, row, &provenance);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_offline_restore_load (policy, operation_uuid,
+            &raw_journal);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_shape (&resolver, &directory, lease, &journal,
+            row, &provenance);
+  if (rc == WYRELOG_E_OK && row->darwin_operation_evidence == NULL) {
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_capture_darwin_replacement_evidence
+            (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &captured));
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_graph_restore_replacement_set_darwin_evidence
+            (policy, row, raw_journal, bytes, &stored_result, &stored);
+    if (rc == WYRELOG_E_OK) {
+      wyl_policy_graph_restore_replacement_record_free (row);
+      row = g_steal_pointer (&stored);
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = check_persisted (policy, operation_uuid, encoded, row, &journal);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_refusal
+          (wyl_fact_graph_directory_compare_darwin_replacement_evidence
+            (&directory, row->replacement_uuid, &graph->staged_main_identity,
+            graph->logical_bytes, graph->checksum, &expected));
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_graph_restore_replacement_sync_with_effect
+          (policy, row, raw_journal, darwin_companion_effect, &effect,
+            &result, out_committed);
+  return rc;
+}
+"""
+
+DARWIN_EFFECT_FIXTURE = """\
+static wyrelog_error_t
+darwin_companion_effect
+  (const WylPolicyGraphRestoreReplacementRecord *current,
+    gpointer user_data)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (effect->lease, effect->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = check_runtime (effect->runtime, effect->key);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_shape (effect->resolver, effect->directory,
+            effect->lease, effect->journal, current, effect->provenance);
+  return rc;
+}
+"""
+
 POSITIVE = {
     "graph_bind_prove_effect": BIND_FIXTURE,
     "graph_capture_provisioned": CAPTURE_FIXTURE,
@@ -644,6 +876,10 @@ POSITIVE = {
     "wyl_fact_offline_restore_graph_commit_publish_run": PUBLISH_RUN_FIXTURE,
     "publish_capture": PUBLISH_CAPTURE_FIXTURE,
     "publish_effect": PUBLISH_EFFECT_FIXTURE,
+    "wyl_fact_offline_restore_graph_commit_companion_recover":
+        COMPANION_FIXTURE,
+    "darwin_companion_recover": DARWIN_RECOVER_FIXTURE,
+    "darwin_companion_effect": DARWIN_EFFECT_FIXTURE,
 }
 
 
@@ -672,6 +908,43 @@ F = "sync_retained_effect"
 V = "wyl_fact_offline_restore_graph_commit_publish_run"
 W = "publish_capture"
 H = "publish_effect"
+Y = "wyl_fact_offline_restore_graph_commit_companion_recover"
+Z = "darwin_companion_recover"
+G = "darwin_companion_effect"
+SETTER_LINES = (
+    "    if (rc == WYRELOG_E_OK)\n"
+    "      rc = wyl_policy_store_graph_restore_replacement_set_darwin"
+    "_evidence\n"
+    "            (policy, row, raw_journal, bytes, &stored_result, &stored);\n"
+)
+SYNC_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = wyl_policy_store_graph_restore_replacement_sync_with_effect\n"
+    "          (policy, row, raw_journal, darwin_companion_effect, &effect,\n"
+    "            &result, out_committed);\n"
+)
+COMPARE_LINES = (
+    "  if (rc == WYRELOG_E_OK)\n"
+    "    rc = darwin_post_publish_refusal\n"
+    "          (wyl_fact_graph_directory_compare_darwin_replacement_evidence\n"
+    "            (&directory, row->replacement_uuid,"
+    " &graph->staged_main_identity,\n"
+    "            graph->logical_bytes, graph->checksum, &expected));\n"
+)
+REREAD_LINES = (
+    "    if (rc == WYRELOG_E_OK)\n"
+    "      rc = check_persisted (policy, operation_uuid, encoded, row,"
+    " &journal);\n"
+)
+
+
+def move_before(block: str, anchor: str):
+    def transform(text: str) -> str:
+        assert block in text and anchor in text
+        text = text.replace(block, "", 1)
+        return text.replace(anchor, block + anchor, 1)
+    return transform
+
 
 MUTANTS = (
     ("bind: swap to name-only", B, replace(
@@ -891,6 +1164,80 @@ MUTANTS = (
     ("publish_effect: facade execute replaces every helper", H, replace(
         "graph_execute_provisioned (",
         "wyl_fact_artifact_transition_execute ("), "E_ROUTE_DIRECT"),
+    ("companion: Apple arm dropped", Y, drop_apple_arm, "E_COMPANION_ARMS"),
+    ("companion: Apple arm refuses instead of the call", Y, replace(
+        "  return darwin_companion_recover (policy, fact_root, runtime,\n"
+        "             operation_uuid, expected_revision, drain_timeout_us,\n"
+        "             out_committed);\n",
+        "  return WYRELOG_E_POLICY;\n"), "E_COMPANION_ROUTE"),
+    ("companion: Apple arm calls the setter directly", Y, replace(
+        "             out_committed);\n#else",
+        "             out_committed);\n"
+        "  rc = wyl_policy_store_graph_restore_replacement_set_darwin_evidence"
+        " (policy, row, raw_journal, bytes, &result, &stored);\n#else"),
+     "E_COMPANION_DIRECT"),
+    ("companion: Linux arm calls the setter", Y, replace(
+        "  return rc;\n#endif",
+        "  rc = wyl_policy_store_graph_restore_replacement_set_darwin_evidence"
+        " (policy, row, raw_journal, bytes, &result, &stored);\n"
+        "  return rc;\n#endif"), "E_COMPANION_LEAK"),
+    ("companion: function renamed", Z, replace(
+        "darwin_companion_recover (", "darwin_companion_other ("),
+     "E_NO_FUNCTION"),
+    ("darwin recover: capture twice", Z, replace(
+        SETTER_LINES,
+        "    if (rc == WYRELOG_E_OK)\n"
+        "      rc = wyl_fact_graph_directory_capture_darwin_replacement"
+        "_evidence"
+        " (&directory, uuid, staged, size, checksum, &captured);\n"
+        + SETTER_LINES), "E_COMPANION_CALLS"),
+    ("darwin recover: compare removed", Z, replace(COMPARE_LINES, ""),
+     "E_COMPANION_CALLS"),
+    ("darwin recover: mark beside the sync", Z, replace(
+        "  return rc;\n}",
+        "  rc = wyl_policy_store_graph_restore_replacement_mark_companion"
+        "_synced"
+        " (policy, row, raw_journal, &result, out_committed);\n"
+        "  return rc;\n}"), "E_COMPANION_CALLS"),
+    ("darwin recover: reload removed", Z, replace(
+        "      row = g_steal_pointer (&stored);\n", ""),
+     "E_COMPANION_RELOAD"),
+    ("darwin recover: sync before the setter", Z,
+     move_before(SYNC_LINES, SETTER_LINES), "E_COMPANION_ORDER"),
+    ("darwin recover: compare before the setter", Z,
+     move_before(COMPARE_LINES, SETTER_LINES), "E_COMPANION_ORDER"),
+    ("darwin recover: re-read removed", Z, replace(REREAD_LINES, ""),
+     "E_COMPANION_REREAD"),
+    ("darwin recover: prologue check_persisted removed", Z, replace(
+        "  if (rc == WYRELOG_E_OK)\n"
+        "    rc = check_persisted (policy, operation_uuid, encoded, row,"
+        " &journal);\n", ""), "E_COMPANION_PERSISTED"),
+    ("darwin recover: sync with another expected row", Z, replace(
+        "          (policy, row, raw_journal, darwin_companion_effect,",
+        "          (policy, expected, raw_journal, darwin_companion_effect,"),
+     "E_COMPANION_ROW"),
+    ("darwin recover: check_policy dropped", Z, replace(
+        "    rc = check_policy (policy, &journal, row);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin recover: graph_commit_quiesce dropped", Z, replace(
+        "    rc = graph_commit_quiesce (policy, lease, &resolver, runtime,\n"
+        "            operation_uuid, encoded, row, FALSE, &key,"
+        " drain_timeout_us,\n"
+        "            &quiescence);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin recover: bind dropped", Z, replace(
+        "    rc = wyl_policy_store_bind_fact_root_authorized (policy,"
+        " fact_root, lease);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin effect: runtime check dropped", G, replace(
+        "    rc = check_runtime (effect->runtime, effect->key);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
+    ("darwin effect: shape dropped", G, replace(
+        "    rc = darwin_post_publish_shape (effect->resolver,"
+        " effect->directory,\n"
+        "            effect->lease, effect->journal, current,"
+        " effect->provenance);\n",
+        "    rc = WYRELOG_E_OK;\n"), "E_ROUTE_HELPER"),
 )
 
 
