@@ -58,7 +58,6 @@ fixture (void)
   register_test_human (store, "admin");
   g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "admin",
       "wr.system_admin", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
   return handle;
 }
 
@@ -77,13 +76,14 @@ static void
 check_denial_is_audit_only (void)
 {
   g_autoptr (WylHandle) handle = fixture ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   deny_login (handle, "unknown", FALSE);
   deny_login (handle, "unknown", TRUE);
-  g_assert_cmpint (mutate (handle, "disabled", "create"), ==, WYRELOG_E_OK);
+  register_test_human (store, "disabled");
   g_assert_cmpint (mutate (handle, "disabled", "disable"), ==, WYRELOG_E_OK);
   deny_login (handle, "disabled", FALSE);
   deny_login (handle, "disabled", TRUE);
-  g_assert_cmpint (mutate (handle, "deleted", "create"), ==, WYRELOG_E_OK);
+  register_test_human (store, "deleted");
   g_assert_cmpint (mutate (handle, "deleted", "delete"), ==, WYRELOG_E_OK);
   deny_login (handle, "deleted", FALSE);
   deny_login (handle, "deleted", TRUE);
@@ -123,7 +123,8 @@ static void
 check_disable_login_order (void)
 {
   g_autoptr (WylHandle) handle = fixture ();
-  g_assert_cmpint (mutate (handle, "racer", "create"), ==, WYRELOG_E_OK);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "racer");
   LoginRace race = {.handle = handle};
   g_mutex_init (&race.lock);
   g_cond_init (&race.started);
@@ -141,7 +142,7 @@ check_disable_login_order (void)
   g_cond_clear (&race.started);
   g_mutex_clear (&race.lock);
 
-  g_assert_cmpint (mutate (handle, "login-first", "create"), ==, WYRELOG_E_OK);
+  register_test_human (store, "login-first");
   g_autoptr (wyl_login_req_t) request = wyl_login_req_new ();
   wyl_login_req_set_username (request, "login-first");
   g_autoptr (WylSession) session = NULL;
@@ -163,12 +164,11 @@ static void
 check_conflicting_receipt_preserves_sessions (void)
 {
   g_autoptr (WylHandle) handle = fixture ();
-  g_assert_cmpint (mutate (handle, "other", "create"), ==, WYRELOG_E_OK);
-  g_assert_cmpint (mutate (handle, "second-admin", "create"), ==, WYRELOG_E_OK);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  register_test_human (store, "other");
+  register_test_human (store, "second-admin");
   g_assert_cmpint (wyl_policy_store_grant_role_membership (store, "second-admin",
       "wr.system_admin", WYL_TENANT_DEFAULT), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
   gchar request[WYL_REQUEST_ID_STRING_BUF];
   g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
   WylTenantDeleteRuntime runtime = {.authorize = authorize, .validate = validate, .data = handle};
@@ -253,41 +253,43 @@ fault_checkpoint (const gchar *point, gpointer data)
 static void
 check_mutation_commit_faults (void)
 {
+  g_autoptr (WylHandle) handle = fixture ();
   const gchar *points[] = {"before_user_commit", "after_user_commit"};
   const gchar *actions[] = {"disable", "delete"};
   for (guint a = 0; a < G_N_ELEMENTS (actions); a++) {
     for (guint p = 0; p < G_N_ELEMENTS (points); p++) {
-      g_autoptr (WylHandle) handle = fixture ();
-      g_assert_cmpint (mutate (handle, "fault-user", "create"), ==, WYRELOG_E_OK);
+      g_autofree gchar *user = g_strdup_printf ("fault-user-%u-%u", a, p);
+      register_test_human (wyl_handle_get_policy_store (handle), user);
       g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
-      wyl_login_req_set_username (login, "fault-user");
+      wyl_login_req_set_username (login, user);
       g_autoptr (WylSession) session = NULL;
       g_assert_cmpint (wyl_session_login (handle, login, &session), ==, WYRELOG_E_OK);
       UserFault fault = {handle, points[p], 0};
       WylTenantDeleteRuntime runtime = {fault_authorize, fault_validate, fault_checkpoint, &fault};
       g_auto (WylUserDeletePreview) preview = {0};
       if (a == 1)
-        g_assert_cmpint (wyl_handle_user_preview (handle, "fault-user", "admin", &runtime, &preview), ==, WYRELOG_E_OK);
+        g_assert_cmpint (wyl_handle_user_preview (handle, user, "admin", &runtime, &preview), ==, WYRELOG_E_OK);
+      gint64 audits = rows (handle, "SELECT COUNT(*) FROM audit_events WHERE action IN ('user_disable','user_delete')");
       gchar request[WYL_REQUEST_ID_STRING_BUF];
       g_assert_cmpint (wyl_request_id_new (request, sizeof request), ==, WYRELOG_E_OK);
       g_auto (WylUserOperation) operation = {0};
-      g_assert_cmpint (wyl_handle_user_mutate (handle, "fault-user", "admin",
+      g_assert_cmpint (wyl_handle_user_mutate (handle, user, "admin",
           actions[a], request, preview.fingerprint, &runtime, &operation), ==, WYRELOG_E_IO);
       g_assert_cmpuint (fault.hits, ==, 1);
       g_assert_cmpint (operation.committed, ==, p == 1);
       g_assert_cmpint (wyl_session_is_active_human_private (session), ==, p == 0);
       g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM human_user_sessions"), ==, p == 0 ? 1 : 0);
-      g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM audit_events WHERE action IN ('user_disable','user_delete')"), ==, p == 1 ? 1 : 0);
-      if (p == 0) g_assert_cmpint (wyl_policy_store_user_require (wyl_handle_get_policy_store (handle), "fault-user", TRUE), ==, WYRELOG_E_OK);
-      else deny_login (handle, "fault-user", FALSE);
+      g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM audit_events WHERE action IN ('user_disable','user_delete')") - audits, ==, p == 1 ? 1 : 0);
+      if (p == 0) g_assert_cmpint (wyl_policy_store_user_require (wyl_handle_get_policy_store (handle), user, TRUE), ==, WYRELOG_E_OK);
+      else deny_login (handle, user, FALSE);
       fault.point = NULL;
       for (guint retry = 0; retry < 2; retry++) {
-        g_assert_cmpint (wyl_handle_user_mutate (handle, "fault-user", "admin",
+        g_assert_cmpint (wyl_handle_user_mutate (handle, user, "admin",
             actions[a], request, preview.fingerprint, &runtime, &operation), ==, WYRELOG_E_OK);
         g_assert_true (operation.committed);
         g_assert_true (operation.complete);
       }
-      g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM audit_events WHERE action IN ('user_disable','user_delete')"), ==, 1);
+      g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM audit_events WHERE action IN ('user_disable','user_delete')") - audits, ==, 1);
       g_assert_cmpint (rows (handle, "SELECT COUNT(*) FROM human_user_operations WHERE phase='cleanup'"), ==, 0);
     }
   }

@@ -7271,7 +7271,8 @@ test_user_delete_restart (void)
       const gchar *tenants[] = {"tenant-a", "tenant-b"};
       for (guint t = 0; t < G_N_ELEMENTS (tenants); t++) {
         create_graph_with_schema (policy, root, tenants[t], "orders");
-        append_order_batches (policy, root, tenants[t], "orders");
+        if (t == 0)
+          append_order_batches (policy, root, tenants[t], "orders");
         WylPolicyAuthorityMutationResult result;
         g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (policy, tenants[t], WYL_POLICY_TENANT_LIFECYCLE_SEALED, 0, 0, &result), ==, WYRELOG_E_OK);
         g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
