@@ -1187,6 +1187,625 @@ test_provisioned_restore_witness_rollback_race (void)
   }
 }
 
+/* ------------------------------------------------------------------ */
+
+static const gchar replacement_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c07054a";
+
+/* Three full 64 KiB read chunks and a partial tail. */
+#define REPLACEMENT_BYTES (3u * 65536u + 17u)
+#define REPLACEMENT_READ "darwin-replacement-main-read"
+#define REPLACEMENT_CHUNK "darwin-replacement-main-read-chunk"
+
+typedef enum
+{
+  REPLACEMENT_RECORD,
+  REPLACEMENT_SUBSTITUTE,
+  REPLACEMENT_LINK,
+  REPLACEMENT_CHMOD,
+  REPLACEMENT_CREATE_LEGACY,
+  REPLACEMENT_RENAME_AWAY,
+  REPLACEMENT_SWAP_GRAPH,
+  REPLACEMENT_FAIL,
+  REPLACEMENT_TRUNCATE,
+  REPLACEMENT_APPEND,
+  REPLACEMENT_OVERWRITE,
+} ReplacementAction;
+
+/* The post-SYNC_PUBLISH_DIR shape of a macOS restore (#1303 U5-6): the old
+ * provisioned main retained at this restore's rollback name, and the restore
+ * stage the journal pinned published at `facts.duckdb`.  The checkpoint
+ * records every point and performs one action at `act_at`. */
+typedef struct
+{
+  gchar *root;
+  WylFactGraphResolver resolver;
+  WylFactGraphLocator locator;
+  WylFactGraphDirectory graph;
+  WylFactGraphDarwinOperationEvidence old_evidence;
+  WylFactArtifactInventoryIdentity old_main;
+  WylFactArtifactInventoryIdentity staged;
+  guint64 logical_bytes;
+  guint8 *content;
+  gchar *checksum;
+  gchar *legacy;
+  gchar *rollback;
+  GPtrArray *seen;
+  const gchar *act_at;
+  ReplacementAction action;
+  guint hits;
+} ReplacementFixture;
+
+static WylFactArtifactInventoryIdentity
+replacement_write_file (ReplacementFixture *fixture, const gchar *name)
+{
+  gint fd = openat (fixture->graph.graph_fd, name,
+          O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (write_exact (fd, fixture->content, fixture->logical_bytes));
+  g_assert_cmpint (fsync (fd), ==, 0);
+  struct stat status;
+  g_assert_cmpint (fstat (fd, &status), ==, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+  return (WylFactArtifactInventoryIdentity) {
+           .domain = (guint64) status.st_dev,
+           .object = (guint64) status.st_ino,
+  };
+}
+
+static void
+replacement_pwrite (ReplacementFixture *fixture, guint8 value, guint64 offset)
+{
+  gint fd = openat (fixture->graph.graph_fd, "facts.duckdb",
+          O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (pwrite (fd, &value, 1, (off_t) offset), ==, 1);
+  g_assert_cmpint (close (fd), ==, 0);
+}
+
+static void
+replacement_rename (ReplacementFixture *fixture, const gchar *from,
+    const gchar *to)
+{
+  g_assert_cmpint (renameat (fixture->graph.graph_fd, from,
+      fixture->graph.graph_fd, to), ==, 0);
+}
+
+static void
+replacement_unlink (ReplacementFixture *fixture, const gchar *name)
+{
+  g_assert_cmpint (unlinkat (fixture->graph.graph_fd, name, 0), ==, 0);
+}
+
+static wyrelog_error_t
+replacement_checkpoint (const gchar *point, gpointer user_data)
+{
+  ReplacementFixture *fixture = user_data;
+  g_ptr_array_add (fixture->seen, g_strdup (point));
+  if (g_strcmp0 (point, fixture->act_at) != 0 || fixture->hits > 0)
+    return WYRELOG_E_OK;
+  fixture->hits++;
+  gint graph_fd = fixture->graph.graph_fd;
+  if (fixture->action == REPLACEMENT_SUBSTITUTE) {
+    replacement_rename (fixture, "facts.duckdb", "parked");
+    (void) replacement_write_file (fixture, "facts.duckdb");
+  } else if (fixture->action == REPLACEMENT_LINK) {
+    g_assert_cmpint (linkat (graph_fd, "facts.duckdb", graph_fd, "extra", 0),
+        ==, 0);
+  } else if (fixture->action == REPLACEMENT_CHMOD) {
+    g_assert_cmpint (fchmodat (graph_fd, "facts.duckdb", 0644,
+        AT_SYMLINK_NOFOLLOW), ==, 0);
+  } else if (fixture->action == REPLACEMENT_CREATE_LEGACY) {
+    (void) replacement_write_file (fixture, fixture->legacy);
+  } else if (fixture->action == REPLACEMENT_RENAME_AWAY) {
+    replacement_rename (fixture, "facts.duckdb", "parked");
+  } else if (fixture->action == REPLACEMENT_SWAP_GRAPH) {
+    DirectFinalCheckpoint swap = {.graph = &fixture->graph };
+    replace_graph_with_foreign (&swap);
+  } else if (fixture->action == REPLACEMENT_FAIL) {
+    return WYRELOG_E_IO;
+  } else if (fixture->action == REPLACEMENT_TRUNCATE) {
+    gint fd = openat (graph_fd, "facts.duckdb",
+            O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+    g_assert_cmpint (fd, >=, 0);
+    g_assert_cmpint (ftruncate (fd, 1), ==, 0);
+    g_assert_cmpint (close (fd), ==, 0);
+  } else if (fixture->action == REPLACEMENT_APPEND) {
+    replacement_pwrite (fixture, 0x5a, fixture->logical_bytes);
+  } else if (fixture->action == REPLACEMENT_OVERWRITE) {
+    replacement_pwrite (fixture, (guint8) (fixture->content[0] ^ 0xffu), 0);
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+replacement_fixture_init (ReplacementFixture *fixture, const gchar *graph_id)
+{
+  memset (fixture, 0, sizeof *fixture);
+  fixture->root = make_resolver_root ("wyl-macos-restore-replacement-XXXXXX");
+  fixture->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  fixture->graph = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_assert_cmpint (wyl_fact_graph_resolver_open (fixture->root,
+      &fixture->resolver), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&fixture->locator,
+      "tenant-restore", graph_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&fixture->resolver,
+      &fixture->locator, TRUE, &fixture->graph), ==, WYRELOG_E_OK);
+
+  /* RETAIN: the old ADR 0006 final now sits at the rollback name. */
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_create_darwin_provisioned_final
+        (&fixture->graph, operation_uuid, &fixture->old_evidence, &final), ==,
+      WYRELOG_E_OK);
+  g_assert_true (write_exact (final.fd, "provisioned", 11));
+  struct stat status;
+  g_assert_cmpint (fstat (final.fd, &status), ==, 0);
+  fixture->old_main = (WylFactArtifactInventoryIdentity) {
+    .domain = (guint64) status.st_dev, .object = (guint64) status.st_ino,
+  };
+  wyl_fact_graph_regular_file_clear (&final);
+  fixture->rollback = g_strdup_printf ("restore-%s.duckdb.superseded",
+          witness_restore_uuid);
+  replacement_rename (fixture, "facts.duckdb", fixture->rollback);
+
+  /* The restore stage, created exclusively and pinned by the journal.  The
+   * checksum is computed here, independently of the locator. */
+  fixture->logical_bytes = REPLACEMENT_BYTES;
+  fixture->content = g_malloc (REPLACEMENT_BYTES);
+  for (guint i = 0; i < REPLACEMENT_BYTES; i++)
+    fixture->content[i] = (guint8) ((i * 31u + 7u) & 0xffu);
+  g_autofree gchar *stage = g_strdup_printf ("restore-%s.duckdb",
+          witness_restore_uuid);
+  fixture->staged = replacement_write_file (fixture, stage);
+  g_autofree gchar *hex = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
+          fixture->content, REPLACEMENT_BYTES);
+  fixture->checksum = g_strconcat ("sha256:", hex, NULL);
+
+  /* PUBLISH keeps the stage's device and inode; SYNC_PUBLISH_DIR. */
+  replacement_rename (fixture, stage, "facts.duckdb");
+  g_assert_cmpint (fsync (fixture->graph.graph_fd), ==, 0);
+  fixture->legacy = g_strdup_printf ("provision-%s.sqlite", replacement_uuid);
+
+  fixture->seen = g_ptr_array_new_with_free_func (g_free);
+  fixture->graph.checkpoint = replacement_checkpoint;
+  fixture->graph.checkpoint_data = fixture;
+}
+
+static void
+replacement_fixture_clear (ReplacementFixture *fixture)
+{
+  fixture->graph.checkpoint = NULL;
+  fixture->graph.checkpoint_data = NULL;
+  wyl_fact_graph_directory_clear (&fixture->graph);
+  wyl_fact_graph_locator_clear (&fixture->locator);
+  wyl_fact_graph_resolver_clear (&fixture->resolver);
+  remove_tree (fixture->root);
+  g_clear_pointer (&fixture->root, g_free);
+  g_clear_pointer (&fixture->content, g_free);
+  g_clear_pointer (&fixture->checksum, g_free);
+  g_clear_pointer (&fixture->legacy, g_free);
+  g_clear_pointer (&fixture->rollback, g_free);
+  g_clear_pointer (&fixture->seen, g_ptr_array_unref);
+}
+
+static guint
+replacement_seen (ReplacementFixture *fixture, const gchar *point)
+{
+  guint count = 0;
+  for (guint i = 0; i < fixture->seen->len; i++)
+    if (g_strcmp0 (g_ptr_array_index (fixture->seen, i), point) == 0)
+      count++;
+  return count;
+}
+
+static guint
+open_fd_count (void)
+{
+  g_autoptr (GDir) fds = g_dir_open ("/dev/fd", 0, NULL);
+  g_assert_nonnull (fds);
+  guint count = 0;
+  while (g_dir_read_name (fds) != NULL)
+    count++;
+  return count;
+}
+
+static wyrelog_error_t
+replacement_capture (ReplacementFixture *fixture,
+    const WylFactArtifactInventoryIdentity *staged, guint64 logical_bytes,
+    const gchar *checksum, WylFactGraphDarwinOperationEvidence *out_evidence)
+{
+  g_ptr_array_set_size (fixture->seen, 0);
+  return wyl_fact_graph_directory_capture_darwin_replacement_evidence
+           (&fixture->graph, replacement_uuid, staged, logical_bytes,
+             checksum, out_evidence);
+}
+
+static wyrelog_error_t
+replacement_compare (ReplacementFixture *fixture, const gchar *uuid,
+    const WylFactArtifactInventoryIdentity *staged, guint64 logical_bytes,
+    const gchar *checksum, const WylFactGraphDarwinOperationEvidence *expected)
+{
+  g_ptr_array_set_size (fixture->seen, 0);
+  return wyl_fact_graph_directory_compare_darwin_replacement_evidence
+           (&fixture->graph, uuid, staged, logical_bytes, checksum, expected);
+}
+
+/* A refusal leaves the output zeroed and closes every descriptor it
+ * opened. */
+static void
+assert_capture_refused (ReplacementFixture *fixture,
+    const WylFactArtifactInventoryIdentity *staged, guint64 logical_bytes,
+    const gchar *checksum, wyrelog_error_t expected)
+{
+  WylFactGraphDarwinOperationEvidence evidence;
+  memset (&evidence, 0xa5, sizeof evidence);
+  guint fds = open_fd_count ();
+  g_assert_cmpint (replacement_capture (fixture, staged, logical_bytes,
+      checksum, &evidence), ==, expected);
+  g_assert_cmpuint (open_fd_count (), ==, fds);
+  g_assert_true (bytes_are_zero (evidence.bytes, sizeof evidence.bytes));
+}
+
+static gchar *
+replacement_checksum_flipped (const gchar *checksum)
+{
+  gchar *flipped = g_strdup (checksum);
+  gsize last = strlen (flipped) - 1;
+  flipped[last] = flipped[last] == '0' ? '1' : '0';
+  return flipped;
+}
+
+static guint64
+replacement_artifact_file_id (const WylFactGraphDarwinOperationEvidence *e)
+{
+  guint64 value = 0;
+  for (gsize i = 48; i < 56; i++)
+    value = (value << 8) | e->bytes[i];
+  return value;
+}
+
+static void
+test_restore_replacement_evidence_capture (void)
+{
+  ReplacementFixture f;
+  replacement_fixture_init (&f, "graph-replacement");
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &evidence), ==, WYRELOG_E_OK);
+
+  /* One reopen, the cheap pins, four read chunks, then the capture. */
+  g_assert_cmpuint (f.seen->len, ==, 6);
+  g_assert_cmpstr (g_ptr_array_index (f.seen, 0), ==, "file-opened");
+  for (guint i = 1; i < 5; i++)
+    g_assert_cmpstr (g_ptr_array_index (f.seen, i), ==, REPLACEMENT_CHUNK);
+  g_assert_cmpstr (g_ptr_array_index (f.seen, 5), ==, REPLACEMENT_READ);
+
+  /* Version 1 evidence bound to the replacement UUID, not to the old
+   * provisioning operation, naming the journal-pinned object. */
+  WylFactGraphDarwinOperationEvidence decoded = { 0 };
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (evidence.bytes,
+      sizeof evidence.bytes, replacement_uuid, &decoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_decode (evidence.bytes,
+      sizeof evidence.bytes, operation_uuid, &decoded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_artifact_file_id (&evidence), ==,
+      f.staged.object);
+  g_assert_false (wyl_fact_graph_darwin_evidence_equal (&evidence,
+      &f.old_evidence));
+  gint fd = openat (f.graph.graph_fd, "facts.duckdb",
+          O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_compare (f.graph.graph_fd,
+      fd, replacement_uuid, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (close (fd), ==, 0);
+
+  WylFactGraphDarwinOperationEvidence second = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &second), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_fact_graph_darwin_evidence_equal (&evidence, &second));
+
+  /* Nothing on disk moved: the retained old main still carries its own
+   * evidence, the main holds the staged bytes, and no legacy name exists. */
+  fd = openat (f.graph.graph_fd, f.rollback, O_RDONLY | O_CLOEXEC
+          | O_NOFOLLOW);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_cmpint (wyl_fact_graph_darwin_evidence_compare (f.graph.graph_fd,
+      fd, operation_uuid, &f.old_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (close (fd), ==, 0);
+  fd = openat (f.graph.graph_fd, "facts.duckdb",
+          O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (fd, >=, 0);
+  g_autofree guint8 *bytes = g_malloc (REPLACEMENT_BYTES + 1);
+  g_assert_true (read_exact (fd, bytes, REPLACEMENT_BYTES));
+  g_assert_cmpint (read (fd, bytes + REPLACEMENT_BYTES, 1), ==, 0);
+  g_assert_cmpint (close (fd), ==, 0);
+  g_assert_cmpmem (bytes, REPLACEMENT_BYTES, f.content, REPLACEMENT_BYTES);
+  struct stat status;
+  g_assert_cmpint (fstatat (f.graph.graph_fd, f.legacy, &status,
+      AT_SYMLINK_NOFOLLOW), !=, 0);
+  g_assert_cmpint (errno, ==, ENOENT);
+  replacement_fixture_clear (&f);
+}
+
+static void
+test_restore_replacement_evidence_invalid (void)
+{
+  ReplacementFixture f;
+  replacement_fixture_init (&f, "graph-replacement-invalid");
+  WylFactArtifactInventoryIdentity bad;
+  WylFactGraphDarwinOperationEvidence evidence;
+  /* Any call reaching the reopen would count a hit here. */
+  f.act_at = "file-opened";
+
+  memset (&evidence, 0xa5, sizeof evidence);
+  g_assert_cmpint (wyl_fact_graph_directory_capture_darwin_replacement_evidence
+        (NULL, replacement_uuid, &f.staged, f.logical_bytes, f.checksum,
+      &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_true (bytes_are_zero (evidence.bytes, sizeof evidence.bytes));
+  assert_capture_refused (&f, NULL, f.logical_bytes, f.checksum,
+      WYRELOG_E_INVALID);
+  bad = f.staged;
+  bad.domain = 0;
+  assert_capture_refused (&f, &bad, f.logical_bytes, f.checksum,
+      WYRELOG_E_INVALID);
+  bad = f.staged;
+  bad.object = 0;
+  assert_capture_refused (&f, &bad, f.logical_bytes, f.checksum,
+      WYRELOG_E_INVALID);
+  bad = f.staged;
+  bad.object_width = 1;
+  assert_capture_refused (&f, &bad, f.logical_bytes, f.checksum,
+      WYRELOG_E_INVALID);
+  bad = f.staged;
+  bad.object_bytes[0] = 1;
+  assert_capture_refused (&f, &bad, f.logical_bytes, f.checksum,
+      WYRELOG_E_INVALID);
+  assert_capture_refused (&f, &f.staged, 0, f.checksum, WYRELOG_E_INVALID);
+  assert_capture_refused (&f, &f.staged, G_MAXUINT64, f.checksum,
+      WYRELOG_E_INVALID);
+  assert_capture_refused (&f, &f.staged, (guint64) G_MAXINT64 + 1u,
+      f.checksum, WYRELOG_E_INVALID);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, NULL,
+      WYRELOG_E_INVALID);
+  g_autofree gchar *short_checksum = g_strndup (f.checksum, 70);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, short_checksum,
+      WYRELOG_E_INVALID);
+  g_autofree gchar *long_checksum = g_strconcat (f.checksum, "0", NULL);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, long_checksum,
+      WYRELOG_E_INVALID);
+  g_autofree gchar *upper_hex = g_ascii_strup (f.checksum + 7, -1);
+  g_autofree gchar *upper = g_strconcat ("sha256:", upper_hex, NULL);
+  g_assert_cmpstr (upper, !=, f.checksum);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, upper,
+      WYRELOG_E_INVALID);
+  g_autofree gchar *sha512 = g_strconcat ("sha512:", f.checksum + 7, NULL);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, sha512,
+      WYRELOG_E_INVALID);
+  g_autofree gchar *upper_uuid = g_ascii_strup (replacement_uuid, -1);
+  memset (&evidence, 0xa5, sizeof evidence);
+  g_assert_cmpint (wyl_fact_graph_directory_capture_darwin_replacement_evidence
+        (&f.graph, upper_uuid, &f.staged, f.logical_bytes, f.checksum,
+      &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_true (bytes_are_zero (evidence.bytes, sizeof evidence.bytes));
+  /* Canonical but not UUIDv7: refused before any reopen (the legacy name
+   * derivation rejects it too). */
+  g_assert_cmpint (wyl_fact_graph_directory_capture_darwin_replacement_evidence
+        (&f.graph, "01890f47-3c4b-4cc2-b8c4-dc0c0c07054a", &f.staged,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_directory_capture_darwin_replacement_evidence
+        (&f.graph, replacement_uuid, &f.staged, f.logical_bytes, f.checksum,
+      NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &bad,
+      f.logical_bytes, f.checksum, &f.old_evidence), ==, WYRELOG_E_INVALID);
+  /* None of these reached the reopen. */
+  g_assert_cmpuint (f.hits, ==, 0);
+  f.act_at = NULL;
+
+  /* The fixture itself is acceptable. */
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &evidence), ==, WYRELOG_E_OK);
+  replacement_fixture_clear (&f);
+}
+
+/* Pin mismatches before the call.  The nlink 2, mode 0644 and symlink
+ * cases are refused by the reopen itself; the pass-level link and mode
+ * checks are reached only by the LINK and CHMOD race actions, so those
+ * stay. */
+static void
+test_restore_replacement_evidence_pins (void)
+{
+  ReplacementFixture f;
+  replacement_fixture_init (&f, "graph-replacement-pins");
+  WylFactArtifactInventoryIdentity shifted;
+
+  /* A remount or reboot may change the device number; it is compared, not
+   * relaxed (ADR 0006).  The cheap pins refuse before any read. */
+  shifted = f.staged;
+  shifted.domain ^= 1;
+  assert_capture_refused (&f, &shifted, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, "file-opened"), ==, 1);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 0);
+  shifted = f.staged;
+  shifted.object += 1;
+  assert_capture_refused (&f, &shifted, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 0);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes + 1, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 0);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes - 1, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 0);
+
+  /* Content: a different checksum, or the same pins over changed bytes. */
+  g_autofree gchar *flipped = replacement_checksum_flipped (f.checksum);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, flipped,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 4);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_READ), ==, 0);
+  replacement_pwrite (&f, (guint8) (f.content[70000] ^ 0xffu), 70000);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 4);
+  replacement_pwrite (&f, f.content[70000], 70000);
+
+  /* Link count, mode and symlink: refused by the reopen. */
+  g_assert_cmpint (linkat (f.graph.graph_fd, "facts.duckdb", f.graph.graph_fd,
+      "extra", 0), ==, 0);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  replacement_unlink (&f, "extra");
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0644,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fchmodat (f.graph.graph_fd, "facts.duckdb", 0600,
+      AT_SYMLINK_NOFOLLOW), ==, 0);
+  replacement_rename (&f, "facts.duckdb", "parked");
+  g_assert_cmpint (symlinkat ("parked", f.graph.graph_fd, "facts.duckdb"),
+      ==, 0);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  replacement_unlink (&f, "facts.duckdb");
+
+  /* An absent main is reported as absent. */
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_NOT_FOUND);
+  replacement_rename (&f, "parked", "facts.duckdb");
+
+  /* The replacement's legacy stage name is refused before any reopen. */
+  (void) replacement_write_file (&f, f.legacy);
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, "file-opened"), ==, 0);
+  replacement_unlink (&f, f.legacy);
+
+  /* A same-bytes substitute under the journal's pins.  The same substitute
+   * under its own pins is not a refusal case: choosing pins is the
+   * journal's job, and capture accepts matching pins by design. */
+  replacement_rename (&f, "facts.duckdb", "parked");
+  (void) replacement_write_file (&f, "facts.duckdb");
+  assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  replacement_unlink (&f, "facts.duckdb");
+  replacement_rename (&f, "parked", "facts.duckdb");
+
+  /* Another graph directory holding the same bytes. */
+  ReplacementFixture foreign;
+  replacement_fixture_init (&foreign, "graph-replacement-foreign");
+  assert_capture_refused (&foreign, &f.staged, f.logical_bytes, f.checksum,
+      WYRELOG_E_POLICY);
+  replacement_fixture_clear (&foreign);
+
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &evidence), ==, WYRELOG_E_OK);
+  replacement_fixture_clear (&f);
+}
+
+/* One change during the proof, each from a fresh fixture.  The read point
+ * follows the capture, so these also cover the capture's window. */
+static void
+test_restore_replacement_evidence_race (void)
+{
+  static const struct
+  {
+    const gchar *at;
+    ReplacementAction action;
+    wyrelog_error_t expected;
+  } cases[] = {
+    {REPLACEMENT_READ, REPLACEMENT_SUBSTITUTE, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_LINK, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_CHMOD, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_CREATE_LEGACY, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_RENAME_AWAY, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_SWAP_GRAPH, WYRELOG_E_POLICY},
+    {REPLACEMENT_READ, REPLACEMENT_FAIL, WYRELOG_E_IO},
+    {REPLACEMENT_CHUNK, REPLACEMENT_FAIL, WYRELOG_E_IO},
+    {REPLACEMENT_CHUNK, REPLACEMENT_TRUNCATE, WYRELOG_E_POLICY},
+    {REPLACEMENT_CHUNK, REPLACEMENT_APPEND, WYRELOG_E_POLICY},
+    {REPLACEMENT_CHUNK, REPLACEMENT_OVERWRITE, WYRELOG_E_POLICY},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    ReplacementFixture f;
+    replacement_fixture_init (&f, "graph-replacement-race");
+    f.act_at = cases[i].at;
+    f.action = cases[i].action;
+    g_test_message ("race case %" G_GSIZE_FORMAT, i);
+    assert_capture_refused (&f, &f.staged, f.logical_bytes, f.checksum,
+        cases[i].expected);
+    g_assert_cmpuint (f.hits, ==, 1);
+    /* The first short read refuses; nothing past it is hashed. */
+    if (cases[i].action == REPLACEMENT_TRUNCATE)
+      g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 1);
+    replacement_fixture_clear (&f);
+  }
+}
+
+static void
+test_restore_replacement_evidence_compare (void)
+{
+  ReplacementFixture f;
+  replacement_fixture_init (&f, "graph-replacement-compare");
+  WylFactGraphDarwinOperationEvidence evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &f.staged, f.logical_bytes,
+      f.checksum, &evidence), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < 2; i++)
+    g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+        f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_OK);
+
+  WylFactGraphDarwinOperationEvidence altered = evidence;
+  altered.bytes[55] ^= 0x01u;
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &altered), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &f.old_evidence), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replacement_compare (&f, witness_other_operation_uuid,
+      &f.staged, f.logical_bytes, f.checksum, &evidence), ==,
+      WYRELOG_E_POLICY);
+
+  /* Evidence for the same replacement UUID naming another object: every
+   * pin and the full read pass, and the evidence comparison refuses. */
+  ReplacementFixture foreign;
+  replacement_fixture_init (&foreign, "graph-replacement-compare-foreign");
+  WylFactGraphDarwinOperationEvidence foreign_evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&foreign, &foreign.staged,
+      foreign.logical_bytes, foreign.checksum, &foreign_evidence), ==,
+      WYRELOG_E_OK);
+  replacement_fixture_clear (&foreign);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &foreign_evidence), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_CHUNK), ==, 4);
+  g_assert_cmpuint (replacement_seen (&f, REPLACEMENT_READ), ==, 0);
+
+  /* The journal pins are still required alongside matching evidence. */
+  WylFactArtifactInventoryIdentity shifted = f.staged;
+  shifted.domain ^= 1;
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &shifted,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *flipped = replacement_checksum_flipped (f.checksum);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, flipped, &evidence), ==, WYRELOG_E_POLICY);
+
+  /* Compare never recaptures: a same-bytes substitute under its own pins
+   * would be captured, yet the recorded evidence refuses it. */
+  replacement_rename (&f, "facts.duckdb", "parked");
+  WylFactArtifactInventoryIdentity substitute =
+      replacement_write_file (&f, "facts.duckdb");
+  WylFactGraphDarwinOperationEvidence substitute_evidence = { 0 };
+  g_assert_cmpint (replacement_capture (&f, &substitute, f.logical_bytes,
+      f.checksum, &substitute_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &substitute,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_POLICY);
+  replacement_unlink (&f, "facts.duckdb");
+  replacement_rename (&f, "parked", "facts.duckdb");
+  g_assert_cmpint (replacement_compare (&f, replacement_uuid, &f.staged,
+      f.logical_bytes, f.checksum, &evidence), ==, WYRELOG_E_OK);
+  replacement_fixture_clear (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1211,5 +1830,20 @@ main (int argc, char **argv)
   g_test_add_func (
     "/fact/macos-object-identity/provisioned-restore-witness-rollback-race",
     test_provisioned_restore_witness_rollback_race);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-capture",
+    test_restore_replacement_evidence_capture);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-invalid",
+    test_restore_replacement_evidence_invalid);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-pins",
+    test_restore_replacement_evidence_pins);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-race",
+    test_restore_replacement_evidence_race);
+  g_test_add_func (
+    "/fact/macos-object-identity/restore-replacement-evidence-compare",
+    test_restore_replacement_evidence_compare);
   return wyl_test_normalize_exit_status (g_test_run ());
 }

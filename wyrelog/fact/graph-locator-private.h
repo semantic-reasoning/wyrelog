@@ -481,6 +481,32 @@ wyrelog_error_t wyl_fact_graph_provisioned_restore_witness_open_with_evidence
     const WylFactArtifactInventoryIdentity *expected_old_main,
     WylFactGraphProvisionedRestoreSlot slot,
     WylFactGraphProvisionedRestoreWitness **out_witness);
+/* Darwin restore replacement evidence (ADR 0006, "Restore replacement
+ * evidence").  After SYNC_PUBLISH_DIR the caller passes the authenticated
+ * journal pins of the published restore stage: device and inode, logical
+ * size, "sha256:" checksum, and the replacement provisioning UUID that the
+ * evidence binds.  Both forms reopen `facts.duckdb` through the held graph
+ * chain and require, before and after a full checksum re-read through that
+ * descriptor, those pins, one link, mode 0600, the effective owner and
+ * `provision-<replacement>.sqlite` absent.  The device number is compared,
+ * never relaxed.  The caller holds the root writer lease and quiescence; the
+ * before/after stat comparison detects a writer but does not replace them.
+ * Capture applies only while the `reserved` replacement row has no evidence;
+ * compare applies once it has, and never recaptures.  Any mismatch is an
+ * operator wedge.  No descriptor escapes; out_evidence stays zero on
+ * failure. */
+wyrelog_error_t
+wyl_fact_graph_directory_capture_darwin_replacement_evidence
+  (WylFactGraphDirectory *directory, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *staged_main,
+    guint64 logical_bytes, const gchar *checksum,
+    WylFactGraphDarwinOperationEvidence *out_evidence);
+wyrelog_error_t
+wyl_fact_graph_directory_compare_darwin_replacement_evidence
+  (WylFactGraphDirectory *directory, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *staged_main,
+    guint64 logical_bytes, const gchar *checksum,
+    const WylFactGraphDarwinOperationEvidence *expected_evidence);
 #endif
 /* Post-publication read-only proof. The old ACTIVE companion and rollback
  * still bind the old inode; the replacement companion and new main bind a
