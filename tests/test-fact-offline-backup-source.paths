@@ -132,6 +132,7 @@
 /fact-offline-backup-source/record/stale-write
 /fact-offline-backup-source/record/success
 /fact-offline-backup-source/record/verified-corrupt
+/fact-offline-backup-source/replacement-row-equal/evidence
 /fact-offline-backup-source/restore-begin-authenticated
 /fact-offline-backup-source/restore-begin-reject/bad-mode
 /fact-offline-backup-source/restore-begin-reject/corrupt-evidence

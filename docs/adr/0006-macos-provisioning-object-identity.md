@@ -408,8 +408,11 @@ re-read before the row advances. The schema cannot require evidence, because
 Linux and Windows replacement rows carry none, so the order is an obligation
 of the macOS commit path: on macOS the replacement row must not advance to
 `companion_synced` until its evidence is durable and re-read, and a selection
-whose replacement row carries no evidence is refused. Policy also refuses
-such a selection on macOS before any write. Selection copies the row's
+whose replacement row carries no evidence is refused. Policy enforces both
+on macOS before any effect or write: it refuses to advance a replacement row
+to `companion_synced` without evidence, even as a replay of a row that
+advanced before the evidence column existed, and it refuses such a
+selection. Selection copies the row's
 evidence into the `restore_selected` provisioning row in the same
 transaction, the replacement row's selection update refuses a missing or
 different copy, and promotion leaves it unchanged. Policy keeps the envelope
@@ -422,6 +425,7 @@ column before a migration creates it.
 | --- | --- |
 | Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed. |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |
+| `companion_synced`, evidence absent (macOS) | Fail closed at mark and at selection; no recapture; operator wedge. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |
