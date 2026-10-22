@@ -362,11 +362,15 @@ evidence exists (see "Restore replacement evidence") no evidence names the
 object at `facts.duckdb`: the witness accepts there any one-link 0600 file of
 the effective owner other than the old main, and only the journal-pinned
 staged identity binds it, so a same-bytes substitute is refused by the
-transition model rather than by evidence. Like Windows, the evidence execute
-stops at `PUBLISHED_DURABLE`: `FINALIZE` and `RETIRE_STAGE` stay refused, as
-do selection and promotion, so a macOS graph restore stops there with
-`FINALIZE` next. None of it is reachable while macOS commit admission
-refuses; these steps are proved by tests that reach the decision directly.
+transition model rather than by evidence. Once the companion step persists
+the replacement evidence, its compare form names that object too. The
+evidence execute stops at `PUBLISHED_DURABLE` with `FINALIZE` next. The
+companion step (see "Restore replacement evidence") then binds the replacement
+evidence and advances the replacement row; `FINALIZE`, `RETIRE_STAGE`,
+selection, promotion and the resume dispatcher's selection still refuse, so
+a macOS graph restore stops there. None of it is reachable while macOS
+commit admission refuses; these steps are proved by tests that reach the
+decision directly, and the companion step by tests that call it directly.
 
 ## Restore replacement evidence
 
@@ -421,11 +425,32 @@ persisting it. The provisioning insert guard names only replacement columns
 that every released replacement table has, so no trigger refers to the new
 column before a migration creates it.
 
+The macOS companion step is the step after `PUBLISHED_DURABLE` that Linux
+spends on the replacement companion link; on macOS it binds the replacement
+evidence instead. It first
+proves the published namespace under the root writer lease and quiescence:
+the graph directory holds exactly `facts.duckdb`, this restore's rollback
+name and at most `facts.duckdb.lock`, each a one-link 0600 regular file of
+the effective owner, and no stage, no provisioning legacy name and nothing
+else. The old main is proved at the rollback name by the old `ACTIVE`
+record's evidence through the restore witness; the new main is proved by the
+journal's device, inode and logical size. Names are matched byte for byte,
+so a case variant of the main or the lock on a case-insensitive volume fails
+closed as an unlisted name. Then, only while the `reserved` row has no
+evidence, the step captures it, persists it write-once and re-reads the row;
+on both paths it compares the stored evidence through a fresh descriptor
+and advances the row inside the policy transaction, whose effect re-proves
+the namespace and requires the row's evidence to be the bytes it compared.
+macOS has no companion link and no dual layout: the row's evidence is the
+discriminator Linux takes from its companion link. Every locator refusal
+after `SYNC_PUBLISH_DIR`, absence and busy included, is a policy refusal:
+an operator wedge, never a retry.
+
 | Durable observation | Required recovery result |
 | --- | --- |
-| Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed. |
+| Published, replacement `reserved`, evidence absent | Capture only under the journal-pin match above; otherwise fail closed (capture, write-once, re-read, compare, advance). |
 | `reserved`, evidence present | Re-read exactly and advance; never recapture. |
-| `companion_synced`, evidence absent (macOS) | Fail closed at mark and at selection; no recapture; operator wedge. |
+| `companion_synced`, evidence absent (macOS) | Fail closed at the companion step, at mark and at selection; no recapture; operator wedge. |
 | Evidence present, reopened main mismatches it | Fail closed without mutation. |
 | Rollback after evidence was written | The evidence stays on the replacement row until the terminal delete; nothing is promoted and nothing reads it. |
 | `restore_selected` or `ACTIVE`, evidence differs from the replacement row | Unreachable by schema; while the replacement row exists, store open treats it as corruption and refuses. After the terminal delete only the `ACTIVE` row holds the evidence, and nothing compares. |

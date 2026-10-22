@@ -2976,6 +2976,170 @@ wyl_fact_graph_directory_compare_darwin_replacement_evidence (
   return darwin_replacement_main_prove (directory, replacement_uuid,
              staged_main, logical_bytes, checksum, expected_evidence, NULL);
 }
+
+/* The Darwin twin of the Linux restore_post_publish_authority, which this
+ * build does not compile. */
+static wyrelog_error_t
+darwin_post_publish_authority (WylFactGraphResolver *resolver,
+    WylFactGraphDirectory *directory, WylFactRootWriterLease *lease)
+{
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_authorizes_resolver
+        (lease, resolver);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (directory->root_device != resolver->device
+      || directory->root_inode != resolver->inode)
+    return WYRELOG_E_POLICY;
+  return directory_revalidate (directory);
+}
+
+/* Enumerate the complete published namespace: the new main, the rollback
+ * name and at most the lock, each one-link 0600 and owned.  No file is
+ * opened; the witness holds the old main and the caller's capture or
+ * compare reads the new one.  Names match byte for byte, so a case variant
+ * of a listed name is refused as unlisted. */
+static wyrelog_error_t
+darwin_post_publish_inventory (WylFactGraphDirectory *directory,
+    const gchar *rollback,
+    const WylFactArtifactInventoryIdentity *old_identity,
+    const WylFactArtifactInventoryIdentity *new_identity,
+    guint64 logical_bytes)
+{
+  const gchar *allowed[] = { WYL_FACT_ARTIFACT_TRANSITION_FINAL_NAME,
+                             rollback,
+                             WYL_FACT_ARTIFACT_TRANSITION_LOCK_NAME };
+  gboolean seen[G_N_ELEMENTS (allowed)] = { FALSE };
+  gint scan_fd = openat (directory->graph_fd, ".",
+          O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (scan_fd < 0)
+    return errno_to_resolver_error (errno);
+  struct stat before = { 0 }, after = { 0 };
+  wyrelog_error_t rc = fstat (scan_fd, &before) == 0
+      ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && !stat_matches (&before, directory->graph_device,
+      directory->graph_inode, TRUE, 0700))
+    rc = WYRELOG_E_POLICY;
+  DIR *scan = NULL;
+  if (rc == WYRELOG_E_OK) {
+    scan = fdopendir (scan_fd);
+    if (scan == NULL)
+      rc = errno_to_resolver_error (errno);
+    else
+      scan_fd = -1;
+  }
+  guint count = 0;
+  while (rc == WYRELOG_E_OK) {
+    errno = 0;
+    struct dirent *entry = readdir (scan);
+    if (entry == NULL) {
+      if (errno != 0)
+        rc = errno_to_resolver_error (errno);
+      break;
+    }
+    if (++count > 5) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    if (strcmp (entry->d_name, ".") == 0
+        || strcmp (entry->d_name, "..") == 0)
+      continue;
+    guint slot = 0;
+    while (slot < G_N_ELEMENTS (allowed)
+        && strcmp (entry->d_name, allowed[slot]) != 0)
+      slot++;
+    if (slot == G_N_ELEMENTS (allowed) || seen[slot]) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    seen[slot] = TRUE;
+    struct stat named = { 0 };
+    if (fstatat (directory->graph_fd, allowed[slot], &named,
+        AT_SYMLINK_NOFOLLOW) != 0) {
+      rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
+      break;
+    }
+    const WylFactArtifactInventoryIdentity *expected = slot == 0
+        ? new_identity : slot == 1 ? old_identity : NULL;
+    if (!S_ISREG (named.st_mode) || named.st_nlink != 1
+        || named.st_size < 0 || named.st_uid != geteuid ()
+        || (named.st_mode & 07777) != 0600
+        || (expected != NULL
+        && ((guint64) named.st_dev != expected->domain
+        || (guint64) named.st_ino != expected->object))
+        || (slot == 0 && (guint64) named.st_size != logical_bytes)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+  }
+  if (rc == WYRELOG_E_OK && (!seen[0] || !seen[1]))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && fstat (directory->graph_fd, &after) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && !restore_inventory_same_stat (&before, &after))
+    rc = WYRELOG_E_POLICY;
+  if (scan != NULL)
+    closedir (scan);
+  if (scan_fd >= 0)
+    close (scan_fd);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_restore_darwin_post_publish_shape_open
+  (WylFactGraphResolver *resolver, WylFactGraphDirectory *directory,
+    WylFactRootWriterLease *lease, const gchar *old_provisioning_uuid,
+    const WylFactGraphDarwinOperationEvidence *old_evidence,
+    const gchar *restore_uuid, const gchar *replacement_uuid,
+    const WylFactArtifactInventoryIdentity *expected_old_main,
+    const WylFactArtifactInventoryIdentity *expected_new_main,
+    guint64 logical_bytes)
+{
+  if (resolver == NULL || directory == NULL || lease == NULL
+      || old_evidence == NULL || expected_old_main == NULL
+      || expected_new_main == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *old_legacy = NULL;
+  g_autofree gchar *new_legacy = NULL;
+  WylFactArtifactTransitionNames names = { 0 };
+  wyrelog_error_t rc = provisioning_stage_name_from_operation
+        (old_provisioning_uuid, &old_legacy);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (replacement_uuid,
+            &new_legacy);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_transition_names_derive (restore_uuid, &names);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (old_legacy, new_legacy) == 0
+      || !restore_inventory_identity_valid (expected_old_main)
+      || !restore_inventory_identity_valid (expected_new_main)
+      || expected_old_main->domain == 0 || expected_old_main->object == 0
+      || expected_new_main->domain == 0 || expected_new_main->object == 0
+      || wyl_fact_artifact_inventory_identity_equal (expected_old_main,
+      expected_new_main)))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_authority (resolver, directory, lease);
+  /* The witness refuses a present old legacy name and accepts an absent
+   * `facts.duckdb`; the inventory requires the new main. */
+  g_autoptr (WylFactGraphProvisionedRestoreWitness) witness = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_restore_witness_open_with_evidence
+          (directory, old_provisioning_uuid, old_evidence, restore_uuid,
+            expected_old_main,
+            WYL_FACT_GRAPH_PROVISIONED_RESTORE_RETAINED_ROLLBACK, &witness);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_inventory (directory, names.rollback,
+            expected_old_main, expected_new_main, logical_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = darwin_post_publish_authority (resolver, directory, lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_provisioned_restore_witness_revalidate (witness,
+            directory);
+  wyl_fact_artifact_transition_names_clear (&names);
+  return rc;
+}
 #endif
 
 wyrelog_error_t
