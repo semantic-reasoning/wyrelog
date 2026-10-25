@@ -58,7 +58,13 @@ def main(argv: list[str]) -> int:
         return 2
     root = Path(argv[1]).resolve()
     archive = Path(argv[2]).resolve()
-    if sha256(archive) != ARCHIVE_SHA256:
+    try:
+        archive_hash = sha256(archive)
+    except OSError as error:
+        print(f"Cannot read pinned DuckDB source archive {archive}: {error}",
+              file=sys.stderr)
+        return 1
+    if archive_hash != ARCHIVE_SHA256:
         print("DuckDB archive SHA-256 mismatch", file=sys.stderr)
         return 1
     generator = load_generator(root)

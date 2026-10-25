@@ -154,6 +154,12 @@ def extract_consumer_target(text: str) -> str:
 
 
 def validate_tests_meson(text: str) -> None:
+    require_once(
+        text,
+        "if get_option('duckdb_source') == 'subproject'\n"
+        "  test('duckdb-source-overlay', python3,\n",
+        "E_OVERLAY_REGISTRATION",
+    )
     for name in (
         "duckdb-linux-link-dependency-wiring",
         "duckdb-linux-link-dependency-wiring-self-test",
@@ -308,6 +314,7 @@ def validate_ci_job(job: str, path: str) -> None:
         "          - compiler: clang-libstdcxx\n            cc: clang\n            cxx: clang++\n            cxxflags: -stdlib=libstdc++\n",
         "      - name: Verify GitHub-hosted runner contract\n",
         "      - name: Configure source-offbridge C-link closure\n",
+        "      - name: Run DuckDB source overlay proof\n",
         "      - name: Compile Clang/libstdc++ C consumer\n",
         "      - name: Run Clang/libstdc++ C consumer proof\n",
         "      - name: Run GCC source-offbridge full suite\n",
@@ -342,7 +349,7 @@ def validate_ci_job(job: str, path: str) -> None:
         reject("E_CI_POSITIVE", f"{path}: positive setup inventory drifted")
     if job.count("meson compile -C build-duckdb-linux-link") != 1:
         reject("E_CI_COMPILE", f"{path}: focused compile inventory drifted")
-    if job.count("meson test -C build-duckdb-linux-link") != 2:
+    if job.count("meson test -C build-duckdb-linux-link") != 3:
         reject("E_CI_TEST", f"{path}: focused/full test inventory drifted")
     if job.count("--suite wyrelog") != 1:
         reject("E_CI_FULL_SUITE", f"{path}: full suite must run exactly once")
@@ -402,6 +409,19 @@ def validate_ci_job(job: str, path: str) -> None:
     )
     if actual_positive_options != positive_options:
         reject("E_CI_STEP", f"{path}: positive setup option inventory drifted")
+
+    overlay_step = extract_ci_step(job, "Run DuckDB source overlay proof")
+    expected_overlay_step = (
+        "      - name: Run DuckDB source overlay proof\n"
+        "        run: |\n"
+        "          meson test -C build-duckdb-linux-link --no-rebuild "
+        "--print-errorlogs duckdb-source-overlay\n\n"
+    )
+    if overlay_step != expected_overlay_step:
+        reject("E_CI_OVERLAY", f"{path}: overlay proof must run unconditionally")
+    if not (job.index(configure) < job.index(overlay_step) <
+            job.index(steps["Compile Clang/libstdc++ C consumer"])):
+        reject("E_CI_OVERLAY", f"{path}: overlay proof must precede compilation")
 
     compile_step = steps["Compile Clang/libstdc++ C consumer"]
     require_once(
@@ -675,6 +695,49 @@ def run_self_test(root: Path) -> None:
     sources = load_sources(root)
     validate_sources(sources)
     mutations = (
+        Mutation(
+            "overlay registration depends on archive existence",
+            TESTS_MESON,
+            lambda text: replace_once(
+                text,
+                "if get_option('duckdb_source') == 'subproject'\n"
+                "  test('duckdb-source-overlay', python3,\n",
+                "if get_option('duckdb_source') == 'subproject' and "
+                "fs.exists(duckdb_source_overlay_archive)\n"
+                "  test('duckdb-source-overlay', python3,\n",
+            ),
+            "E_OVERLAY_REGISTRATION",
+        ),
+        Mutation(
+            "CI removes overlay proof",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text, "      - name: Run DuckDB source overlay proof\n", ""),
+            "E_CI_JOB",
+        ),
+        Mutation(
+            "CI comments overlay proof command",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "          meson test -C build-duckdb-linux-link --no-rebuild "
+                "--print-errorlogs duckdb-source-overlay\n",
+                "          # meson test -C build-duckdb-linux-link --no-rebuild "
+                "--print-errorlogs duckdb-source-overlay\n",
+            ),
+            "E_CI_OVERLAY",
+        ),
+        Mutation(
+            "CI conditionally skips overlay proof",
+            WORKFLOWS[0],
+            lambda text: replace_once(
+                text,
+                "      - name: Run DuckDB source overlay proof\n",
+                "      - name: Run DuckDB source overlay proof\n"
+                "        if: false\n",
+            ),
+            "E_CI_MASKING",
+        ),
         Mutation(
             "optional libm",
             PACKAGE_MESON,
