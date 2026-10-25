@@ -460,3 +460,4 @@
 /fact-offline-backup-source/windows/rollback-stage-substituted
 /fact-offline-backup-source/windows/rollback-staged
 /fact-offline-backup-source/windows/rollback-unbound
+/fact-offline-backup-source/windows/rollback-unbound-callback-identity
