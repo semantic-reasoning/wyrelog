@@ -42812,7 +42812,11 @@ restore_replacement_synced_journal_valid
          && graph->identity_verified && graph->schema_verified
          && graph->replay_preflighted
          && graph->staged_main_identity.domain != 0
-         && graph->staged_main_identity.object != 0
+         && (graph->staged_main_identity.object_width == 16
+         ? memcmp (graph->staged_main_identity.object_bytes,
+         (guint8[16]) { 0 },
+         sizeof graph->staged_main_identity.object_bytes) != 0
+         : graph->staged_main_identity.object != 0)
          && graph->transition_state ==
          WYL_FACT_ARTIFACT_MAIN_TRANSITION_STATE_PUBLISHED_DURABLE
          && graph->next_op == WYL_FACT_ARTIFACT_MAIN_TRANSITION_OP_FINALIZE

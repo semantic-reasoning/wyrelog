@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 
 #include <cstring>
+#include <process.h>
 
 #include "fact/graph-artifact-namespace-private.h"
 #include "fact/graph-locator-private.h"
@@ -106,7 +107,7 @@ test_secure_temp_child_lifecycle (void)
   ProvisionedPairFixture fixture;
   WylSecureDuckdbFileSystem filesystem (fixture.namespace_, false);
   const auto temp_path = filesystem.TemporaryDirectory ()
-      + "/duckdb_temp_" + std::to_string (GetCurrentProcessId ())
+      + "/duckdb_temp_" + std::to_string (_getpid ())
       + "_0_storage_S32K-0.tmp";
   auto temporary = filesystem.OpenFile (temp_path,
           duckdb::FileOpenFlags (11, duckdb::FileLockType::NO_LOCK,

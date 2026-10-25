@@ -2,6 +2,7 @@
 #pragma once
 
 #include <duckdb.hpp>
+#include <duckdb/common/compressed_file_system.hpp>
 #include <memory>
 #include <mutex>
 #include <string>

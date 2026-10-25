@@ -2579,8 +2579,8 @@ test_recording_filesystem_forwarding_protocol_preflight (void)
  * explicitly configured home directory or its .duckdb metadata path on
  * open; it instead joins every artifact path, so each open of the main file
  * or a sidecar is preceded by two PathSeparator tokens on that same path.
- * The HOME roles stay in the grammar for the Windows contender stream, which
- * has not been re-recorded against 2.0. */
+ * The Windows contender likewise joins the main-file path before its
+ * rejected metadata read-open. */
 enum class TracePathRole {
   HOME,
   HOME_METADATA,
@@ -2651,10 +2651,10 @@ assert_writer_contender_exact_trace (const std::vector<Event> &events,
    * so the contender's very first metadata read-open is already denied with a
    * sharing violation. It never reaches DuckDB's write-lock acquisition or the
    * intervening read/canonicalize/exists probes the advisory-locked POSIX path
-   * performs, so the recorded language is the two home separators plus that one
-   * rejected read-open. */
+   * performs, so the recorded 2.0 language is the two main-file separators
+   * plus that one rejected read-open. */
   static const ExactTraceToken tokens[] = {
-    H ("separator"), D ("separator"),
+    M ("separator", 0, NO_LOCK, -1), M ("separator", 0, NO_LOCK, -1),
     { "open", TracePathRole::MAIN, 129, duckdb::FileLockType::NO_LOCK,
         0, "IOException" },
   };

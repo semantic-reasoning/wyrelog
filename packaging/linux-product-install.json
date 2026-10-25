@@ -116,5 +116,5 @@
     "libwyrelog.so.0",
     "libxxhash.so.0"
   ],
-  "duckdb_wrap_sha256": "1fb8ce388157d84a25abe685a8a2520bf00c00321821968e4bb398fd766e7abb"
+  "duckdb_wrap_sha256": "993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1"
 }

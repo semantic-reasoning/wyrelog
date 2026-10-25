@@ -67,6 +67,10 @@ typedef struct
 
 static gchar *graph_file_path (BackupFixture *fixture,
     const gchar *graph_id, const gchar *basename);
+#ifdef G_OS_WIN32
+static WylFactArtifactInventoryIdentity windows_file_identity (
+  const gchar *path);
+#endif
 /* An in-memory engine for runtime sessions.  The Windows cases use it
  * too, so it lives outside the POSIX-only session block below. */
 static wyrelog_error_t
@@ -789,6 +793,7 @@ test_generation_empty_tenant (void)
   g_assert_cmpuint (manifest.artifacts->len, ==, 0);
   wyl_fact_offline_backup_manifest_clear (&manifest);
   destination_capture_clear (&capture);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
   fixture_clear (&fixture);
 }
 
@@ -826,6 +831,7 @@ test_generation_multi_graph_order (void)
   assert_captured_artifact (&capture, &manifest, 1, "zeta");
   wyl_fact_offline_backup_manifest_clear (&manifest);
   destination_capture_clear (&capture);
+  g_clear_pointer (&source, wyl_fact_offline_backup_source_free);
   fixture_clear (&fixture);
 }
 
@@ -13632,12 +13638,17 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
 
   g_autofree gchar *main_path = graph_file_path (&fixture, "alpha",
           "facts.duckdb");
+#ifdef G_OS_WIN32
+  WylFactArtifactInventoryIdentity old_identity =
+      windows_file_identity (main_path);
+#else
   GStatBuf old_stat = { 0 };
   g_assert_cmpint (g_stat (main_path, &old_stat), ==, 0);
   WylFactArtifactInventoryIdentity old_identity = {
     .domain = (guint64) old_stat.st_dev,
     .object = (guint64) old_stat.st_ino,
   };
+#endif
 
   WylFactOfflineBackupManifest manifest = { 0 };
   g_assert_cmpint (wyl_fact_offline_backup_manifest_init (&manifest,
@@ -13744,12 +13755,17 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
   g_assert_cmpint (duckdb_open (stage_path, &staged_db), ==, DuckDBSuccess);
   duckdb_close (&staged_db);
   g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+#ifdef G_OS_WIN32
+  WylFactArtifactInventoryIdentity new_identity =
+      windows_file_identity (stage_path);
+#else
   GStatBuf stage_stat = { 0 };
   g_assert_cmpint (g_stat (stage_path, &stage_stat), ==, 0);
   WylFactArtifactInventoryIdentity new_identity = {
     .domain = (guint64) stage_stat.st_dev,
     .object = (guint64) stage_stat.st_ino,
   };
+#endif
   g_auto (WylFactOfflineRestoreJournal) initial = { 0 };
   g_assert_cmpint (wyl_fact_offline_restore_journal_init (&initial,
       manifest_bytes, operation_uuid, WYL_FACT_OFFLINE_RESTORE_SCOPE_GRAPH,
@@ -14365,6 +14381,25 @@ static void test_graph_restore_replacement_reservation(gconstpointer data) {
       &synced), ==, WYRELOG_E_INVALID);
   g_assert_null (synced);
   published_record->revision++;
+  g_auto (WylFactOfflineRestoreJournal) zero_object = { 0 };
+  g_assert_cmpint (wyl_fact_offline_restore_journal_decode
+        (published_record->journal_blob, &zero_object), ==, WYRELOG_E_OK);
+  WylFactOfflineRestoreJournalGraph *zero_object_graph =
+      g_ptr_array_index (zero_object.graphs, 0);
+  zero_object_graph->staged_main_identity.object = 0;
+  memset (zero_object_graph->staged_main_identity.object_bytes, 0,
+      sizeof zero_object_graph->staged_main_identity.object_bytes);
+  g_autoptr (GBytes) zero_object_blob = NULL;
+  g_assert_cmpint (wyl_fact_offline_restore_journal_encode
+        (&zero_object, &zero_object_blob), ==, WYRELOG_E_OK);
+  GBytes *saved_published_blob = published_record->journal_blob;
+  published_record->journal_blob = zero_object_blob;
+  g_assert_cmpint
+    (wyl_policy_store_graph_restore_replacement_mark_companion_synced
+        (fixture.policy, reserved, published_record, &policy_result,
+      &synced), ==, WYRELOG_E_INVALID);
+  g_assert_null (synced);
+  published_record->journal_blob = saved_published_blob;
   gchar *reserved_replacement = reserved->replacement_uuid;
   reserved->replacement_uuid = operation_uuid;
   g_assert_cmpint
